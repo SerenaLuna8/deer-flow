@@ -7,9 +7,11 @@ import {
   type triggerAutomation,
 } from "@/core/project-automations/api";
 import {
+  AUTOMATION_RUN_REFRESH_INTERVAL_MS,
   automationTriggerMutationOptions,
   automationMutationOptions,
   createAutomationTriggerIdempotencyRegistry,
+  projectAutomationRunsQueryOptions,
   projectAutomationsQueryOptions,
 } from "@/core/project-automations/hooks";
 import { automationRoot } from "@/core/project-automations/query-keys";
@@ -45,6 +47,39 @@ describe("project automation hooks", () => {
     const active = projectAutomationsQueryOptions(access(SCOPE));
     expect(active.queryKey).toEqual([...automationRoot(SCOPE), "list", 50, 0]);
     expect(active.enabled).toBe(true);
+  });
+
+  test.each(["queued", "launching", "running"] as const)(
+    "polls run history while an occurrence is %s",
+    (status) => {
+      const options = projectAutomationRunsQueryOptions(
+        access(SCOPE),
+        "task-1",
+      );
+
+      expect(
+        options.refetchInterval({
+          state: { data: [{ ...AUTOMATION_RUN, status }] },
+        }),
+      ).toBe(AUTOMATION_RUN_REFRESH_INTERVAL_MS);
+    },
+  );
+
+  test.each([
+    "success",
+    "failed",
+    "skipped",
+    "interrupted",
+    "cancelled",
+    "rejected",
+  ] as const)("stops polling run history after %s", (status) => {
+    const options = projectAutomationRunsQueryOptions(access(SCOPE), "task-1");
+
+    expect(
+      options.refetchInterval({
+        state: { data: [{ ...AUTOMATION_RUN, status }] },
+      }),
+    ).toBe(false);
   });
 
   test("uses a scoped mutation key and forwards the provider abort signal", async () => {

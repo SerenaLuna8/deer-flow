@@ -43,7 +43,8 @@ from app.reliability.models import ReliabilityReadiness
 from app.reliability.operations import safe_channel_provider_health
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.persistence.audit.model import AuditLogRow
-from deerflow.persistence.jobs.model import DeadJobRow, JobRow
+from deerflow.persistence.jobs.model import DeadJobRow, JobRow, WorkerNodeRow
+from deerflow.persistence.projects.model import ProjectRow
 from deerflow.persistence.quotas.model import ProjectUsageCounterRow
 from deerflow.persistence.user.model import UserRow
 
@@ -169,6 +170,9 @@ def test_system_operations_routes_are_mounted() -> None:
     paths = {route.path for route in app.routes}
     assert "/api/admin/operations" in paths
     assert "/api/admin/projects" in paths
+    assert "/api/admin/projects/{project_id}" in paths
+    assert "/api/admin/projects/{project_id}/suspend" in paths
+    assert "/api/admin/projects/{project_id}/resume" in paths
     assert "/api/admin/jobs" in paths
     assert "/api/admin/jobs/requeue" in paths
     assert "/api/admin/audit" in paths
@@ -347,7 +351,62 @@ async def test_operations_requires_current_system_admin_and_returns_only_aggrega
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_projects_are_descending_cursor_paginated_and_private_fields_are_never_selected(
+async def test_operations_production_fallback_reports_initialized_gateway_components_ready(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    await _make_system_admin(seed)
+    app = _test_app(seed, AuditService(seed.factory, _keyring()))
+    app.state.private_run_event_store = object()
+    app.state.private_stream_bridge = object()
+    app.state.project_quota_service = object()
+    app.state.project_quota_enforcer = object()
+    app.state.project_audit_service = object()
+    app.state.operational_audit_sink = object()
+    async with seed.factory.begin() as session:
+        session.add(
+            WorkerNodeRow(
+                id=uuid.uuid4(),
+                version="m6",
+                capabilities_json=["private_run"],
+                max_concurrent_jobs=4,
+                draining=False,
+                heartbeat_at=datetime.now(UTC),
+            )
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/api/admin/operations",
+                headers={
+                    "x-test-user": str(seed.owner_a.user_id),
+                    "x-trace-id": "operations-api-test",
+                },
+            )
+
+        assert response.status_code == 200, response.text
+        readiness = response.json()["readiness"]
+        assert readiness["status"] == "ready"
+        assert readiness["database"] == "ready"
+        assert readiness["schema"] == "ready"
+        assert readiness["worker_fleet"] == "ready"
+        assert readiness["scheduler"] == "disabled"
+        assert readiness["stream"] == "ready"
+        assert readiness["quota"] == "ready"
+        assert readiness["audit"] == "ready"
+        assert readiness["worker_count"] == 1
+        assert readiness["worker_capacity"] == 4
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_projects_are_searchable_cursor_paginated_and_expose_only_governance_metadata(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
@@ -361,7 +420,12 @@ async def test_projects_are_descending_cursor_paginated_and_private_fields_are_n
         ) as client:
             first = await client.get(
                 "/api/admin/projects",
-                params={"limit": 1, "status": "active", "suspended": "false"},
+                params={
+                    "limit": 1,
+                    "query": "Thread Project",
+                    "status": "active",
+                    "suspended": "false",
+                },
                 headers={
                     "x-test-user": str(seed.owner_a.user_id),
                     "x-trace-id": "operations-api-test",
@@ -383,20 +447,33 @@ async def test_projects_are_descending_cursor_paginated_and_private_fields_are_n
                     "x-trace-id": "operations-api-test",
                 },
             )
+            detail = await client.get(
+                f"/api/admin/projects/{first.json()['items'][0]['project_id']}",
+                headers={
+                    "x-test-user": str(seed.owner_a.user_id),
+                    "x-trace-id": "operations-api-test",
+                },
+            )
 
         assert first.status_code == 200
         assert second.status_code == 200
         assert set(first.json()) == {"items", "next_cursor"}
         assert set(first.json()["items"][0]) == {
             "project_id",
-            "status",
-            "is_suspended",
-        }
-        assert first.json()["items"][0]["project_id"] != second.json()["items"][0]["project_id"]
-        encoded = json.dumps((first.json(), second.json()), sort_keys=True)
-        for private_field in (
             "slug",
             "display_name",
+            "status",
+            "is_suspended",
+            "state_version",
+            "created_at",
+            "updated_at",
+            "deletion_effective_at",
+        }
+        assert first.json()["items"][0]["project_id"] != second.json()["items"][0]["project_id"]
+        assert detail.status_code == 200
+        assert detail.json() == first.json()["items"][0]
+        encoded = json.dumps((first.json(), second.json()), sort_keys=True)
+        for private_field in (
             "description",
             "icon",
             "created_by_user_id",
@@ -406,6 +483,93 @@ async def test_projects_are_descending_cursor_paginated_and_private_fields_are_n
             assert private_field not in encoded
         assert oversized.status_code == 422
         assert oversized.json()["code"] == "RELIABILITY_INVALID"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_system_admin_can_suspend_and_resume_without_project_membership(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    await _make_system_admin(seed)
+    audit = AuditService(seed.factory, _keyring())
+    app = _test_app(seed, audit)
+    target_project_id = uuid.uuid4()
+    async with seed.factory.begin() as session:
+        session.add(
+            ProjectRow(
+                id=target_project_id,
+                slug=f"platform-{target_project_id.hex[:12]}",
+                display_name="Platform governed project",
+                created_by_user_id=str(seed.owner_b.user_id),
+            )
+        )
+
+    headers = {
+        "x-test-user": str(seed.owner_a.user_id),
+        "x-trace-id": "operations-api-test",
+    }
+    ordinary_headers = {
+        "x-test-user": str(seed.owner_b.user_id),
+        "x-trace-id": "operations-api-test",
+    }
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            suspended = await client.post(
+                f"/api/admin/projects/{target_project_id}/suspend",
+                headers=headers,
+            )
+            repeated = await client.post(
+                f"/api/admin/projects/{target_project_id}/suspend",
+                headers=headers,
+            )
+            ordinary = await client.post(
+                f"/api/admin/projects/{target_project_id}/resume",
+                headers=ordinary_headers,
+            )
+            resumed = await client.post(
+                f"/api/admin/projects/{target_project_id}/resume",
+                headers=headers,
+            )
+
+        assert suspended.status_code == 200
+        assert suspended.json()["is_suspended"] is True
+        assert suspended.json()["state_version"] == 2
+        assert repeated.status_code == 409
+        assert repeated.json()["code"] == "RELIABILITY_CONFLICT"
+        _assert_public_not_found(ordinary)
+        assert resumed.status_code == 200
+        assert resumed.json()["is_suspended"] is False
+        assert resumed.json()["state_version"] == 3
+
+        async with seed.factory() as session:
+            project = await session.get(ProjectRow, target_project_id)
+            events = (
+                (
+                    await session.execute(
+                        select(AuditLogRow)
+                        .where(
+                            AuditLogRow.project_id == target_project_id,
+                            AuditLogRow.action.in_(("project.suspended", "project.resumed")),
+                        )
+                        .order_by(AuditLogRow.occurred_at)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert project is not None and project.is_suspended is False
+        assert [event.action for event in events] == [
+            "project.suspended",
+            "project.resumed",
+        ]
+        assert all(event.actor_platform_role == "system_admin" for event in events)
+        assert all(event.actor_user_id == str(seed.owner_a.user_id) for event in events)
     finally:
         await seed.engine.dispose()
 

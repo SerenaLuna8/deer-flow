@@ -517,6 +517,20 @@ export function useProject(
   });
 }
 
+export function shouldRetryProjectSlugResolution(
+  failureCount: number,
+  error: Error,
+): boolean {
+  if (
+    error instanceof ProjectApiError &&
+    error.status >= 400 &&
+    error.status < 500
+  ) {
+    return false;
+  }
+  return failureCount < 3;
+}
+
 export function useProjectBySlug(
   userId: string | null | undefined,
   slug: string | null | undefined,
@@ -535,6 +549,7 @@ export function useProjectBySlug(
       return findProjectBySlug(slug, signal);
     },
     enabled: Boolean(userId && slug),
+    retry: shouldRetryProjectSlugResolution,
   });
 }
 

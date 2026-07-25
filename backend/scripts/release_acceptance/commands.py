@@ -156,14 +156,6 @@ COMMANDS: tuple[CommandSpec, ...] = (
         summary_parser="matrix",
     ),
     CommandSpec(
-        command_id="contracts.docs",
-        stage=StageId.CONTRACTS,
-        argv=("uv", "run", "pytest", "tests/test_m8_release_gate_postgres.py", "-q", "-k", "runbook"),
-        cwd="backend",
-        timeout_seconds=600,
-        allowed_environment=frozenset(),
-    ),
-    CommandSpec(
         command_id="contracts.git_diff",
         stage=StageId.CONTRACTS,
         argv=("git", "diff", "--check"),

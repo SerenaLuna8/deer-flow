@@ -49,10 +49,11 @@ export function resolveChatRightPanel({
   return "artifacts";
 }
 
-const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
-  children,
-  threadId,
-}) => {
+const ChatBox: React.FC<{
+  children: React.ReactNode;
+  threadId: string;
+  canDeleteFiles?: boolean;
+}> = ({ children, threadId, canDeleteFiles = false }) => {
   const { locale, t } = useI18n();
   const { thread } = useThread();
   const isMobile = useIsMobile();
@@ -220,6 +221,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
                   className="max-w-(--container-width-sm) p-4 pt-12"
                   files={artifacts}
                   threadId={threadId}
+                  canDelete={canDeleteFiles}
                 />
               </main>
             </div>
@@ -237,6 +239,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     setArtifactsOpen,
     locale,
     t.common.artifacts,
+    canDeleteFiles,
   ]);
 
   if (!artifactsEnabled && sidecar == null) {

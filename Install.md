@@ -1,6 +1,6 @@
 # DeerFlow Install
 
-This file is for coding agents. If the DeerFlow repository is not already cloned and open, clone `https://github.com/bytedance/deer-flow.git` first, then continue from the repository root.
+This file is for coding agents. If the DeerFlow repository is not already cloned and open, clone `https://github.com/SerenaLuna8/deer-flow.git` first, then continue from the repository root.
 
 ## Goal
 
@@ -36,12 +36,13 @@ Consider the setup successful when all of the following are true:
 
 ## Steps
 
-- If the current directory is not the DeerFlow repository root, clone `https://github.com/bytedance/deer-flow.git` if needed, then change into the repository root.
+- If the current directory is not the DeerFlow repository root, clone `https://github.com/SerenaLuna8/deer-flow.git` if needed, then change into the repository root.
 - Confirm the current directory is the DeerFlow repository root by checking that `Makefile`, `backend/`, `frontend/`, and `config.example.yaml` exist.
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
-- Require an explicit PostgreSQL-only `DATABASE_URL`. Do not read or print its password. If the target database does not exist, ask the user to provide `POSTGRES_ADMIN_URL` and run `make setup-db`; otherwise run `make migrate-db`, then `make check-db`.
+- Require an explicit PostgreSQL-only `DATABASE_URL`. Do not read or print its password. The current pre-release schema is consolidated into the single `0001_project_saas_baseline` revision. If the target database does not exist, ask the user to provide `POSTGRES_ADMIN_URL` and run `make setup-db`; this installs the current head in an empty target. After future revisions are added, an existing database at a verified known ancestor may be upgraded with `make migrate-db`, which applies only pending migrations. Then run `make check-db`.
+- Never rely on application startup to migrate or repair PostgreSQL. Runtime startup and `make check-db` are read-only schema consumers. If an existing database has an unknown revision, is unversioned and nonempty, or has catalog drift, stop and report the operator intervention requirement instead of stamping, resetting, or repairing it.
 - The application compose stack does not provision PostgreSQL. When Docker is available, a standalone `postgres:17-alpine` container is acceptable, but use placeholders for credentials and keep the application role non-superuser. DeerFlow does not use RLS; project access is enforced by `ProjectContext` and scoped repositories.
 - If Docker is available:
   - Run `make docker-init`.
@@ -64,7 +65,7 @@ Use the lightest verification that matches the chosen setup path.
 
 For Docker setup:
 
-- Confirm `make check-db` completed successfully before treating the environment as launchable.
+- Confirm explicit `make setup-db` or `make migrate-db` completed as appropriate, then confirm `make check-db` completed successfully before treating the environment as launchable.
 - Confirm `make docker-init` completed successfully.
 - Confirm `config.yaml` exists.
 - State explicitly that Docker services were not started and `make docker-start` is still the first real launch step.
@@ -72,7 +73,7 @@ For Docker setup:
 
 For local setup:
 
-- Confirm `make check-db` completed successfully.
+- Confirm explicit `make setup-db` or `make migrate-db` completed as appropriate, then confirm `make check-db` completed successfully.
 - Confirm `make install` completed successfully.
 - Confirm `config.yaml` exists.
 - Do not leave background services running unless the user asked for that.

@@ -63,6 +63,12 @@ class ProjectMembershipRow(Base):
     )
     end_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
+    activation_generation: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
     is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     last_entered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
@@ -73,6 +79,10 @@ class ProjectMembershipRow(Base):
         CheckConstraint("status IN ('active', 'left', 'removed')", name="ck_project_memberships_status"),
         CheckConstraint("end_reason IS NULL OR end_reason IN ('left', 'removed')", name="ck_project_memberships_end_reason"),
         CheckConstraint("version >= 1", name="ck_project_memberships_version"),
+        CheckConstraint(
+            "activation_generation >= 1",
+            name="ck_project_memberships_activation_generation",
+        ),
         UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
         Index("ix_project_memberships_user_id", "user_id"),
     )

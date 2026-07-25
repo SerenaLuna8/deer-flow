@@ -35,7 +35,7 @@ def test_filter_excludes_langgraph_checkpoint_tables() -> None:
         assert include_object(_table(owned), owned, "table", True, None) is False
 
 
-def test_filter_includes_deerflow_tables() -> None:
+def test_filter_includes_current_deerflow_tables() -> None:
     for owned in (
         "runs",
         "threads_meta",
@@ -45,10 +45,10 @@ def test_filter_includes_deerflow_tables() -> None:
         "files",
         "file_chunks",
         "run_asset_versions",
-        "private_work_cutover_state",
-        "automation_migration_runs",
-        "automation_migration_ledger",
-        "automation_cutover_state",
+        "artifacts",
+        "scheduled_tasks",
+        "scheduled_task_runs",
+        "run_events",
         "jobs",
         "job_attempts",
         "dead_jobs",
@@ -57,9 +57,9 @@ def test_filter_includes_deerflow_tables() -> None:
         "project_usage_counters",
         "project_usage_ledger",
         "audit_logs",
-        "reliability_migration_runs",
-        "reliability_migration_ledger",
-        "reliability_cutover_state",
+        "thread_event_sequences",
+        "channel_conversations",
+        "asset_catalog_state",
     ):
         assert include_object(_table(owned), owned, "table", True, None) is True
 

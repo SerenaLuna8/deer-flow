@@ -2,11 +2,19 @@
  * API functions for file uploads
  */
 
+import { z } from "zod";
+
 import { fetch } from "../api/fetcher";
+import { projectClientScopeSchema } from "../private-work/types";
 import type { ProjectPrivateWorkScope } from "../private-work/types";
+
+import { UploadApiError, UploadLimitValidationError } from "./errors";
+import { validateUploadLimits } from "./file-validation";
+import { uploadLimitsSchema, type UploadLimits } from "./limits";
 
 export interface UploadedFileInfo {
   id?: string;
+  kind?: ProjectFileKind;
   filename: string;
   size: number;
   path: string;
@@ -21,6 +29,23 @@ export interface UploadedFileInfo {
   markdown_artifact_url?: string;
 }
 
+export type ProjectFileKind = "upload" | "workspace" | "output";
+
+export const USER_DELETABLE_PROJECT_FILE_KINDS = new Set<ProjectFileKind>([
+  "upload",
+  "workspace",
+  "output",
+]);
+
+export function canDeleteProjectFile(
+  allowed: boolean,
+  kind: ProjectFileKind | undefined,
+) {
+  return (
+    allowed && kind !== undefined && USER_DELETABLE_PROJECT_FILE_KINDS.has(kind)
+  );
+}
+
 export interface UploadResponse {
   success: boolean;
   files: UploadedFileInfo[];
@@ -33,12 +58,6 @@ export interface ListFilesResponse {
   count: number;
 }
 
-export interface UploadLimits {
-  max_files: number;
-  max_file_size: number;
-  max_total_size: number;
-}
-
 export type UploadRequestOptions = Pick<
   ProjectPrivateWorkScope,
   "apiBaseURL" | "scope"
@@ -48,7 +67,7 @@ type PrivateUploadedFile = {
   id: string;
   logical_path: string;
   display_name: string;
-  kind: string;
+  kind: ProjectFileKind;
   media_type: string;
   size: number;
   sha256: string;
@@ -61,8 +80,17 @@ function uploadAPIBaseURL(options: UploadRequestOptions): string {
   return options.apiBaseURL;
 }
 
-export function supportsUploadLimits(_options: UploadRequestOptions): boolean {
-  return false;
+export function supportsUploadLimits(options: UploadRequestOptions): boolean {
+  const scope = projectClientScopeSchema.safeParse(options.scope);
+  if (!scope.success) return false;
+  try {
+    const url = new URL(options.apiBaseURL, "http://deerflow.invalid");
+    return (
+      url.pathname === `/api/projects/${scope.data.projectId}/private-work`
+    );
+  } catch {
+    return false;
+  }
 }
 
 function mapPrivateUploadedFile(
@@ -76,6 +104,7 @@ function mapPrivateUploadedFile(
     : undefined;
   return {
     id: file.id,
+    kind: file.kind,
     filename: file.display_name,
     size: file.size,
     path: virtualPath,
@@ -87,12 +116,32 @@ function mapPrivateUploadedFile(
   };
 }
 
-async function readErrorDetail(
+const privateUploadErrorSchema = z
+  .object({
+    detail: z
+      .object({
+        code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u),
+        message: z.string().min(1),
+        request_id: z.string().min(1),
+      })
+      .strict(),
+  })
+  .strict();
+
+async function readUploadError(
   response: Response,
   fallback: string,
-): Promise<string> {
-  const error = await response.json().catch(() => ({ detail: fallback }));
-  return error.detail ?? fallback;
+): Promise<UploadApiError> {
+  const parsed = privateUploadErrorSchema.safeParse(
+    await response.json().catch(() => null),
+  );
+  return new UploadApiError({
+    status: response.status,
+    code: parsed.success ? parsed.data.detail.code : "UPLOAD_REQUEST_FAILED",
+    message: parsed.success ? parsed.data.detail.message : fallback,
+    requestId: parsed.success ? parsed.data.detail.request_id : null,
+    retryAfter: response.headers.get("Retry-After"),
+  });
 }
 
 /**
@@ -102,22 +151,42 @@ export async function uploadFiles(
   threadId: string,
   files: File[],
   options: UploadRequestOptions,
+  signal?: AbortSignal,
 ): Promise<UploadResponse> {
+  signal?.throwIfAborted();
+  if (files.length === 0) {
+    return {
+      success: true,
+      files: [],
+      message: "0 file(s) uploaded",
+      skipped_files: [],
+    };
+  }
+  const limits = await getUploadLimits(threadId, options, signal);
+  signal?.throwIfAborted();
+  const preflight = validateUploadLimits([], files, limits);
+  if (preflight.violations.length > 0) {
+    throw new UploadLimitValidationError(preflight.violations);
+  }
   const uploadedFiles: UploadedFileInfo[] = [];
   const apiBaseURL = uploadAPIBaseURL(options);
   for (const file of files) {
+    signal?.throwIfAborted();
     const formData = new FormData();
     formData.append("file", file);
     const response = await fetch(
       `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
-      { method: "POST", body: formData },
+      { method: "POST", body: formData, signal },
     );
+    signal?.throwIfAborted();
     if (!response.ok) {
-      throw new Error(await readErrorDetail(response, "Upload failed"));
+      throw await readUploadError(response, "Upload failed");
     }
     const uploaded = (await response.json()) as PrivateUploadedFile;
+    signal?.throwIfAborted();
     uploadedFiles.push(mapPrivateUploadedFile(uploaded, apiBaseURL, threadId));
   }
+  signal?.throwIfAborted();
   return {
     success: true,
     files: uploadedFiles,
@@ -132,18 +201,25 @@ export async function uploadFiles(
 export async function getUploadLimits(
   threadId: string,
   options: UploadRequestOptions,
+  signal?: AbortSignal,
 ): Promise<UploadLimits> {
+  const parsedThreadId = z.string().uuid().parse(threadId);
+  if (!supportsUploadLimits(options)) {
+    throw new TypeError("Upload limits require an exact project-private scope");
+  }
   const response = await fetch(
-    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads/limits`,
+    `${uploadAPIBaseURL(options)}/threads/${parsedThreadId}/uploads/limits`,
+    { signal },
   );
+  signal?.throwIfAborted();
 
   if (!response.ok) {
-    throw new Error(
-      await readErrorDetail(response, "Failed to load upload limits"),
-    );
+    throw await readUploadError(response, "Failed to load upload limits");
   }
 
-  return response.json();
+  const body = await response.json();
+  signal?.throwIfAborted();
+  return uploadLimitsSchema.parse(body);
 }
 
 /**
@@ -152,19 +228,22 @@ export async function getUploadLimits(
 export async function listUploadedFiles(
   threadId: string,
   options: UploadRequestOptions,
+  signal?: AbortSignal,
 ): Promise<ListFilesResponse> {
+  signal?.throwIfAborted();
   const apiBaseURL = uploadAPIBaseURL(options);
   const response = await fetch(
     `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
+    { signal },
   );
+  signal?.throwIfAborted();
 
   if (!response.ok) {
-    throw new Error(
-      await readErrorDetail(response, "Failed to list uploaded files"),
-    );
+    throw await readUploadError(response, "Failed to list uploaded files");
   }
 
   const files = (await response.json()) as PrivateUploadedFile[];
+  signal?.throwIfAborted();
   return {
     files: files.map((file) =>
       mapPrivateUploadedFile(file, apiBaseURL, threadId),
@@ -180,16 +259,20 @@ export async function deleteUploadedFile(
   threadId: string,
   filename: string,
   options: UploadRequestOptions,
+  signal?: AbortSignal,
 ): Promise<{ success: boolean; message: string }> {
+  signal?.throwIfAborted();
   const response = await fetch(
     `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads?file_id=${encodeURIComponent(filename)}`,
-    { method: "DELETE" },
+    { method: "DELETE", signal },
   );
+  signal?.throwIfAborted();
 
   if (!response.ok) {
-    throw new Error(await readErrorDetail(response, "Failed to delete file"));
+    throw await readUploadError(response, "Failed to delete file");
   }
 
   const result = (await response.json()) as { success: boolean };
+  signal?.throwIfAborted();
   return { ...result, message: "File deleted" };
 }

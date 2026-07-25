@@ -549,12 +549,15 @@ class PrivateRunRepository:
         outcome: Literal["succeeded", "cancelled", "failed"],
         public_error_code: str | None = None,
         ambiguous_side_effect: bool = False,
+        retryable_failure: bool = True,
         cancel_preempts_outcome: bool = True,
         retry_initial_seconds: int = 2,
         retry_max_seconds: int = 300,
         now: datetime | None = None,
     ) -> PrivateRunSettlement:
         if type(cancel_preempts_outcome) is not bool:
+            raise PrivateRunConflict
+        if type(retryable_failure) is not bool:
             raise PrivateRunConflict
         settled_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
@@ -621,6 +624,7 @@ class PrivateRunRepository:
                 job_id,
                 lease_token=lease_token,
                 public_error_code=public_error_code,
+                retryable=retryable_failure,
                 retry_initial_seconds=retry_initial_seconds,
                 retry_max_seconds=retry_max_seconds,
                 now=settled_at,

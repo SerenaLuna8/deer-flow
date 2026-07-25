@@ -19,8 +19,13 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    reload: string;
+    retry: string;
+    historyLoadFailed: string;
     download: string;
     thinking: string;
+    thinkingInProgress: (seconds?: number) => string;
+    thoughtFor: (seconds?: number) => string;
     artifacts: string;
     public: string;
     custom: string;
@@ -42,6 +47,9 @@ export interface Translations {
     regenerate: string;
     branch: string;
     showArtifacts: string;
+    feedbackHelpful: string;
+    feedbackNotHelpful: string;
+    feedbackSaveFailed: string;
   };
 
   home: {
@@ -104,6 +112,7 @@ export interface Translations {
     inputPolishFailed: string;
     inputPolishUndo: string;
     inputPolishCancel: string;
+    model: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -235,6 +244,12 @@ export interface Translations {
       unavailableDescription: string;
       readiness: {
         title: string;
+        workerCount: string;
+        workerCapacity: string;
+        oldestHeartbeat: string;
+        schedulerOwnership: string;
+        secondsAgo: string;
+        notReported: string;
         states: {
           ready: string;
           degraded: string;
@@ -253,6 +268,11 @@ export interface Translations {
           quota: string;
           audit: string;
         };
+      };
+      channels: {
+        title: string;
+        empty: string;
+        checkedAt: string;
       };
       counts: {
         projects: string;
@@ -280,6 +300,38 @@ export interface Translations {
       emptyDescription: string;
       older: string;
       suspended: string;
+      active: string;
+      pendingDeletion: string;
+      details: string;
+      fields: {
+        projectId: string;
+        slug: string;
+        createdAt: string;
+        updatedAt: string;
+        deletionAt: string;
+      };
+      filters: {
+        query: string;
+        queryPlaceholder: string;
+        status: string;
+        suspension: string;
+        all: string;
+        apply: string;
+        clear: string;
+        invalid: string;
+      };
+      actions: {
+        suspend: string;
+        resume: string;
+        pending: string;
+        error: string;
+        confirmSuspendTitle: string;
+        confirmSuspendDescription: string;
+        confirmResumeTitle: string;
+        confirmResumeDescription: string;
+        cancel: string;
+        confirm: string;
+      };
     };
     jobs: {
       title: string;
@@ -293,6 +345,16 @@ export interface Translations {
       requeue: string;
       requeueing: string;
       requeueError: string;
+      filters: {
+        project: string;
+        status: string;
+        type: string;
+        allStatuses: string;
+        allTypes: string;
+        apply: string;
+        clear: string;
+        invalidProject: string;
+      };
     };
     audit: {
       title: string;
@@ -313,6 +375,11 @@ export interface Translations {
     migrationRequired: string;
     retry: string;
     history: string;
+    fields: {
+      title: string;
+      prompt: string;
+      schedule: string;
+    };
   };
 
   // Scheduled tasks
@@ -514,6 +581,8 @@ export interface Translations {
     startConversation: string;
     branchCreated: string;
     branchFailed: string;
+    runFailedTitle: string;
+    runFailedDescription: string;
   };
 
   // Chats
@@ -607,6 +676,8 @@ export interface Translations {
     answered: string;
     pending: string;
     readOnly: string;
+    attentionCount: (count: number) => string;
+    changeBeforeSubmit: string;
     otherLabel: string;
     otherPlaceholder: string;
     submit: string;
@@ -626,6 +697,11 @@ export interface Translations {
     filesTooLarge: (files: string, maxFileSize: string) => string;
     tooManyFiles: (count: number, maxFiles: number) => string;
     totalSizeTooLarge: (count: number, maxTotalSize: string) => string;
+    projectStorageTooSmall: (count: number, remainingSize: string) => string;
+    serverTooLarge: string;
+    storageQuotaExceeded: string;
+    preflightRejected: string;
+    uploadFailed: string;
   };
 
   // Subtasks
@@ -787,6 +863,12 @@ export interface Translations {
       systemDescription: string;
       lightDescription: string;
       darkDescription: string;
+      chatWidthTitle: string;
+      chatWidthDescription: string;
+      chatWidthNarrow: string;
+      chatWidthStandard: string;
+      chatWidthWide: string;
+      chatWidthFull: string;
       languageTitle: string;
       languageDescription: string;
     };
@@ -890,5 +972,31 @@ export interface Translations {
       sso_account_exists: string;
       sso_not_allowed: string;
     };
+  };
+
+  // Administrator setup
+  setup: {
+    loading: string;
+    initAdminTitle: string;
+    initAdminDescription: string;
+    email: string;
+    emailPlaceholder: string;
+    password: string;
+    passwordPlaceholder: string;
+    confirmPassword: string;
+    confirmPasswordPlaceholder: string;
+    passwordMismatch: string;
+    passwordTooShort: string;
+    networkError: string;
+    creatingAccount: string;
+    createAdminAccount: string;
+    completeAdminTitle: string;
+    completeAdminDescription: string;
+    yourEmailPlaceholder: string;
+    currentPassword: string;
+    newPassword: string;
+    confirmNewPassword: string;
+    settingUp: string;
+    completeSetup: string;
   };
 }

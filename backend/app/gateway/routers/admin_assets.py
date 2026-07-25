@@ -10,25 +10,35 @@ from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
     AssetItemResponse,
     AssetRoute,
+    BindingItemResponse,
     BindingResponse,
     CredentialItemResponse,
     DisableSystemBindingRequest,
+    McpVersionResponse,
     MoveSystemBindingRequest,
+    ProjectAssetItemResponse,
+    ProjectCredentialItemResponse,
+    ScopedAssetListResponse,
+    ScopedCredentialListResponse,
     SystemBindingRequest,
+    SystemMcpCredentialGrantRequest,
     _asset_item,
     _credential_item,
     _StrictModel,
+    _version_call,
     get_agent_service,
     get_binding_service,
     get_credential_service,
     get_mcp_service,
     get_skill_service,
     raise_asset_domain,
-    register_asset_mutation_routes,
+    register_asset_routes,
 )
-from app.shared_assets import AgentService, AssetKind, AssetSelection, CredentialService, McpService, SkillService
-from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
-from app.shared_assets.errors import AssetForbidden
+from app.projects.capabilities import Capability
+from app.shared_assets import AgentService, AssetKind, AssetSelection, BindingService, CredentialService, McpService, SkillService
+from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext, resolve_asset_actor
+from app.shared_assets.errors import AssetForbidden, AssetValidationFailed
+from app.shared_assets.models import AssetScope
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 admin_router = APIRouter(
@@ -110,6 +120,89 @@ async def _list_credentials(
         raise_asset_domain(exc)
 
 
+def _override_asset_capabilities(scope: AssetScope, kind: AssetKind) -> list[Capability]:
+    allowed = {
+        Capability.SHARED_ASSETS_READ,
+        Capability.SHARED_ASSETS_EXECUTE,
+        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+    }
+    if scope is AssetScope.PROJECT:
+        allowed.add(Capability.SHARED_ASSETS_EDIT)
+        if kind is AssetKind.MCP:
+            allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
+    return sorted(allowed, key=str)
+
+
+async def _list_override_assets(
+    actor: SystemAssetGovernanceContext,
+    kind: AssetKind,
+    service,
+    binding_service,
+) -> ScopedAssetListResponse:
+    try:
+        project_views = await service.list_visible(actor)
+        catalog_actor = SystemAssetReadContext(
+            user_id=actor.user_id,
+            request_id=actor.request_id,
+        )
+        system_views = await service.list_visible(catalog_actor)
+        bindings = await binding_service.list_visible(actor, kind)
+        if any(view.scope is not AssetScope.PROJECT or view.project_id != actor.project_id for view in project_views):
+            raise AssetValidationFailed(actor.request_id)
+        if any(view.scope is not AssetScope.SYSTEM or view.project_id is not None for view in system_views):
+            raise AssetValidationFailed(actor.request_id)
+        by_asset_id = {binding.asset_id: binding for binding in bindings}
+        system_items = [
+            ProjectAssetItemResponse(
+                **vars(view),
+                capabilities=_override_asset_capabilities(view.scope, kind),
+                binding=(BindingItemResponse(**vars(by_asset_id[view.id])) if view.id in by_asset_id else None),
+            )
+            for view in system_views
+        ]
+        project_items = [
+            ProjectAssetItemResponse(
+                **vars(view),
+                capabilities=_override_asset_capabilities(view.scope, kind),
+                binding=None,
+            )
+            for view in project_views
+        ]
+        return ScopedAssetListResponse(
+            system_items=system_items,
+            project_items=project_items,
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+async def _scoped_override_credentials(
+    actor: SystemAssetGovernanceContext,
+    service: CredentialService,
+) -> ScopedCredentialListResponse:
+    try:
+        views = await service.list_visible(actor)
+        if any(view.scope is not AssetScope.PROJECT or view.project_id != actor.project_id for view in views):
+            raise AssetValidationFailed(actor.request_id)
+        return ScopedCredentialListResponse(
+            system_items=[],
+            project_items=[
+                ProjectCredentialItemResponse(
+                    **vars(view),
+                    capabilities=[
+                        Capability.SHARED_ASSETS_READ,
+                        Capability.MCP_CREDENTIALS_APPROVE,
+                    ],
+                )
+                for view in views
+            ],
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
 @admin_router.get("/agents", response_model=AdminAssetListResponse)
 async def list_system_agents(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
@@ -132,6 +225,30 @@ async def list_system_mcp_servers(
     service: Annotated[McpService, Depends(get_mcp_service)],
 ):
     return await _list_assets(actor, service)
+
+
+@admin_router.post(
+    "/mcp-servers/{asset_id}/versions/{version_id}/credential-grants",
+    response_model=McpVersionResponse,
+)
+async def configure_system_mcp_credential_grants(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: SystemMcpCredentialGrantRequest,
+    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    return await _version_call(
+        actor,
+        lambda: service.configure_system_credential_grants(
+            actor,
+            asset_id,
+            version_id,
+            body.credential_versions,
+            body.expected_active_grant_versions,
+        ),
+        McpVersionResponse,
+    )
 
 
 @admin_router.get("/credentials", response_model=AdminCredentialListResponse)
@@ -157,40 +274,47 @@ async def get_system_credential_rotation_status(
         raise_asset_domain(exc)
 
 
-@admin_project_router.get("/agents", response_model=AdminAssetListResponse)
+@admin_project_router.get("/agents", response_model=ScopedAssetListResponse)
 async def list_override_agents(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
+    binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
-    return await _list_assets(actor, service)
+    return await _list_override_assets(actor, AssetKind.AGENT, service, binding_service)
 
 
-@admin_project_router.get("/skills", response_model=AdminAssetListResponse)
+@admin_project_router.get("/skills", response_model=ScopedAssetListResponse)
 async def list_override_skills(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[SkillService, Depends(get_skill_service)],
+    binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
-    return await _list_assets(actor, service)
+    return await _list_override_assets(actor, AssetKind.SKILL, service, binding_service)
 
 
-@admin_project_router.get("/mcp-servers", response_model=AdminAssetListResponse)
+@admin_project_router.get("/mcp-servers", response_model=ScopedAssetListResponse)
 async def list_override_mcp_servers(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[McpService, Depends(get_mcp_service)],
+    binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
-    return await _list_assets(actor, service)
+    return await _list_override_assets(actor, AssetKind.MCP, service, binding_service)
 
 
-@admin_project_router.get("/credentials", response_model=AdminCredentialListResponse)
+@admin_project_router.get("/credentials", response_model=ScopedCredentialListResponse)
 async def list_override_credentials(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[CredentialService, Depends(get_credential_service)],
 ):
-    return await _list_credentials(actor, service)
+    return await _scoped_override_credentials(actor, service)
 
 
-register_asset_mutation_routes(admin_router, _admin_actor)
-register_asset_mutation_routes(admin_project_router, _admin_project_actor)
+register_asset_routes(
+    admin_router,
+    _admin_actor,
+    include_shared_asset_mutations=False,
+)
+register_asset_routes(admin_project_router, _admin_project_actor)
 
 
 def _register_override_binding_routes(segment: str, kind: AssetKind) -> None:

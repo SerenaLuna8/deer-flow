@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   AutomationScheduleInput,
@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   RECIPES,
   type Recipe,
@@ -35,6 +36,7 @@ export type AutomationAgentOption = {
   id: string;
   scope: "project" | "system";
   displayName: string;
+  isDefault?: boolean;
 };
 
 export type AutomationFormDraft = {
@@ -219,9 +221,16 @@ export function buildAutomationFormSubmission(
   };
 }
 
+function defaultAutomationAgent(
+  agents: readonly AutomationAgentOption[],
+): AutomationAgentOption | undefined {
+  return agents.find((agent) => agent.isDefault);
+}
+
 function initialDraft(
   initial: Automation | undefined,
   initialThreadId: string | undefined,
+  agents: readonly AutomationAgentOption[],
 ): AutomationFormDraft {
   if (initial) {
     return {
@@ -247,13 +256,14 @@ function initialDraft(
       },
     };
   }
+  const defaultAgent = defaultAutomationAgent(agents);
   return {
     title: "",
     prompt: "",
     contextMode: initialThreadId ? "reuse_thread" : "fresh_thread_per_run",
     threadId: initialThreadId ?? "",
-    agentAssetId: "",
-    agentScope: "",
+    agentAssetId: defaultAgent?.id ?? "",
+    agentScope: defaultAgent?.scope ?? "",
     schedule: {
       schedule_type: "cron",
       schedule_spec: { cron: "0 9 * * *" },
@@ -281,12 +291,34 @@ export function AutomationForm({
   ) => void | Promise<void>;
   onCancel?: () => void;
 }) {
+  const { t } = useI18n();
   const immutable = mode === "edit";
   const [draft, setDraft] = useState(() =>
-    initialDraft(initial, initialThreadId),
+    initialDraft(initial, initialThreadId, agents),
+  );
+  const initialDefaultAgent = defaultAutomationAgent(agents);
+  const defaultAgentApplied = useRef(
+    mode === "edit" || Boolean(initialDefaultAgent),
   );
   const [scheduleRevision, setScheduleRevision] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
+  const defaultAgent = defaultAutomationAgent(agents);
+
+  useEffect(() => {
+    if (mode !== "create" || defaultAgentApplied.current || !defaultAgent) {
+      return;
+    }
+    defaultAgentApplied.current = true;
+    setDraft((current) =>
+      current.agentAssetId
+        ? current
+        : {
+            ...current,
+            agentAssetId: defaultAgent.id,
+            agentScope: defaultAgent.scope,
+          },
+    );
+  }, [defaultAgent, mode]);
 
   const selectAgent = (value: string) => {
     const agent = agents.find(({ id, scope }) => `${scope}:${id}` === value);
@@ -427,7 +459,7 @@ export function AutomationForm({
       </label>
 
       <label className="block space-y-2 text-sm font-medium">
-        <span>Title</span>
+        <span>{t.automation.fields.title}</span>
         <Input
           value={draft.title}
           maxLength={255}
@@ -438,7 +470,7 @@ export function AutomationForm({
       </label>
 
       <label className="block space-y-2 text-sm font-medium">
-        <span>Prompt</span>
+        <span>{t.automation.fields.prompt}</span>
         <Textarea
           rows={6}
           value={draft.prompt}
@@ -449,7 +481,7 @@ export function AutomationForm({
       </label>
 
       <div className="space-y-2">
-        <p className="text-sm font-medium">Schedule</p>
+        <p className="text-sm font-medium">{t.automation.fields.schedule}</p>
         <AutomationScheduleInput
           key={scheduleRevision}
           initial={draft.schedule}

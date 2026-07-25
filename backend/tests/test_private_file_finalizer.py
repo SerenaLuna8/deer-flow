@@ -536,8 +536,66 @@ async def test_finalizer_optimistic_authority_compare_rejects_concurrent_change(
                 text("SELECT id,status FROM files WHERE id=:file_id"),
                 {"file_id": concurrent.id},
             )
-        ).one()
-    assert current == (concurrent.id, "ready" if concurrent_change == "upload" else "deleted")
+        ).one_or_none()
+    if concurrent_change == "upload":
+        assert current == (concurrent.id, "ready")
+    else:
+        assert current is None
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_user_delete_physically_removes_artifact_metadata_and_file_bytes(
+    finalizer_seed,
+) -> None:
+    from app.private_work.file_service import PrivateFileService
+    from deerflow.persistence.private_work.model import PrivateArtifactRow
+
+    seed, thread_id, run_id, ready = finalizer_seed
+    artifact_id = uuid.uuid4()
+    async with seed.factory() as session, session.begin():
+        session.add(
+            PrivateArtifactRow(
+                id=artifact_id,
+                project_id=ready.project_id,
+                owner_user_id=ready.owner_user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                file_id=ready.id,
+                display_name="private-report.txt",
+                media_type="text/plain",
+                artifact_metadata={"private": "metadata"},
+            )
+        )
+
+    deleted = await PrivateFileService(seed.factory).delete_ready(
+        seed.owner_a,
+        thread_id=thread_id,
+        file_id=ready.id,
+    )
+    assert deleted.status == "deleted"
+    async with seed.engine.connect() as connection:
+        assert (
+            await connection.scalar(
+                text("SELECT count(*) FROM artifacts WHERE id=:artifact_id"),
+                {"artifact_id": artifact_id},
+            )
+            == 0
+        )
+        assert (
+            await connection.scalar(
+                text("SELECT count(*) FROM files WHERE id=:file_id"),
+                {"file_id": ready.id},
+            )
+            == 0
+        )
+        assert (
+            await connection.scalar(
+                text("SELECT count(*) FROM file_chunks WHERE file_id=:file_id"),
+                {"file_id": ready.id},
+            )
+            == 0
+        )
 
 
 @pytest.mark.postgres

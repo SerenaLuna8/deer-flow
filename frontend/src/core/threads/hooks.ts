@@ -18,20 +18,31 @@ import { fetch } from "../api/fetcher";
 import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
+import { isProjectRunTerminalFailure } from "../private-work/api-client";
 import { usePrivateWorkAccess } from "../private-work/provider";
 import { privateWorkQueryKey } from "../private-work/query-keys";
-import type {
-  ProjectClientScope,
-  ProjectPrivateWorkScope,
+import {
+  runPrivateWorkAbortable,
+  type ProjectClientScope,
+  type ProjectPrivateWorkScope,
 } from "../private-work/types";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useUpdateSubtask } from "../tasks/context";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
-import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  promptInputFilePartToFile,
+  uploadFailureMessage,
+  uploadFiles,
+} from "../uploads";
 
-import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
+import {
+  branchThreadFromTurn,
+  fetchRunMessagesPage,
+  fetchThreadTokenUsage,
+  type RunMessagesPageResponse,
+} from "./api";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -108,11 +119,13 @@ type RegeneratePrepareResponse = {
 
 export function buildThreadSubmitMessages({
   text,
+  messageId,
   additionalKwargs,
   additionalInputMessages = [],
   filesForSubmit = [],
 }: {
   text: string;
+  messageId: string;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   filesForSubmit?: FileInMessage[];
@@ -121,6 +134,7 @@ export function buildThreadSubmitMessages({
     ...additionalInputMessages,
     {
       type: "human",
+      id: messageId,
       content: [
         {
           type: "text",
@@ -165,6 +179,48 @@ function messageIdentity(message: Message): string | undefined {
   return undefined;
 }
 
+function messageRunId(message: Message): string | undefined {
+  const directRunId = Reflect.get(message, "run_id");
+  if (typeof directRunId === "string" && directRunId.length > 0) {
+    return directRunId;
+  }
+  const additionalRunId = message.additional_kwargs?.run_id;
+  return typeof additionalRunId === "string" && additionalRunId.length > 0
+    ? additionalRunId
+    : undefined;
+}
+
+function isRunAdmissionMessage(message: Message): boolean {
+  if (message.type !== "human") {
+    return false;
+  }
+  if (Reflect.get(message, "run_message_source") === "run_admission") {
+    return true;
+  }
+  const runId = messageRunId(message);
+  return Boolean(runId && message.id === `run-admission-${runId}`);
+}
+
+export function attachRunIdToNewMessages(
+  messages: Message[],
+  runId: string | null,
+  baselineMessageIds: ReadonlySet<string>,
+): Message[] {
+  if (!runId) return messages;
+  return messages.map((message) => {
+    const identity = messageIdentity(message);
+    const existingRunId = Reflect.get(message, "run_id");
+    if (
+      typeof existingRunId === "string" ||
+      !identity ||
+      baselineMessageIds.has(identity)
+    ) {
+      return message;
+    }
+    return { ...message, run_id: runId } as unknown as Message;
+  });
+}
+
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
@@ -175,6 +231,7 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // independent tracing/task semantics should use a distinct id or a custom
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
+  const preservedRunIds = new Map<string, string>();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
@@ -187,6 +244,10 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
           identity,
           message.additional_kwargs.turn_duration as number,
         );
+      }
+      const runId = Reflect.get(message, "run_id");
+      if (typeof runId === "string" && runId.length > 0) {
+        preservedRunIds.set(identity, runId);
       }
     }
   });
@@ -205,20 +266,26 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     })
     .map((message) => {
       const identity = messageIdentity(message);
-      if (
-        identity &&
+      if (!identity) return message;
+      const preserveDuration =
         preservedTurnDurations.has(identity) &&
-        message.additional_kwargs?.turn_duration === undefined
-      ) {
-        return {
-          ...message,
-          additional_kwargs: {
-            ...message.additional_kwargs,
-            turn_duration: preservedTurnDurations.get(identity),
-          },
-        } as Message;
-      }
-      return message;
+        message.additional_kwargs?.turn_duration === undefined;
+      const preserveRunId =
+        preservedRunIds.has(identity) &&
+        typeof Reflect.get(message, "run_id") !== "string";
+      if (!preserveDuration && !preserveRunId) return message;
+      return {
+        ...message,
+        ...(preserveRunId ? { run_id: preservedRunIds.get(identity) } : {}),
+        ...(preserveDuration
+          ? {
+              additional_kwargs: {
+                ...message.additional_kwargs,
+                turn_duration: preservedTurnDurations.get(identity),
+              },
+            }
+          : {}),
+      } as Message;
     });
 }
 
@@ -240,6 +307,51 @@ function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   });
 }
 
+export function mergeRunMessageRows(
+  previous: RunMessage[],
+  incoming: RunMessage[],
+  runsNewestFirst: Run[],
+): RunMessage[] {
+  const merged = dedupeRunMessagesByIdentity([...previous, ...incoming]);
+  const runOrder = new Map<string, number>();
+  [...runsNewestFirst]
+    .reverse()
+    .forEach((run, index) => runOrder.set(run.run_id, index));
+
+  let nextUnknownRunOrder = runOrder.size;
+  for (const message of merged) {
+    if (!runOrder.has(message.run_id)) {
+      runOrder.set(message.run_id, nextUnknownRunOrder);
+      nextUnknownRunOrder += 1;
+    }
+  }
+
+  return merged
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const runDifference =
+        (runOrder.get(left.message.run_id) ?? Number.MAX_SAFE_INTEGER) -
+        (runOrder.get(right.message.run_id) ?? Number.MAX_SAFE_INTEGER);
+      if (runDifference !== 0) {
+        return runDifference;
+      }
+
+      const leftSeq = left.message.seq;
+      const rightSeq = right.message.seq;
+      if (typeof leftSeq === "number" && typeof rightSeq === "number") {
+        return leftSeq - rightSeq || left.index - right.index;
+      }
+      if (typeof leftSeq === "number") {
+        return -1;
+      }
+      if (typeof rightSeq === "number") {
+        return 1;
+      }
+      return left.index - right.index;
+    })
+    .map(({ message }) => message);
+}
+
 export function getSupersededRunIds(
   runs: Run[] | undefined,
   pendingSupersededRunIds?: ReadonlySet<string>,
@@ -258,6 +370,11 @@ export function getSupersededRunIds(
     }
   }
   return ids;
+}
+
+export function latestRunHasTerminalFailure(runs: Run[] | undefined) {
+  const status = runs?.[0]?.status as string | undefined;
+  return status === "error" || status === "failed" || status === "timeout";
 }
 
 export function removeSetItems<T>(
@@ -286,6 +403,9 @@ export function buildVisibleHistoryMessages(
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      ...(message.metadata.source === "run_admission"
+        ? { run_message_source: "run_admission" }
+        : {}),
     })),
     ...appendedMessages,
   ]);
@@ -317,14 +437,8 @@ export function shouldAutoContinueOnEmptyRun(
   );
 }
 
-type RunMessagesPageResponse = {
-  data: RunMessage[];
-  has_more?: boolean;
-  hasMore?: boolean;
-};
-
 export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
-  return result.has_more ?? result.hasMore ?? false;
+  return result.has_more;
 }
 
 export function getOldestRunMessageSeq(messages: RunMessage[]) {
@@ -348,40 +462,51 @@ export function getNextRunMessagesBeforeSeq(
   return getOldestRunMessageSeq(result.data) ?? undefined;
 }
 
-export function buildRunMessagesUrl(
-  baseUrl: string,
-  threadId: string,
-  runId: string,
-  beforeSeq?: number,
-) {
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
-  const apiBaseUrl =
-    normalizedBaseUrl.endsWith("/api") ||
-    normalizedBaseUrl.endsWith("/private-work")
-      ? normalizedBaseUrl
-      : `${normalizedBaseUrl}/api`;
-  const path = `${apiBaseUrl}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
-  const url = new URL(
-    path,
-    typeof window !== "undefined" ? window.location.origin : "http://localhost",
-  );
-  if (beforeSeq !== undefined) {
-    url.searchParams.set("before_seq", String(beforeSeq));
-  }
-  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
-}
-
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
+  runsNewestFirst: Run[] = [],
 ): Message[] {
   // Only visible live messages should trim overlapping history. Hidden messages
   // are UI control messages in this path, not observability records; any hidden
   // message that must survive as task/tracing data should use custom events or a
   // separate state channel instead of participating in this overlap heuristic.
 
+  const threadMessageIds = new Set(
+    threadMessages
+      .filter((message) => !isHiddenFromUIMessage(message))
+      .map(messageIdentity)
+      .filter(isNonEmptyString),
+  );
+  const visibleLiveHumanRunIds = new Set(
+    threadMessages
+      .filter(
+        (message) =>
+          message.type === "human" && !isHiddenFromUIMessage(message),
+      )
+      .map(messageRunId)
+      .filter(isNonEmptyString),
+  );
+  const admissionMessages: Message[] = [];
+  const regularHistoryMessages = historyMessages.filter((message) => {
+    if (!isRunAdmissionMessage(message)) {
+      return true;
+    }
+    const identity = messageIdentity(message);
+    const runId = messageRunId(message);
+    if (
+      (identity && threadMessageIds.has(identity)) ||
+      (runId && visibleLiveHumanRunIds.has(runId))
+    ) {
+      return false;
+    }
+    admissionMessages.push(message);
+    return false;
+  });
+
   const savedTurnDurations = new Map<string, number>();
+  const savedRunIds = new Map<string, string>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
     if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
@@ -390,21 +515,18 @@ export function mergeMessages(
         msg.additional_kwargs.turn_duration as number,
       );
     }
+    const runId = Reflect.get(msg, "run_id");
+    if (identity && typeof runId === "string" && runId.length > 0) {
+      savedRunIds.set(identity, runId);
+    }
   }
-
-  const threadMessageIds = new Set(
-    threadMessages
-      .filter((message) => !isHiddenFromUIMessage(message))
-      .map(messageIdentity)
-      .filter(isNonEmptyString),
-  );
 
   // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
   // Scan from the end: shrink cutoff while messages are already in thread, stop as soon as
   // we hit one that isn't — everything before that point is non-overlapping.
-  let cutoff = historyMessages.length;
-  for (let i = historyMessages.length - 1; i >= 0; i--) {
-    const msg = historyMessages[i];
+  let cutoff = regularHistoryMessages.length;
+  for (let i = regularHistoryMessages.length - 1; i >= 0; i--) {
+    const msg = regularHistoryMessages[i];
     if (!msg) {
       continue;
     }
@@ -417,27 +539,81 @@ export function mergeMessages(
   }
 
   const merged = dedupeMessagesByIdentity([
-    ...historyMessages.slice(0, cutoff),
+    ...regularHistoryMessages.slice(0, cutoff),
     ...threadMessages,
     ...optimisticMessages,
   ]);
+  const chronologicalRunOrder = new Map<string, number>();
+  [...runsNewestFirst]
+    .reverse()
+    .forEach((run, index) => chronologicalRunOrder.set(run.run_id, index));
+  const orderedAdmissionMessages = admissionMessages
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftOrder = chronologicalRunOrder.get(
+        messageRunId(left.message) ?? "",
+      );
+      const rightOrder = chronologicalRunOrder.get(
+        messageRunId(right.message) ?? "",
+      );
+      if (leftOrder === undefined || rightOrder === undefined) {
+        return left.index - right.index;
+      }
+      return leftOrder - rightOrder || left.index - right.index;
+    })
+    .map(({ message }) => message);
+
+  for (const admissionMessage of orderedAdmissionMessages) {
+    const identity = messageIdentity(admissionMessage);
+    if (
+      identity &&
+      merged.some((message) => messageIdentity(message) === identity)
+    ) {
+      continue;
+    }
+    const admissionRunOrder = chronologicalRunOrder.get(
+      messageRunId(admissionMessage) ?? "",
+    );
+    const insertionIndex =
+      admissionRunOrder === undefined
+        ? -1
+        : merged.findIndex((message) => {
+            const messageOrder = chronologicalRunOrder.get(
+              messageRunId(message) ?? "",
+            );
+            return (
+              messageOrder !== undefined && messageOrder > admissionRunOrder
+            );
+          });
+    if (insertionIndex === -1) {
+      merged.push(admissionMessage);
+    } else {
+      merged.splice(insertionIndex, 0, admissionMessage);
+    }
+  }
 
   return merged.map((message) => {
     const identity = messageIdentity(message);
-    if (
-      identity &&
+    if (!identity) return message;
+    const preserveDuration =
       savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined
-    ) {
-      return {
-        ...message,
-        additional_kwargs: {
-          ...message.additional_kwargs,
-          turn_duration: savedTurnDurations.get(identity),
-        },
-      } as Message;
-    }
-    return message;
+      message.additional_kwargs?.turn_duration === undefined;
+    const preserveRunId =
+      savedRunIds.has(identity) &&
+      typeof Reflect.get(message, "run_id") !== "string";
+    if (!preserveDuration && !preserveRunId) return message;
+    return {
+      ...message,
+      ...(preserveRunId ? { run_id: savedRunIds.get(identity) } : {}),
+      ...(preserveDuration
+        ? {
+            additional_kwargs: {
+              ...message.additional_kwargs,
+              turn_duration: savedTurnDurations.get(identity),
+            },
+          }
+        : {}),
+    } as Message;
   });
 }
 
@@ -722,6 +898,9 @@ export function invalidateStoppedThreadCaches(
       ...threadTokenUsageQueryKey(threadId),
     ),
   });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(scope, "uploads", "list", threadId),
+  });
 }
 
 export const STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS = 1500;
@@ -861,6 +1040,10 @@ export function useThreadStream({
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
+  const messagesRef = useRef<Message[]>([]);
+  const currentRunIdRef = useRef<string | null>(null);
+  const currentRunBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  const runBaselinePreparedRef = useRef(false);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const listeners = useRef({
@@ -872,9 +1055,12 @@ export function useThreadStream({
 
   const {
     messages: history,
+    runs: historyRuns,
     hasMore: hasMoreHistory,
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
+    error: historyError,
+    retry: retryHistory,
     appendMessages,
   } = useThreadHistory(onStreamThreadId ?? "", {
     enabled: !isMock,
@@ -901,6 +1087,15 @@ export function useThreadStream({
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
+    if (!runBaselinePreparedRef.current) {
+      currentRunBaselineMessageIdsRef.current = new Set(
+        messagesRef.current
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
+    }
+    currentRunIdRef.current = _runId;
+    runBaselinePreparedRef.current = false;
     setOptimisticThreadId((currentOptimisticThreadId) => {
       const currentView = currentViewThreadIdRef.current;
       if (
@@ -1009,10 +1204,14 @@ export function useThreadStream({
             summarizedRef.current?.add(m.id ?? "");
           }
         }
-        const _movedMessages = computeSummarizationMovedMessages(
-          messagesRef.current,
-          _messages,
-          summarizedRef.current ?? new Set<string>(),
+        const _movedMessages = attachRunIdToNewMessages(
+          computeSummarizationMovedMessages(
+            messagesRef.current,
+            _messages,
+            summarizedRef.current ?? new Set<string>(),
+          ),
+          currentRunIdRef.current,
+          currentRunBaselineMessageIdsRef.current,
         );
         // Buffer the rescued messages synchronously so the merge can keep
         // displaying them immediately, even though appendMessages below only
@@ -1125,20 +1324,22 @@ export function useThreadStream({
       setLiveMessagesThreadId(null);
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      toast.error(
+        isProjectRunTerminalFailure(error)
+          ? t.conversation.runFailedDescription
+          : getStreamErrorMessage(error),
+      );
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: scopedThreadQueryKey(
-            privateWork.scope,
-            ...threadTokenUsageQueryKey(threadIdRef.current),
-          ),
-        });
-      }
+      invalidateStoppedThreadCaches(
+        queryClient,
+        threadIdRef.current,
+        isMock,
+        privateWork.scope,
+      );
     },
     onFinish(state) {
       listeners.current.onFinish?.(state.values);
@@ -1196,7 +1397,6 @@ export function useThreadStream({
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
-  const messagesRef = useRef<Message[]>([]);
   // Synchronous bridge for messages rescued from context summarization. The
   // archived-history `setState` (via appendMessages) lands on a different
   // schedule than the live thread external store, so the merge reads this buffer
@@ -1224,6 +1424,9 @@ export function useThreadStream({
     startedRef.current = false;
     sendInFlightRef.current = false;
     messagesRef.current = [];
+    currentRunIdRef.current = null;
+    currentRunBaselineMessageIdsRef.current = new Set();
+    runBaselinePreparedRef.current = false;
     pendingArchivedMessagesRef.current = [];
     pendingArchiveThreadIdRef.current = null;
     summarizedRef.current = new Set<string>();
@@ -1305,6 +1508,7 @@ export function useThreadStream({
       options?.onSent?.();
 
       const text = message.text.trim();
+      const humanMessageId = `human-${crypto.randomUUID()}`;
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -1314,6 +1518,12 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
+      currentRunBaselineMessageIdsRef.current = new Set(
+        persistedMessages
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
+      runBaselinePreparedRef.current = true;
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -1334,7 +1544,7 @@ export function useThreadStream({
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
         });
@@ -1383,10 +1593,9 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(
-                threadId,
-                files,
+              const uploadResponse = await runPrivateWorkAbortable(
                 privateWork,
+                (signal) => uploadFiles(threadId, files, privateWork, signal),
               );
               uploadedFileInfo = uploadResponse.files;
 
@@ -1414,10 +1623,12 @@ export function useThreadStream({
               });
             }
           } catch (error) {
-            const errorMessage =
-              error instanceof Error
-                ? error.message
-                : "Failed to upload files.";
+            const errorMessage = uploadFailureMessage(error, {
+              tooLarge: t.uploads.serverTooLarge,
+              storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+              preflightRejected: t.uploads.preflightRejected,
+              fallback: t.uploads.uploadFailed,
+            });
             toast.error(errorMessage);
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
@@ -1442,6 +1653,7 @@ export function useThreadStream({
           {
             messages: buildThreadSubmitMessages({
               text,
+              messageId: humanMessageId,
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
               filesForSubmit,
@@ -1498,6 +1710,10 @@ export function useThreadStream({
     },
     [
       thread,
+      t.uploads.preflightRejected,
+      t.uploads.serverTooLarge,
+      t.uploads.storageQuotaExceeded,
+      t.uploads.uploadFailed,
       t.uploads.uploadingFiles,
       context,
       queryClient,
@@ -1523,6 +1739,12 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
+      currentRunBaselineMessageIdsRef.current = new Set(
+        persistedMessages
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
+      runBaselinePreparedRef.current = true;
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
@@ -1640,6 +1862,11 @@ export function useThreadStream({
   if (persistedMessages.length >= messagesRef.current.length) {
     messagesRef.current = persistedMessages;
   }
+  const runScopedPersistedMessages = attachRunIdToNewMessages(
+    persistedMessages,
+    currentRunIdRef.current,
+    currentRunBaselineMessageIdsRef.current,
+  );
 
   const visibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
@@ -1659,8 +1886,9 @@ export function useThreadStream({
       : visibleHistory;
   const mergedMessages = mergeMessages(
     effectiveHistory,
-    persistedMessages,
+    runScopedPersistedMessages,
     visibleOptimisticMessages,
+    historyRuns,
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
@@ -1688,6 +1916,9 @@ export function useThreadStream({
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    historyError,
+    retryHistory,
+    hasTerminalRunFailure: latestRunHasTerminalFailure(historyRuns),
   } as const;
 }
 
@@ -1717,6 +1948,7 @@ export function useThreadHistory(
   const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
   const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
+  const [messageLoadError, setMessageLoadError] = useState<Error | null>(null);
   const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
   const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
 
@@ -1753,6 +1985,7 @@ export function useThreadHistory(
     }
 
     loadingRef.current = true;
+    setMessageLoadError(null);
     setLoading(true);
 
     try {
@@ -1775,21 +2008,15 @@ export function useThreadHistory(
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
         const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
-        const url = buildRunMessagesUrl(
-          privateWork.apiBaseURL,
-          requestThreadId,
-          run.run_id,
-          beforeSeq,
+        const result = await runPrivateWorkAbortable(privateWork, (signal) =>
+          fetchRunMessagesPage(
+            privateWork.apiBaseURL,
+            requestThreadId,
+            run.run_id,
+            beforeSeq,
+            signal,
+          ),
         );
-        const result: RunMessagesPageResponse = await fetch(url, {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include",
-        }).then((res) => {
-          return res.json();
-        });
         if (
           loadGenerationRef.current !== loadGeneration ||
           threadIdRef.current !== requestThreadId
@@ -1800,15 +2027,15 @@ export function useThreadHistory(
           (m) => !m.metadata.caller?.startsWith("middleware:"),
         );
         setMessageRows((prev) =>
-          dedupeRunMessagesByIdentity([..._messages, ...prev]),
+          mergeRunMessageRows(prev, _messages, runsRef.current),
         );
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "number") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
           pendingLoadRef.current = true;
         } else if (nextBeforeSeq === undefined) {
-          console.warn(
-            `Run ${run.run_id} returned has_more without message seq values; leaving it pending for retry.`,
+          throw new Error(
+            `Run ${run.run_id} returned a non-advancing message page.`,
           );
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
@@ -1831,7 +2058,14 @@ export function useThreadHistory(
         );
       } while (pendingLoadRef.current);
     } catch (err) {
-      console.error(err);
+      pendingLoadRef.current = false;
+      if (loadGenerationRef.current === loadGeneration) {
+        setMessageLoadError(
+          err instanceof Error
+            ? err
+            : new Error("Failed to load thread history."),
+        );
+      }
     } finally {
       if (loadGenerationRef.current === loadGeneration) {
         loadingRef.current = false;
@@ -1839,7 +2073,7 @@ export function useThreadHistory(
         setLoading(false);
       }
     }
-  }, [enabled, privateWork.apiBaseURL]);
+  }, [enabled, privateWork]);
   useEffect(() => {
     const threadChanged = threadIdRef.current !== threadId;
     threadIdRef.current = threadId;
@@ -1854,6 +2088,7 @@ export function useThreadHistory(
       runBeforeSeqRef.current = new Map();
       loadingRef.current = false;
       setLoading(false);
+      setMessageLoadError(null);
       setMessageRows([]);
       setAppendedMessages([]);
     }
@@ -1869,9 +2104,7 @@ export function useThreadHistory(
         loadedRunIdsRef.current,
       );
     }
-    loadMessages().catch(() => {
-      toast.error("Failed to load thread history.");
-    });
+    void loadMessages();
   }, [enabled, threadId, runs.data, loadMessages]);
 
   const appendMessages = useCallback((_messages: Message[]) => {
@@ -1889,8 +2122,21 @@ export function useThreadHistory(
     (runs.isLoading || (runs.isFetching && !runs.data));
   const isRunsUnresolved =
     enabled && hasThreadId && !runs.data && !runs.isError;
+  const historyError = messageLoadError ?? runs.error;
   const hasMore =
-    enabled && hasThreadId && (indexRef.current >= 0 || hasUnloadedRuns);
+    enabled &&
+    hasThreadId &&
+    historyError === null &&
+    (indexRef.current >= 0 || hasUnloadedRuns);
+  const runsFailed = runs.isError;
+  const refetchRuns = runs.refetch;
+  const retryHistory = useCallback(() => {
+    if (runsFailed) {
+      void refetchRuns();
+      return;
+    }
+    void loadMessages();
+  }, [loadMessages, refetchRuns, runsFailed]);
   return {
     runs: runs.data,
     messages,
@@ -1898,6 +2144,8 @@ export function useThreadHistory(
     appendMessages,
     hasMore,
     loadMore: loadMessages,
+    error: historyError,
+    retry: retryHistory,
   };
 }
 
@@ -2082,6 +2330,7 @@ export function useThreadRuns(
       return response;
     },
     enabled: enabled && Boolean(threadId),
+    retry: false,
     refetchOnWindowFocus: false,
   });
 }

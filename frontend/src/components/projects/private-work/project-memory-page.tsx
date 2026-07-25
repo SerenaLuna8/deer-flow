@@ -8,6 +8,7 @@ import {
   type MemorySettingsController,
 } from "@/components/workspace/settings/memory-settings-page";
 import {
+  createProjectMemoryFact,
   deleteProjectMemoryFact,
   exportProjectMemory,
   importProjectMemory,
@@ -18,6 +19,7 @@ import {
   reloadProjectMemory,
   updateProjectMemoryFact,
   type MemoryFact,
+  type MemoryFactInput,
   type ProjectMemorySnapshot,
 } from "@/core/private-work/memory";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
@@ -110,6 +112,16 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     },
     onSuccess: setSnapshot,
   });
+  const createMemoryFact = useMutation({
+    mutationKey: projectMemoryMutationKey(scope, "create-fact"),
+    mutationFn: async (input: MemoryFactInput) => {
+      if (!query.data) throw new Error("Project Memory is unavailable");
+      return runPrivateWorkAbortable(privateWork, (signal) =>
+        createProjectMemoryFact(privateWork, query.data.version, input, signal),
+      );
+    },
+    onSuccess: setSnapshot,
+  });
   const deleteMemoryFact = useMutation({
     mutationKey: projectMemoryMutationKey(scope, "delete-fact"),
     mutationFn: async (factId: string) => {
@@ -133,6 +145,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     exportMemory: () => exportProjectMemory(privateWork),
     reloadMemory: permissions.canReload ? reloadMemory : undefined,
     importMemory: permissions.canImport ? importMemory : undefined,
+    createMemoryFact: permissions.canAdd ? createMemoryFact : undefined,
     updateMemoryFact: permissions.canModify ? updateMemoryFact : undefined,
     deleteMemoryFact: permissions.canDelete ? deleteMemoryFact : undefined,
   };
@@ -145,7 +158,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
         }
         controller={controller}
         permissions={{
-          canAdd: false,
+          canAdd: permissions.canAdd,
           canClear: false,
           canDelete: permissions.canDelete,
           canExport: permissions.canExport,

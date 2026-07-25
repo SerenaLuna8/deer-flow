@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 
 from app.gateway.auth_middleware import _is_public
 from app.gateway.deps import project_session
-from app.gateway.routers import project_invitations
+from app.gateway.routers import notifications, project_invitations
+from app.notifications.models import InvitationNotificationView, NotificationPage
 from app.projects.capabilities import Capability
 from app.projects.errors import (
     ProjectForbidden,
@@ -53,12 +54,18 @@ def _app() -> FastAPI:
     app.state.project_quota_enforcer = object()
     app.state.operational_audit_sink = AsyncMock()
     app.include_router(project_invitations.router)
+    app.include_router(notifications.router)
 
     async def fake_session():
         yield object()
 
     app.dependency_overrides[project_session] = fake_session
     app.dependency_overrides[project_invitations.authenticated_invitation_identity] = lambda: (
+        USER_ID,
+        "member@example.com",
+        "req-invitations",
+    )
+    app.dependency_overrides[notifications.authenticated_invitation_identity] = lambda: (
         USER_ID,
         "member@example.com",
         "req-invitations",
@@ -170,6 +177,177 @@ def test_mine_is_scoped_to_authenticated_email_and_hides_secrets(monkeypatch) ->
     assert "token" not in response.text
     assert "hash" not in response.text
     assert list_mine.await_args.args[0] == "member@example.com"
+
+
+def test_notification_list_is_account_scoped_and_enriched_without_secrets(
+    monkeypatch,
+) -> None:
+    notification = InvitationNotificationView(
+        id=INVITATION_ID,
+        project_id=PROJECT_ID,
+        project_slug="research-lab",
+        project_display_name="Research Lab",
+        inviter_email="owner@example.com",
+        role=ProjectRole.VIEWER,
+        status="pending",
+        is_read=False,
+        created_at=NOW,
+        expires_at=NOW + timedelta(days=7),
+        version=1,
+    )
+    list_notifications = AsyncMock(
+        return_value=NotificationPage(
+            items=(notification,),
+            unread_count=1,
+        )
+    )
+    monkeypatch.setattr(
+        notifications.InvitationService,
+        "list_notifications",
+        list_notifications,
+    )
+
+    response = TestClient(_app()).get("/api/notifications")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "id": str(INVITATION_ID),
+                "kind": "project_invitation",
+                "project": {
+                    "id": str(PROJECT_ID),
+                    "slug": "research-lab",
+                    "display_name": "Research Lab",
+                },
+                "actor": {"email": "owner@example.com"},
+                "role": "viewer",
+                "status": "pending",
+                "is_read": False,
+                "expires_at": (NOW + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+                "version": 1,
+                "created_at": NOW.isoformat().replace("+00:00", "Z"),
+            }
+        ],
+        "next_cursor": None,
+        "unread_count": 1,
+    }
+    assert "token" not in response.text
+    assert "hash" not in response.text
+    list_notifications.assert_awaited_once()
+    assert list_notifications.await_args.args[0] == USER_ID
+    assert list_notifications.await_args.kwargs == {
+        "cursor": None,
+        "limit": 50,
+    }
+
+
+def test_notification_list_forwards_cursor_and_bounded_limit(monkeypatch) -> None:
+    list_notifications = AsyncMock(return_value=NotificationPage(items=(), unread_count=0))
+    monkeypatch.setattr(
+        notifications.InvitationService,
+        "list_notifications",
+        list_notifications,
+    )
+
+    response = TestClient(_app()).get("/api/notifications?cursor=opaque-cursor&limit=75")
+
+    assert response.status_code == 200
+    assert list_notifications.await_args.kwargs == {
+        "cursor": "opaque-cursor",
+        "limit": 75,
+    }
+
+
+def test_notification_list_rejects_invalid_cursor_with_stable_validation_error() -> None:
+    response = TestClient(_app()).get("/api/notifications?cursor=not-a-valid-cursor")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "PROJECT_VALIDATION_FAILED",
+        "message": "Project validation failed",
+        "request_id": "req-invitations",
+    }
+
+
+def test_notification_read_all_returns_single_account_update_count(
+    monkeypatch,
+) -> None:
+    mark_all = AsyncMock(return_value=3)
+    monkeypatch.setattr(
+        notifications.InvitationService,
+        "mark_all_notifications_read",
+        mark_all,
+    )
+
+    response = TestClient(_app()).post("/api/notifications/read-all")
+
+    assert response.status_code == 200
+    assert response.json() == {"marked_count": 3}
+    assert mark_all.await_args.args[0] == USER_ID
+
+
+def test_notification_read_is_recipient_scoped_and_returns_updated_item(
+    monkeypatch,
+) -> None:
+    notification = InvitationNotificationView(
+        id=INVITATION_ID,
+        project_id=PROJECT_ID,
+        project_slug="research-lab",
+        project_display_name="Research Lab",
+        inviter_email="owner@example.com",
+        role=ProjectRole.VIEWER,
+        status="pending",
+        is_read=True,
+        created_at=NOW,
+        expires_at=NOW + timedelta(days=7),
+        version=1,
+    )
+    mark_read = AsyncMock(return_value=notification)
+    monkeypatch.setattr(
+        notifications.InvitationService,
+        "mark_notification_read",
+        mark_read,
+    )
+
+    response = TestClient(_app()).post(f"/api/notifications/{INVITATION_ID}/read")
+
+    assert response.status_code == 200
+    assert response.json()["is_read"] is True
+    assert mark_read.await_args.args[:2] == (USER_ID, INVITATION_ID)
+
+
+def test_notification_accept_uses_authenticated_account_and_returns_membership(
+    monkeypatch,
+) -> None:
+    redeemed = RedeemedInvitation(
+        invitation_id=INVITATION_ID,
+        project_id=PROJECT_ID,
+        project_slug="research-lab",
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.VIEWER,
+    )
+    accept = AsyncMock(return_value=redeemed)
+    monkeypatch.setattr(
+        notifications.InvitationService,
+        "accept_notification",
+        accept,
+    )
+
+    response = TestClient(_app()).post(
+        f"/api/notifications/{INVITATION_ID}/accept",
+        json={"version": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["project_slug"] == "research-lab"
+    assert "token" not in response.text
+    assert accept.await_args.args[:2] == (
+        USER_ID,
+        INVITATION_ID,
+    )
+    assert accept.await_args.kwargs["expected_version"] == 1
+    assert accept.await_args.kwargs["request_id"] == "req-invitations"
 
 
 def test_claim_valid_and_invalid_tokens_are_indistinguishable(monkeypatch) -> None:

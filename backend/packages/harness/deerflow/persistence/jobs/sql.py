@@ -75,8 +75,10 @@ class EnqueueJob:
         elif self.job_type == "automation_run":
             if self.scope.owner_user_id is None or not self.run_id or not self.occurrence_id:
                 raise ValueError("automation_run requires owner, run, and occurrence authority")
-        elif self.scope.owner_user_id is not None or self.run_id is not None or self.occurrence_id is not None:
-            raise ValueError("retention_purge requires project-only authority")
+        elif self.run_id is not None or self.occurrence_id is not None:
+            raise ValueError(
+                "retention_purge requires project or exact former-owner authority",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -868,6 +870,7 @@ class JobRepository:
         *,
         lease_token: str,
         public_error_code: str,
+        retryable: bool = True,
         retry_initial_seconds: int,
         retry_max_seconds: int,
         now: datetime | None = None,
@@ -876,6 +879,7 @@ class JobRepository:
             job_id,
             lease_token=lease_token,
             public_error_code=public_error_code,
+            retryable=retryable,
             retry_initial_seconds=retry_initial_seconds,
             retry_max_seconds=retry_max_seconds,
             now=now,
@@ -888,6 +892,7 @@ class JobRepository:
         *,
         lease_token: str,
         public_error_code: str,
+        retryable: bool = True,
         retry_initial_seconds: int,
         retry_max_seconds: int,
         now: datetime | None = None,
@@ -895,6 +900,8 @@ class JobRepository:
         failed_at = self._now(now)
         if not public_error_code or len(public_error_code) > 64:
             raise ValueError("public_error_code must be between 1 and 64 characters")
+        if type(retryable) is not bool:
+            raise TypeError("retryable must be a boolean")
         if not await self._lock_job_authority(job_id):
             return JobRetryResult(
                 changed=False,
@@ -918,7 +925,7 @@ class JobRepository:
                 changed=False,
                 run_terminal_published=False,
             )
-        if row.retry_safety == "safe" and row.attempt_count < row.max_attempts:
+        if retryable and row.retry_safety == "safe" and row.attempt_count < row.max_attempts:
             delay = retry_backoff_seconds(
                 attempt_count=row.attempt_count,
                 initial_seconds=retry_initial_seconds,

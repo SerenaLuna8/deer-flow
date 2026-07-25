@@ -1,4 +1,8 @@
-import { assetListKindSchema, type AssetListKind } from "./types";
+import {
+  assetIdSchema,
+  assetListKindSchema,
+  type AssetListKind,
+} from "./types";
 
 function requireKeyPart(value: string, label: string): string {
   if (value.trim() === "") throw new Error(`${label} is required`);
@@ -21,6 +25,19 @@ export const sharedAssetKeys = {
 export function adminAssetKey(accountId: string, kind: AssetListKind) {
   return [
     ...sharedAssetKeys.admin(accountId),
+    assetListKindSchema.parse(kind),
+  ] as const;
+}
+
+export function adminProjectAssetKey(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+) {
+  return [
+    ...sharedAssetKeys.admin(accountId),
+    "project",
+    assetIdSchema.parse(projectId),
     assetListKindSchema.parse(kind),
   ] as const;
 }
@@ -57,6 +74,20 @@ export function adminAssetVersionsKey(
     ...adminAssetKey(accountId, kind),
     "asset",
     requireKeyPart(assetId, "Asset ID"),
+    "versions",
+  ] as const;
+}
+
+export function adminProjectAssetVersionsKey(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+  assetId: string,
+) {
+  return [
+    ...adminProjectAssetKey(accountId, projectId, kind),
+    "asset",
+    assetIdSchema.parse(assetId),
     "versions",
   ] as const;
 }

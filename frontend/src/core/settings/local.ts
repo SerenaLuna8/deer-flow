@@ -1,7 +1,26 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
 
+export const CHAT_CONTENT_WIDTH_OPTIONS = [
+  "narrow",
+  "standard",
+  "wide",
+  "full",
+] as const;
+
+export type ChatContentWidth = (typeof CHAT_CONTENT_WIDTH_OPTIONS)[number];
+
+export const CHAT_CONTENT_WIDTH_CSS_VALUES: Record<ChatContentWidth, string> = {
+  narrow: "42rem",
+  standard: "var(--container-width-md)",
+  wide: "var(--container-width-lg)",
+  full: "100%",
+};
+
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
+  appearance: {
+    chatContentWidth: "standard",
+  },
   notification: {
     enabled: true,
   },
@@ -24,6 +43,9 @@ function isBrowser(): boolean {
 }
 
 export interface LocalSettings {
+  appearance: {
+    chatContentWidth: ChatContentWidth;
+  };
   notification: {
     enabled: boolean;
   };
@@ -46,9 +68,24 @@ export interface LocalSettings {
   };
 }
 
-function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
+export function isChatContentWidth(value: unknown): value is ChatContentWidth {
+  return CHAT_CONTENT_WIDTH_OPTIONS.some((option) => option === value);
+}
+
+export function normalizeLocalSettings(
+  settings?: Partial<LocalSettings>,
+): LocalSettings {
+  const storedChatContentWidth = settings?.appearance?.chatContentWidth;
   return {
     ...DEFAULT_LOCAL_SETTINGS,
+    ...settings,
+    appearance: {
+      ...DEFAULT_LOCAL_SETTINGS.appearance,
+      ...settings?.appearance,
+      chatContentWidth: isChatContentWidth(storedChatContentWidth)
+        ? storedChatContentWidth
+        : DEFAULT_LOCAL_SETTINGS.appearance.chatContentWidth,
+    },
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
       ...settings?.context,
@@ -114,7 +151,7 @@ export function getLocalSettings(): LocalSettings {
   try {
     if (json) {
       const settings = JSON.parse(json) as Partial<LocalSettings>;
-      return mergeLocalSettings(settings);
+      return normalizeLocalSettings(settings);
     }
   } catch {}
   return DEFAULT_LOCAL_SETTINGS;

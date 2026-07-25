@@ -10,11 +10,7 @@ import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
-from support.m4_private_threads import (
-    M4ThreadSeed,
-    install_open_project_cutover_guard,
-    seed_m4_thread_database,
-)
+from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.gateway.deps import private_work_context
 from app.gateway.routers.private_work import _thread_response, router
@@ -73,7 +69,6 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     raw = InMemorySaver()
     scoped = ProjectScopedCheckpointer(raw, seed.factory)
     app = FastAPI()
-    install_open_project_cutover_guard(app)
     app.include_router(router)
     app.state.private_thread_service = PrivateThreadService(seed.factory, scoped)
     app.state.project_scoped_checkpointer = scoped

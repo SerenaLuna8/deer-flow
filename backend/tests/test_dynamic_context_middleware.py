@@ -5,16 +5,45 @@ the first HumanMessage exactly once per session (frozen-snapshot pattern).
 """
 
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
+import pytest
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
 )
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    _USER_INPUT_BEGIN,
+    _USER_INPUT_END,
+    InputSanitizationMiddleware,
+)
+from deerflow.sandbox.middleware import SandboxMiddleware
 
 _SYSTEM_REMINDER_TAG = "<system-reminder>"
+
+
+class _DeterministicChatModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Runnable:  # type: ignore[override]
+        del tools, tool_choice, kwargs
+        return self
+
+
+class _ModelRequestRecorder(AgentMiddleware):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[list[object]] = []
+
+    async def awrap_model_call(self, request, handler):
+        self.calls.append(list(request.messages))
+        return await handler(request)
 
 
 def _make_middleware(**kwargs) -> DynamicContextMiddleware:
@@ -258,8 +287,8 @@ def test_legacy_systemmessage_reminder_without_key_detected():
     assert result is None  # same day detected from content → no re-injection
 
 
-def test_injects_only_into_first_human_message_not_later_ones():
-    """Reminder targets the first HumanMessage; subsequent messages are not touched."""
+def test_delayed_first_injection_targets_latest_human_message():
+    """A recovered checkpoint without a reminder keeps the latest turn last."""
     mw = _make_middleware()
     state = {
         "messages": [
@@ -275,15 +304,102 @@ def test_injects_only_into_first_human_message_not_later_ones():
 
     assert result is not None
     msgs = result["messages"]
-    # Only the two injected messages are returned (reminder + original first query)
+    # Only the reminder and latest genuine user message are returned. The
+    # earlier turn remains in place instead of being ID-swapped to the tail.
     assert len(msgs) == 2
-    assert msgs[0].id == "msg-1"  # reminder takes first message's ID
+    assert msgs[0].id == "msg-2"
     assert msgs[0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
     assert _SYSTEM_REMINDER_TAG in msgs[0].content
-    assert msgs[1].id == "msg-1__user"  # original content with derived ID
-    assert msgs[1].content == "First"
-    # "Second" (msg-2) is not in the returned update — it is left unchanged
-    assert all(m.id != "msg-2" for m in msgs)
+    assert msgs[1].id == "msg-2__user"
+    assert msgs[1].content == "Second"
+    assert all(m.id != "msg-1" for m in msgs)
+
+
+@pytest.mark.anyio
+async def test_sandbox_failure_checkpoint_keeps_recovery_as_latest_model_input():
+    """A pre-context failure must not move the failed prompt after a recovery turn."""
+    saver = InMemorySaver()
+    recorder = _ModelRequestRecorder()
+    agent = create_agent(
+        model=_DeterministicChatModel(responses=[AIMessage(content="recovered", id="assistant-recovery")]),
+        tools=[],
+        middleware=[
+            InputSanitizationMiddleware(),
+            SandboxMiddleware(lazy_init=True),
+            DynamicContextMiddleware(),
+            recorder,
+        ],
+        context_schema=dict,
+        checkpointer=saver,
+    )
+    thread_config = {
+        "configurable": {
+            "thread_id": "dynamic-context-recovery",
+            "checkpoint_ns": "",
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="Private file authority"):
+        await agent.ainvoke(
+            {
+                "messages": [
+                    HumanMessage(content="OLD_STORY", id="old-story"),
+                ]
+            },
+            config=thread_config,
+            context={
+                "thread_id": "dynamic-context-recovery",
+                "run_id": "run-1",
+                "private_scope": object(),
+            },
+        )
+
+    failed_checkpoint = await saver.aget_tuple(thread_config)
+    assert failed_checkpoint is not None
+    failed_messages = failed_checkpoint.checkpoint["channel_values"]["messages"]
+    assert [(message.id, message.content) for message in failed_messages if isinstance(message, HumanMessage)] == [("old-story", "OLD_STORY")]
+    failed_checkpoint_id = failed_checkpoint.config["configurable"]["checkpoint_id"]
+
+    await agent.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="NEW_RECOVERY", id="new-recovery"),
+            ]
+        },
+        config={
+            "configurable": {
+                "thread_id": "dynamic-context-recovery",
+                "checkpoint_ns": "",
+                "checkpoint_id": failed_checkpoint_id,
+            }
+        },
+        context={
+            "thread_id": "dynamic-context-recovery",
+            "run_id": "run-2",
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(
+                sandbox_id="run-2-sandbox",
+            ),
+        },
+    )
+
+    assert len(recorder.calls) == 1
+    model_humans = [message for message in recorder.calls[0] if isinstance(message, HumanMessage)]
+    assert [message.id for message in model_humans] == [
+        "old-story",
+        "new-recovery__user",
+    ]
+    assert "OLD_STORY" in str(model_humans[0].content)
+    assert model_humans[-1].content == (f"{_USER_INPUT_BEGIN}\nNEW_RECOVERY\n{_USER_INPUT_END}")
+
+    latest_checkpoint = await saver.aget_tuple(thread_config)
+    assert latest_checkpoint is not None
+    persisted_humans = [message for message in latest_checkpoint.checkpoint["channel_values"]["messages"] if isinstance(message, HumanMessage) and not message.additional_kwargs.get("hide_from_ui")]
+    assert [message.content for message in persisted_humans] == [
+        "OLD_STORY",
+        "NEW_RECOVERY",
+    ]
+    assert persisted_humans[-1].id == "new-recovery__user"
 
 
 # ---------------------------------------------------------------------------

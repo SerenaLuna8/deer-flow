@@ -78,6 +78,7 @@ import {
 } from "@/core/threads/hooks";
 import {
   formatUploadSize,
+  uploadFailureMessage,
   useUploadLimits,
   validateUploadLimits,
   type UploadLimits,
@@ -86,18 +87,18 @@ import {
 import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../../ai-elements/model-selector";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
 import { ModeHoverGuide } from "../mode-hover-guide";
+import {
+  ModelSelector,
+  ModelSelectorContent,
+  ModelSelectorItem,
+  ModelSelectorLabel,
+  ModelSelectorList,
+  ModelSelectorName,
+  ModelSelectorTrigger,
+} from "../model-selector-popover";
 import { Tooltip } from "../tooltip";
 
 import { type SidecarReference, useSidecar } from "./context";
@@ -192,6 +193,8 @@ export function SidecarPanel({ className }: { className?: string }) {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    historyError,
+    retryHistory,
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
@@ -278,9 +281,16 @@ export function SidecarPanel({ className }: { className?: string }) {
           toast.error(
             t.uploads.tooManyFiles(violation.files.length, violation.limit),
           );
-        } else {
+        } else if (violation.code === "max_total_size") {
           toast.error(
             t.uploads.totalSizeTooLarge(
+              violation.files.length,
+              formatUploadSize(violation.limit),
+            ),
+          );
+        } else {
+          toast.error(
+            t.uploads.projectStorageTooSmall(
               violation.files.length,
               formatUploadSize(violation.limit),
             ),
@@ -481,7 +491,12 @@ export function SidecarPanel({ className }: { className?: string }) {
       },
     ).catch((error) => {
       toast.error(
-        error instanceof Error ? error.message : t.sidecar.sendFailed,
+        uploadFailureMessage(error, {
+          tooLarge: t.uploads.serverTooLarge,
+          storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+          preflightRejected: t.uploads.preflightRejected,
+          fallback: t.sidecar.sendFailed,
+        }),
       );
     });
   }, [
@@ -491,6 +506,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     sidecar.sidecarThreadId,
     submitToSidecarThread,
     t.sidecar.sendFailed,
+    t.uploads,
     thread.isLoading,
   ]);
 
@@ -538,7 +554,12 @@ export function SidecarPanel({ className }: { className?: string }) {
         );
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : t.sidecar.sendFailed,
+          uploadFailureMessage(error, {
+            tooLarge: t.uploads.serverTooLarge,
+            storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+            preflightRejected: t.uploads.preflightRejected,
+            fallback: t.sidecar.sendFailed,
+          }),
         );
       }
     },
@@ -549,6 +570,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       sidecar,
       submitToSidecarThread,
       t.sidecar.sendFailed,
+      t.uploads,
       uploadLimits,
     ],
   );
@@ -647,6 +669,8 @@ export function SidecarPanel({ className }: { className?: string }) {
             hasMoreHistory={hasMoreHistory}
             loadMoreHistory={loadMoreHistory}
             isHistoryLoading={isHistoryLoading}
+            historyError={historyError}
+            retryHistory={retryHistory}
             tokenUsageInlineMode={tokenUsageInlineMode}
             sidecarSurface
             initialScroll="instant"
@@ -1012,17 +1036,21 @@ function SidecarModelSelector({
         </PromptInputButton>
       </ModelSelectorTrigger>
       <ModelSelectorContent>
-        <ModelSelectorInput placeholder={t.inputBox.searchModels} />
+        <ModelSelectorLabel>{t.inputBox.model}</ModelSelectorLabel>
         <ModelSelectorList>
           {models.map((model) => (
             <ModelSelectorItem
+              className={cn(
+                model.name === context.model_name
+                  ? "text-accent-foreground"
+                  : "text-muted-foreground/65",
+              )}
               key={model.name}
-              value={model.name}
               onSelect={() => onModelSelect(model.name)}
             >
               <div className="flex min-w-0 flex-1 flex-col">
                 <ModelSelectorName>{model.display_name}</ModelSelectorName>
-                <span className="text-muted-foreground truncate text-[10px]">
+                <span className="text-muted-foreground truncate text-xs">
                   {model.model}
                 </span>
               </div>

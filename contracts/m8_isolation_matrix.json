@@ -128,8 +128,8 @@
     ]
   },
   "surface_manifest": {
-    "count": 474,
-    "sha256": "a9e4aadb3c76bbaa0b774b0854fbaaa33e43f38b263d2a10e14c4a5d248593d0"
+    "count": 530,
+    "sha256": "379d59cd8b358a1b99e740a7f4519effffe5e4a99f62442b2f51563466c5ac7d"
   },
   "cases": [
     {
@@ -793,6 +793,28 @@
       ]
     },
     {
+      "case_id": "surface.auth.delete",
+      "actor": "viewer",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_viewer",
+      "platform_role": "user",
+      "resource_family": "auth",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "delete",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_auth_type_system.py::test_logout_revokes_copied_session_token_across_requests"
+      ]
+    },
+    {
       "case_id": "rate_limit.auth.shared_admit",
       "actor": "unauthenticated",
       "account_relationship": "unauthenticated",
@@ -937,7 +959,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+        "playwright::tests/e2e/admin-assets.spec.ts::system Agent Skill and MCP catalog is read only while Credential governance remains available"
       ]
     },
     {
@@ -962,7 +984,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+        "playwright::tests/e2e/admin-assets.spec.ts::system Agent Skill and MCP catalog is read only while Credential governance remains available"
       ]
     },
     {
@@ -984,7 +1006,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+        "playwright::tests/e2e/admin-assets.spec.ts::system Agent Skill and MCP catalog is read only while Credential governance remains available"
       ]
     },
     {
@@ -1000,13 +1022,12 @@
       "operation": "update",
       "expected_status": 200,
       "expected_code": null,
-      "expected_db_delta": 0,
+      "expected_db_delta": 1,
       "layers": [
-        "frontend"
+        "api"
       ],
       "evidence_selectors": [
-        "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+        "pytest::tests/test_m6_system_operations_api_postgres.py::test_system_admin_can_suspend_and_resume_without_project_membership"
       ]
     },
     {
@@ -1024,12 +1045,14 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
+        "frontend",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -1156,7 +1179,7 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_audit_integration_postgres.py::test_system_requeue_rejects_cross_project_dead_job_scope",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+        "playwright::tests/e2e/admin-assets.spec.ts::system Agent Skill and MCP catalog is read only while Credential governance remains available"
       ]
     },
     {
@@ -1652,12 +1675,13 @@
       "operation": "delete",
       "expected_status": 200,
       "expected_code": null,
-      "expected_db_delta": 0,
+      "expected_db_delta": 1,
       "layers": [
-        "frontend"
+        "frontend",
+        "repository"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_project_mcp_direct_publish_and_credential_approval_are_scope_safe",
+        "pytest::tests/integration/test_m3_mcp_credentials_postgres.py::test_credential_grant_migration_is_explicit_and_revoke_invalidates_all_active_grants",
         "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
@@ -1949,6 +1973,89 @@
       ]
     },
     {
+      "case_id": "surface.invite.account_list",
+      "actor": "ordinary_platform_user",
+      "account_relationship": "same_account",
+      "project_relationship": "none",
+      "membership_state": "none",
+      "platform_role": "user",
+      "resource_family": "invite",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "list",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_notifications_postgres.py::test_registered_invitee_gets_recipient_scoped_persistent_notification_and_can_accept",
+        "pytest::tests/test_project_invitations_router.py::test_notification_list_is_account_scoped_and_enriched_without_secrets",
+        "playwright::tests/e2e/project-governance.spec.ts::workspace handles invitations in the notification center and keeps recoverable projects separate"
+      ]
+    },
+    {
+      "case_id": "surface.invite.account_update",
+      "actor": "ordinary_platform_user",
+      "account_relationship": "same_account",
+      "project_relationship": "none",
+      "membership_state": "none",
+      "platform_role": "user",
+      "resource_family": "invite",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "update",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_notifications_postgres.py::test_registered_invitee_gets_recipient_scoped_persistent_notification_and_can_accept",
+        "pytest::tests/test_project_invitations_router.py::test_notification_read_all_returns_single_account_update_count",
+        "pytest::tests/test_project_invitations_router.py::test_notification_read_is_recipient_scoped_and_returns_updated_item",
+        "playwright::tests/e2e/project-governance.spec.ts::workspace handles invitations in the notification center and keeps recoverable projects separate"
+      ]
+    },
+    {
+      "case_id": "surface.invite.account_approve",
+      "actor": "ordinary_platform_user",
+      "account_relationship": "same_account",
+      "project_relationship": "none",
+      "membership_state": "none",
+      "platform_role": "user",
+      "resource_family": "invite",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "approve",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_notifications_postgres.py::test_registered_invitee_gets_recipient_scoped_persistent_notification_and_can_accept",
+        "pytest::tests/test_notifications_postgres.py::test_concurrent_notification_accept_has_exactly_one_winner",
+        "pytest::tests/test_project_invitations_router.py::test_notification_accept_uses_authenticated_account_and_returns_membership",
+        "playwright::tests/e2e/project-governance.spec.ts::workspace handles invitations in the notification center and keeps recoverable projects separate"
+      ]
+    },
+    {
       "case_id": "surface.job.create",
       "actor": "runner",
       "account_relationship": "same_account",
@@ -2160,12 +2267,14 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
+        "frontend",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m2_project_governance_postgres.py::test_m2_cross_project_and_last_admin_matrix"
+        "pytest::tests/integration/test_m2_project_governance_postgres.py::test_m2_cross_project_and_last_admin_matrix",
+        "playwright::tests/e2e/project-governance.spec.ts::leaving or requesting deletion replaces the current project with workspace"
       ]
     },
     {
@@ -2572,12 +2681,13 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
+        "api",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider"
+        "pytest::tests/test_private_work_feed_router.py::test_project_chat_feed_happy_path_and_cross_owner_404"
       ]
     },
     {
@@ -2595,12 +2705,15 @@
       "expected_code": null,
       "expected_db_delta": 0,
       "layers": [
+        "frontend",
+        "api",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m4_private_work_postgres.py::test_owner_thread_is_hidden_across_owner_project_and_outsider"
+        "pytest::tests/test_private_work_feed_router.py::test_project_chat_feed_happy_path_and_cross_owner_404",
+        "playwright::tests/e2e/project-private-chat.spec.ts::project detail loads history and streams without legacy private-work calls"
       ]
     },
     {
@@ -2893,6 +3006,82 @@
       ],
       "evidence_selectors": [
         "pytest::tests/test_m6_quota_integration_postgres.py::test_run_admission_enforces_limit_and_terminal_cancel_releases_once"
+      ]
+    },
+    {
+      "case_id": "surface.retention.list",
+      "actor": "left_membership",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "left",
+      "platform_role": "user",
+      "resource_family": "retention",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "list",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_m6_retention_purge_postgres.py::test_privacy_center_is_account_scoped_exports_no_credentials_and_admits_early_delete",
+        "playwright::tests/e2e/privacy-center.spec.ts::privacy center exports retained data and queues exact scoped early deletion"
+      ]
+    },
+    {
+      "case_id": "surface.retention.export",
+      "actor": "left_membership",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "left",
+      "platform_role": "user",
+      "resource_family": "retention",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "export",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_m6_retention_purge_postgres.py::test_privacy_center_is_account_scoped_exports_no_credentials_and_admits_early_delete",
+        "playwright::tests/e2e/privacy-center.spec.ts::privacy center exports retained data and queues exact scoped early deletion"
+      ]
+    },
+    {
+      "case_id": "surface.retention.delete",
+      "actor": "left_membership",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "left",
+      "platform_role": "user",
+      "resource_family": "retention",
+      "scope": "account",
+      "ownership": "own",
+      "operation": "delete",
+      "expected_status": 202,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "database",
+        "worker"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_m6_retention_purge_postgres.py::test_privacy_center_is_account_scoped_exports_no_credentials_and_admits_early_delete",
+        "playwright::tests/e2e/privacy-center.spec.ts::privacy center exports retained data and queues exact scoped early deletion"
       ]
     },
     {
@@ -3214,29 +3403,6 @@
       ]
     },
     {
-      "case_id": "surface.skill.update",
-      "actor": "editor",
-      "account_relationship": "same_account",
-      "project_relationship": "same_project",
-      "membership_state": "active_editor",
-      "platform_role": "user",
-      "resource_family": "skill",
-      "scope": "project_shared",
-      "ownership": "not_applicable",
-      "operation": "update",
-      "expected_status": 200,
-      "expected_code": null,
-      "expected_db_delta": 1,
-      "layers": [
-        "service",
-        "repository",
-        "database"
-      ],
-      "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
-      ]
-    },
-    {
       "case_id": "surface.thread.create",
       "actor": "admin",
       "account_relationship": "same_account",
@@ -3436,6 +3602,31 @@
       ]
     },
     {
+      "case_id": "surface.version.create",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "version",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "create",
+      "expected_status": 201,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+      ]
+    },
+    {
       "case_id": "surface.version.get",
       "actor": "viewer",
       "account_relationship": "same_account",
@@ -3456,6 +3647,31 @@
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+      ]
+    },
+    {
+      "case_id": "surface.version.list",
+      "actor": "viewer",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_viewer",
+      "platform_role": "user",
+      "resource_family": "version",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "list",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 0,
+      "layers": [
+        "frontend",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
       ]
     },
     {
@@ -3495,14 +3711,12 @@
       "expected_code": null,
       "expected_db_delta": 1,
       "layers": [
-        "frontend",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
       ]
     },
     {

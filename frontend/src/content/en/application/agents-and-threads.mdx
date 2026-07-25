@@ -77,7 +77,7 @@ Each user message triggers an agent run. The run streams tokens and tool calls b
 
 #### Checkpoint
 
-The configured persistence backend stores thread state after each turn. This means the conversation survives process restarts when a persistent backend is used.
+The project-scoped PostgreSQL checkpointer stores thread state after each turn, so the conversation survives process restarts.
 
 #### Resume
 
@@ -92,9 +92,6 @@ PostgreSQL is required for thread state and application data. Configure the shar
 ```yaml
 database:
   url: $DATABASE_URL
-
-run_events:
-  backend: db
 ```
 
 PostgreSQL drivers are default dependencies. A standalone `checkpointer` configuration is not accepted.
@@ -109,7 +106,7 @@ backend/.deer-flow/threads/{thread_id}/user-data/
 
 This directory is mounted into the sandbox as `/mnt/user-data/` for the agent to read and write.
 
-In Docker deployments, this path is bind-mounted from the host so that thread data persists across container restarts. Set `DEER_FLOW_ROOT` to the absolute path of your deer-flow repository root to ensure the correct host path is used.
+In local and Docker development, this path may be mounted into the configured Sandbox. It contains working-file projections only; Thread metadata, messages, Run state, and asset authority remain in PostgreSQL.
 
 <Cards num={2}>
   <Cards.Card

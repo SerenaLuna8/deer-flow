@@ -3,7 +3,7 @@
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,7 @@ import { uuid } from "@/core/utils/uuid";
 export { projectAgentsStartChatPath };
 
 export type ExecutableProjectAgent = ProjectAssetItem;
+export const MAIN_PROJECT_AGENT_SLUG = "project-assistant";
 
 export function configurableSystemAgents(
   catalog: ProjectAssetList | undefined,
@@ -96,6 +97,106 @@ export function executableProjectAgents(
       (item) => executable(item) && item.binding?.enabled === true,
     ),
   ];
+}
+
+export function mainProjectAgent(
+  catalog: ProjectAssetList | undefined,
+): ExecutableProjectAgent | null {
+  if (!catalog) return null;
+  return (
+    catalog.system_items.find(
+      (item) =>
+        item.slug === MAIN_PROJECT_AGENT_SLUG &&
+        item.status === "active" &&
+        item.current_published_version_id !== null &&
+        item.capabilities.includes("shared_assets.execute"),
+    ) ?? null
+  );
+}
+
+type MainSystemBindingKind = "agent" | "skill" | "mcp";
+
+type EnsureMainSystemAgentBindingsDependencies = {
+  agent: ProjectAssetItem;
+  requiredSkillVersionIds: readonly string[];
+  requiredMcpVersionIds: readonly string[];
+  skillCatalog: ProjectAssetList;
+  mcpCatalog: ProjectAssetList;
+  enableBinding: (
+    kind: MainSystemBindingKind,
+    input: EnableSystemBindingInput,
+  ) => Promise<unknown>;
+};
+
+function bindingInput(
+  item: ProjectAssetItem,
+  versionId: string,
+): EnableSystemBindingInput {
+  return {
+    asset_id: item.id,
+    version_id: versionId,
+    ...(item.binding ? { expected_binding_version: item.binding.version } : {}),
+  };
+}
+
+async function ensureSystemDependencyBindings(
+  kind: Exclude<MainSystemBindingKind, "agent">,
+  requiredVersionIds: readonly string[],
+  catalog: ProjectAssetList,
+  enableBinding: EnsureMainSystemAgentBindingsDependencies["enableBinding"],
+) {
+  for (const versionId of requiredVersionIds) {
+    const item = catalog.system_items.find(
+      (candidate) =>
+        candidate.status === "active" &&
+        candidate.current_published_version_id === versionId,
+    );
+    if (!item) {
+      throw new Error("Main 的系统依赖尚未就绪");
+    }
+    if (item.binding?.enabled === true) {
+      if (item.binding.version_id !== versionId) {
+        throw new Error("Main 的系统依赖版本与当前项目不一致");
+      }
+      continue;
+    }
+    await enableBinding(kind, bindingInput(item, versionId));
+  }
+}
+
+export async function ensureMainSystemAgentBindings({
+  agent,
+  requiredSkillVersionIds,
+  requiredMcpVersionIds,
+  skillCatalog,
+  mcpCatalog,
+  enableBinding,
+}: EnsureMainSystemAgentBindingsDependencies): Promise<void> {
+  if (
+    agent.scope !== "system" ||
+    agent.status !== "active" ||
+    agent.current_published_version_id === null
+  ) {
+    throw new Error("Main 智能体尚未就绪");
+  }
+  if (agent.binding?.enabled === true) return;
+
+  await ensureSystemDependencyBindings(
+    "skill",
+    requiredSkillVersionIds,
+    skillCatalog,
+    enableBinding,
+  );
+  await ensureSystemDependencyBindings(
+    "mcp",
+    requiredMcpVersionIds,
+    mcpCatalog,
+    enableBinding,
+  );
+  await enableBinding(
+    "agent",
+    bindingInput(agent, agent.current_published_version_id),
+  );
 }
 
 export function projectThreadAgentSelection(agent: ExecutableProjectAgent) {
@@ -200,122 +301,189 @@ export function AgentSelectorDialog({
   onSelect: (agent: ExecutableProjectAgent) => void;
   onEnableSystemAgent?: (agent: ProjectAssetItem) => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const frame = requestAnimationFrame(() => {
+      dialogRef.current
+        ?.querySelector<HTMLElement>("[data-dialog-initial-focus]")
+        ?.focus();
+    });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onOpenChange(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((element) => !element.hasAttribute("aria-hidden"));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialogRef.current?.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previouslyFocused?.focus();
+    };
+  }, [onOpenChange, open]);
+
   if (!open) return null;
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="project-agent-selector-title"
-      className="bg-background fixed inset-0 z-50 m-auto h-fit max-h-[80vh] w-[min(32rem,calc(100%-2rem))] overflow-y-auto rounded-2xl border p-6 shadow-xl"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      data-testid="project-agent-selector-overlay"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onOpenChange(false);
+      }}
     >
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2
-            id="project-agent-selector-title"
-            className="text-lg font-semibold"
-          >
-            选择 Agent
-          </h2>
-          <p className="text-muted-foreground mt-1 text-sm">
-            选择一个 Agent 开始新的私有对话。
-          </p>
-        </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          onClick={() => onOpenChange(false)}
-        >
-          关闭
-        </Button>
-      </div>
-      {isLoading ? (
-        <p role="status" className="text-muted-foreground mt-6 text-sm">
-          正在加载 Agent…
-        </p>
-      ) : error ? (
-        <p role="alert" className="text-destructive mt-6 text-sm">
-          无法加载 Agent，请稍后重试。
-        </p>
-      ) : agents.length > 0 ? (
-        <div className="mt-6 space-y-2">
-          {agents.map((agent) => (
-            <Button
-              key={`${agent.scope}:${agent.id}`}
-              type="button"
-              variant="outline"
-              className="h-auto w-full justify-between px-4 py-3"
-              disabled={isCreating}
-              onClick={() => onSelect(agent)}
-            >
-              <span className="truncate">{agent.display_name}</span>
-              <span className="text-muted-foreground text-xs">
-                {agent.scope === "project" ? "项目 Agent" : "系统 Agent"}
-              </span>
-            </Button>
-          ))}
-        </div>
-      ) : (
-        <div className="mt-6 space-y-5">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="project-agent-selector-title"
+        aria-describedby="project-agent-selector-description"
+        className="bg-background max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-2xl border p-6 shadow-xl"
+        tabIndex={-1}
+      >
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="font-medium">项目还没有可执行 Agent</h3>
-            <p className="text-muted-foreground mt-2 text-sm">
-              需要先启用一个系统 Agent，或创建并发布项目 Agent。
+            <h2
+              id="project-agent-selector-title"
+              className="text-lg font-semibold"
+            >
+              选择 Agent
+            </h2>
+            <p
+              id="project-agent-selector-description"
+              className="text-muted-foreground mt-1 text-sm"
+            >
+              选择一个 Agent 开始新的私有对话。
             </p>
           </div>
-          {systemAgents.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-sm font-medium">可立即启用</p>
-              {systemAgents.map((agent) => (
-                <Button
-                  key={agent.id}
-                  type="button"
-                  className="h-auto w-full justify-between px-4 py-3"
-                  disabled={isCreating}
-                  onClick={() => onEnableSystemAgent?.(agent)}
-                >
-                  <span className="truncate">
-                    启用 {agent.display_name} 并开始对话
-                  </span>
-                  <span className="text-primary-foreground/75 text-xs">
-                    系统 Agent
-                  </span>
-                </Button>
-              ))}
-            </div>
-          )}
-          {blockedSystemAgents.length > 0 && (
-            <div className="rounded-xl border border-dashed p-4">
-              <p className="text-sm font-medium">需要先完成依赖配置</p>
-              <p className="text-muted-foreground mt-1 text-sm">
-                以下系统 Agent 依赖的 Skill 或 MCP 尚未全部在项目中启用。
-              </p>
-              <ul className="mt-3 space-y-1 text-sm">
-                {blockedSystemAgents.map((agent) => (
-                  <li key={agent.id}>{agent.display_name}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {(canAuthorProjectAgent || blockedSystemAgents.length > 0) &&
-            agentsPath && (
-              <Button asChild variant="outline" className="w-full">
-                <Link href={agentsPath}>
-                  {blockedSystemAgents.length > 0
-                    ? "前往 Agent 页面完成配置"
-                    : "创建项目 Agent"}
-                </Link>
-              </Button>
-            )}
-          {systemAgents.length === 0 &&
-            blockedSystemAgents.length === 0 &&
-            !canAuthorProjectAgent && (
-              <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                请联系项目 Admin 或 Editor 完成配置。
-              </p>
-            )}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            data-dialog-initial-focus
+            onClick={() => onOpenChange(false)}
+          >
+            关闭
+          </Button>
         </div>
-      )}
+        {isLoading ? (
+          <p role="status" className="text-muted-foreground mt-6 text-sm">
+            正在加载 Agent…
+          </p>
+        ) : error ? (
+          <p role="alert" className="text-destructive mt-6 text-sm">
+            无法加载 Agent，请稍后重试。
+          </p>
+        ) : agents.length > 0 ? (
+          <div className="mt-6 space-y-2">
+            {agents.map((agent) => (
+              <Button
+                key={`${agent.scope}:${agent.id}`}
+                type="button"
+                variant="outline"
+                className="h-auto w-full justify-between px-4 py-3"
+                disabled={isCreating}
+                onClick={() => onSelect(agent)}
+              >
+                <span className="truncate">{agent.display_name}</span>
+                <span className="text-muted-foreground text-xs">
+                  {agent.scope === "project" ? "项目 Agent" : "系统 Agent"}
+                </span>
+              </Button>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-6 space-y-5">
+            <div>
+              <h3 className="font-medium">项目还没有可执行 Agent</h3>
+              <p className="text-muted-foreground mt-2 text-sm">
+                需要先启用一个系统 Agent，或创建并发布项目 Agent。
+              </p>
+            </div>
+            {systemAgents.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-sm font-medium">可立即启用</p>
+                {systemAgents.map((agent) => (
+                  <Button
+                    key={agent.id}
+                    type="button"
+                    className="h-auto w-full justify-between px-4 py-3"
+                    disabled={isCreating}
+                    onClick={() => onEnableSystemAgent?.(agent)}
+                  >
+                    <span className="truncate">
+                      启用 {agent.display_name} 并开始对话
+                    </span>
+                    <span className="text-primary-foreground/75 text-xs">
+                      系统 Agent
+                    </span>
+                  </Button>
+                ))}
+              </div>
+            )}
+            {blockedSystemAgents.length > 0 && (
+              <div className="rounded-xl border border-dashed p-4">
+                <p className="text-sm font-medium">需要先完成依赖配置</p>
+                <p className="text-muted-foreground mt-1 text-sm">
+                  以下系统 Agent 依赖的 Skill 或 MCP 尚未全部在项目中启用。
+                </p>
+                <ul className="mt-3 space-y-1 text-sm">
+                  {blockedSystemAgents.map((agent) => (
+                    <li key={agent.id}>{agent.display_name}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {(canAuthorProjectAgent || blockedSystemAgents.length > 0) &&
+              agentsPath && (
+                <Button asChild variant="outline" className="w-full">
+                  <Link href={agentsPath}>
+                    {blockedSystemAgents.length > 0
+                      ? "前往 Agent 页面完成配置"
+                      : "创建项目 Agent"}
+                  </Link>
+                </Button>
+              )}
+            {systemAgents.length === 0 &&
+              blockedSystemAgents.length === 0 &&
+              !canAuthorProjectAgent && (
+                <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+                  请联系项目 Admin 或 Editor 完成配置。
+                </p>
+              )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

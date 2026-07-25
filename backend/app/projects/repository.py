@@ -31,7 +31,7 @@ class ProjectCreateQuotaPort(Protocol):
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None: ...
 
 
@@ -56,9 +56,9 @@ class _NoopProjectCreateQuota:
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None:
-        del session, context, membership_id, membership_version
+        del session, context, membership_id, activation_generation
 
 
 def _constraint_name(exc: BaseException) -> str | None:
@@ -153,7 +153,7 @@ class ProjectRepository:
                     self.session,
                     PrivateWorkContext.from_project(context),
                     membership_id=membership.id,
-                    membership_version=membership.version,
+                    activation_generation=membership.activation_generation,
                 )
                 if audit is not None:
                     await audit.project_created(self.session, context)

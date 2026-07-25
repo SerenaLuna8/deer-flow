@@ -30,12 +30,14 @@ rs.mock("@/core/api/fetcher", () => ({
 }));
 
 import AdminLayout from "@/app/admin/layout";
+import AdminRootPage from "@/app/admin/page";
 import {
   AdminAuditStateView,
   type AdminAuditState,
 } from "@/components/admin/operations/admin-audit";
 import {
   AdminJobsStateView,
+  parseAdminJobFilters,
   type AdminJobsState,
 } from "@/components/admin/operations/admin-jobs";
 import {
@@ -43,6 +45,7 @@ import {
   AdminOperationsShell,
 } from "@/components/admin/operations/admin-operations-shell";
 import {
+  parseAdminProjectFilters,
   AdminProjectsStateView,
   type AdminProjectsState,
 } from "@/components/admin/operations/admin-projects";
@@ -55,6 +58,7 @@ import * as adminOperationsApi from "@/core/admin-operations/api";
 import {
   adminAuditQueryOptions,
   adminJobsQueryOptions,
+  adminProjectLifecycleMutationOptions,
   adminProjectsQueryOptions,
   operationsOverviewQueryOptions,
   safeRequeueMutationOptions,
@@ -63,6 +67,7 @@ import {
   adminAuditQueryKey,
   adminJobsQueryKey,
   adminOperationsRoot,
+  adminProjectLifecycleMutationKey,
   adminProjectsQueryKey,
   operationsOverviewQueryKey,
   safeRequeueMutationKey,
@@ -128,8 +133,14 @@ const projects: AdminProjectPage = {
   items: [
     {
       project_id: PROJECT_A,
+      slug: "alpha-project",
+      display_name: "Alpha Project",
       status: "active",
       is_suspended: false,
+      state_version: 1,
+      created_at: "2026-07-17T05:00:00Z",
+      updated_at: "2026-07-17T05:30:00Z",
+      deletion_effective_at: null,
     },
   ],
   next_cursor: null,
@@ -228,6 +239,7 @@ describe("M6 system operations console", () => {
     ]);
     expect(
       adminProjectsQueryKey(ACCOUNT_A, "cursor-1", {
+        query: "alpha",
         status: "active",
         suspended: false,
       }),
@@ -235,7 +247,7 @@ describe("M6 system operations console", () => {
       ...adminOperationsRoot(ACCOUNT_A),
       "projects",
       "cursor-1",
-      { status: "active", suspended: false },
+      { query: "alpha", status: "active", suspended: false },
     ]);
     expect(
       adminJobsQueryKey(ACCOUNT_A, "cursor-2", {
@@ -264,9 +276,67 @@ describe("M6 system operations console", () => {
       "mutation",
       "safe-requeue",
     ]);
+    expect(adminProjectLifecycleMutationKey(ACCOUNT_A)).toEqual([
+      ...adminOperationsRoot(ACCOUNT_A),
+      "projects",
+      "mutation",
+      "lifecycle",
+    ]);
     expect(adminOperationsRoot(ACCOUNT_A)).not.toEqual(
       adminOperationsRoot(ACCOUNT_B),
     );
+  });
+
+  test("accepts only the canonical auth-disabled account alias", () => {
+    expect(adminOperationsRoot("default")).toEqual([
+      "account",
+      "default",
+      "admin",
+      "operations",
+    ]);
+    expect(() => adminOperationsRoot("not-a-uuid")).toThrow();
+  });
+
+  test("normalizes public job filters and rejects malformed project coordinates", () => {
+    expect(
+      parseAdminJobFilters({
+        projectId: ` ${PROJECT_A} `,
+        status: "dead",
+        type: "retention_purge",
+      }),
+    ).toEqual({
+      project_id: PROJECT_A,
+      status: "dead",
+      type: "retention_purge",
+    });
+    expect(
+      parseAdminJobFilters({
+        projectId: "not-a-project",
+        status: "",
+        type: "",
+      }),
+    ).toBeNull();
+  });
+
+  test("normalizes public project filters without leaking private coordinates", () => {
+    expect(
+      parseAdminProjectFilters({
+        query: "  Alpha Project  ",
+        status: "active",
+        suspension: "running",
+      }),
+    ).toEqual({
+      query: "Alpha Project",
+      status: "active",
+      suspended: false,
+    });
+    expect(
+      parseAdminProjectFilters({
+        query: "x".repeat(121),
+        status: "",
+        suspension: "",
+      }),
+    ).toBeNull();
   });
 
   test("rejects every private or unknown response field", () => {
@@ -281,7 +351,7 @@ describe("M6 system operations console", () => {
     expect(() =>
       adminProjectPageSchema.parse({
         ...projects,
-        items: [{ ...projects.items[0], slug: "secret-project" }],
+        items: [{ ...projects.items[0], description: "must-not-enter-cache" }],
       }),
     ).toThrow();
     for (const privateField of [
@@ -404,6 +474,9 @@ describe("M6 system operations console", () => {
     expect(adminAuditQueryOptions(ACCOUNT_A).queryKey).toEqual(
       adminAuditQueryKey(ACCOUNT_A, null),
     );
+    expect(adminProjectLifecycleMutationOptions(ACCOUNT_A).mutationKey).toEqual(
+      adminProjectLifecycleMutationKey(ACCOUNT_A),
+    );
   });
 
   test("account transition aborts an in-flight operations query before clearing it", async () => {
@@ -523,6 +596,15 @@ describe("M6 system operations console", () => {
     });
   });
 
+  test("redirects the admin root to the operations overview", () => {
+    expect(() => AdminRootPage()).toThrow(
+      expect.objectContaining({
+        code: "NEXT_REDIRECT",
+        destination: "/admin/operations",
+      }),
+    );
+  });
+
   test("does not construct an operations query before the client identity gate", () => {
     const hook = rs.spyOn(adminOperationsApi, "useOperationsOverview");
     expect(() =>
@@ -548,6 +630,7 @@ describe("M6 system operations console", () => {
       />,
     );
     expect(navigation).toContain('aria-label="Platform operations navigation"');
+    expect(navigation).not.toContain("overflow-x-auto");
     for (const [href, label] of [
       ["/admin/operations", "Overview"],
       ["/admin/projects", "Projects"],
@@ -571,11 +654,11 @@ describe("M6 system operations console", () => {
         }
       />,
       <AdminProjectsStateView
-        key="projects-empty"
+        key="projects-ready"
         state={
           {
             status: "ready",
-            data: { items: [], next_cursor: null },
+            data: projects,
           } satisfies AdminProjectsState
         }
       />,
@@ -596,16 +679,29 @@ describe("M6 system operations console", () => {
           } satisfies AdminAuditState
         }
       />,
+      <AdminAuditStateView
+        key="audit-ready"
+        state={{ status: "ready", data: audit } satisfies AdminAuditState}
+      />,
     ];
     const html = renderWithProviders(<>{states}</>);
     expect(html).toContain("Loading platform operations");
     expect(html).toContain("Readiness");
     expect(html).toContain("Degraded");
     expect(html).toContain("Worker fleet");
-    expect(html).toContain("No projects found");
+    expect(html).toContain("Worker processes");
+    expect(html).toContain("Worker capacity");
+    expect(html).toContain("Scheduler ownership");
+    expect(html).toContain("Channel providers");
+    expect(html).toContain("Alpha Project");
+    expect(html).toContain(`href="/admin/projects/${PROJECT_A}/assets/agents"`);
+    expect(html).toContain("治理共享资产");
+    expect(html).toContain("Governance details");
     expect(html).toContain("Operations data is unavailable");
     expect(html).toContain("PURGE_FAILED");
     expect(html).toContain("No audit events found");
+    expect(html).toContain("Job requeued");
+    expect(html).not.toContain("job.requeued");
     expect(html).not.toContain("owner_user_id");
   });
 

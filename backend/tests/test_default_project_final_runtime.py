@@ -88,13 +88,14 @@ async def test_default_bootstrap_reserves_initial_membership_atomically(
             context,
             *,
             membership_id,
-            membership_version,
+            activation_generation,
         ) -> None:
             assert session.in_transaction()
             assert str(context.user_id) == admin_id
             assert context.project_id is not None
             assert context.membership_id == membership_id
-            assert context.membership_version == membership_version == 1
+            assert context.membership_version == 1
+            assert activation_generation == 1
             raise ProjectMemberQuotaExceeded()
 
     try:

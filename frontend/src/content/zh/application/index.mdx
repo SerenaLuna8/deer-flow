@@ -1,62 +1,49 @@
 ---
 title: DeerFlow 应用
-description: DeerFlow 应用是 DeerFlow 生产体验的参考实现。它将 Harness 运行时、基于 Web 的对话工作区、API Gateway 和反向代理组合成一个可部署的完整系统。
+description: DeerFlow project-first Web 应用及其 Gateway、Worker、Scheduler 与 PostgreSQL 边界。
 ---
 
 import { Callout } from "nextra/components";
 
 # DeerFlow 应用
 
-<Callout type="info" emoji="🚀">
-  DeerFlow 应用是构建在 DeerFlow Harness 之上的完整 Super Agent
-  应用。它将运行时能力打包成一个可部署的产品，包含 Web 界面、API Gateway
-  和运维工具。
+<Callout type="info">
+  DeerFlow 应用是构建在 DeerFlow Harness 之上的多账户、多项目 Super Agent 系统。Gateway 准入工作，只有 Worker 执行 Agent graph。
 </Callout>
 
-DeerFlow 应用是 DeerFlow 生产体验的参考实现。它将 Harness 运行时、基于 Web 的对话工作区、API Gateway 和反向代理组合成一个可部署的完整系统。
+## 核心能力
 
-## 应用提供什么
-
-| 能力             | 描述                                                  |
-| ---------------- | ----------------------------------------------------- |
-| **Web 工作区**   | 浏览器对话界面，支持线程、产出物、文件上传和技能选择  |
-| **自定义 Agent** | 创建和管理具有不同模型、技能和工具集的命名 Agent      |
-| **线程管理**     | 带检查点和历史记录的持久化对话线程                    |
-| **流式响应**     | 实时 token 流式传输，带思考步骤和工具调用可见性       |
-| **产出物查看器** | Agent 生成文件和输出的浏览器内预览和下载              |
-| **扩展界面**     | 无需编辑配置文件即可启用/禁用 MCP 服务器和技能        |
-| **Gateway API**  | 基于 FastAPI 的 REST API，并内置 LangGraph-compatible Agent 运行时 |
+| 能力 | 描述 |
+| --- | --- |
+| 项目工作区 | 项目、成员、邀请、角色、配额、审计和生命周期 |
+| 私有工作 | 持久化 Thread、Run、上传、Artifact、Feedback 和 durable SSE |
+| 版本化资产 | System/Project Agent、Skill、MCP、Credential、binding 和准入 snapshot |
+| Agent harness | Sub-Agent、Memory、Plan Mode、上下文压缩、Guardrail 和 Sandbox |
+| Automation | Scheduler 准入一次性或 Cron occurrence，Worker 执行 |
+| IM Connection | 复用相同项目准入边界的项目绑定渠道连接 |
 
 ## 架构
 
-DeerFlow 应用通过单个 nginx 反向代理提供：
-
-```
-                ┌──────────────────┐
-     浏览器 → │  nginx :2026      │
-                └──────────────────┘
-                  │          │
-         ┌────────┘          └────────┐
-         ▼                            ▼
-┌──────────────────┐       ┌──────────────────────┐
-│  前端 :3000      │       │  Gateway API :8001    │
-│  (Next.js)       │       │  (FastAPI)            │
-└──────────────────┘       └──────────────────────┘
+```text
+Browser / IM
+     │
+     ▼
+Nginx :2026 ─────► Frontend :3000
+     │
+     └───────────► Gateway :8001 ─────► PostgreSQL
+                                      ▲          ▲
+                                      │          │
+                                  Worker     Scheduler
 ```
 
-- **nginx**：把项目 REST 与流式请求路由到 Gateway，其余页面请求路由到前端。
-- **前端**（Next.js + React）：浏览器界面，与 Gateway 通信。
-- **Gateway**（FastAPI）：处理 API 操作，并通过内置 LangGraph-compatible 运行时管理线程状态、Agent 执行和流式传输。
+- Nginx 是唯一对外入口。
+- Frontend 负责界面，不是授权权威。
+- Gateway 负责认证、项目授权、Run 准入、查询和 SSE replay，永不执行 Agent graph。
+- Worker 租约领取 PostgreSQL job，是唯一 Agent graph executor。
+- Scheduler 可选准入到期 Automation，不执行 graph code。
+- PostgreSQL 保存应用数据、checkpoint、job、stream、quota、audit 和版本化资产 snapshot。
 
-## 技术栈
-
-| 层次         | 技术                                                    |
-| ------------ | ------------------------------------------------------- |
-| 前端         | Next.js 16、React 19、TypeScript、pnpm                  |
-| Gateway      | FastAPI、Python 3.12、uvicorn                           |
-| Agent 运行时 | LangGraph、LangChain、DeerFlow Harness                  |
-| 反向代理     | nginx                                                   |
-| 状态持久化   | Gateway 运行时 + PostgreSQL 检查点          |
+私有资源始终绑定 account、project、membership 与 owner context。隔离由业务层和数据库模型保证，不使用 PostgreSQL RLS。
 
 <Cards num={2}>
   <Cards.Card title="快速上手" href="/docs/application/quick-start" />

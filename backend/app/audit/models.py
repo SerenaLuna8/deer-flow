@@ -57,7 +57,10 @@ class AuditAction(StrEnum):
     ASSET_DEPRECATED = "asset.deprecated"
     ASSET_BOUND = "asset.bound"
     ASSET_UNBOUND = "asset.unbound"
+    ASSET_CREDENTIAL_CREATED = "asset.credential_created"
     ASSET_CREDENTIAL_REPLACED = "asset.credential_replaced"
+    ASSET_CREDENTIAL_REVOKED = "asset.credential_revoked"
+    ASSET_CREDENTIAL_GRANTS_MIGRATED = "asset.credential_grants_migrated"
     AUTOMATION_CREATED = "automation.created"
     AUTOMATION_UPDATED = "automation.updated"
     AUTOMATION_DELETED = "automation.deleted"
@@ -210,7 +213,10 @@ for _action in (
     AuditAction.ASSET_UPDATED,
     AuditAction.ASSET_PUBLISHED,
     AuditAction.ASSET_DEPRECATED,
+    AuditAction.ASSET_CREDENTIAL_CREATED,
     AuditAction.ASSET_CREDENTIAL_REPLACED,
+    AuditAction.ASSET_CREDENTIAL_REVOKED,
+    AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
 ):
     _ACTION_CONTRACTS[_action] = AuditActionContract(
         target_kind=AuditTargetKind.ASSET,
@@ -342,6 +348,12 @@ _ACTION_CONTRACTS[AuditAction.PURGE_COMPLETED] = AuditActionContract(
             "process",
             processes=(AuditProcess.WORKER,),
             metadata_equals=(("resource_kind", "file"),),
+        ),
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.WORKER,),
+            metadata_equals=(("resource_kind", "former_owner"),),
         ),
         _variant(
             AuditScope.PLATFORM,
@@ -688,7 +700,7 @@ class JobAuditMetadata(_AuditMetadata):
 
 
 class PurgeAuditMetadata(_AuditMetadata):
-    resource_kind: Literal["project", "account", "file"]
+    resource_kind: Literal["project", "account", "file", "former_owner"]
     purged_count: StrictInt = Field(ge=0)
 
 
@@ -711,7 +723,10 @@ for _action in (
     AuditAction.ASSET_DEPRECATED,
     AuditAction.ASSET_BOUND,
     AuditAction.ASSET_UNBOUND,
+    AuditAction.ASSET_CREDENTIAL_CREATED,
     AuditAction.ASSET_CREDENTIAL_REPLACED,
+    AuditAction.ASSET_CREDENTIAL_REVOKED,
+    AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
 ):
     _AUDIT_METADATA_MODELS[_action] = AssetAuditMetadata
 for _action in (

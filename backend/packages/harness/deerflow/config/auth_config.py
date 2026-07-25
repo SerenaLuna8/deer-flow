@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from ipaddress import ip_network
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OIDCProviderConfig(BaseModel):
@@ -70,4 +71,22 @@ class OIDCAuthConfig(BaseModel):
 class AuthAppConfig(BaseModel):
     """Authentication configuration section for the DeerFlow app config."""
 
+    trusted_proxies: tuple[str, ...] = Field(
+        default=("127.0.0.1/32", "::1/128"),
+        description=("Exact proxy IPs/CIDRs allowed to supply X-Real-IP. Loopback is trusted by default for the repository-owned local nginx."),
+    )
     oidc: OIDCAuthConfig = Field(default_factory=OIDCAuthConfig, description="OIDC SSO authentication settings")
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _normalize_trusted_proxies(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for value in values:
+            network = ip_network(value.strip(), strict=False)
+            rendered = str(network)
+            if rendered not in normalized:
+                normalized.append(rendered)
+        return tuple(normalized)

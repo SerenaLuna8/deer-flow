@@ -3,9 +3,14 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminJobs, useSafeRequeue } from "@/core/admin-operations/api";
-import type { AdminJobPage } from "@/core/admin-operations/types";
+import {
+  jobFiltersSchema,
+  type AdminJobFilters,
+  type AdminJobPage,
+} from "@/core/admin-operations/types";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -122,6 +127,19 @@ function idempotencyKey(): string {
   return `${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
+export function parseAdminJobFilters(input: {
+  projectId: string;
+  status: string;
+  type: string;
+}): AdminJobFilters | null {
+  const result = jobFiltersSchema.safeParse({
+    project_id: input.projectId.trim() || undefined,
+    status: input.status || undefined,
+    type: input.type || undefined,
+  });
+  return result.success ? result.data : null;
+}
+
 export function AdminJobs() {
   const { user } = useAuth();
   if (!user || user.system_role !== "system_admin") return null;
@@ -131,7 +149,12 @@ export function AdminJobs() {
 function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
   const { t } = useI18n();
   const [cursor, setCursor] = useState<string | null>(null);
-  const jobs = useAdminJobs(accountId, cursor);
+  const [filters, setFilters] = useState<AdminJobFilters>({});
+  const [projectId, setProjectId] = useState("");
+  const [status, setStatus] = useState("");
+  const [jobType, setJobType] = useState("");
+  const [filterError, setFilterError] = useState(false);
+  const jobs = useAdminJobs(accountId, cursor, filters);
   const requeue = useSafeRequeue(accountId);
   const state: AdminJobsState = jobs.isLoading
     ? { status: "loading" }
@@ -146,6 +169,102 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
           {t.adminOperations.jobs.description}
         </p>
       </div>
+      <form
+        className="bg-card grid gap-3 rounded-xl border p-4 sm:grid-cols-2 lg:grid-cols-[minmax(14rem,1fr)_12rem_12rem_auto] lg:items-end"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const parsed = parseAdminJobFilters({
+            projectId,
+            status,
+            type: jobType,
+          });
+          if (!parsed) {
+            setFilterError(true);
+            return;
+          }
+          setFilterError(false);
+          setCursor(null);
+          setFilters(parsed);
+        }}
+      >
+        <label className="grid gap-1.5 text-sm">
+          {t.adminOperations.jobs.filters.project}
+          <Input
+            value={projectId}
+            onChange={(event) => setProjectId(event.target.value)}
+            placeholder="00000000-0000-0000-0000-000000000000"
+            aria-invalid={filterError || undefined}
+          />
+        </label>
+        <label className="grid gap-1.5 text-sm">
+          {t.adminOperations.jobs.filters.status}
+          <select
+            value={status}
+            onChange={(event) => setStatus(event.target.value)}
+            className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+          >
+            <option value="">
+              {t.adminOperations.jobs.filters.allStatuses}
+            </option>
+            {[
+              "queued",
+              "leased",
+              "running",
+              "retry_wait",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "dead",
+            ].map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1.5 text-sm">
+          {t.adminOperations.jobs.filters.type}
+          <select
+            value={jobType}
+            onChange={(event) => setJobType(event.target.value)}
+            className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+          >
+            <option value="">{t.adminOperations.jobs.filters.allTypes}</option>
+            {["private_run", "automation_run", "retention_purge"].map(
+              (value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit">{t.adminOperations.jobs.filters.apply}</Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setProjectId("");
+              setStatus("");
+              setJobType("");
+              setFilterError(false);
+              setCursor(null);
+              setFilters({});
+            }}
+          >
+            {t.adminOperations.jobs.filters.clear}
+          </Button>
+        </div>
+        {filterError ? (
+          <p
+            role="alert"
+            className="text-destructive text-sm sm:col-span-2 lg:col-span-4"
+          >
+            {t.adminOperations.jobs.filters.invalidProject}
+          </p>
+        ) : null}
+      </form>
       <AdminJobsStateView
         state={state}
         onRetry={() => void jobs.refetch()}

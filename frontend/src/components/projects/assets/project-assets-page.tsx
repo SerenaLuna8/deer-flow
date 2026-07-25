@@ -7,20 +7,24 @@ import { useEffect, useState } from "react";
 import {
   CreateAssetDialog,
   CreateVersionDialog,
+  CredentialGrantMigrationDialog,
+  CredentialRevokeDialog,
   CredentialSecretDialog,
   type VersionAuthoringInput,
 } from "@/components/admin/assets/admin-asset-dialogs";
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
-import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
 import { ProjectAgentStartContinuation } from "@/components/projects/private-work/project-agent-start-continuation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useModels } from "@/core/models/hooks";
 import {
   createProjectCredential,
+  migrateProjectCredentialGrants,
   projectAssetKey,
   replaceProjectCredential,
   revokeProjectCredential,
@@ -44,6 +48,7 @@ import {
 
 import { useCurrentProject } from "../project-context";
 
+import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetSection } from "./project-asset-section";
 import {
   projectAssetCanAuthor,
@@ -136,34 +141,70 @@ export function ProjectAssetCatalogView({
 export function ProjectCredentialCatalogView({
   data,
   pending = false,
+  actions,
   onReplace,
+  onMigrate,
   onRevoke,
   renderDetails,
 }: {
   data: ProjectCredentialList;
   pending?: boolean;
+  actions?: React.ReactNode;
   onReplace?: (credential: ProjectCredentialItem) => void;
+  onMigrate?: (credential: ProjectCredentialItem) => void;
   onRevoke?: (credential: ProjectCredentialItem) => void;
   renderDetails?: (credential: ProjectCredentialItem) => React.ReactNode;
 }) {
+  const [source, setSource] = useState<"system" | "project">(() =>
+    data.project_items.length === 0 && data.system_items.length > 0
+      ? "system"
+      : "project",
+  );
   const groups = [
-    ["系统 Credential", "系统", data.system_items],
-    ["项目 Credential", "项目", data.project_items],
+    {
+      value: "system",
+      label: "系统提供",
+      title: "系统 Credential",
+      items: data.system_items,
+    },
+    {
+      value: "project",
+      label: "项目自建",
+      title: "项目 Credential",
+      items: data.project_items,
+    },
   ] as const;
   return (
-    <div className="space-y-10">
-      {groups.map(([title, source, items]) => (
-        <section key={title} className="space-y-4">
-          <h2 className="text-xl font-semibold">{title}</h2>
+    <Tabs
+      value={source}
+      onValueChange={(value) => setSource(value as typeof source)}
+      className="gap-0"
+    >
+      <div className="flex flex-col gap-3 border-b pb-3 sm:flex-row sm:items-center sm:justify-between">
+        <TabsList variant="line" aria-label="Credential 来源">
+          {groups.map((group) => (
+            <TabsTrigger key={group.value} value={group.value}>
+              {group.label}
+              <span className="text-muted-foreground text-xs tabular-nums">
+                {group.items.length}
+              </span>
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        {source === "project" ? actions : null}
+      </div>
+
+      {groups.map(({ value, title, items }) => (
+        <TabsContent key={value} value={value} className="pt-4">
           {items.length === 0 ? (
-            <p className="text-muted-foreground rounded-xl border border-dashed p-6 text-sm">
+            <p className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm">
               暂无 {title}。
             </p>
           ) : (
             <div className="grid gap-4 xl:grid-cols-2">
               {items.map((credential) => (
-                <Card key={credential.id} className="relative">
-                  <CardHeader>
+                <Card key={credential.id} className="relative gap-4 py-4">
+                  <CardHeader className="px-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <CardTitle className="flex items-center gap-2">
@@ -176,17 +217,18 @@ export function ProjectCredentialCatalogView({
                           {credential.name}
                         </p>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Badge
-                          variant={source === "系统" ? "secondary" : "default"}
-                        >
-                          {source}
-                        </Badge>
-                        <AssetStatusBadge status={credential.status} />
-                      </div>
+                      <Badge
+                        variant={
+                          credential.status === "active"
+                            ? "default"
+                            : "secondary"
+                        }
+                      >
+                        {credential.status === "active" ? "有效" : "已撤销"}
+                      </Badge>
                     </div>
                   </CardHeader>
-                  <CardContent className="space-y-4">
+                  <CardContent className="space-y-4 px-4">
                     <dl className="grid gap-2 text-sm sm:grid-cols-2">
                       <div>
                         <dt className="text-muted-foreground text-xs">类型</dt>
@@ -213,25 +255,47 @@ export function ProjectCredentialCatalogView({
                       credential.capabilities.includes(
                         "mcp.credentials.approve",
                       ) && (
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={pending}
-                            onClick={() => onReplace?.(credential)}
-                          >
-                            替换凭据
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="destructive"
-                            disabled={pending}
-                            onClick={() => onRevoke?.(credential)}
-                          >
-                            撤销凭据
-                          </Button>
+                        <div className="space-y-3">
+                          {credential.version > 1 && (
+                            <div
+                              role="note"
+                              className="border-border bg-muted/30 text-muted-foreground rounded-lg border px-3 py-2 text-xs"
+                            >
+                              替换只创建新版本；既有 Grant 仍固定到 retired
+                              version，轮换需要显式迁移。
+                            </div>
+                          )}
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={pending}
+                              onClick={() => onReplace?.(credential)}
+                            >
+                              替换凭据
+                            </Button>
+                            {credential.version > 1 && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={pending}
+                                onClick={() => onMigrate?.(credential)}
+                              >
+                                迁移兼容 Grant
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              disabled={pending}
+                              onClick={() => onRevoke?.(credential)}
+                            >
+                              撤销凭据
+                            </Button>
+                          </div>
                         </div>
                       )}
                     {renderDetails?.(credential)}
@@ -240,9 +304,9 @@ export function ProjectCredentialCatalogView({
               ))}
             </div>
           )}
-        </section>
+        </TabsContent>
       ))}
-    </div>
+    </Tabs>
   );
 }
 
@@ -253,6 +317,8 @@ export function projectCredentialShowsHistory(
 }
 
 export { projectAssetCanAuthor, projectAssetLifecycleActions };
+
+export { dependencyVersionOptions } from "./asset-dependency-options";
 
 function ErrorNotice({ error }: { error: unknown }) {
   if (!error) return null;
@@ -448,15 +514,21 @@ function useSecureProjectCredentialWrite(accountId: string, projectId: string) {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
 
-  async function run(operation: () => Promise<unknown>): Promise<boolean> {
+  async function run(
+    operation: () => Promise<unknown>,
+    successMessage?: string,
+  ): Promise<boolean> {
     setPending(true);
     setErrorMessage(null);
+    setNoticeMessage(null);
     try {
       await operation();
       await queryClient.invalidateQueries({
         queryKey: projectAssetKey(accountId, projectId, "credentials"),
       });
+      setNoticeMessage(successMessage ?? null);
       return true;
     } catch (error) {
       setErrorMessage(adminAssetErrorMessage(error));
@@ -469,8 +541,12 @@ function useSecureProjectCredentialWrite(accountId: string, projectId: string) {
   return {
     pending,
     errorMessage,
+    noticeMessage,
     run,
-    clearError: () => setErrorMessage(null),
+    clearError: () => {
+      setErrorMessage(null);
+      setNoticeMessage(null);
+    },
   };
 }
 
@@ -541,6 +617,19 @@ function MutableProjectAssets({
 }) {
   const project = useCurrentProject();
   const query = useProjectAssets(accountId, projectId, kind);
+  const modelCatalog = useModels({ enabled: kind === "agents" });
+  const skillDependencies = useProjectAssets(
+    accountId,
+    projectId,
+    "skills",
+    kind === "agents",
+  );
+  const mcpDependencies = useProjectAssets(
+    accountId,
+    projectId,
+    "mcp-servers",
+    kind === "agents",
+  );
   const createAsset = useCreateProjectAsset(accountId, projectId, kind);
   const createVersion = useCreateProjectAssetVersion(
     accountId,
@@ -634,6 +723,18 @@ function MutableProjectAssets({
               ? adminAssetErrorMessage(createVersion.error)
               : null
           }
+          modelOptions={modelCatalog.models.map((model) => ({
+            name: model.name,
+            displayName: model.display_name,
+          }))}
+          skillVersionOptions={dependencyVersionOptions(
+            skillDependencies.data as ProjectAssetList | undefined,
+          )}
+          mcpVersionOptions={dependencyVersionOptions(
+            mcpDependencies.data as ProjectAssetList | undefined,
+          )}
+          modelsLoading={modelCatalog.isLoading}
+          modelsError={Boolean(modelCatalog.error)}
           onOpenChange={(open) => !open && setVersionAsset(null)}
           onSubmit={(input: VersionAuthoringInput) =>
             createVersion.mutate({
@@ -670,6 +771,10 @@ export function ProjectCredentialsWorkspace({
   const [createOpen, setCreateOpen] = useState(false);
   const [replaceCredential, setReplaceCredential] =
     useState<ProjectCredentialItem | null>(null);
+  const [credentialToRevoke, setCredentialToRevoke] =
+    useState<ProjectCredentialItem | null>(null);
+  const [credentialToMigrate, setCredentialToMigrate] =
+    useState<ProjectCredentialItem | null>(null);
 
   if (query.isLoading) return <Skeleton className="h-72 w-full" />;
   if (query.error) return <ErrorNotice error={query.error} />;
@@ -682,34 +787,44 @@ export function ProjectCredentialsWorkspace({
           {secureWrite.errorMessage}
         </p>
       )}
-      {canCreate && (
-        <div className="mb-6 flex justify-end">
-          <Button
-            type="button"
-            onClick={() => {
-              secureWrite.clearError();
-              setCreateOpen(true);
-            }}
-          >
-            <PlusIcon aria-hidden className="size-4" />
-            创建 Credential
-          </Button>
-        </div>
+      {secureWrite.noticeMessage && (
+        <p
+          role="status"
+          className="border-border bg-muted/30 text-muted-foreground mb-4 rounded-xl border px-4 py-3 text-sm"
+        >
+          {secureWrite.noticeMessage}
+        </p>
       )}
       <ProjectCredentialCatalogView
         data={data}
         pending={secureWrite.pending}
+        actions={
+          canCreate ? (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => {
+                secureWrite.clearError();
+                setCreateOpen(true);
+              }}
+            >
+              <PlusIcon aria-hidden className="size-4" />
+              创建 Credential
+            </Button>
+          ) : null
+        }
         onReplace={(credential) => {
           secureWrite.clearError();
           setReplaceCredential(credential);
         }}
-        onRevoke={(credential) =>
-          void secureWrite.run(() =>
-            revokeProjectCredential(project.id, credential.id, {
-              expected_credential_version: credential.version,
-            }),
-          )
-        }
+        onMigrate={(credential) => {
+          secureWrite.clearError();
+          setCredentialToMigrate(credential);
+        }}
+        onRevoke={(credential) => {
+          secureWrite.clearError();
+          setCredentialToRevoke(credential);
+        }}
         renderDetails={(credential) =>
           projectCredentialShowsHistory(credential) ? (
             <CredentialHistory
@@ -739,6 +854,46 @@ export function ProjectCredentialsWorkspace({
           credential={replaceCredential}
           secureWrite={secureWrite}
           onClose={() => setReplaceCredential(null)}
+        />
+      )}
+      {credentialToMigrate && (
+        <CredentialGrantMigrationDialog
+          open
+          credentialName={credentialToMigrate.display_name}
+          pending={secureWrite.pending}
+          onOpenChange={(open) => !open && setCredentialToMigrate(null)}
+          onConfirm={() => {
+            void secureWrite
+              .run(
+                () =>
+                  migrateProjectCredentialGrants(
+                    project.id,
+                    credentialToMigrate.id,
+                    {
+                      expected_credential_version: credentialToMigrate.version,
+                    },
+                  ),
+                "已完成兼容 Grant 迁移；没有待迁移 Grant 时不会更改授权。",
+              )
+              .then((success) => success && setCredentialToMigrate(null));
+          }}
+        />
+      )}
+      {credentialToRevoke && (
+        <CredentialRevokeDialog
+          open
+          credentialName={credentialToRevoke.display_name}
+          pending={secureWrite.pending}
+          onOpenChange={(open) => !open && setCredentialToRevoke(null)}
+          onConfirm={() => {
+            void secureWrite
+              .run(() =>
+                revokeProjectCredential(project.id, credentialToRevoke.id, {
+                  expected_credential_version: credentialToRevoke.version,
+                }),
+              )
+              .then((success) => success && setCredentialToRevoke(null));
+          }}
         />
       )}
     </>

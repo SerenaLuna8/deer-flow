@@ -70,11 +70,12 @@ export function AdminOperationsNavigation({
   ] as const;
 
   return (
-    <nav aria-label={labels.label} className="flex gap-1 overflow-x-auto">
+    <nav aria-label={labels.label} className="flex flex-wrap gap-1">
       {navigation.map(({ href, label, icon: Icon }) => {
         const active =
           pathname === href ||
-          (href === "/admin/assets" && pathname.startsWith(`${href}/`));
+          ((href === "/admin/assets" || href === "/admin/projects") &&
+            pathname.startsWith(`${href}/`));
         return (
           <Link
             key={href}
@@ -111,8 +112,8 @@ export function AdminOperationsShell({
       className="bg-background min-h-screen"
     >
       <header className="border-border/70 bg-background/95 sticky top-0 z-40 border-b backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4 px-4 py-3 lg:px-6">
-          <div className="mr-auto min-w-48">
+        <div className="mx-auto grid max-w-7xl gap-3 px-4 py-3 md:grid-cols-[minmax(12rem,1fr)_auto_auto] md:items-center lg:px-6">
+          <div className="min-w-0">
             <p className="text-primary font-serif text-lg">
               {t.adminOperations.shellTitle}
             </p>
@@ -132,9 +133,12 @@ export function AdminOperationsShell({
             onClick={() => void logout()}
           >
             <LogOutIcon aria-hidden className="size-4" />
-            <span className="hidden max-w-40 truncate xl:inline">
-              {user?.email}
-            </span>
+            <span>{t.adminOperations.signOut}</span>
+            {user?.email ? (
+              <span className="hidden max-w-40 truncate xl:inline">
+                ({user.email})
+              </span>
+            ) : null}
           </Button>
         </div>
       </header>

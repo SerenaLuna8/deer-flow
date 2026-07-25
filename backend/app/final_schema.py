@@ -8,7 +8,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-M7_FINAL_SCHEMA_REVISION = "0001_project_saas_baseline"
+from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
+
+M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
 FINAL_REQUIRED_RELATIONS = (
     "projects",

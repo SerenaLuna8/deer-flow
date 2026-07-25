@@ -160,6 +160,11 @@ secrets: {}
 # -- Use an existing Secret instead of creating one from `secrets` above.
 existingSecret: ""
 
+# -- Optional pre-created application Secret. It must contain
+# BETTER_AUTH_SECRET, DEER_FLOW_INTERNAL_AUTH_TOKEN and the independent
+# DEER_FLOW_PROXY_AUTH_TOKEN used to attest nginx's X-Real-IP header.
+existingAppSecret: ""
+
 # -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
 ingress:
   enabled: true
@@ -174,7 +179,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 22
+  config_version: 26
   log_level: info
 
   models: []

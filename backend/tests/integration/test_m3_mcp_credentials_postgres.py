@@ -13,6 +13,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.projects.context import ProjectContext, resolve_project_context
+from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
 from app.shared_assets.models import WorkflowStatus
@@ -21,6 +22,7 @@ from deerflow.persistence.shared_assets import (
     CredentialGrantRow,
     CredentialRow,
     CredentialVersionRow,
+    McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
 )
@@ -352,7 +354,7 @@ async def test_mcp_approval_binds_named_required_slots_and_allows_optional_omiss
 
 
 @pytest.mark.asyncio
-async def test_credential_replace_keeps_old_grant_retired_then_revoke_invalidates_it(
+async def test_credential_grant_migration_is_explicit_and_revoke_invalidates_all_active_grants(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -396,6 +398,30 @@ async def test_credential_replace_keeps_old_grant_retired_then_revoke_invalidate
         assert replacement.id != grant.credential_version_id
         assert await mcp_service.grant_is_usable(admin, grant.id) is True
 
+        migration = await credential_service.migrate_grants(
+            admin,
+            credential.id,
+            expected_credential_version=2,
+        )
+        assert migration.credential_id == credential.id
+        assert migration.credential_version_id == replacement.id
+        assert migration.migrated_count == 1
+        assert await mcp_service.grant_is_usable(admin, grant.id) is False
+
+        async with factory() as session:
+            migrated_grant = (
+                await session.execute(
+                    select(CredentialGrantRow).where(
+                        CredentialGrantRow.mcp_server_version_id == draft.id,
+                        CredentialGrantRow.credential_slot_id == grant.credential_slot_id,
+                        CredentialGrantRow.credential_version_id == replacement.id,
+                        CredentialGrantRow.status == "active",
+                    )
+                )
+            ).scalar_one()
+        assert migrated_grant.id != grant.id
+        assert await mcp_service.grant_is_usable(admin, migrated_grant.id) is True
+
         second_asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("erp-two", "ERP Two"))
         second_draft = await mcp_service.create_version(
             admin,
@@ -420,18 +446,23 @@ async def test_credential_replace_keeps_old_grant_retired_then_revoke_invalidate
         )
         assert revoked.status == "revoked"
         assert await mcp_service.grant_is_usable(admin, grant.id) is False
+        assert await mcp_service.grant_is_usable(admin, migrated_grant.id) is False
 
         async with factory() as session:
             old_version = await session.get(CredentialVersionRow, grant.credential_version_id)
             replacement_row = await session.get(CredentialVersionRow, replacement.id)
             stored_grant = await session.get(CredentialGrantRow, grant.id)
+            stored_migrated_grant = await session.get(CredentialGrantRow, migrated_grant.id)
             envelopes = (await session.execute(select(CredentialEnvelopeRow).order_by(CredentialEnvelopeRow.created_at))).scalars().all()
         assert old_version is not None and old_version.status == "revoked"
         assert replacement_row is not None and replacement_row.status == "revoked"
-        assert stored_grant is not None and stored_grant.credential_version_id == grant.credential_version_id
+        assert stored_grant is not None and stored_grant.status == "revoked"
+        assert stored_grant.credential_version_id == grant.credential_version_id
+        assert stored_migrated_grant is not None and stored_migrated_grant.status == "revoked"
+        assert stored_migrated_grant.credential_version_id == replacement.id
         assert len(envelopes) == 2
         assert all(b"old-secret" not in row.ciphertext and b"new-secret" not in row.ciphertext for row in envelopes)
-        for api_view in (credential, replacement, revoked, grant):
+        for api_view in (credential, replacement, migration, revoked, grant):
             rendered = repr(api_view)
             assert "ciphertext" not in rendered
             assert "nonce" not in rendered
@@ -443,7 +474,75 @@ async def test_credential_replace_keeps_old_grant_retired_then_revoke_invalidate
 
 
 @pytest.mark.asyncio
-async def test_system_mcp_requires_system_credential_and_editor_cannot_approve(
+async def test_credential_grant_migration_rejects_incompatible_current_payload_schema_atomically(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_keyring(monkeypatch)
+    mcp_module = importlib.import_module("app.shared_assets.mcp_service")
+    credential_module = importlib.import_module("app.shared_assets.credential_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_project(engine, factory, label="migration-schema", role="admin")
+    mcp_service = mcp_module.McpService(factory)
+    credential_service = credential_module.CredentialService(factory)
+    try:
+        credential = await credential_service.create(
+            admin,
+            credential_module.CreateCredential("erp", "ERP", "token"),
+            {"env": {"ERP_TOKEN": "old-secret"}},
+        )
+        asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("erp", "ERP"))
+        draft = await mcp_service.create_version(
+            admin,
+            asset.id,
+            _safe_definition(mcp_module, credential=True),
+            expected_asset_version=1,
+        )
+        await mcp_service.submit_approval(admin, asset.id, draft.id, expected_asset_version=2)
+        approved = await mcp_service.approve(
+            admin,
+            asset.id,
+            draft.id,
+            {"primary": credential.current_version_id},
+            expected_asset_version=3,
+        )
+        grant = approved.credential_grants[0]
+        replacement = await credential_service.replace(
+            admin,
+            credential.id,
+            {"headers": {"Authorization": "new-secret"}},
+            expected_credential_version=1,
+        )
+
+        with pytest.raises(AssetValidationFailed):
+            await credential_service.migrate_grants(
+                admin,
+                credential.id,
+                expected_credential_version=2,
+            )
+
+        async with factory() as session:
+            grants = (
+                (
+                    await session.execute(
+                        select(CredentialGrantRow).where(
+                            CredentialGrantRow.mcp_server_version_id == draft.id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [(row.id, row.credential_version_id, row.status) for row in grants] == [(grant.id, grant.credential_version_id, "active")]
+        assert replacement.id != grant.credential_version_id
+        assert await mcp_service.grant_is_usable(admin, grant.id) is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_packaged_system_mcp_only_allows_dedicated_system_credential_grants(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -458,39 +557,108 @@ async def test_system_mcp_requires_system_credential_and_editor_cannot_approve(
     mcp_service = mcp_module.McpService(factory)
     credential_service = credential_module.CredentialService(factory)
     try:
+        await bootstrap_system_assets(factory)
+        async with factory() as session:
+            system_asset = (
+                await session.execute(
+                    select(McpServerRow).where(
+                        McpServerRow.source_key == "builtin:mcp:deerflow-docs",
+                    )
+                )
+            ).scalar_one()
+            system_version = await session.get(
+                McpServerVersionRow,
+                system_asset.current_published_version_id,
+            )
+        assert system_version is not None
+
         project_credential = await credential_service.create(
             admin,
             credential_module.CreateCredential("project", "Project", "token"),
-            {"env": {"ERP_TOKEN": "project-secret"}},
+            {"headers": {"X-DEERFLOW-DOCS-KEY": "project-secret"}},
         )
         system_credential = await credential_service.create(
             system,
             credential_module.CreateCredential("system", "System", "token"),
-            {"env": {"ERP_TOKEN": "system-secret"}},
+            {"headers": {"X-DEERFLOW-DOCS-KEY": "system-secret"}},
         )
-        system_asset = await mcp_service.create_asset(system, mcp_module.CreateMcpServer("system", "System"))
-        system_draft = await mcp_service.create_version(
-            system,
-            system_asset.id,
-            _safe_definition(mcp_module, credential=True),
-            expected_asset_version=1,
-        )
-        with pytest.raises(AssetValidationFailed):
+
+        with pytest.raises(AssetForbidden):
+            await mcp_service.create_asset(
+                system,
+                mcp_module.CreateMcpServer("runtime-system", "Runtime System"),
+            )
+        with pytest.raises(AssetForbidden):
             await mcp_service.approve(
                 system,
                 system_asset.id,
-                system_draft.id,
-                {"primary": project_credential.current_version_id},
-                expected_asset_version=2,
+                system_version.id,
+                {"api-key": system_credential.current_version_id},
+                expected_asset_version=system_asset.version,
             )
-        approved = await mcp_service.approve(
+        with pytest.raises(AssetValidationFailed):
+            await mcp_service.configure_system_credential_grants(
+                system,
+                system_asset.id,
+                system_version.id,
+                {"api-key": project_credential.current_version_id},
+                {},
+            )
+        configured = await mcp_service.configure_system_credential_grants(
             system,
             system_asset.id,
-            system_draft.id,
-            {"primary": system_credential.current_version_id},
-            expected_asset_version=2,
+            system_version.id,
+            {"api-key": system_credential.current_version_id},
+            {},
         )
-        assert approved.workflow_status is WorkflowStatus.PUBLISHED
+        assert configured.workflow_status is WorkflowStatus.PUBLISHED
+        assert len(configured.credential_grants) == 1
+        grant = configured.credential_grants[0]
+        assert grant.status == "active"
+        assert grant.credential_version_id == system_credential.current_version_id
+
+        idempotent = await mcp_service.configure_system_credential_grants(
+            system,
+            system_asset.id,
+            system_version.id,
+            {"api-key": system_credential.current_version_id},
+            {"api-key": grant.version},
+        )
+        active_grants = [item for item in idempotent.credential_grants if item.status == "active"]
+        assert [item.id for item in active_grants] == [grant.id]
+
+        replacement = await credential_service.replace(
+            system,
+            system_credential.id,
+            {"headers": {"X-DEERFLOW-DOCS-KEY": "replacement-secret"}},
+            expected_credential_version=system_credential.version,
+        )
+        rotated = await mcp_service.configure_system_credential_grants(
+            system,
+            system_asset.id,
+            system_version.id,
+            {"api-key": replacement.id},
+            {"api-key": grant.version},
+        )
+        rotated_active = [item for item in rotated.credential_grants if item.status == "active"]
+        assert len(rotated_active) == 1
+        assert rotated_active[0].credential_version_id == replacement.id
+        assert rotated_active[0].id != grant.id
+
+        async with factory() as session:
+            unchanged_asset = await session.get(McpServerRow, system_asset.id)
+            unchanged_version = await session.get(McpServerVersionRow, system_version.id)
+            stored_grants = (await session.execute(select(CredentialGrantRow).where(CredentialGrantRow.mcp_server_version_id == system_version.id).order_by(CredentialGrantRow.created_at, CredentialGrantRow.id))).scalars().all()
+        assert unchanged_asset is not None
+        assert unchanged_asset.version == system_asset.version
+        assert unchanged_asset.current_published_version_id == system_version.id
+        assert unchanged_version is not None
+        assert unchanged_version.workflow_status == WorkflowStatus.PUBLISHED.value
+        assert unchanged_version.payload_checksum == system_version.payload_checksum
+        assert [(item.status, item.version) for item in stored_grants] == [
+            ("revoked", 2),
+            ("active", 1),
+        ]
 
         project_asset = await mcp_service.create_asset(editor, mcp_module.CreateMcpServer("editor", "Editor"))
         project_draft = await mcp_service.create_version(
@@ -690,33 +858,65 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
                 ),
             ),
         )
-        asset_one = await mcp_service.create_asset(
-            system,
-            mcp_module.CreateMcpServer("system-one", "System One"),
-        )
-        version_one = await mcp_service.create_version(
-            system,
-            asset_one.id,
-            definition,
-            expected_asset_version=1,
-        )
-        asset_two = await mcp_service.create_asset(
-            system,
-            mcp_module.CreateMcpServer("system-two", "System Two"),
-        )
-        version_two = await mcp_service.create_version(
-            system,
-            asset_two.id,
-            definition,
-            expected_asset_version=1,
-        )
 
-        original_single = repository_module.CredentialRepository.lock_system_credential_version
-        original_bulk = getattr(
-            repository_module.CredentialRepository,
-            "lock_system_credential_versions",
-            None,
-        )
+        async def seed_packaged_mcp(slug: str):
+            asset_id = uuid.uuid4()
+            version_id = uuid.uuid4()
+            asset = McpServerRow(
+                id=asset_id,
+                scope="system",
+                project_id=None,
+                slug=slug,
+                display_name=slug,
+                source_key=f"test:packaged:mcp:{slug}",
+                created_by_user_id=str(system.user_id),
+            )
+            version = McpServerVersionRow(
+                id=version_id,
+                mcp_server_id=asset_id,
+                version_number=1,
+                workflow_status=WorkflowStatus.DRAFT.value,
+                description=definition.description,
+                transport=definition.transport,
+                command=definition.command,
+                args=list(definition.args),
+                url=definition.url,
+                non_secret_env=dict(definition.env),
+                non_secret_headers=dict(definition.headers),
+                oauth_metadata=dict(definition.oauth),
+                routing=dict(definition.routing),
+                tool_overrides=dict(definition.tool_overrides),
+                timeout_seconds=definition.timeout_seconds,
+                payload_checksum=mcp_service._checksum(definition),
+                created_by_user_id=str(system.user_id),
+            )
+            async with factory() as session, session.begin():
+                session.add(asset)
+                await session.flush()
+                session.add(version)
+                await session.flush()
+                session.add_all(
+                    [
+                        McpCredentialSlotRow(
+                            mcp_server_version_id=version.id,
+                            name=slot.name,
+                            purpose=slot.purpose,
+                            payload_schema={key: list(values) for key, values in slot.payload_schema.items()},
+                            required=slot.required,
+                        )
+                        for slot in definition.credential_slots
+                    ]
+                )
+                await session.flush()
+                version.workflow_status = WorkflowStatus.PUBLISHED.value
+                asset.current_published_version_id = version.id
+                await session.flush()
+            return asset, version
+
+        asset_one, version_one = await seed_packaged_mcp("system-one")
+        asset_two, version_two = await seed_packaged_mcp("system-two")
+
+        original_bulk = repository_module.CredentialRepository.lock_system_credential_versions
         ready_count = 0
         ready_tasks: set[asyncio.Task] = set()
         both_ready = asyncio.Event()
@@ -734,26 +934,12 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
                 both_ready.set()
             await release.wait()
 
-        async def wait_after_first_singular_lock(
-            repository,
-            context,
-            credential_version_id,
-        ):
-            locked = await original_single(
-                repository,
-                context,
-                credential_version_id,
-            )
-            await mark_ready_once()
-            return locked
-
         async def wait_before_bulk_lock(
             repository,
             context,
             credential_version_ids,
         ):
             await mark_ready_once()
-            assert original_bulk is not None
             return await original_bulk(
                 repository,
                 context,
@@ -762,18 +948,13 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
 
         monkeypatch.setattr(
             repository_module.CredentialRepository,
-            "lock_system_credential_version",
-            wait_after_first_singular_lock,
-        )
-        monkeypatch.setattr(
-            repository_module.CredentialRepository,
             "lock_system_credential_versions",
             wait_before_bulk_lock,
             raising=False,
         )
         tasks = [
             asyncio.create_task(
-                mcp_service.approve(
+                mcp_service.configure_system_credential_grants(
                     system,
                     asset_one.id,
                     version_one.id,
@@ -781,11 +962,11 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
                         "first": credential_a.current_version_id,
                         "second": credential_b.current_version_id,
                     },
-                    expected_asset_version=2,
+                    {},
                 )
             ),
             asyncio.create_task(
-                mcp_service.approve(
+                mcp_service.configure_system_credential_grants(
                     system,
                     asset_two.id,
                     version_two.id,
@@ -793,7 +974,7 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
                         "first": credential_b.current_version_id,
                         "second": credential_a.current_version_id,
                     },
-                    expected_asset_version=2,
+                    {},
                 )
             ),
         ]
@@ -846,12 +1027,12 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
                 .scalars()
                 .all()
             )
-        assert all(asset is not None and asset.version == 3 for asset in stored_assets)
+        assert all(asset is not None and asset.version == 1 and asset.source_key is not None for asset in stored_assets)
         assert [asset.current_published_version_id for asset in stored_assets] == [
             version_one.id,
             version_two.id,
         ]
-        assert all(version is not None and version.workflow_status == WorkflowStatus.PUBLISHED.value and version.reviewed_at is not None for version in stored_versions)
+        assert all(version is not None and version.workflow_status == WorkflowStatus.PUBLISHED.value for version in stored_versions)
         assert len(stored_grants) == 4
         assert all(grant.status == "active" for grant in stored_grants)
     finally:

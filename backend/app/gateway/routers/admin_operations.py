@@ -231,12 +231,36 @@ async def current_reliability_readiness(
             FinalSchemaProbe(),
             session,
             identity[1],
+            stream=lambda: _gateway_components_status(
+                request,
+                "private_run_event_store",
+                "private_stream_bridge",
+            ),
+            quota=lambda: _gateway_components_status(
+                request,
+                "project_quota_service",
+                "project_quota_enforcer",
+            ),
+            audit=lambda: _gateway_components_status(
+                request,
+                "project_audit_service",
+                "operational_audit_sink",
+            ),
             process=process,
         )
     result = service.read()
     if not isawaitable(result):
         raise TypeError("reliability readiness service must be async")
     return await result
+
+
+def _gateway_components_status(
+    request: Request,
+    *state_names: str,
+) -> Literal["ready", "unavailable"]:
+    """Project initialized Gateway adapters to one content-free health enum."""
+
+    return "ready" if all(getattr(request.app.state, name, None) is not None for name in state_names) else "unavailable"
 
 
 def map_admin_operations_errors(function):

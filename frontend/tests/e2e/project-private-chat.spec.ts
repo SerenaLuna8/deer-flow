@@ -10,6 +10,7 @@ const THREAD_ID = "20000000-0000-4000-8000-000000000001";
 const SECOND_THREAD_ID = "20000000-0000-4000-8000-000000000002";
 const MISSING_THREAD_ID = "20000000-0000-4000-8000-000000000099";
 const AGENT_ID = "30000000-0000-4000-8000-000000000001";
+const MAIN_AGENT_ID = "30000000-0000-4000-8000-000000000002";
 const PROJECT_FILE_ID = "40000000-0000-4000-8000-000000000001";
 const PROJECT_SKILL_FILE_ID = "40000000-0000-4000-8000-000000000003";
 const PROJECT_SKILL_ID = "50000000-0000-4000-8000-000000000001";
@@ -63,6 +64,8 @@ const privateThread = {
     updated_at: "2026-07-15T01:00:00Z",
   },
   version: 1,
+  created_at: "2026-07-15T00:00:00Z",
+  updated_at: "2026-07-15T01:00:00Z",
 };
 
 const projectArtifactMessages = [
@@ -116,12 +119,20 @@ type MockPrivateWorkOptions = {
   artifactFileStatus?: number;
   runBodies?: unknown[];
   streamGate?: Promise<void>;
+  streamValueSequence?: Array<Record<string, unknown>>;
   uploadRequests?: string[];
   searchThreads?: (typeof privateThread)[];
   streamValues?: Record<string, unknown>;
   workspaceChanges?: unknown;
   uploadedFiles?: Array<Record<string, unknown>>;
+  uploadedFilesAfterStream?: Array<Record<string, unknown>>;
   controlBodies?: Array<{ path: string; body: unknown }>;
+  goalGate?: ReturnType<typeof deferredGate>;
+  compactGate?: ReturnType<typeof deferredGate>;
+  streamTerminalStatus?: "error" | "failed" | "timeout";
+  failureMessageIds?: Partial<
+    Record<"submitted" | "live" | "admission", string>
+  >;
 };
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -130,6 +141,35 @@ async function json(route: Route, body: unknown, status = 200) {
     contentType: "application/json",
     body: JSON.stringify(body),
   });
+}
+
+function latestVisibleSubmittedHumanMessage(
+  messages: unknown[],
+): Record<string, unknown> | null {
+  for (const value of [...messages].reverse()) {
+    if (typeof value !== "object" || value === null) continue;
+    const type = Reflect.get(value, "type");
+    const role = Reflect.get(value, "role");
+    if (type !== "human" && role !== "user") continue;
+    const additionalKwargs = Reflect.get(value, "additional_kwargs");
+    if (
+      typeof additionalKwargs === "object" &&
+      additionalKwargs !== null &&
+      Reflect.get(additionalKwargs, "hide_from_ui") === true
+    ) {
+      continue;
+    }
+    const messageId = Reflect.get(value, "id");
+    return {
+      type: "human",
+      ...(typeof messageId === "string" && messageId ? { id: messageId } : {}),
+      content: Reflect.get(value, "content"),
+      ...(typeof additionalKwargs === "object" && additionalKwargs !== null
+        ? { additional_kwargs: additionalKwargs }
+        : {}),
+    };
+  }
+  return null;
 }
 
 async function mockProjectContext(page: Page, currentProject = project) {
@@ -157,7 +197,15 @@ async function mockPrivateWork(
   const requests: string[] = [];
   let threadExists = includeThread;
   let hasStreamed = false;
+  let failedSubmittedMessage: Record<string, unknown> | null = null;
   let goal: Record<string, unknown> | null = null;
+  const initialStateMessages = options.stateMessages ?? [
+    {
+      type: "human",
+      id: "msg-project-history",
+      content: [{ type: "text", text: "Previous project question" }],
+    },
+  ];
   await page.route(
     `**/api/projects/${PROJECT_ID}/private-work/**`,
     async (route) => {
@@ -191,16 +239,8 @@ async function mockPrivateWork(
           values: {
             title: "Owner research",
             messages: [
-              ...(options.stateMessages ?? [
-                {
-                  type: "human",
-                  id: "msg-project-history",
-                  content: [
-                    { type: "text", text: "Previous project question" },
-                  ],
-                },
-              ]),
-              ...(hasStreamed
+              ...initialStateMessages,
+              ...(hasStreamed && !options.streamTerminalStatus
                 ? (options.stateMessagesAfterStream ?? [
                     {
                       type: "human",
@@ -244,6 +284,10 @@ async function mockPrivateWork(
         }
         const body = request.postDataJSON() as { objective: string };
         options.controlBodies?.push({ path, body });
+        if (options.goalGate) {
+          options.goalGate.markStarted();
+          await options.goalGate.promise;
+        }
         goal = {
           objective: body.objective,
           status: "active",
@@ -259,6 +303,10 @@ async function mockPrivateWork(
       if (path.endsWith(`/threads/${THREAD_ID}/compact`)) {
         const body = request.postDataJSON();
         options.controlBodies?.push({ path, body });
+        if (options.compactGate) {
+          options.compactGate.markStarted();
+          await options.compactGate.promise;
+        }
         return json(route, {
           thread_id: THREAD_ID,
           compacted: true,
@@ -314,6 +362,18 @@ async function mockPrivateWork(
           suggestions: ["Review the project result?"],
         });
       }
+      if (path.endsWith(`/threads/${THREAD_ID}/uploads/limits`)) {
+        return json(route, {
+          max_files: 10,
+          max_file_size: 50 * 1024 * 1024,
+          max_total_size: 100 * 1024 * 1024,
+          project_storage: {
+            policy: "project_quota",
+            remaining_bytes: 5 * 1024 * 1024 * 1024,
+          },
+          request_id: "project-private-upload-limits",
+        });
+      }
       if (
         request.method() === "POST" &&
         path.endsWith(`/threads/${THREAD_ID}/uploads`)
@@ -338,20 +398,23 @@ async function mockPrivateWork(
       ) {
         return json(
           route,
-          options.uploadedFiles ?? [
-            {
-              id: PROJECT_FILE_ID,
-              logical_path: "outputs/presented-report.md",
-              display_name: "presented-report.md",
-              kind: "artifact",
-              media_type: "text/markdown",
-              size: 26,
-              sha256: "project-file-sha",
-              status: "ready",
-              created_at: "2026-07-15T00:00:00Z",
-              updated_at: "2026-07-15T00:00:00Z",
-            },
-          ],
+          (hasStreamed
+            ? options.uploadedFilesAfterStream
+            : options.uploadedFiles) ??
+            options.uploadedFiles ?? [
+              {
+                id: PROJECT_FILE_ID,
+                logical_path: "outputs/presented-report.md",
+                display_name: "presented-report.md",
+                kind: "artifact",
+                media_type: "text/markdown",
+                size: 26,
+                sha256: "project-file-sha",
+                status: "ready",
+                created_at: "2026-07-15T00:00:00Z",
+                updated_at: "2026-07-15T00:00:00Z",
+              },
+            ],
         );
       }
       if (path.endsWith(`/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}`)) {
@@ -384,9 +447,89 @@ async function mockPrivateWork(
         return json(route, privateThread);
       }
       if (path.endsWith(`/threads/${THREAD_ID}/runs/stream`)) {
-        options.runBodies?.push(request.postDataJSON());
+        const body = request.postDataJSON() as {
+          input?: { messages?: unknown[] };
+        };
+        options.runBodies?.push(body);
         await options.streamGate;
         hasStreamed = true;
+        if (options.streamTerminalStatus) {
+          failedSubmittedMessage = latestVisibleSubmittedHumanMessage(
+            body.input?.messages ?? [],
+          );
+          const submittedMessageId = failedSubmittedMessage
+            ? Reflect.get(failedSubmittedMessage, "id")
+            : null;
+          if (
+            options.failureMessageIds &&
+            typeof submittedMessageId === "string" &&
+            submittedMessageId
+          ) {
+            options.failureMessageIds.submitted = submittedMessageId;
+          }
+          const liveFailedMessage = failedSubmittedMessage
+            ? {
+                ...failedSubmittedMessage,
+                id:
+                  typeof submittedMessageId === "string" && submittedMessageId
+                    ? submittedMessageId
+                    : "msg-project-failed",
+              }
+            : {
+                type: "human",
+                id: "msg-project-failed",
+                content: [{ type: "text", text: "Trigger project failure" }],
+              };
+          if (options.failureMessageIds) {
+            options.failureMessageIds.live = String(
+              Reflect.get(liveFailedMessage, "id"),
+            );
+          }
+          return route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body: [
+              "event: metadata",
+              `data: ${JSON.stringify({ run_id: "run-failed", thread_id: THREAD_ID })}`,
+              "id: 1",
+              "",
+              "event: values",
+              `data: ${JSON.stringify({
+                title: "Owner research",
+                messages: [...initialStateMessages, liveFailedMessage],
+                artifacts: [],
+                todos: [],
+              })}`,
+              "id: 2",
+              "",
+              "event: end",
+              `data: ${JSON.stringify({ status: options.streamTerminalStatus })}`,
+              "id: 3",
+              "",
+              "",
+            ].join("\n"),
+          });
+        }
+        if (options.streamValueSequence) {
+          return route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body: [
+              "event: metadata",
+              `data: ${JSON.stringify({ run_id: "run-artifact", thread_id: THREAD_ID })}`,
+              "",
+              ...options.streamValueSequence.flatMap((values) => [
+                "event: values",
+                `data: ${JSON.stringify(values)}`,
+                "",
+              ]),
+              "event: end",
+              "data: {}",
+              "",
+              "",
+            ].join("\n"),
+          });
+        }
         return handleRunStream(route, options.streamValues);
       }
       if (path.endsWith(`/threads/${THREAD_ID}/runs/run-retained/events`)) {
@@ -403,8 +546,59 @@ async function mockPrivateWork(
           options.workspaceChanges ? 200 : 404,
         );
       }
+      if (path.endsWith(`/threads/${THREAD_ID}/runs/run-failed/messages`)) {
+        const submittedMessageId = failedSubmittedMessage
+          ? Reflect.get(failedSubmittedMessage, "id")
+          : null;
+        const admittedFailedMessage = failedSubmittedMessage
+          ? {
+              ...failedSubmittedMessage,
+              id:
+                typeof submittedMessageId === "string" && submittedMessageId
+                  ? submittedMessageId
+                  : "run-admission-run-failed",
+            }
+          : null;
+        if (options.failureMessageIds && admittedFailedMessage) {
+          options.failureMessageIds.admission = String(
+            Reflect.get(admittedFailedMessage, "id"),
+          );
+        }
+        return json(route, {
+          data: admittedFailedMessage
+            ? [
+                {
+                  run_id: "run-failed",
+                  seq: 0,
+                  content: admittedFailedMessage,
+                  metadata: { source: "run_admission" },
+                  created_at: "2026-07-15T03:00:00Z",
+                },
+              ]
+            : [],
+          has_more: false,
+        });
+      }
       if (/\/threads\/[^/]+\/runs(?:\?|$)/u.test(request.url())) {
-        return json(route, []);
+        return json(
+          route,
+          hasStreamed && options.streamTerminalStatus
+            ? [
+                {
+                  run_id: "run-failed",
+                  thread_id: THREAD_ID,
+                  assistant_id: null,
+                  status: options.streamTerminalStatus,
+                  metadata: {},
+                  multitask_strategy: "reject",
+                  error: "AGENT_EXECUTION_FAILED",
+                  model_name: null,
+                  created_at: "2026-07-15T03:00:00Z",
+                  updated_at: "2026-07-15T03:00:01Z",
+                },
+              ]
+            : [],
+        );
       }
       return json(route, { detail: "not found" }, 404);
     },
@@ -462,6 +656,8 @@ async function mockProjectSidecar(
     status: "idle",
     metadata: sidecarMetadata(),
     version: 1,
+    created_at: "2026-07-15T00:00:00Z",
+    updated_at: "2026-07-15T02:00:00Z",
   });
 
   await page.route(
@@ -534,6 +730,11 @@ async function mockProjectSidecar(
           max_files: 10,
           max_file_size: 50 * 1024 * 1024,
           max_total_size: 100 * 1024 * 1024,
+          project_storage: {
+            policy: "project_quota",
+            remaining_bytes: 5 * 1024 * 1024 * 1024,
+          },
+          request_id: "project-private-upload-limits",
         });
       }
       if (
@@ -703,6 +904,8 @@ async function mockProjectSidecarRaces(
       referenced_message_roles: ["assistant"],
     },
     version: 1,
+    created_at: "2026-07-15T00:00:00Z",
+    updated_at: "2026-07-15T02:00:00Z",
   });
   const state = (messages: unknown[]) => ({
     values: { title: "Project thread", messages, artifacts: [], todos: [] },
@@ -723,8 +926,8 @@ async function mockProjectSidecarRaces(
 
       if (request.method() === "POST" && path.endsWith("/threads/search")) {
         restoreCount += 1;
-        if (restoreCount === 1 && options.restoreGate) {
-          options.restoreGate.markStarted();
+        if (options.restoreGate) {
+          if (restoreCount === 1) options.restoreGate.markStarted();
           await options.restoreGate.promise;
         }
         return json(route, {
@@ -815,6 +1018,11 @@ async function mockProjectSidecarRaces(
           max_files: 10,
           max_file_size: 50 * 1024 * 1024,
           max_total_size: 100 * 1024 * 1024,
+          project_storage: {
+            policy: "project_quota",
+            remaining_bytes: 5 * 1024 * 1024 * 1024,
+          },
+          request_id: "project-private-sidecar-upload-limits",
         });
       }
       if (path.endsWith(`/threads/${sidecarId}/uploads`)) {
@@ -901,6 +1109,40 @@ test.beforeEach(async ({ page }) => {
       request_id: "req-project-skills",
     }),
   );
+  await page.route(`**/api/projects/${PROJECT_ID}/agents`, (route) =>
+    json(route, {
+      system_items: [
+        {
+          id: MAIN_AGENT_ID,
+          scope: "system",
+          project_id: null,
+          slug: "project-assistant",
+          display_name: "Main",
+          status: "active",
+          current_published_version_id: "31000000-0000-4000-8000-000000000001",
+          version: 1,
+          created_by_user_id: "system",
+          created_at: "2026-07-15T00:00:00Z",
+          updated_at: "2026-07-15T00:00:00Z",
+          capabilities: ["shared_assets.read", "shared_assets.execute"],
+          binding: {
+            project_id: PROJECT_ID,
+            kind: "agent",
+            asset_id: MAIN_AGENT_ID,
+            version_id: "31000000-0000-4000-8000-000000000001",
+            enabled: true,
+            version: 1,
+            created_by_user_id: ACCOUNT_ID,
+            updated_by_user_id: ACCOUNT_ID,
+            created_at: "2026-07-15T00:00:00Z",
+            updated_at: "2026-07-15T00:00:00Z",
+          },
+        },
+      ],
+      project_items: [],
+      request_id: "req-project-agents",
+    }),
+  );
 });
 
 test("project detail loads history and streams without legacy private-work calls", async ({
@@ -973,7 +1215,13 @@ test("project goal and compact commands use only scoped control routes", async (
   page,
 }) => {
   const controlBodies: Array<{ path: string; body: unknown }> = [];
-  const projectRequests = await mockPrivateWork(page, true, { controlBodies });
+  const goalGate = deferredGate();
+  const compactGate = deferredGate();
+  const projectRequests = await mockPrivateWork(page, true, {
+    controlBodies,
+    goalGate,
+    compactGate,
+  });
   const globalRequests: string[] = [];
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
@@ -984,18 +1232,51 @@ test("project goal and compact commands use only scoped control routes", async (
 
   await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
   const textarea = page.getByPlaceholder(/how can i assist you/i);
+  const goalResponse = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      request.method() === "PUT" &&
+      new URL(response.url()).pathname.endsWith(`/threads/${THREAD_ID}/goal`)
+    );
+  });
   await textarea.fill("/goal Finish the project-scoped repair");
   await textarea.press("Enter");
-  await expect
-    .poll(() =>
-      projectRequests.includes(
-        `PUT /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/goal`,
-      ),
-    )
-    .toBe(true);
+  await goalGate.started;
 
   await textarea.fill("/compact");
-  await page.getByRole("button", { name: "Submit" }).click();
+  goalGate.release();
+  await goalResponse;
+  await expect(
+    page.getByText("Hello from DeerFlow!", { exact: true }),
+  ).toBeVisible();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(textarea).toHaveValue("/compact");
+  const submit = page.getByRole("button", { name: "Submit" });
+  await expect(submit).toBeEnabled();
+  const compactResponse = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      request.method() === "POST" &&
+      new URL(response.url()).pathname.endsWith(`/threads/${THREAD_ID}/compact`)
+    );
+  });
+  await submit.click();
+  await compactGate.started;
+  await textarea.fill("Draft typed while compacting");
+  compactGate.release();
+  await compactResponse;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(textarea).toHaveValue("Draft typed while compacting");
   await expect
     .poll(() =>
       projectRequests.includes(
@@ -1601,6 +1882,125 @@ test("project write-file artifacts retain preview and survive artifact-less stre
   await expect(artifactTrigger).toBeVisible();
 });
 
+test("a live file write collapses project navigation, opens preview, and presents the finished file inline", async ({
+  page,
+}) => {
+  const submitted = {
+    type: "human",
+    id: "msg-live-artifact-request",
+    content: [{ type: "text", text: "Write a live project report" }],
+  };
+  const write = {
+    type: "ai",
+    id: "msg-live-artifact-write",
+    content: "",
+    tool_calls: [
+      {
+        id: "write-live-project-file",
+        name: "write_file",
+        args: {
+          description: "Writing live project report",
+          path: WRITE_ARTIFACT_PATH,
+          content: "# Live project report",
+        },
+      },
+    ],
+  };
+  const writeResult = {
+    type: "tool",
+    id: "msg-live-artifact-write-result",
+    name: "write_file",
+    tool_call_id: "write-live-project-file",
+    content: "OK",
+  };
+  const present = {
+    type: "ai",
+    id: "msg-live-artifact-present",
+    content: "The live report is ready.",
+    tool_calls: [
+      {
+        id: "present-live-project-file",
+        name: "present_files",
+        args: { filepaths: [WRITE_ARTIFACT_PATH] },
+      },
+    ],
+  };
+  const presentResult = {
+    type: "tool",
+    id: "msg-live-artifact-present-result",
+    name: "present_files",
+    tool_call_id: "present-live-project-file",
+    content: "Successfully presented files",
+  };
+  const finalMessages = [submitted, write, writeResult, present, presentResult];
+  await mockPrivateWork(page, true, {
+    stateMessages: [],
+    stateMessagesAfterStream: finalMessages,
+    streamValueSequence: [
+      {
+        title: "Owner research",
+        messages: [submitted, write],
+        artifacts: [],
+        todos: [],
+      },
+      {
+        title: "Owner research",
+        messages: finalMessages,
+        artifacts: [WRITE_ARTIFACT_PATH],
+        todos: [],
+      },
+    ],
+    uploadedFiles: [],
+    uploadedFilesAfterStream: [
+      {
+        id: PROJECT_FILE_ID,
+        logical_path: "outputs/project-report.md",
+        display_name: "project-report.md",
+        kind: "artifact",
+        media_type: "text/markdown",
+        size: 21,
+        sha256: "live-project-file-sha",
+        status: "ready",
+        created_at: "2026-07-15T00:00:00Z",
+        updated_at: "2026-07-15T00:00:01Z",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const menu = page.getByRole("complementary", { name: "项目菜单栏" });
+  await expect(menu).toHaveAttribute("data-state", "expanded");
+
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("Write a live project report");
+  await textarea.press("Enter");
+
+  await expect(menu).toHaveAttribute("data-state", "collapsed");
+  await expect(
+    page.locator("#artifacts").getByText("Live project report"),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("chat-message-content")
+      .getByText("project-report.md", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: /download/i }).first(),
+  ).toHaveAttribute(
+    "href",
+    new RegExp(
+      `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/files/${PROJECT_FILE_ID}$`,
+      "u",
+    ),
+  );
+  if (process.env.CAPTURE_ARTIFACT_FLOW_SCREENSHOT === "1") {
+    await page.screenshot({
+      path: "test-results/artifact-file-flow.png",
+      fullPage: false,
+    });
+  }
+});
+
 test("project workspace changes use only the private-work route", async ({
   page,
 }) => {
@@ -1814,7 +2214,50 @@ test("project list is owner-scoped and direct metadata misses show one public no
   await expect(
     page.getByRole("heading", { name: "找不到这个对话" }),
   ).toBeVisible();
-  await expect(page.getByText(/owner|跨项目|其他用户/iu)).toHaveCount(0);
+  await expect(
+    page
+      .locator("main")
+      .getByText(/owner_user_id|project_id|跨项目|其他用户/iu),
+  ).toHaveCount(0);
+});
+
+test("new conversation creates directly with Main without opening an Agent selector", async ({
+  page,
+}) => {
+  await mockPrivateWork(page);
+  let createBody: Record<string, unknown> | null = null;
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/private-work/threads`,
+    async (route) => {
+      createBody = route.request().postDataJSON() as Record<string, unknown>;
+      await json(route, {
+        thread_id: createBody.thread_id,
+        agent_asset_id: createBody.agent_asset_id,
+        agent_scope: createBody.agent_scope,
+        display_name: createBody.display_name,
+        status: "idle",
+        metadata: {},
+        version: 1,
+        created_at: "2026-07-15T04:00:00Z",
+        updated_at: "2026-07-15T04:00:00Z",
+      });
+    },
+  );
+
+  await page.goto("/projects/research-lab/chats");
+  await page.getByRole("button", { name: "新建对话" }).click();
+
+  await expect
+    .poll(() => createBody)
+    .toMatchObject({
+      agent_asset_id: MAIN_AGENT_ID,
+      agent_scope: "system",
+      display_name: "新对话",
+    });
+  await expect(page.getByRole("dialog", { name: "选择 Agent" })).toHaveCount(0);
+  await expect(page).toHaveURL(
+    new RegExp("/projects/research-lab/chats/[0-9a-f-]+$", "u"),
+  );
 });
 
 test("project thread list paginates inside the selected project scope", async ({
@@ -1830,9 +2273,13 @@ test("project thread list paginates inside the selected project scope", async ({
   await expect(
     page.getByText("Scoped thread 1", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Scoped thread 51")).toHaveCount(0);
+  await expect(page.getByText("Scoped thread 51", { exact: true })).toHaveCount(
+    0,
+  );
   await page.getByRole("button", { name: "加载更多" }).click();
-  await expect(page.getByText("Scoped thread 51")).toBeVisible();
+  await expect(
+    page.getByText("Scoped thread 51", { exact: true }),
+  ).toBeVisible();
 });
 
 test("project artifacts load only through the scoped project file surface", async ({
@@ -2030,6 +2477,9 @@ test("viewer can delete an owned thread but cannot create or run project work", 
   await page.goto("/projects/research-lab/chats");
   await expect(page.getByRole("button", { name: "新建对话" })).toHaveCount(0);
   await page.getByRole("button", { name: "删除 Owner research" }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除对话？" });
+  await deleteDialog.getByRole("button", { name: "确认删除" }).click();
+  await expect(deleteDialog).toHaveCount(0);
   await expect(page.getByText("Owner research")).toHaveCount(0);
   expect(projectRequests).toContain(
     `DELETE /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}`,
@@ -2056,6 +2506,115 @@ test("project chat stop aborts the scoped in-flight stream", async ({
   releaseStream();
   await expect(textarea).toBeEnabled();
   await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
+});
+
+test("project chat keeps a failed durable Run visible with recovery guidance", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  const failureMessageIds: Partial<
+    Record<"submitted" | "live" | "admission", string>
+  > = {};
+  const priorMessages = [
+    {
+      type: "human",
+      id: "msg-project-first-question",
+      content: [{ type: "text", text: "First project question" }],
+    },
+    {
+      type: "ai",
+      id: "msg-project-first-answer",
+      content: "First project answer",
+    },
+    {
+      type: "human",
+      id: "msg-project-second-question",
+      content: [{ type: "text", text: "Second project question" }],
+    },
+    {
+      type: "ai",
+      id: "msg-project-second-answer",
+      content: "Second project answer",
+    },
+  ];
+  const requests = await mockPrivateWork(page, true, {
+    runBodies,
+    failureMessageIds,
+    stateMessages: priorMessages,
+    streamTerminalStatus: "error",
+  });
+  const expectedMessageOrder = [
+    "First project question",
+    "First project answer",
+    "Second project question",
+    "Second project answer",
+    "Trigger project failure",
+  ];
+  const expectSingleOrderedTranscript = async () => {
+    const messageList = page.getByTestId("main-message-list");
+    for (const text of expectedMessageOrder) {
+      await expect(messageList.getByText(text, { exact: true })).toHaveCount(1);
+    }
+    const transcript = await messageList.innerText();
+    const positions = expectedMessageOrder.map((text) =>
+      transcript.indexOf(text),
+    );
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual(
+      [...positions].sort((left, right) => left - right),
+    );
+  };
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("Trigger project failure");
+  await textarea.press("Enter");
+
+  await expect.poll(() => runBodies).toHaveLength(1);
+  const submittedBody = runBodies[0] as {
+    input?: { messages?: unknown[] };
+  };
+  const submittedMessage = latestVisibleSubmittedHumanMessage(
+    submittedBody.input?.messages ?? [],
+  );
+  const submittedMessageId = submittedMessage
+    ? Reflect.get(submittedMessage, "id")
+    : null;
+  expect(typeof submittedMessageId).toBe("string");
+  expect((submittedMessageId as string).length).toBeGreaterThan(0);
+
+  const alert = page.getByTestId("run-failure-alert");
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText("Run did not finish");
+  await expect(alert).toContainText("send the message again");
+  await expect(page.getByRole("button", { name: "Submit" })).toBeEnabled();
+  await expect
+    .poll(() =>
+      requests.includes(
+        `GET /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/run-failed/messages`,
+      ),
+    )
+    .toBe(true);
+  expect(failureMessageIds).toEqual({
+    submitted: submittedMessageId,
+    live: submittedMessageId,
+    admission: submittedMessageId,
+  });
+  await expectSingleOrderedTranscript();
+
+  await page.reload();
+  await expect(page.getByTestId("run-failure-alert")).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        requests.filter(
+          (request) =>
+            request ===
+            `GET /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/run-failed/messages`,
+        ).length,
+    )
+    .toBeGreaterThan(1);
+  await expectSingleOrderedTranscript();
 });
 
 test("project human-input answer stays hidden and scoped in the run body", async ({
@@ -2117,8 +2676,22 @@ test("project human-input answer stays hidden and scoped in the run body", async
   });
 
   await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
-  await expect(page.getByTestId("human-input-card")).toBeVisible();
-  await page.getByRole("button", { name: "staging" }).click();
+  const humanInputCard = page.getByTestId("human-input-card");
+  await expect(humanInputCard).toBeVisible();
+  await expect(
+    humanInputCard.getByText("1 item needs attention", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Need your help", { exact: true })).toHaveCount(
+    1,
+  );
+
+  const staging = humanInputCard.getByRole("radio", { name: "staging" });
+  await expect(staging).toHaveAttribute("aria-checked", "false");
+  await staging.click();
+  await expect(staging).toHaveAttribute("aria-checked", "true");
+  expect(runBodies).toHaveLength(0);
+
+  await humanInputCard.getByRole("button", { name: "Submit answer" }).click();
 
   await expect.poll(() => runBodies).toHaveLength(1);
   const serialized = JSON.stringify(runBodies[0]);
@@ -2132,7 +2705,10 @@ test("project upload is sent only through the scoped upload route", async ({
 }) => {
   const runBodies: unknown[] = [];
   const uploadRequests: string[] = [];
-  await mockPrivateWork(page, true, { runBodies, uploadRequests });
+  const requests = await mockPrivateWork(page, true, {
+    runBodies,
+    uploadRequests,
+  });
   const legacyUploads: string[] = [];
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
@@ -2156,6 +2732,9 @@ test("project upload is sent only through the scoped upload route", async ({
     .toEqual([
       `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/uploads`,
     ]);
+  expect(requests).toContain(
+    `GET /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/uploads/limits`,
+  );
   await expect.poll(() => runBodies).toHaveLength(1);
   expect(JSON.stringify(runBodies[0])).toContain(
     "/mnt/user-data/uploads/release.txt",

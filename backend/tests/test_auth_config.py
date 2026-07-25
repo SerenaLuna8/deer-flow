@@ -43,7 +43,10 @@ def test_auth_config_missing_secret_generates_and_persists(tmp_path, caplog):
     cfg._auth_config = None
     secret_file = tmp_path / ".jwt_secret"
     try:
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("dotenv.load_dotenv", return_value=False),
+        ):
             os.environ.pop("AUTH_JWT_SECRET", None)
             with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=tmp_path)), caplog.at_level(logging.WARNING):
                 config = cfg.get_auth_config()
@@ -63,7 +66,10 @@ def test_auth_config_reuses_persisted_secret(tmp_path):
     persisted = "persisted-secret-from-file-min-32-chars!!"
     (tmp_path / ".jwt_secret").write_text(persisted, encoding="utf-8")
     try:
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("dotenv.load_dotenv", return_value=False),
+        ):
             os.environ.pop("AUTH_JWT_SECRET", None)
             with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=tmp_path)):
                 config = cfg.get_auth_config()
@@ -79,7 +85,10 @@ def test_auth_config_empty_secret_file_generates_new(tmp_path):
     cfg._auth_config = None
     (tmp_path / ".jwt_secret").write_text("", encoding="utf-8")
     try:
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("dotenv.load_dotenv", return_value=False),
+        ):
             os.environ.pop("AUTH_JWT_SECRET", None)
             with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=tmp_path)):
                 config = cfg.get_auth_config()

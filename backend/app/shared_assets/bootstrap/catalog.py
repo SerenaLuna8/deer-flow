@@ -31,12 +31,15 @@ class BootstrapEntry(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     version: int = Field(ge=1)
     payload_path: str
+    payload_format: Literal["document", "skill_archive_v1"] = "document"
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _source_kind_matches(self) -> BootstrapEntry:
         if self.source_key.split(":", 2)[1] != self.kind:
             raise ValueError("bootstrap source key kind does not match entry kind")
+        if self.payload_format == "skill_archive_v1" and self.kind != "skill":
+            raise ValueError("bootstrap Skill archives require Skill entries")
         _safe_relative_path(self.payload_path)
         return self
 

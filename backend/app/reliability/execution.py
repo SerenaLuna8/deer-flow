@@ -39,6 +39,7 @@ from app.private_work.sandbox_files import (
     PrivateSandboxFileProjection,
 )
 from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
@@ -47,6 +48,7 @@ from app.reliability.jobs import (
     automation_run_idempotency_key,
     private_run_idempotency_key,
 )
+from app.shared_assets.model_refs import resolve_model_ref
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -104,6 +106,16 @@ class TransientExecutionError(RuntimeError):
         super().__init__(public_error_code)
 
 
+class PermanentExecutionError(RuntimeError):
+    """A deterministic public-safe failure that must not be retried."""
+
+    def __init__(self, public_error_code: str) -> None:
+        if _PUBLIC_ERROR_CODE.fullmatch(public_error_code) is None:
+            raise ValueError("permanent execution error requires a public code")
+        self.public_error_code = public_error_code
+        super().__init__(public_error_code)
+
+
 class AmbiguousExternalSideEffect(RuntimeError):
     """Execution may have crossed an external side-effect boundary."""
 
@@ -112,9 +124,14 @@ class AmbiguousExternalSideEffect(RuntimeError):
 class AgentExecutionResult:
     status: Literal["succeeded", "cancelled", "failed"]
     public_error_code: str | None = None
+    retryable: bool = False
 
     def __post_init__(self) -> None:
         JobOutcome(self.status, self.public_error_code)
+        if type(self.retryable) is not bool:
+            raise TypeError("retryable must be a boolean")
+        if self.status != "failed" and self.retryable:
+            raise ValueError("terminal success/cancel outcomes cannot be retryable")
 
     @classmethod
     def succeeded(cls) -> AgentExecutionResult:
@@ -125,8 +142,13 @@ class AgentExecutionResult:
         return cls("cancelled")
 
     @classmethod
-    def failed(cls, public_error_code: str) -> AgentExecutionResult:
-        return cls("failed", public_error_code)
+    def failed(
+        cls,
+        public_error_code: str,
+        *,
+        retryable: bool = True,
+    ) -> AgentExecutionResult:
+        return cls("failed", public_error_code, retryable)
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,6 +780,41 @@ class PrivateRunExecutionBoundary:
         self._ambiguous_side_effect = True
 
 
+class _PrivateRunThreadMetadataStore:
+    """Persist the first completed title inside the exact private scope."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        scope: PrivateResourceScope,
+        boundary: PrivateRunExecutionBoundary,
+    ) -> None:
+        self._factory = session_factory
+        self._scope = scope
+        self._boundary = boundary
+
+    async def update_display_name(
+        self,
+        thread_id: str,
+        display_name: str,
+    ) -> None:
+        await self._boundary.before_checkpoint_write()
+        async with self._factory() as session, session.begin():
+            await PrivateThreadRepository(
+                session,
+            ).set_automatic_display_name(
+                scope=self._scope,
+                thread_id=thread_id,
+                display_name=display_name,
+            )
+
+    async def update_status(self, thread_id: str, status: str) -> None:
+        # Private Run admission/settlement owns status. The harness invokes this
+        # compatibility hook after title sync, so it intentionally stays a no-op.
+        del thread_id, status
+
+
 class RunAgentPrivateExecutor:
     """Production adapter that invokes ``run_agent`` only inside the Worker."""
 
@@ -863,14 +920,18 @@ class RunAgentPrivateExecutor:
         try:
             exact_model_name = execution.run.model_name
             if exact_model_name is None or self._app_config.get_model_config(exact_model_name) is None:
-                raise TransientExecutionError("RUN_ASSET_STALE")
+                raise PermanentExecutionError("RUN_ASSET_STALE")
             private_runtime = await self._asset_runtime.materialize(
                 execution.context,
                 admitted,
                 authorization_boundary=boundary,
             )
-            if private_runtime.model_ref != exact_model_name:
-                raise TransientExecutionError("RUN_ASSET_STALE")
+            resolved_runtime_model = resolve_model_ref(
+                self._app_config,
+                private_runtime.model_ref,
+            )
+            if getattr(resolved_runtime_model, "name", None) != exact_model_name:
+                raise PermanentExecutionError("RUN_ASSET_STALE")
 
             skills_config = getattr(self._app_config, "skills", None)
             skill_container_path = getattr(
@@ -934,7 +995,11 @@ class RunAgentPrivateExecutor:
                 store=self._store,
                 event_store=self._event_store,
                 run_events_config=None,
-                thread_store=None,
+                thread_store=_PrivateRunThreadMetadataStore(
+                    self._factory,
+                    scope=execution.context.resource_scope,
+                    boundary=boundary,
+                ),
                 app_config=self._app_config,
                 private_scope=execution.context.resource_scope,
                 authorization_boundary=boundary,
@@ -1273,6 +1338,7 @@ class PrivateRunJobHandler:
                         outcome=result.status,
                         public_error_code=result.public_error_code,
                         ambiguous_side_effect=ambiguous_side_effect,
+                        retryable_failure=(result.retryable and not durable_terminal),
                         cancel_preempts_outcome=not durable_terminal,
                         retry_initial_seconds=self._retry_initial_seconds,
                         retry_max_seconds=self._retry_max_seconds,
@@ -1364,6 +1430,11 @@ class PrivateRunJobHandler:
             raise
         except TransientExecutionError as error:
             result = AgentExecutionResult.failed(error.public_error_code)
+        except PermanentExecutionError as error:
+            result = AgentExecutionResult.failed(
+                error.public_error_code,
+                retryable=False,
+            )
         except PrivateWorkMcpQuotaExceeded as error:
             result = AgentExecutionResult.failed(error.code)
         except AmbiguousExternalSideEffect:
@@ -1398,6 +1469,7 @@ __all__ = [
     "PrivateRunExecutionBoundary",
     "PrivateRunExecutor",
     "PrivateRunJobHandler",
+    "PermanentExecutionError",
     "RunAgentPrivateExecutor",
     "TransientExecutionError",
 ]

@@ -9,8 +9,15 @@ from typing import Protocol
 from email_validator import EmailNotValidError, validate_email
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.notifications.models import (
+    InvitationNotificationView,
+    NotificationPage,
+    decode_notification_cursor,
+)
+from app.notifications.repository import NotificationRepository
 from app.private_work.context import PrivateWorkContext
 from app.private_work.retention import PrivateWorkRetentionService
+from app.private_work.retention_jobs import RetentionJobAdmission
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectValidationFailed
@@ -18,6 +25,7 @@ from app.projects.invitation_models import (
     CreatedInvitation,
     InvitationClaim,
     InvitationView,
+    ProjectInvitationConflict,
     ProjectInvitationInvalid,
     RedeemedInvitation,
 )
@@ -35,7 +43,7 @@ class InvitationQuotaPort(Protocol):
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None: ...
 
 
@@ -60,9 +68,9 @@ class _NoopInvitationQuota:
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None:
-        del session, context, membership_id, membership_version
+        del session, context, membership_id, activation_generation
 
 
 def hash_invitation_token(token: str) -> str:
@@ -88,13 +96,17 @@ class InvitationService:
         repository: InvitationRepository,
         *,
         retention: object = PrivateWorkRetentionService,
+        retention_jobs: object = RetentionJobAdmission,
         quota: InvitationQuotaPort | None = None,
         audit: InvitationAuditPort | None = None,
+        notifications: NotificationRepository | None = None,
     ):
         self.repository = repository
         self._retention = retention
+        self._retention_jobs = retention_jobs
         self._quota = quota or _NoopInvitationQuota()
         self._audit = audit
+        self._notifications = notifications or NotificationRepository(repository.session)
 
     async def create(
         self,
@@ -138,6 +150,48 @@ class InvitationService:
     ) -> tuple[InvitationView, ...]:
         invited_email = normalize_email(user_email)
         return await self.repository.list_mine(invited_email, now)
+
+    async def list_notifications(
+        self,
+        user_id: uuid.UUID,
+        now: datetime,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> NotificationPage:
+        if limit < 1 or limit > 100:
+            raise ProjectValidationFailed("invalid_notification_limit")
+        decoded_cursor = None
+        if cursor is not None:
+            try:
+                decoded_cursor = decode_notification_cursor(cursor)
+            except ValueError:
+                raise ProjectValidationFailed("invalid_notification_cursor") from None
+        return await self._notifications.list_for_recipient(
+            user_id,
+            now,
+            cursor=decoded_cursor,
+            limit=limit,
+        )
+
+    async def mark_notification_read(
+        self,
+        user_id: uuid.UUID,
+        notification_id: uuid.UUID,
+        now: datetime,
+    ) -> InvitationNotificationView:
+        return await self._notifications.mark_read(
+            user_id,
+            notification_id,
+            now,
+        )
+
+    async def mark_all_notifications_read(
+        self,
+        user_id: uuid.UUID,
+        now: datetime,
+    ) -> int:
+        return await self._notifications.mark_all_read(user_id, now)
 
     async def revoke(
         self,
@@ -187,50 +241,109 @@ class InvitationService:
             self._require_redeemable(invitation, now)
             if invitation.invited_email != normalized_email:
                 raise ProjectInvitationInvalid()
-            result = await self.repository.redeem_locked(
+            return await self._redeem_locked(
                 project,
                 invitation,
                 user_id=user_id,
                 now=now,
+                request_id=request_id,
             )
-            membership = await self.repository.lock_membership(
-                project.id,
+
+    async def accept_notification(
+        self,
+        user_id: uuid.UUID,
+        notification_id: uuid.UUID,
+        *,
+        expected_version: int,
+        now: datetime,
+        request_id: str = "notification-accept",
+    ) -> RedeemedInvitation:
+        async with self.repository.transaction():
+            project_id = await self._notifications.locate_project_for_accept(
                 user_id,
+                notification_id,
             )
-            issued_context = PrivateWorkContext.from_project(
-                ProjectContext(
-                    user_id=user_id,
-                    project_id=project.id,
-                    membership_id=membership.id,
-                    role=result.role,
-                    capabilities=capabilities_for(result.role),
-                    membership_version=membership.version,
-                    request_id="invitation-redeem",
-                )
+            project = await self.repository.lock_project(project_id)
+            invitation = await self._notifications.lock_invitation_for_accept(
+                user_id,
+                notification_id,
+                project_id,
             )
-            await self._quota.reserve_member(
-                self.repository.session,
-                issued_context,
-                membership_id=membership.id,
-                membership_version=membership.version,
-            )
-            await self._retention.restore_owner(
-                self.repository.session,
-                project_id=project.id,
-                owner_user_id=str(user_id),
+            self._require_redeemable(invitation, now)
+            if invitation.version != expected_version:
+                raise ProjectInvitationConflict()
+            return await self._redeem_locked(
+                project,
+                invitation,
+                user_id=user_id,
                 now=now,
+                request_id=request_id,
             )
-            if self._audit is not None:
-                await self._audit.invitation_redeemed_and_member_joined(
-                    self.repository.session,
-                    user_id=user_id,
-                    project_id=project.id,
-                    invitation_id=result.invitation_id,
-                    membership_id=result.membership_id,
-                    role=result.role,
-                    request_id=request_id,
-                )
-            return result
+
+    async def _redeem_locked(
+        self,
+        project,
+        invitation,
+        *,
+        user_id: uuid.UUID,
+        now: datetime,
+        request_id: str,
+    ) -> RedeemedInvitation:
+        result = await self.repository.redeem_locked(
+            project,
+            invitation,
+            user_id=user_id,
+            now=now,
+        )
+        membership = await self.repository.lock_membership(
+            project.id,
+            user_id,
+        )
+        issued_context = PrivateWorkContext.from_project(
+            ProjectContext(
+                user_id=user_id,
+                project_id=project.id,
+                membership_id=membership.id,
+                role=result.role,
+                capabilities=capabilities_for(result.role),
+                membership_version=membership.version,
+                request_id=request_id,
+            )
+        )
+        await self._quota.reserve_member(
+            self.repository.session,
+            issued_context,
+            membership_id=membership.id,
+            activation_generation=membership.activation_generation,
+        )
+        await self._retention.restore_owner(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=str(user_id),
+            now=now,
+        )
+        await self._retention_jobs.cancel_former_owner(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=str(user_id),
+            now=now,
+        )
+        await self._notifications.mark_invitation_acted(
+            user_id,
+            result.invitation_id,
+            now,
+        )
+        if self._audit is not None:
+            await self._audit.invitation_redeemed_and_member_joined(
+                self.repository.session,
+                user_id=user_id,
+                project_id=project.id,
+                invitation_id=result.invitation_id,
+                membership_id=result.membership_id,
+                role=result.role,
+                request_id=request_id,
+            )
+        return result
 
     @staticmethod
     def _require_redeemable(invitation, now: datetime) -> None:

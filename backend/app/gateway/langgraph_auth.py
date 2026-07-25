@@ -20,6 +20,7 @@ from langgraph_sdk import Auth
 
 from app.gateway.auth.errors import TokenError
 from app.gateway.auth.jwt import decode_token
+from app.gateway.auth.sessions import AuthSessionUnavailable, validate_access_session
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
 from app.gateway.deps import get_local_provider
 
@@ -63,7 +64,7 @@ async def authenticate(request):
     """Validate the session cookie, decode JWT, and check token_version.
 
     Same validation chain as Gateway's get_current_user_from_request:
-      cookie → decode JWT → DB lookup → token_version match
+      cookie → decode JWT → DB lookup → token_version → durable session
     Also enforces CSRF on state-changing methods.
     """
     # CSRF check before authentication so forged cross-site requests
@@ -97,6 +98,18 @@ async def authenticate(request):
         raise Auth.exceptions.HTTPException(
             status_code=401,
             detail="Token revoked (password changed)",
+        )
+    try:
+        session_is_active = await validate_access_session(payload)
+    except AuthSessionUnavailable:
+        raise Auth.exceptions.HTTPException(
+            status_code=503,
+            detail="Authentication storage unavailable",
+        ) from None
+    if not session_is_active:
+        raise Auth.exceptions.HTTPException(
+            status_code=401,
+            detail="Invalid token",
         )
 
     return payload.sub

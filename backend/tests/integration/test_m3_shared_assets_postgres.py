@@ -55,9 +55,10 @@ async def test_m3_end_to_end_shared_asset_governance(
 ) -> None:
     scenario = await M3Scenario.create(migrated_postgres_database_url)
     try:
-        published = await scenario.publish_system_catalog()
+        published = await scenario.bootstrap_system_catalog()
         binding = await scenario.bind_system_agent(published.agent_v1)
-        await scenario.publish_system_agent_v2()
+        with pytest.raises(AssetForbidden):
+            await scenario.attempt_runtime_system_agent_version()
 
         assert binding.version_id == published.agent_v1
         assert (await scenario.resolve_bound_agent()).version_id == published.agent_v1
@@ -67,9 +68,9 @@ async def test_m3_end_to_end_shared_asset_governance(
         with pytest.raises(AssetNotFound):
             await scenario.other_project_read_project_agent()
 
-        await scenario.suspend_bound_system_agent()
-        with pytest.raises(AssetResolutionUnavailable):
-            await scenario.resolve_bound_agent()
+        with pytest.raises(AssetForbidden):
+            await scenario.suspend_bound_system_agent()
+        assert (await scenario.resolve_bound_agent()).version_id == published.agent_v1
 
         snapshot = await scenario.resolve_project_mcp_before_revoke()
         assert snapshot.credential_grant_ids

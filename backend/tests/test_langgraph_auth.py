@@ -21,18 +21,24 @@ from langgraph_sdk import Auth
 from app.gateway.auth.config import AuthConfig, set_auth_config
 from app.gateway.auth.jwt import create_access_token, decode_token
 from app.gateway.auth.models import User
+from app.gateway.auth.sessions import AuthSessionUnavailable
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
 from app.gateway.langgraph_auth import add_owner_filter, authenticate
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 _JWT_SECRET = "test-secret-key-for-langgraph-auth-testing-min-32"
+_SESSION_ID = "a" * 43
 
 
 @pytest.fixture(autouse=True)
 def _setup_auth_config():
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
-    yield
+    with patch(
+        "app.gateway.langgraph_auth.validate_access_session",
+        new=AsyncMock(return_value=True),
+    ):
+        yield
     set_auth_config(AuthConfig(jwt_secret=_JWT_SECRET))
 
 
@@ -76,14 +82,18 @@ def test_invalid_jwt_raises_401():
 
 
 def test_expired_jwt_raises_401():
-    token = create_access_token("user-1", expires_delta=timedelta(seconds=-1))
+    token = create_access_token(
+        "user-1",
+        expires_delta=timedelta(seconds=-1),
+        session_id=_SESSION_ID,
+    )
     with pytest.raises(Auth.exceptions.HTTPException) as exc:
         asyncio.run(authenticate(_req({"access_token": token})))
     assert exc.value.status_code == 401
 
 
 def test_user_not_found_raises_401():
-    token = create_access_token("ghost")
+    token = create_access_token("ghost", session_id=_SESSION_ID)
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(None)):
         with pytest.raises(Auth.exceptions.HTTPException) as exc:
             asyncio.run(authenticate(_req({"access_token": token})))
@@ -93,7 +103,11 @@ def test_user_not_found_raises_401():
 
 def test_token_version_mismatch_raises_401():
     user = _user(token_version=2)
-    token = create_access_token(str(user.id), token_version=1)
+    token = create_access_token(
+        str(user.id),
+        token_version=1,
+        session_id=_SESSION_ID,
+    )
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
         with pytest.raises(Auth.exceptions.HTTPException) as exc:
             asyncio.run(authenticate(_req({"access_token": token})))
@@ -103,7 +117,11 @@ def test_token_version_mismatch_raises_401():
 
 def test_valid_token_returns_user_id():
     user = _user(token_version=0)
-    token = create_access_token(str(user.id), token_version=0)
+    token = create_access_token(
+        str(user.id),
+        token_version=0,
+        session_id=_SESSION_ID,
+    )
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
         result = asyncio.run(authenticate(_req({"access_token": token})))
     assert result == str(user.id)
@@ -111,10 +129,59 @@ def test_valid_token_returns_user_id():
 
 def test_valid_token_matching_version():
     user = _user(token_version=5)
-    token = create_access_token(str(user.id), token_version=5)
+    token = create_access_token(
+        str(user.id),
+        token_version=5,
+        session_id=_SESSION_ID,
+    )
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
         result = asyncio.run(authenticate(_req({"access_token": token})))
     assert result == str(user.id)
+
+
+def test_revoked_durable_session_raises_401():
+    user = _user(token_version=0)
+    token = create_access_token(
+        str(user.id),
+        token_version=0,
+        session_id=_SESSION_ID,
+    )
+    with (
+        patch(
+            "app.gateway.langgraph_auth.get_local_provider",
+            return_value=_mock_provider(user),
+        ),
+        patch(
+            "app.gateway.langgraph_auth.validate_access_session",
+            new=AsyncMock(return_value=False),
+        ),
+        pytest.raises(Auth.exceptions.HTTPException) as exc,
+    ):
+        asyncio.run(authenticate(_req({"access_token": token})))
+    assert exc.value.status_code == 401
+
+
+def test_session_database_failure_is_publicly_safe_503():
+    user = _user(token_version=0)
+    token = create_access_token(
+        str(user.id),
+        token_version=0,
+        session_id=_SESSION_ID,
+    )
+    with (
+        patch(
+            "app.gateway.langgraph_auth.get_local_provider",
+            return_value=_mock_provider(user),
+        ),
+        patch(
+            "app.gateway.langgraph_auth.validate_access_session",
+            new=AsyncMock(side_effect=AuthSessionUnavailable()),
+        ),
+        pytest.raises(Auth.exceptions.HTTPException) as exc,
+    ):
+        asyncio.run(authenticate(_req({"access_token": token})))
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "Authentication storage unavailable"
 
 
 # ── @auth.authenticate edge cases ────────────────────────────────────────
@@ -122,7 +189,7 @@ def test_valid_token_matching_version():
 
 def test_provider_exception_propagates():
     """Provider raises → should not be swallowed silently."""
-    token = create_access_token("user-1")
+    token = create_access_token("user-1", session_id=_SESSION_ID)
     p = AsyncMock()
     p.get_user = AsyncMock(side_effect=RuntimeError("DB down"))
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=p):
@@ -130,24 +197,38 @@ def test_provider_exception_propagates():
             asyncio.run(authenticate(_req({"access_token": token})))
 
 
-def test_jwt_missing_ver_defaults_to_zero():
-    """JWT without 'ver' claim → decoded as ver=0, matches user with token_version=0."""
+def test_jwt_missing_ver_is_rejected():
+    """JWT without the signed token-version claim is malformed."""
     import jwt as pyjwt
 
     uid = str(uuid4())
-    raw = pyjwt.encode({"sub": uid, "exp": 9999999999, "iat": 1000000000}, _JWT_SECRET, algorithm="HS256")
+    raw = pyjwt.encode(
+        {
+            "sub": uid,
+            "exp": 9999999999,
+            "iat": 1000000000,
+            "sid": _SESSION_ID,
+        },
+        _JWT_SECRET,
+        algorithm="HS256",
+    )
     user = _user(user_id=uid, token_version=0)
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
-        result = asyncio.run(authenticate(_req({"access_token": raw})))
-    assert result == uid
+        with pytest.raises(Auth.exceptions.HTTPException) as exc:
+            asyncio.run(authenticate(_req({"access_token": raw})))
+    assert exc.value.status_code == 401
 
 
-def test_jwt_missing_ver_rejected_when_user_version_nonzero():
-    """JWT without 'ver' (defaults 0) vs user with token_version=1 → 401."""
+def test_jwt_missing_session_id_is_rejected():
+    """A signed but stateless JWT cannot authenticate."""
     import jwt as pyjwt
 
     uid = str(uuid4())
-    raw = pyjwt.encode({"sub": uid, "exp": 9999999999, "iat": 1000000000}, _JWT_SECRET, algorithm="HS256")
+    raw = pyjwt.encode(
+        {"sub": uid, "exp": 9999999999, "iat": 1000000000, "ver": 1},
+        _JWT_SECRET,
+        algorithm="HS256",
+    )
     user = _user(user_id=uid, token_version=1)
     with patch("app.gateway.langgraph_auth.get_local_provider", return_value=_mock_provider(user)):
         with pytest.raises(Auth.exceptions.HTTPException) as exc:
@@ -230,7 +311,11 @@ def test_filter_with_empty_metadata():
 
 
 def test_shared_jwt_secret():
-    token = create_access_token("user-1", token_version=3)
+    token = create_access_token(
+        "user-1",
+        token_version=3,
+        session_id=_SESSION_ID,
+    )
     payload = decode_token(token)
     from app.gateway.auth.errors import TokenError
 

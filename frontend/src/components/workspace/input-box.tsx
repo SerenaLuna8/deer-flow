@@ -93,15 +93,6 @@ import {
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -128,6 +119,15 @@ import {
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import {
+  ModelSelector,
+  ModelSelectorContent,
+  ModelSelectorItem,
+  ModelSelectorLabel,
+  ModelSelectorList,
+  ModelSelectorName,
+  ModelSelectorTrigger,
+} from "./model-selector-popover";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
@@ -407,9 +407,16 @@ export function InputBox({
           toast.error(
             t.uploads.tooManyFiles(violation.files.length, violation.limit),
           );
-        } else {
+        } else if (violation.code === "max_total_size") {
           toast.error(
             t.uploads.totalSizeTooLarge(
+              violation.files.length,
+              formatUploadSize(violation.limit),
+            ),
+          );
+        } else {
+          toast.error(
+            t.uploads.projectStorageTooSmall(
               violation.files.length,
               formatUploadSize(violation.limit),
             ),
@@ -633,7 +640,7 @@ export function InputBox({
               threadId,
             )
           ) {
-            return false;
+            throw new DOMException("Goal request superseded", "AbortError");
           }
           const objective = goal?.objective;
           toast.info(
@@ -661,7 +668,7 @@ export function InputBox({
               threadId,
             )
           ) {
-            return false;
+            throw new DOMException("Goal request superseded", "AbortError");
           }
           toast.success(t.inputBox.goalCleared);
           onGoalChange?.(null);
@@ -690,24 +697,23 @@ export function InputBox({
               threadId,
             )
           ) {
-            return false;
+            throw new DOMException("Goal request superseded", "AbortError");
           }
           toast.success(t.inputBox.goalSet);
           onGoalChange?.(goal);
         }
-        textInput.setInput("");
         return true;
       } catch (error) {
         if (
           isAbortError(error) ||
           !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
         ) {
-          return false;
+          throw error;
         }
         toast.error(
           error instanceof Error ? error.message : t.inputBox.goalFailed,
         );
-        return false;
+        throw error;
       } finally {
         finishGoalRequest(goalRequestStateRef.current, request);
       }
@@ -720,14 +726,12 @@ export function InputBox({
       t.inputBox.goalNone,
       t.inputBox.goalSet,
       privateWork.apiBaseURL,
-      textInput,
       threadId,
     ],
   );
 
   const handleCompactCommand = useCallback(async (): Promise<void> => {
     if (isWelcomeMode) {
-      textInput.setInput("");
       toast.info(t.inputBox.compactSkipped);
       return;
     }
@@ -741,9 +745,8 @@ export function InputBox({
       if (
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
       ) {
-        return;
+        throw new DOMException("Compact request superseded", "AbortError");
       }
-      textInput.setInput("");
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
       setFollowups([]);
@@ -770,11 +773,12 @@ export function InputBox({
         isAbortError(error) ||
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
       ) {
-        return;
+        throw error;
       }
       toast.error(
         error instanceof Error ? error.message : t.inputBox.compactFailed,
       );
+      throw error;
     } finally {
       finishGoalRequest(compactRequestStateRef.current, request);
     }
@@ -785,7 +789,6 @@ export function InputBox({
     t.inputBox.compactSuccess,
     isWelcomeMode,
     privateWork,
-    textInput,
     threadId,
   ]);
 
@@ -2103,17 +2106,21 @@ export function InputBox({
                 </PromptInputButton>
               </ModelSelectorTrigger>
               <ModelSelectorContent>
-                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
+                <ModelSelectorLabel>{t.inputBox.model}</ModelSelectorLabel>
                 <ModelSelectorList>
                   {models.map((m) => (
                     <ModelSelectorItem
+                      className={cn(
+                        m.name === context.model_name
+                          ? "text-accent-foreground"
+                          : "text-muted-foreground/65",
+                      )}
                       key={m.name}
-                      value={m.name}
                       onSelect={() => handleModelSelect(m.name)}
                     >
                       <div className="flex min-w-0 flex-1 flex-col">
                         <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
+                        <span className="text-muted-foreground truncate text-xs">
                           {m.model}
                         </span>
                       </div>
@@ -2147,6 +2154,7 @@ export function InputBox({
       )}
 
       {isWelcomeMode &&
+        !composerLocked &&
         searchParams.get("mode") !== "skill" &&
         !selectedSlashSkill &&
         !showSkillSuggestions && (

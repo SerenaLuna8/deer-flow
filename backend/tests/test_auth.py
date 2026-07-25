@@ -10,6 +10,8 @@ from app.gateway.auth.errors import TokenError
 from app.gateway.auth.models import User
 from app.gateway.auth.password import needs_rehash
 
+_SESSION_ID = "a" * 43
+
 
 def test_hash_password_and_verify() -> None:
     password = "s3cr3tP@ssw0rd!"
@@ -47,7 +49,7 @@ def test_create_and_decode_token(monkeypatch) -> None:
         "test-secret-key-for-jwt-testing-minimum-32-chars",
     )
     user_id = str(uuid4())
-    payload = decode_token(create_access_token(user_id))
+    payload = decode_token(create_access_token(user_id, session_id=_SESSION_ID))
     assert payload is not None
     assert not isinstance(payload, TokenError)
     assert payload.sub == user_id
@@ -57,6 +59,7 @@ def test_expired_and_invalid_tokens_fail_closed() -> None:
     expired = create_access_token(
         str(uuid4()),
         expires_delta=timedelta(seconds=-1),
+        session_id=_SESSION_ID,
     )
     assert decode_token(expired) == TokenError.EXPIRED
     for token in ("not.a.valid.token", "", "completely-wrong"):

@@ -1,58 +1,49 @@
-# Documentation
+# 后端文档索引
 
-This directory contains detailed documentation for the DeerFlow backend.
+这里仅保留描述当前实现、配置和运维边界的文档。历史里程碑、一次性实现报告和已删除迁移不作为运行依据；精确行为以代码、OpenAPI 和当前测试门禁为准。
 
-## Quick Links
+## 架构与接口
 
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture overview |
-| [API.md](API.md) | Complete API reference |
-| [AUTH_DESIGN.md](AUTH_DESIGN.md) | User authentication, CSRF, and per-user isolation design |
-| [CONFIGURATION.md](CONFIGURATION.md) | Configuration options |
-| [SETUP.md](SETUP.md) | Quick setup guide |
+| 文档 | 内容 |
+| --- | --- |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | Gateway、Worker、Scheduler、Agent harness 与持久化边界 |
+| [API.md](./API.md) | 当前 project-scoped API 路由族和错误契约 |
+| [PATH_EXAMPLES.md](./PATH_EXAMPLES.md) | HTTP、Sandbox 和本地配置路径示例 |
+| [STREAMING.md](./STREAMING.md) | Run stream、durable SSE 与客户端事件处理 |
+| [REPLAY_E2E.md](./REPLAY_E2E.md) | Gateway 录制与确定性 replay E2E |
 
-## Feature Documentation
+## 配置与集成
 
-| Document | Description |
-|----------|-------------|
-| [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
-| [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
-| [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
-| [SANDBOX_MEMORY_PROFILING.md](SANDBOX_MEMORY_PROFILING.md) | Sandbox memory baseline and runtime comparison guide |
-| [summarization.md](summarization.md) | Context summarization feature |
-| [plan_mode_usage.md](plan_mode_usage.md) | Plan mode with TodoList |
-| [AUTO_TITLE_GENERATION.md](AUTO_TITLE_GENERATION.md) | Automatic title generation |
+| 文档 | 内容 |
+| --- | --- |
+| [CONFIGURATION.md](./CONFIGURATION.md) | `config.yaml`、环境变量和 Sandbox 配置 |
+| [SSO.md](./SSO.md) | OIDC SSO 配置 |
+| [IM_CHANNEL_CONNECTIONS.md](./IM_CHANNEL_CONNECTIONS.md) | Project-bound IM Channel Connection |
+| [MCP_SERVER.md](./MCP_SERVER.md) | MCP 资产、Credential 和 Run snapshot |
+| [APPLE_CONTAINER.md](./APPLE_CONTAINER.md) | Apple Container Sandbox 说明 |
 
-## Development
+## Agent harness
 
-| Document | Description |
-|----------|-------------|
-| [TODO.md](TODO.md) | Planned features and known issues |
+| 文档 | 内容 |
+| --- | --- |
+| [GUARDRAILS.md](./GUARDRAILS.md) | Tool call 前置授权与 provider |
+| [FILE_UPLOAD.md](./FILE_UPLOAD.md) | 文件上传和转换 |
+| [AUTO_TITLE_GENERATION.md](./AUTO_TITLE_GENERATION.md) | Thread title 生成 |
+| [plan_mode_usage.md](./plan_mode_usage.md) | Plan Mode 与 Todo middleware |
+| [summarization.md](./summarization.md) | 上下文压缩 |
+| [TUI.md](./TUI.md) | 本地嵌入式 Terminal UI |
 
-## Getting Started
+## 诊断与性能
 
-1. **New to DeerFlow?** Start with [SETUP.md](SETUP.md) for quick installation
-2. **Configuring the system?** See [CONFIGURATION.md](CONFIGURATION.md)
-3. **Understanding the architecture?** Read [ARCHITECTURE.md](ARCHITECTURE.md)
-4. **Building integrations?** Check [API.md](API.md) for API reference
+| 文档 | 内容 |
+| --- | --- |
+| [BLOCKING_IO_DETECTION.md](./BLOCKING_IO_DETECTION.md) | Async/线程边界静态与动态检查 |
+| [SANDBOX_MEMORY_PROFILING.md](./SANDBOX_MEMORY_PROFILING.md) | Sandbox 内存基线与分析流程 |
 
-## Document Organization
+## 权威入口
 
-```
-docs/
-├── README.md                  # This file
-├── ARCHITECTURE.md            # System architecture
-├── API.md                     # API reference
-├── AUTH_DESIGN.md             # User authentication and isolation design
-├── CONFIGURATION.md           # Configuration guide
-├── SETUP.md                   # Setup instructions
-├── FILE_UPLOAD.md             # File upload feature
-├── PATH_EXAMPLES.md           # Path usage examples
-├── summarization.md           # Summarization feature
-├── plan_mode_usage.md         # Plan mode feature
-├── STREAMING.md               # Token-level streaming design
-├── AUTO_TITLE_GENERATION.md   # Title generation
-├── TITLE_GENERATION_IMPLEMENTATION.md  # Title implementation details
-└── TODO.md                    # Roadmap and issues
-```
+- 项目安装和全栈命令：[`../../README.md`](../../README.md)
+- 面向 Coding Agent 的安装流程：[`../../Install.md`](../../Install.md)
+- Project-first SaaS 设计：[`../../docs/2026-07-12-project-first-saas-design.md`](../../docs/2026-07-12-project-first-saas-design.md)
+- 后端代码约定和模块地图：[`../AGENTS.md`](../AGENTS.md)
+- 精确请求/响应模型：启动 Gateway 后访问 `/docs` 或 `/openapi.json`

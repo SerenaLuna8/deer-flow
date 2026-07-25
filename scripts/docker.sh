@@ -41,6 +41,34 @@ load_proxy_env_from_dotenv() {
     done
 }
 
+ensure_proxy_auth_token() {
+    local token_file="$PROJECT_ROOT/backend/.deer-flow/.proxy-auth-token"
+
+    if [ -z "${DEER_FLOW_PROXY_AUTH_TOKEN:-}" ]; then
+        mkdir -p "$(dirname "$token_file")"
+        if [ -f "$token_file" ]; then
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(cat "$token_file")"
+        elif command -v python3 >/dev/null 2>&1; then
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            printf '%s\n' "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$token_file"
+            chmod 600 "$token_file"
+        elif command -v openssl >/dev/null 2>&1; then
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"
+            printf '%s\n' "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$token_file"
+            chmod 600 "$token_file"
+        else
+            echo -e "${YELLOW}Cannot generate DEER_FLOW_PROXY_AUTH_TOKEN: python3 and openssl are unavailable.${NC}" >&2
+            exit 1
+        fi
+    fi
+
+    if [ "${#DEER_FLOW_PROXY_AUTH_TOKEN}" -lt 32 ]; then
+        echo -e "${YELLOW}DEER_FLOW_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
+        exit 1
+    fi
+    export DEER_FLOW_PROXY_AUTH_TOKEN
+}
+
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
     local sandbox_use=""
@@ -270,6 +298,7 @@ start() {
     fi
 
     load_proxy_env_from_dotenv
+    ensure_proxy_auth_token
 
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services

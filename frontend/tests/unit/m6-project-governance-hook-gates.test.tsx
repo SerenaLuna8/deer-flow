@@ -100,14 +100,14 @@ describe("M6 project governance hook gates", () => {
 
   test("denied usage page mounts no usage query or mutation hook", () => {
     rs.mocked(useCurrentProject).mockReturnValue(project);
-    expect(() => render(<ProjectUsagePage />)).toThrow("NOT_FOUND");
+    expect(render(<ProjectUsagePage />)).toContain('data-error-status="403"');
     expect(useProjectUsage).not.toHaveBeenCalled();
     expect(useUpdateProjectQuotaLimits).not.toHaveBeenCalled();
   });
 
   test("denied audit page mounts no audit query hook", () => {
     rs.mocked(useCurrentProject).mockReturnValue(project);
-    expect(() => render(<ProjectAuditPage />)).toThrow("NOT_FOUND");
+    expect(render(<ProjectAuditPage />)).toContain('data-error-status="403"');
     expect(useProjectAudit).not.toHaveBeenCalled();
   });
 

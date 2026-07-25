@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { safeInternalNextPath } from "@/core/auth/next-path";
+import { restoreSessionThenNavigate } from "@/core/auth/post-auth-navigation";
 import {
   canCreateRegularAccount,
   fetchSetupStatus,
@@ -21,7 +22,7 @@ import { useI18n } from "@/core/i18n/hooks";
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, refreshUser } = useAuth();
   const { theme, resolvedTheme } = useTheme();
   const { t } = useI18n();
 
@@ -50,6 +51,7 @@ export default function LoginPage() {
   // Nudge the user toward the SSO buttons without confirming the account exists.
   const [showSsoHint, setShowSsoHint] = useState(false);
   const [loading, setLoading] = useState(false);
+  const localAuthNavigationRef = useRef(false);
 
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
@@ -62,7 +64,7 @@ export default function LoginPage() {
 
   // Redirect if already authenticated (client-side, post-login)
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && !localAuthNavigationRef.current) {
       router.push(redirectPath);
     }
   }, [isAuthenticated, redirectPath, router]);
@@ -153,9 +155,20 @@ export default function LoginPage() {
         return;
       }
 
-      // Both login and register set a cookie — redirect to workspace
-      router.push(redirectPath);
+      // Both login and register set an HttpOnly cookie. Restore that identity
+      // in the currently mounted provider, then cross the auth boundary with a
+      // document navigation. App Router can otherwise retain an anonymous
+      // layout while returning to /invite, preventing redemption until reload.
+      localAuthNavigationRef.current = true;
+      const navigated = await restoreSessionThenNavigate(refreshUser, () =>
+        window.location.replace(redirectPath),
+      );
+      if (!navigated) {
+        localAuthNavigationRef.current = false;
+        setError(t.login.networkError);
+      }
     } catch {
+      localAuthNavigationRef.current = false;
       setError(t.login.networkError);
     } finally {
       setLoading(false);

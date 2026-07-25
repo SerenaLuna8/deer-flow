@@ -1,11 +1,8 @@
 """Shared helpers for user-isolation e2e tests on the custom-agent tooling.
 
-Centralises the small fake-LLM shim and a few test-data builders that the
-three e2e files in this PR (``test_setup_agent_e2e_user_isolation``,
-``test_update_agent_e2e_user_isolation``, ``test_setup_agent_http_e2e_real_server``)
-all need. The shim is what lets a real ``langchain.agents.create_agent``
-graph run without an API key — every other layer in those tests is real
-production code, which is the entire point of the test design.
+Centralises the small fake-LLM shim used by deterministic agent and middleware
+tests. The shim lets a real ``langchain.agents.create_agent`` graph run without
+an API key while every other exercised layer remains production code.
 """
 
 from __future__ import annotations

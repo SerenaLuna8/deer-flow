@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import UTC, datetime
 
 import pytest
-from alembic import command
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.gateway.auth.models import User, UserResponse
-from deerflow.persistence.bootstrap import _get_alembic_config
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 
@@ -46,6 +43,7 @@ async def test_empty_database_head_has_project_constraints(migrated_postgres_dat
         names = {item["name"] for item in checks}
         assert {"ck_projects_slug_format", "ck_projects_status", "ck_projects_membership_version"} <= names
         assert {
+            "ck_project_memberships_activation_generation",
             "ck_project_memberships_role",
             "ck_project_memberships_status",
             "ck_project_memberships_version",
@@ -94,13 +92,13 @@ async def test_project_defaults_constraints_and_cascades(migrated_postgres_datab
             )
             membership_defaults = (
                 await conn.execute(
-                    text("""SELECT status,version,is_pinned,created_at,updated_at
+                    text("""SELECT status,version,activation_generation,is_pinned,created_at,updated_at
                         FROM project_memberships WHERE project_id=:id"""),
                     {"id": project_id},
                 )
             ).one()
             membership_inserted_after = datetime.now(UTC)
-            assert membership_defaults[:3] == ("active", 1, False)
+            assert membership_defaults[:4] == ("active", 1, 1, False)
             assert now <= membership_defaults.created_at <= membership_inserted_after
             assert now <= membership_defaults.updated_at <= membership_inserted_after
 
@@ -178,191 +176,5 @@ async def test_project_defaults_constraints_and_cascades(migrated_postgres_datab
             )
             await conn.execute(text("DELETE FROM projects WHERE id=:id"), {"id": project_id})
             assert (await conn.execute(text("SELECT count(*) FROM project_memberships"))).scalar_one() == 0
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("include_membership", [False, True])
-async def test_downgrade_with_project_data_fails_without_mutation(
-    migrated_postgres_database_url: str,
-    include_membership: bool,
-) -> None:
-    engine = create_async_engine(migrated_postgres_database_url)
-    user_id, project_id = str(uuid.uuid4()), uuid.uuid4()
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("""INSERT INTO users
-                    (id,email,system_role,created_at,needs_setup,token_version)
-                    VALUES (:id,'owner@example.com','system_admin',:now,false,0)"""),
-                {"id": user_id, "now": datetime.now(UTC)},
-            )
-            await conn.execute(
-                text("""INSERT INTO projects (id,slug,display_name,created_by_user_id)
-                    VALUES (:id,'keep-project','Keep',:user_id)"""),
-                {"id": project_id, "user_id": user_id},
-            )
-            if include_membership:
-                await conn.execute(
-                    text("""INSERT INTO project_memberships (id,project_id,user_id,role)
-                        VALUES (:id,:project_id,:user_id,'admin')"""),
-                    {"id": uuid.uuid4(), "project_id": project_id, "user_id": user_id},
-                )
-
-        with pytest.raises(RuntimeError, match="project data exists"):
-            await asyncio.to_thread(command.downgrade, _get_alembic_config(engine), "0004_migration_ledger")
-
-        async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT count(*) FROM projects"))).scalar_one() == 1
-            assert (await conn.execute(text("SELECT count(*) FROM project_memberships"))).scalar_one() == int(include_membership)
-            assert (await conn.execute(text("SELECT system_role FROM users WHERE id=:id"), {"id": user_id})).scalar_one() == "system_admin"
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0013_project_automation_finalize"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_downgrade_with_empty_project_tables_returns_to_0004(
-    migrated_postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(migrated_postgres_database_url)
-    user_id = str(uuid.uuid4())
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("""INSERT INTO users
-                    (id,email,system_role,created_at,needs_setup,token_version)
-                    VALUES (:id,'admin@example.com','system_admin',:now,false,0)"""),
-                {"id": user_id, "now": datetime.now(UTC)},
-            )
-
-        await asyncio.to_thread(command.downgrade, _get_alembic_config(engine), "0004_migration_ledger")
-
-        async with engine.connect() as conn:
-            tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-            assert "projects" not in tables
-            assert "project_memberships" not in tables
-            assert (await conn.execute(text("SELECT system_role FROM users WHERE id=:id"), {"id": user_id})).scalar_one() == "admin"
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0004_migration_ledger"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_upgrade_fails_closed_on_users_role_constraint_definition_drift(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "0004_migration_ledger")
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("""ALTER TABLE users ADD CONSTRAINT ck_users_system_role
-                    CHECK (system_role IN ('system_admin', 'user', 'guest'))""")
-            )
-
-        with pytest.raises(Exception, match="constraint definition drift"):
-            await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
-
-        async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0004_migration_ledger"
-            tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-            assert "projects" not in tables
-            assert "project_memberships" not in tables
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_upgrade_validates_matching_not_valid_users_role_constraint(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    admin_id, user_id = str(uuid.uuid4()), str(uuid.uuid4())
-    try:
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "0004_migration_ledger")
-        async with engine.begin() as conn:
-            for row_id, email, role in (
-                (admin_id, "admin@example.com", "admin"),
-                (user_id, "user@example.com", "user"),
-            ):
-                await conn.execute(
-                    text("""INSERT INTO users
-                        (id,email,system_role,created_at,needs_setup,token_version)
-                        VALUES (:id,:email,:role,:now,false,0)"""),
-                    {"id": row_id, "email": email, "role": role, "now": datetime.now(UTC)},
-                )
-            await conn.execute(
-                text("""ALTER TABLE users ADD CONSTRAINT ck_users_system_role
-                    CHECK (system_role IN ('system_admin', 'user')) NOT VALID""")
-            )
-
-        await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
-
-        async with engine.connect() as conn:
-            validated = (
-                await conn.execute(
-                    text("""SELECT convalidated FROM pg_constraint
-                        WHERE conrelid = 'users'::regclass
-                          AND conname = 'ck_users_system_role'
-                          AND contype = 'c'""")
-                )
-            ).scalar_one()
-            roles = (await conn.execute(text("SELECT system_role FROM users ORDER BY email"))).scalars().all()
-            assert validated is True
-            assert roles == ["system_admin", "user"]
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0005_project_foundation"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_upgrade_rolls_back_when_matching_not_valid_constraint_has_legacy_guest(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "0004_migration_ledger")
-        async with engine.begin() as conn:
-            for email, role in (("admin@example.com", "admin"), ("guest@example.com", "guest")):
-                await conn.execute(
-                    text("""INSERT INTO users
-                        (id,email,system_role,created_at,needs_setup,token_version)
-                        VALUES (:id,:email,:role,:now,false,0)"""),
-                    {
-                        "id": str(uuid.uuid4()),
-                        "email": email,
-                        "role": role,
-                        "now": datetime.now(UTC),
-                    },
-                )
-            await conn.execute(
-                text("""ALTER TABLE users ADD CONSTRAINT ck_users_system_role
-                    CHECK (system_role IN ('system_admin', 'user')) NOT VALID""")
-            )
-
-        with pytest.raises(Exception, match="ck_users_system_role"):
-            await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
-
-        async with engine.connect() as conn:
-            roles = (await conn.execute(text("SELECT system_role FROM users ORDER BY email"))).scalars().all()
-            validated = (
-                await conn.execute(
-                    text("""SELECT convalidated FROM pg_constraint
-                        WHERE conrelid = 'users'::regclass
-                          AND conname = 'ck_users_system_role'
-                          AND contype = 'c'""")
-                )
-            ).scalar_one()
-            tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-            assert roles == ["admin", "guest"]
-            assert validated is False
-            assert "projects" not in tables
-            assert "project_memberships" not in tables
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0004_migration_ledger"
     finally:
         await engine.dispose()

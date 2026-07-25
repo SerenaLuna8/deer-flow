@@ -72,29 +72,29 @@ class CatalogInvariant:
     digest: str
 
 
-# Generated from the hand-audited 0001 baseline by ``read_m7_catalog_signature``.
+# Generated from the current single baseline by ``read_m7_catalog_signature``.
 # Category separation makes a drift review identify the affected invariant without
 # exposing data or relying on PostgreSQL object OIDs.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=49,
-        digest="54a3929467c03bb4b4d799d27ec5a62097f977b3a765b9f055b22c60b8d8c478",
+        count=51,
+        digest="a63041054a602b144a85042934cd56404a4ba7c5d91058aab5a66a89bab226ea",
     ),
     "columns": CatalogInvariant(
-        count=586,
-        digest="861bb49db7d6961c2ceb471d005e88adb5f8342f8b56cf12625876a2f8a08ab6",
+        count=601,
+        digest="f4b4eca37555fa347c83e5cc232d59af1b22dafb0978f6d72b7257ff93e57fb9",
     ),
     "constraints": CatalogInvariant(
-        count=371,
-        digest="5ecf40896c674f4a7d536cea75bf1b95a5d555bde55de9a04efcdccdb7e2b702",
+        count=387,
+        digest="ed80444286ad9c5dc32311de07d64f8f6ac94370d00aee6229e933d7c6690b0a",
     ),
     "indexes": CatalogInvariant(
-        count=153,
-        digest="60eb4ab43351a9af5cb36da2d7d6622d4def074265489974192159fab7cff01f",
+        count=161,
+        digest="8f912785d06ac98690754a3794eab8236c5cf1a624f0becc4c4470824782fbe1",
     ),
     "functions": CatalogInvariant(
         count=10,
-        digest="4f5e3d18a510d365ffc45c6f389d14487d25791a2ed4118c64185a8515380719",
+        digest="01f24e30255e0e337369614c857dbc347b2ebe4377b3bbbf805de7a9c4449d94",
     ),
     "triggers": CatalogInvariant(
         count=64,
@@ -240,9 +240,10 @@ async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, Ca
 
 
 async def verify_m7_catalog(connection: AsyncConnection) -> bool:
-    """Return whether all canonical M7 catalog invariants match exactly."""
+    """Return whether all current baseline catalog invariants match exactly."""
 
-    return await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
+    signature = await read_m7_catalog_signature(connection)
+    return signature == FINAL_M7_CATALOG_SIGNATURE
 
 
 _USER_SCHEMA_INVENTORY_SQL = """

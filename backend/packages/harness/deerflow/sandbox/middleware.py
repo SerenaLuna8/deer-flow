@@ -66,13 +66,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         state: SandboxMiddlewareState,
         runtime: Runtime,
     ) -> dict | None:
+        del state
         sandbox_id = SandboxMiddleware._private_sandbox_id(runtime)
         if sandbox_id is None:
             return None
-        existing = SandboxMiddleware._read_sandbox_id_from_state(state)
-        if existing is not None and existing != sandbox_id:
-            raise RuntimeError("Private file authority is unavailable")
-        return {"sandbox": {"sandbox_id": sandbox_id}}
+        run_id = (runtime.context or {}).get("run_id")
+        if type(run_id) is not str or not run_id:
+            raise RuntimeError("Private Run identity is unavailable")
+        return {"sandbox": {"sandbox_id": sandbox_id, "run_id": run_id}}
 
     @staticmethod
     def _run_mounts(runtime: Runtime) -> tuple[RunScopedReadOnlyMount, ...]:

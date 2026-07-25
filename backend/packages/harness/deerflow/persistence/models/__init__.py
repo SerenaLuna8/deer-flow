@@ -15,6 +15,7 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.audit import AuditLogRow
+from deerflow.persistence.auth_sessions import AuthSessionRow
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -24,6 +25,7 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
+from deerflow.persistence.notifications import UserNotificationRow
 from deerflow.persistence.private_work import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
@@ -67,6 +69,7 @@ from deerflow.persistence.user.model import UserRow
 
 __all__ = [
     "AuditLogRow",
+    "AuthSessionRow",
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
@@ -111,6 +114,7 @@ __all__ = [
     "SkillVersionFileRow",
     "SkillVersionRow",
     "ThreadMetaRow",
+    "UserNotificationRow",
     "UserRow",
     "UserProjectMemoryFactRow",
     "UserProjectMemoryRow",

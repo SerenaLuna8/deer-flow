@@ -87,7 +87,13 @@ export function projectHomeIdentityKey(
   membershipVersion: number | null | undefined,
   summary?: Pick<
     Project,
-    "member_count" | "agent_count" | "skill_count" | "mcp_count"
+    | "display_name"
+    | "description"
+    | "icon"
+    | "member_count"
+    | "agent_count"
+    | "skill_count"
+    | "mcp_count"
   >,
 ): string | null {
   if (!userId || !slug || !projectId || !membershipVersion) return null;
@@ -96,6 +102,9 @@ export function projectHomeIdentityKey(
     slug,
     projectId,
     membershipVersion,
+    summary?.display_name ?? null,
+    summary?.description ?? null,
+    summary?.icon ?? null,
     summary?.member_count ?? null,
     summary?.agent_count ?? null,
     summary?.skill_count ?? null,

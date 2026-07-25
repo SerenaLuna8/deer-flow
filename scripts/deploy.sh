@@ -180,6 +180,42 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     fi
 fi
 
+# ── DEER_FLOW_PROXY_AUTH_TOKEN ──────────────────────────────────────────────
+# Dedicated nginx-to-Gateway attestation. This is deliberately independent of
+# the internal channel token so a proxy compromise cannot mint internal users.
+
+_proxy_auth_token_file="$DEER_FLOW_HOME/.proxy-auth-token"
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_PROXY_AUTH_TOKEN" ]; then
+    if [ -f "$_proxy_auth_token_file" ]; then
+        export DEER_FLOW_PROXY_AUTH_TOKEN
+        DEER_FLOW_PROXY_AUTH_TOKEN="$(cat "$_proxy_auth_token_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_PROXY_AUTH_TOKEN loaded from $_proxy_auth_token_file${NC}"
+    else
+        export DEER_FLOW_PROXY_AUTH_TOKEN
+        if command -v python3 > /dev/null 2>&1 && \
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_PROXY_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_PROXY_AUTH_TOKEN manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        echo "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$_proxy_auth_token_file"
+        chmod 600 "$_proxy_auth_token_file"
+        echo -e "${GREEN}✓ DEER_FLOW_PROXY_AUTH_TOKEN generated → $_proxy_auth_token_file${NC}"
+    fi
+fi
+if [ "$CMD" != "down" ] && [ "${#DEER_FLOW_PROXY_AUTH_TOKEN}" -lt 32 ]; then
+    echo -e "${RED}✗ DEER_FLOW_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
+    exit 1
+fi
+
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
 # The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
 # adds the --extra prefix itself. Convert the detector's uv flag string
@@ -277,6 +313,7 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
     export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
+    export DEER_FLOW_PROXY_AUTH_TOKEN="${DEER_FLOW_PROXY_AUTH_TOKEN:-placeholder-placeholder-placeholder-00}"
     "${COMPOSE_CMD[@]}" down
     exit 0
 fi

@@ -1,8 +1,9 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
+import { buildRunMessagesUrl } from "@/core/threads/api";
 import {
-  buildRunMessagesUrl,
+  attachRunIdToNewMessages,
   buildVisibleHistoryMessages,
   computeSummarizationMovedMessages,
   findLatestUnloadedRunIndex,
@@ -11,8 +12,10 @@ import {
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
+  latestRunHasTerminalFailure,
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
+  mergeRunMessageRows,
   pruneConfirmedArchivedMessages,
   removeSetItems,
   resolvePreservedHistory,
@@ -28,6 +31,25 @@ function runMessage(seq?: number): RunMessage {
     content: {} as Message,
     metadata: { caller: "" },
     created_at: "2026-05-22T00:00:00Z",
+  };
+}
+
+function orderedRunMessage(
+  runId: string,
+  seq: number,
+  messageId: string,
+  content: string,
+): RunMessage {
+  return {
+    run_id: runId,
+    seq,
+    content: {
+      id: messageId,
+      type: "human",
+      content,
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-07-23T00:00:00Z",
   };
 }
 
@@ -72,6 +94,48 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
     liveHuman,
     liveAi,
   ]);
+});
+
+test("completed live Run messages expose exact run_id without a page refresh", () => {
+  const priorAi = {
+    id: "ai-prior",
+    type: "ai",
+    content: "prior answer",
+  } as Message;
+  const currentAi = {
+    id: "ai-current",
+    type: "ai",
+    content: "current answer",
+  } as Message;
+  const scopedLive = attachRunIdToNewMessages(
+    [priorAi, currentAi],
+    "run-current",
+    new Set(["message:ai-prior"]),
+  );
+  const merged = mergeMessages(
+    [{ ...priorAi, run_id: "run-prior" } as unknown as Message],
+    scopedLive,
+    [],
+  );
+
+  expect(Reflect.get(merged[0]!, "run_id")).toBe("run-prior");
+  expect(Reflect.get(merged[1]!, "run_id")).toBe("run-current");
+});
+
+test("live Run scoping preserves an authoritative existing run_id", () => {
+  const alreadyScoped = {
+    id: "ai-scoped",
+    type: "ai",
+    content: "persisted",
+    run_id: "run-authoritative",
+  } as Message;
+
+  expect(
+    Reflect.get(
+      attachRunIdToNewMessages([alreadyScoped], "run-current", new Set())[0]!,
+      "run_id",
+    ),
+  ).toBe("run-authoritative");
 });
 
 test("mergeMessages deduplicates tool messages by tool_call_id", () => {
@@ -221,6 +285,113 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
   ]);
 });
 
+test("mergeMessages deduplicates a failed admission prompt against its live state copy by stable id", () => {
+  const priorHuman = {
+    id: "human-1",
+    type: "human",
+    content: "first question",
+  } as Message;
+  const priorAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "first answer",
+  } as Message;
+  const failedAdmission = {
+    id: "human-2",
+    type: "human",
+    content: "second question",
+    run_id: "run-2",
+  } as unknown as Message;
+  const failedLive = {
+    id: "human-2",
+    type: "human",
+    content: "second question",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [priorHuman, priorAi, failedAdmission],
+      [priorHuman, priorAi, failedLive],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["human-1", "ai-1", "human-2"]);
+});
+
+test("mergeMessages removes a legacy failed admission fallback when live state owns the same run", () => {
+  const priorHuman = {
+    id: "human-1",
+    type: "human",
+    content: "first question",
+  } as Message;
+  const priorAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "first answer",
+  } as Message;
+  const failedAdmission = {
+    id: "run-admission-run-2",
+    type: "human",
+    content: "second question",
+    run_id: "run-2",
+  } as unknown as Message;
+  const failedLive = {
+    id: "generated-live-id",
+    type: "human",
+    content: "second question",
+    additional_kwargs: { run_id: "run-2" },
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [priorHuman, priorAi, failedAdmission],
+      [priorHuman, priorAi, failedLive],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["human-1", "ai-1", "generated-live-id"]);
+});
+
+test("mergeMessages appends the newest failed admission after an older live checkpoint", () => {
+  const priorHuman = {
+    id: "human-1",
+    type: "human",
+    content: "first question",
+  } as Message;
+  const priorAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "first answer",
+  } as Message;
+  const failedAdmission = {
+    id: "human-2",
+    type: "human",
+    content: "second question",
+    run_id: "run-2",
+    run_message_source: "run_admission",
+  } as unknown as Message;
+  const runs = [{ run_id: "run-2" }] as unknown as Run[];
+
+  expect(
+    mergeMessages([failedAdmission], [priorHuman, priorAi], [], runs).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["human-1", "ai-1", "human-2"]);
+});
+
+test("mergeMessages preserves intentionally repeated prompts with different ids", () => {
+  const first = {
+    id: "human-repeat-1",
+    type: "human",
+    content: "repeat this",
+  } as Message;
+  const second = {
+    id: "human-repeat-2",
+    type: "human",
+    content: "repeat this",
+  } as Message;
+
+  expect(mergeMessages([first, second], [], [])).toEqual([first, second]);
+});
+
 test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
   const optimisticHuman = {
     id: "opt-human-1",
@@ -284,10 +455,6 @@ test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
   expect(runMessagesPageHasMore({ data: [], has_more: false })).toBe(false);
 });
 
-test("runMessagesPageHasMore keeps compatibility with camelCase pagination field", () => {
-  expect(runMessagesPageHasMore({ data: [], hasMore: true })).toBe(true);
-});
-
 test("getOldestRunMessageSeq returns the cursor for the next older run page", () => {
   expect(
     getOldestRunMessageSeq([runMessage(8), runMessage(9), runMessage(10)]),
@@ -313,26 +480,30 @@ test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", (
 test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
   expect(
     buildRunMessagesUrl(
-      "https://api.example.test/",
+      "https://api.example.test/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work/",
       "thread/with space",
       "run?one",
       18,
     ),
   ).toBe(
-    "https://api.example.test/api/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
+    "https://api.example.test/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
   );
 });
 
 test("buildRunMessagesUrl omits before_seq when loading the latest page", () => {
   expect(
-    buildRunMessagesUrl("https://api.example.test", "thread-1", "run-1"),
-  ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
+    buildRunMessagesUrl(
+      "https://api.example.test/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work",
+      "thread-1",
+      "run-1",
+    ),
+  ).toBe(
+    "https://api.example.test/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work/threads/thread-1/runs/run-1/messages",
+  );
 });
 
-test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", () => {
-  expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
-    "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
-  );
+test("buildRunMessagesUrl rejects a non-project API root", () => {
+  expect(() => buildRunMessagesUrl("/api", "thread-1", "run-1", 42)).toThrow();
 });
 
 test("findLatestUnloadedRunIndex loads the newest run first from a newest-first list", () => {
@@ -359,6 +530,38 @@ test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next 
 test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
   const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
   expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+});
+
+test("mergeRunMessageRows keeps a newly discovered latest run after older loaded runs", () => {
+  const runs = [
+    { run_id: "R3" },
+    { run_id: "R2" },
+    { run_id: "R1" },
+  ] as unknown as Run[];
+  const previous = [
+    orderedRunMessage("R1", 10, "R1-human", "first"),
+    orderedRunMessage("R2", 20, "R2-human", "second"),
+  ];
+  const incoming = [orderedRunMessage("R3", 30, "R3-human", "third")];
+
+  expect(
+    mergeRunMessageRows(previous, incoming, runs).map(
+      (message) => message.run_id,
+    ),
+  ).toEqual(["R1", "R2", "R3"]);
+});
+
+test("mergeRunMessageRows orders older pages by seq inside the same run", () => {
+  const runs = [{ run_id: "R1" }] as unknown as Run[];
+  const previous = [orderedRunMessage("R1", 30, "R1-30", "latest page")];
+  const incoming = [
+    orderedRunMessage("R1", 10, "R1-10", "oldest page"),
+    orderedRunMessage("R1", 20, "R1-20", "middle page"),
+  ];
+
+  expect(
+    mergeRunMessageRows(previous, incoming, runs).map((message) => message.seq),
+  ).toEqual([10, 20, 30]);
 });
 
 test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {
@@ -397,6 +600,26 @@ test("getSupersededRunIds ignores failed regenerate runs but keeps pending ids",
   expect(getSupersededRunIds(runs, new Set(["run-pending"]))).toEqual(
     new Set(["run-pending"]),
   );
+});
+
+test("latestRunHasTerminalFailure restores only the newest failed Run state", () => {
+  for (const status of ["error", "failed", "timeout"]) {
+    expect(latestRunHasTerminalFailure([{ status }] as unknown as Run[])).toBe(
+      true,
+    );
+  }
+  for (const status of ["success", "interrupted", "running", "pending"]) {
+    expect(latestRunHasTerminalFailure([{ status }] as unknown as Run[])).toBe(
+      false,
+    );
+  }
+  expect(latestRunHasTerminalFailure(undefined)).toBe(false);
+  expect(
+    latestRunHasTerminalFailure([
+      { status: "success" },
+      { status: "error" },
+    ] as unknown as Run[]),
+  ).toBe(false);
 });
 
 test("removeSetItems removes pending superseded ids after submit failure", () => {

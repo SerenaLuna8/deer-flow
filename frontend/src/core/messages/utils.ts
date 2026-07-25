@@ -163,6 +163,24 @@ export function groupMessages<T>(
     .filter((result) => result !== undefined && result !== null) as T[];
 }
 
+export function hasActiveAssistantReasoning(groups: MessageGroup[]) {
+  let lastHumanIndex = -1;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    if (groups[index]?.type === "human") {
+      lastHumanIndex = index;
+      break;
+    }
+  }
+
+  if (lastHumanIndex === -1) {
+    return false;
+  }
+
+  return groups
+    .slice(lastHumanIndex + 1)
+    .some((group) => group.messages.some(hasReasoning));
+}
+
 export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   const usageMessagesByGroupIndex: Array<Message[] | null> = Array.from(
     { length: groups.length },
@@ -476,6 +494,31 @@ export function hasPresentFiles(message: Message) {
 
 export function isClarificationToolMessage(message: Message) {
   return message.type === "tool" && message.name === "ask_clarification";
+}
+
+export function isClarificationOnlyProcessingGroup(messages: Message[]) {
+  let hasClarification = false;
+
+  for (const message of messages) {
+    if (message.type === "ai") {
+      for (const toolCall of message.tool_calls ?? []) {
+        if (toolCall.name !== "ask_clarification") {
+          return false;
+        }
+        hasClarification = true;
+      }
+      continue;
+    }
+
+    if (message.type === "tool") {
+      if (message.name !== "ask_clarification") {
+        return false;
+      }
+      hasClarification = true;
+    }
+  }
+
+  return hasClarification;
 }
 
 export function extractPresentFilesFromMessage(message: Message) {

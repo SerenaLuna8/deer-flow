@@ -48,9 +48,15 @@ spec:
           command: ["sh", "-c"]
           args:
             - >-
-              cp /etc/nginx/nginx.conf.template /tmp/nginx.conf &&
+              envsubst '$DEER_FLOW_PROXY_AUTH_TOKEN' < /etc/nginx/nginx.conf.template > /tmp/nginx.conf &&
               test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /tmp/nginx.conf &&
               nginx -c /tmp/nginx.conf -g 'daemon off;'
+          env:
+            - name: DEER_FLOW_PROXY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: DEER_FLOW_PROXY_AUTH_TOKEN
           readinessProbe:
             httpGet:
               path: /health

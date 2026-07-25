@@ -129,6 +129,8 @@ _FRONTEND_NON_REQUEST_EXPORTS = frozenset(
         "frontend/src/core/admin-operations/api.ts:useAdminJobs",
         "frontend/src/core/admin-operations/api.ts:useAdminAudit",
         "frontend/src/core/admin-operations/api.ts:useSafeRequeue",
+        "frontend/src/core/admin-operations/api.ts:adminProjectLifecycleMutationOptions",
+        "frontend/src/core/admin-operations/api.ts:useAdminProjectLifecycle",
         "frontend/src/core/models/api.ts:loadModels",
         "frontend/src/core/private-work/connections.ts:projectConnectionsQueryKey",
         "frontend/src/core/private-work/connections.ts:projectConnectionProvidersQueryKey",
@@ -141,6 +143,7 @@ _FRONTEND_NON_REQUEST_EXPORTS = frozenset(
         "frontend/src/core/project-automations/api.ts:automationBaseURL",
         "frontend/src/core/project-automations/api.ts:createAutomationIdempotencyKey",
         "frontend/src/core/suggestions/api.ts:loadSuggestionsConfig",
+        "frontend/src/core/threads/api.ts:buildRunMessagesUrl",
         "frontend/src/core/uploads/api.ts:supportsUploadLimits",
     }
 )
@@ -559,7 +562,15 @@ def _route_decorator(node: ast.AST) -> tuple[str, str] | None:
 def _is_scoped_route(module_name: str, route_path: str) -> bool:
     if "/projects" in route_path or "/admin" in route_path or "{project_id}" in route_path:
         return True
-    return module_name.startswith(("project_", "admin_")) or module_name in {"projects", "private_work", "memory", "connections", "automations"}
+    return module_name.startswith(("project_", "admin_")) or module_name in {
+        "automations",
+        "connections",
+        "memory",
+        "notifications",
+        "privacy_center",
+        "private_work",
+        "projects",
+    }
 
 
 def _resource_family(value: str) -> str:
@@ -573,7 +584,9 @@ def _resource_family(value: str) -> str:
         ("run_event", ("run_event", "stream", "event")),
         ("dead_job", ("dead_job", "deadjob", "dead")),
         ("membership", ("membership", "member")),
-        ("invite", ("invitation", "invite")),
+        # The current notification catalog is closed to project invitations;
+        # keep its account-scoped recipient surfaces under Invite authority.
+        ("invite", ("invitation", "invite", "notification")),
         ("lifecycle", ("lifecycle", "deletion", "recover")),
         ("version", ("catalog_state", "catalogstate")),
         ("automation", ("automation", "scheduled_task", "scheduledtask")),
@@ -584,7 +597,7 @@ def _resource_family(value: str) -> str:
         ("artifact", ("artifact",)),
         ("memory", ("memory",)),
         ("occurrence", ("occurrence",)),
-        ("retention", ("retention", "purge")),
+        ("retention", ("retention", "privacy", "purge")),
         ("channel", ("channel", "webhook")),
         ("quota", ("quota",)),
         ("usage", ("usage",)),
@@ -613,6 +626,12 @@ def _resource_family(value: str) -> str:
 
 def _operation_for_name(name: str, *, method: str | None = None, route_path: str = "") -> str:
     normalized = _normalized_identifier(f"{name}_{route_path}")
+    if ("notification" in normalized and "accept" in normalized) or "for_accept" in normalized:
+        return "approve"
+    if normalized.startswith("set_automatic_display_name"):
+        return "update"
+    if normalized.startswith("current_published_descriptions"):
+        return "list"
     # These semantic verbs must win before substring heuristics. In particular,
     # ``asset_id`` contains ``set_`` and would otherwise misclassify both routes
     # as updates. Forking creates a new immutable version; preview is read-only.
@@ -656,6 +675,8 @@ def _operation_for_name(name: str, *, method: str | None = None, route_path: str
                 "update",
                 "patch",
                 "change",
+                "configure",
+                "migrate_",
                 "replace",
                 "pause",
                 "resume",
@@ -756,7 +777,7 @@ def _operation_for_name(name: str, *, method: str | None = None, route_path: str
         ("run", ("run", "admit", "execute")),
     )
     for operation, needles in explicit:
-        if any(needle in normalized for needle in needles):
+        if any(normalized.startswith(needle) if needle == "set_" else needle in normalized for needle in needles):
             return operation
     if method == "get":
         return "get" if "{" in route_path else "list"

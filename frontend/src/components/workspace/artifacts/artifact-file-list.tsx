@@ -17,6 +17,7 @@ import {
 } from "@/core/private-work/files";
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { useDeleteUploadedFile, useUploadedFiles } from "@/core/uploads";
+import { canDeleteProjectFile } from "@/core/uploads/api";
 import {
   getFileExtensionDisplayName,
   getFileIcon,
@@ -30,10 +31,12 @@ export function ArtifactFileList({
   className,
   files,
   threadId,
+  canDelete = false,
 }: {
   className?: string;
   files: string[];
   threadId: string;
+  canDelete?: boolean;
 }) {
   const { t } = useI18n();
   const privateWork = useProjectPrivateWorkScope();
@@ -93,66 +96,68 @@ export function ArtifactFileList({
 
   return (
     <ul className={cn("flex w-full flex-col gap-4", className)}>
-      {files.map((file) => (
-        <Card
-          key={file}
-          className="relative cursor-pointer p-3"
-          onClick={() => handleClick(file)}
-        >
-          <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pr-2 pl-1">
-            <CardTitle className="relative min-w-0 pl-8 leading-tight [overflow-wrap:anywhere] break-words">
-              <div className="min-w-0">{getFileName(file)}</div>
-              <div className="absolute top-2 -left-0.5">
-                {getFileIcon(file, "size-6")}
-              </div>
-            </CardTitle>
-            <CardDescription className="min-w-0 pl-8 text-xs">
-              {getFileExtensionDisplayName(file)} file
-            </CardDescription>
-            <CardAction className="row-span-1 self-center">
-              {projectFiles.data?.files.some(
-                (candidate) =>
-                  candidate.id &&
-                  candidate.logical_path ===
-                    file
-                      .replace(/^\/mnt\/(?:data|user-data)\//u, "")
-                      .replace(/^\/+/, ""),
-              ) && (
-                <Button
-                  variant="ghost"
-                  disabled={deleteProjectFile.isPending}
-                  onClick={(event) => handleDeleteProjectFile(event, file)}
-                >
-                  {deleteProjectFile.isPending ? (
-                    <LoaderIcon className="size-4 animate-spin" />
-                  ) : (
-                    <Trash2Icon className="size-4" />
+      {files.map((file) => {
+        const normalizedPath = file
+          .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+          .replace(/^\/+/, "");
+        const projectFile = projectFiles.data?.files.find(
+          (candidate) => candidate.logical_path === normalizedPath,
+        );
+        return (
+          <Card
+            key={file}
+            className="relative cursor-pointer p-3"
+            onClick={() => handleClick(file)}
+          >
+            <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pr-2 pl-1">
+              <CardTitle className="relative min-w-0 pl-8 leading-tight [overflow-wrap:anywhere] break-words">
+                <div className="min-w-0">{getFileName(file)}</div>
+                <div className="absolute top-2 -left-0.5">
+                  {getFileIcon(file, "size-6")}
+                </div>
+              </CardTitle>
+              <CardDescription className="min-w-0 pl-8 text-xs">
+                {getFileExtensionDisplayName(file)} file
+              </CardDescription>
+              <CardAction className="row-span-1 self-center">
+                {projectFile?.id &&
+                  canDeleteProjectFile(canDelete, projectFile.kind) && (
+                    <Button
+                      variant="ghost"
+                      disabled={deleteProjectFile.isPending}
+                      onClick={(event) => handleDeleteProjectFile(event, file)}
+                    >
+                      {deleteProjectFile.isPending ? (
+                        <LoaderIcon className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2Icon className="size-4" />
+                      )}
+                      {t.common.delete}
+                    </Button>
                   )}
-                  {t.common.delete}
-                </Button>
-              )}
-              {downloadURL(file) ? (
-                <Button variant="ghost" asChild>
-                  <a
-                    href={downloadURL(file)!}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                {downloadURL(file) ? (
+                  <Button variant="ghost" asChild>
+                    <a
+                      href={downloadURL(file)!}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <DownloadIcon className="size-4" />
+                      {t.common.download}
+                    </a>
+                  </Button>
+                ) : (
+                  <Button variant="ghost" disabled>
                     <DownloadIcon className="size-4" />
                     {t.common.download}
-                  </a>
-                </Button>
-              ) : (
-                <Button variant="ghost" disabled>
-                  <DownloadIcon className="size-4" />
-                  {t.common.download}
-                </Button>
-              )}
-            </CardAction>
-          </CardHeader>
-        </Card>
-      ))}
+                  </Button>
+                )}
+              </CardAction>
+            </CardHeader>
+          </Card>
+        );
+      })}
     </ul>
   );
 }

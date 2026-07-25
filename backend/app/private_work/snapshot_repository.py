@@ -27,6 +27,7 @@ from app.shared_assets.credential_closure import (
     McpCredentialClosureTarget,
     lock_mcp_credential_closures,
 )
+from app.shared_assets.model_refs import ExactModelRefResolver, ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetScope, ResolvedAgentSnapshot
 from deerflow.persistence.private_work.model import RunAssetVersionRow, RunMcpGrantSnapshotRow
 from deerflow.persistence.shared_assets.agent_model import (
@@ -87,8 +88,14 @@ def _reject_secret_bearing_keys(value: object, request_id: str) -> None:
 class RunSnapshotRepository:
     """Atomically persist a private run and its exact, secret-free asset closure."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        model_ref_resolver: ModelRefResolver | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._model_ref_resolver = model_ref_resolver or ExactModelRefResolver()
 
     @staticmethod
     def _asset_allowed(
@@ -283,12 +290,17 @@ class RunSnapshotRepository:
             raise PrivateWorkConflict(context.request_id)
         _reject_secret_bearing_keys(request.metadata, context.request_id)
         _reject_secret_bearing_keys(request.kwargs, context.request_id)
+        exact_model_name = self._model_ref_resolver.resolve(
+            resolved_agent.payload.model_ref,
+        )
+        if exact_model_name is None:
+            raise RunSnapshotAssetStale
         safe_request = replace(
             request,
             assistant_id=str(resolved_agent.asset_id),
             status="pending",
             multitask_strategy="reject",
-            model_name=resolved_agent.payload.model_ref,
+            model_name=exact_model_name,
         )
         skills, mcps, closures = await self.validate_agent_closure_in_session(
             session,

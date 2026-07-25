@@ -17,16 +17,21 @@ import {
 } from "@/components/admin/assets/admin-asset-dialogs";
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useModels } from "@/core/models/hooks";
 import type { Project } from "@/core/projects/types";
 import {
   useCreateProjectAsset,
   useCreateProjectAssetVersion,
+  useDisableProjectSystemBinding,
+  useEnableProjectSystemBinding,
   useProjectAssets,
+  type AssetKind,
   type AssetListKind,
   type AssetVersion,
   type ProjectAssetItem,
@@ -34,12 +39,14 @@ import {
 } from "@/core/shared-assets";
 
 import { useCurrentProject } from "../project-context";
+import { ProjectPageHeader } from "../project-page-header";
 
+import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-export type ProjectAssetSourceFilter = "all" | "system" | "project";
+export type ProjectAssetSourceFilter = "system" | "project";
 
 const KIND_META = {
   agents: {
@@ -56,6 +63,12 @@ const KIND_META = {
   },
 } as const;
 
+const BINDING_KIND: Record<MutableAssetKind, AssetKind> = {
+  agents: "agent",
+  skills: "skill",
+  "mcp-servers": "mcp",
+};
+
 function assetAvailability(item: ProjectAssetItem): string {
   if (item.scope === "system") {
     if (!item.binding) return "未启用";
@@ -71,139 +84,258 @@ function assetAvailability(item: ProjectAssetItem): string {
   return item.current_published_version_id ? "已有发布版本" : "尚未发布";
 }
 
-export function filterProjectAssetList(
+export function filterProjectAssetItems(
   data: ProjectAssetList,
   searchQuery: string,
   source: ProjectAssetSourceFilter,
-): ProjectAssetList {
+): ProjectAssetItem[] {
   const query = searchQuery.trim().toLocaleLowerCase();
-  const matches = (item: ProjectAssetItem) =>
-    query === "" ||
-    item.display_name.toLocaleLowerCase().includes(query) ||
-    item.slug.toLocaleLowerCase().includes(query);
+  const items = source === "system" ? data.system_items : data.project_items;
+  if (query === "") return items;
+  return items.filter(
+    (item) =>
+      item.display_name.toLocaleLowerCase().includes(query) ||
+      item.slug.toLocaleLowerCase().includes(query),
+  );
+}
 
+export function defaultProjectAssetSource(
+  data: Pick<ProjectAssetList, "system_items" | "project_items">,
+): ProjectAssetSourceFilter {
+  return data.project_items.length === 0 && data.system_items.length > 0
+    ? "system"
+    : "project";
+}
+
+export function projectAssetSourceOptions(
+  kind: MutableAssetKind,
+): ReadonlyArray<readonly [ProjectAssetSourceFilter, string]> {
+  if (kind === "agents") return [["project", "项目自建"]];
+  return [
+    ["system", "系统提供"],
+    ["project", "项目自建"],
+  ];
+}
+
+export function systemBindingToggleState(item: ProjectAssetItem): {
+  checked: boolean;
+  disabled: boolean;
+  targetVersionId: string | null;
+} {
+  const checked = item.scope === "system" && item.binding?.enabled === true;
+  const canManage =
+    item.scope === "system" &&
+    item.capabilities.includes("shared_assets.manage_bindings") &&
+    (item.status === "active" || checked);
+  const targetVersionId =
+    item.scope === "system"
+      ? (item.binding?.version_id ?? item.current_published_version_id)
+      : null;
   return {
-    ...data,
-    system_items: source === "project" ? [] : data.system_items.filter(matches),
-    project_items:
-      source === "system" ? [] : data.project_items.filter(matches),
+    checked,
+    disabled: !canManage || (!checked && targetVersionId === null),
+    targetVersionId,
   };
 }
 
-function AssetListSection({
+function AssetList({
   kind,
-  title,
-  description,
+  source,
   items,
   selectedAssetId,
   onSelect,
+  onToggleSystemBinding,
+  bindingIntent,
+  bindingErrorAssetId,
+  bindingError,
 }: {
   kind: MutableAssetKind;
-  title: string;
-  description: string;
+  source: ProjectAssetSourceFilter;
   items: ProjectAssetItem[];
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
+  onToggleSystemBinding: (item: ProjectAssetItem, checked: boolean) => void;
+  bindingIntent?: { assetId: string; checked: boolean } | null;
+  bindingErrorAssetId?: string | null;
+  bindingError?: unknown;
 }) {
   const Icon = KIND_META[kind].icon;
+  const sourceLabel = source === "system" ? "系统提供" : "项目自建";
+
+  if (items.length === 0) {
+    return (
+      <p className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm">
+        暂无{sourceLabel}的 {KIND_META[kind].singular}。
+      </p>
+    );
+  }
 
   return (
-    <section className="space-y-4">
-      <div>
-        <h2 className="text-base font-semibold">{title}</h2>
-        <p className="text-muted-foreground mt-1 text-sm">{description}</p>
-      </div>
-
-      {items.length === 0 ? (
-        <p className="text-muted-foreground rounded-2xl border border-dashed px-5 py-8 text-center text-sm">
-          暂无{title}的 {KIND_META[kind].singular}。
-        </p>
-      ) : (
-        <div className="overflow-hidden rounded-2xl border">
-          {items.map((item) => {
-            const selected = item.id === selectedAssetId;
-            const isSystem = item.scope === "system";
-            return (
-              <button
-                key={item.id}
-                type="button"
-                aria-haspopup="dialog"
-                className={`hover:bg-muted/45 focus-visible:ring-ring group flex w-full items-center gap-4 border-b px-4 py-4 text-left transition-colors last:border-b-0 focus-visible:ring-2 focus-visible:outline-none sm:px-5 ${
-                  selected ? "bg-muted/60" : ""
-                }`}
-                onClick={() => onSelect(item)}
-              >
-                <span className="bg-muted flex size-10 shrink-0 items-center justify-center rounded-xl">
-                  <Icon aria-hidden className="size-5" />
-                </span>
+    <div
+      role="list"
+      className={
+        kind === "skills" ? "space-y-3" : "overflow-hidden rounded-xl border"
+      }
+    >
+      {items.map((item) => {
+        const selected = item.id === selectedAssetId;
+        const description = item.description?.trim();
+        const toggleState = systemBindingToggleState(item);
+        const pending = bindingIntent?.assetId === item.id;
+        const bindingBusy = bindingIntent !== null;
+        const checked = pending ? bindingIntent.checked : toggleState.checked;
+        const error =
+          bindingErrorAssetId === item.id && bindingError
+            ? adminAssetErrorMessage(bindingError)
+            : null;
+        return (
+          <div
+            key={item.id}
+            role="listitem"
+            className={`group flex flex-wrap items-stretch transition-colors ${
+              kind === "skills"
+                ? "overflow-hidden rounded-xl border"
+                : "border-b last:border-b-0"
+            } ${selected ? "bg-selection-subtle/60" : "hover:bg-muted/50"}`}
+          >
+            <button
+              type="button"
+              aria-haspopup="dialog"
+              aria-label={`查看 ${item.display_name} 详情`}
+              className={`focus-visible:ring-ring flex min-w-0 flex-1 items-center text-left focus-visible:ring-2 focus-visible:outline-none ${
+                kind === "skills"
+                  ? "gap-4 px-5 py-5"
+                  : "gap-3 px-4 py-3 sm:px-4"
+              }`}
+              onClick={() => onSelect(item)}
+            >
+              {kind === "skills" ? (
                 <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="truncate text-sm font-semibold">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-base font-semibold">
                       {item.display_name}
                     </span>
-                    <Badge variant={isSystem ? "secondary" : "default"}>
-                      {isSystem ? "系统提供" : "项目自建"}
-                    </Badge>
-                    <AssetStatusBadge status={item.status} />
+                    {item.status !== "active" ? (
+                      <AssetStatusBadge status={item.status} />
+                    ) : null}
                   </span>
-                  <span className="text-muted-foreground mt-1 block truncate font-mono text-xs">
-                    {item.slug}
-                  </span>
-                  <span className="mt-2 block text-xs font-medium sm:hidden">
-                    {assetAvailability(item)}
+                  <span className="text-muted-foreground mt-2 line-clamp-3 block text-sm leading-6">
+                    {description && description.length > 0
+                      ? description
+                      : "暂无技能描述。"}
                   </span>
                 </span>
-                <span className="hidden shrink-0 text-right sm:block">
-                  <span className="text-sm font-medium">
-                    {assetAvailability(item)}
+              ) : (
+                <>
+                  <span className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg">
+                    <Icon aria-hidden className="size-4.5" />
                   </span>
-                  <time className="text-muted-foreground mt-1 block text-xs">
-                    {new Date(item.updated_at).toLocaleDateString("zh-CN")}
-                  </time>
-                </span>
-                <ArrowRightIcon
-                  aria-hidden
-                  className="text-muted-foreground size-4 shrink-0 transition-transform group-hover:translate-x-0.5"
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-semibold">
+                        {item.display_name}
+                      </span>
+                      {item.status !== "active" ? (
+                        <AssetStatusBadge status={item.status} />
+                      ) : null}
+                    </span>
+                    <span className="text-muted-foreground mt-0.5 block truncate font-mono text-xs">
+                      {item.slug}
+                    </span>
+                  </span>
+                  <span className="hidden shrink-0 text-right md:block">
+                    <span className="text-sm font-medium">
+                      {assetAvailability(item)}
+                    </span>
+                    <time className="text-muted-foreground mt-0.5 block text-xs">
+                      {new Date(item.updated_at).toLocaleDateString("zh-CN")}
+                    </time>
+                  </span>
+                  <ArrowRightIcon
+                    aria-hidden
+                    className="text-muted-foreground size-4 shrink-0 transition-transform group-hover:translate-x-0.5"
+                  />
+                </>
+              )}
+            </button>
+
+            {source === "system" ? (
+              <div
+                className={
+                  kind === "skills"
+                    ? "flex min-w-20 shrink-0 items-center justify-center px-5 py-5"
+                    : "border-border/70 flex min-w-28 shrink-0 items-center justify-end gap-2 border-l px-3 sm:min-w-36 sm:px-4"
+                }
+              >
+                {kind !== "skills" ? (
+                  <span className="text-muted-foreground hidden text-xs sm:inline">
+                    {checked ? "已启用" : "未启用"}
+                  </span>
+                ) : null}
+                <Switch
+                  checked={checked}
+                  disabled={toggleState.disabled || bindingBusy}
+                  className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
+                  aria-busy={pending || undefined}
+                  aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
+                  title={
+                    !toggleState.targetVersionId && !checked
+                      ? "没有可启用的已发布版本"
+                      : undefined
+                  }
+                  onCheckedChange={(next) => onToggleSystemBinding(item, next)}
                 />
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </section>
+              </div>
+            ) : null}
+
+            {error ? (
+              <p
+                role="alert"
+                className="text-destructive border-destructive/20 bg-destructive/5 basis-full border-t px-4 py-2 text-xs"
+              >
+                {error}
+              </p>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
 export function ProjectAssetListView({
   kind,
   data,
+  source,
   selectedAssetId,
   onSelect,
+  onToggleSystemBinding,
+  bindingIntent,
+  bindingErrorAssetId,
+  bindingError,
 }: {
   kind: MutableAssetKind;
   data: ProjectAssetList;
+  source: ProjectAssetSourceFilter;
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
+  onToggleSystemBinding: (item: ProjectAssetItem, checked: boolean) => void;
+  bindingIntent?: { assetId: string; checked: boolean } | null;
+  bindingErrorAssetId?: string | null;
+  bindingError?: unknown;
 }) {
   return (
-    <div className="space-y-9">
-      <AssetListSection
-        kind={kind}
-        title="系统提供"
-        description="平台维护的只读资产；启用后项目固定使用指定发布版本。"
-        items={data.system_items}
-        selectedAssetId={selectedAssetId}
-        onSelect={onSelect}
-      />
-      <AssetListSection
-        kind={kind}
-        title="项目自建"
-        description="仅属于当前项目，可创建新版本并按发布流程生效。"
-        items={data.project_items}
-        selectedAssetId={selectedAssetId}
-        onSelect={onSelect}
-      />
-    </div>
+    <AssetList
+      kind={kind}
+      source={source}
+      items={source === "system" ? data.system_items : data.project_items}
+      selectedAssetId={selectedAssetId}
+      onSelect={onSelect}
+      onToggleSystemBinding={onToggleSystemBinding}
+      bindingIntent={bindingIntent}
+      bindingErrorAssetId={bindingErrorAssetId}
+      bindingError={bindingError}
+    />
   );
 }
 
@@ -233,11 +365,39 @@ function ProjectAssetCatalog({
     project.id,
     kind,
   );
+  const enableBinding = useEnableProjectSystemBinding(
+    accountId,
+    project.id,
+    BINDING_KIND[kind],
+  );
+  const disableBinding = useDisableProjectSystemBinding(
+    accountId,
+    project.id,
+    BINDING_KIND[kind],
+  );
+  const modelCatalog = useModels({ enabled: kind === "agents" });
+  const skillDependencies = useProjectAssets(
+    accountId,
+    project.id,
+    "skills",
+    kind === "agents",
+  );
+  const mcpDependencies = useProjectAssets(
+    accountId,
+    project.id,
+    "mcp-servers",
+    kind === "agents",
+  );
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] =
-    useState<ProjectAssetSourceFilter>("all");
+    useState<ProjectAssetSourceFilter>("project");
+  const [sourceTouched, setSourceTouched] = useState(false);
+  const [bindingIntent, setBindingIntent] = useState<{
+    assetId: string;
+    checked: boolean;
+  } | null>(null);
   const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
     null,
   );
@@ -251,12 +411,27 @@ function ProjectAssetCatalog({
   }, [createVersion.isSuccess]);
 
   const data = query.data as ProjectAssetList | undefined;
+  useEffect(() => {
+    if (!sourceTouched && data) {
+      setSourceFilter(
+        kind === "agents" ? "project" : defaultProjectAssetSource(data),
+      );
+    }
+  }, [data, kind, sourceTouched]);
   const filteredData = useMemo(
     () =>
       data
-        ? filterProjectAssetList(data, searchQuery, sourceFilter)
+        ? {
+            ...data,
+            system_items: filterProjectAssetItems(data, searchQuery, "system"),
+            project_items: filterProjectAssetItems(
+              data,
+              searchQuery,
+              "project",
+            ),
+          }
         : undefined,
-    [data, searchQuery, sourceFilter],
+    [data, searchQuery],
   );
   const selectedItem = useMemo(() => {
     if (!data || !selectedAssetId) return null;
@@ -271,11 +446,51 @@ function ProjectAssetCatalog({
     if (selectedAssetId && data && !selectedItem) setSelectedAssetId(null);
   }, [data, selectedAssetId, selectedItem]);
 
+  function toggleSystemBinding(item: ProjectAssetItem, checked: boolean) {
+    const state = systemBindingToggleState(item);
+    if (state.disabled || state.checked === checked) return;
+
+    enableBinding.reset();
+    disableBinding.reset();
+    setBindingIntent({ assetId: item.id, checked });
+    const settle = () =>
+      setBindingIntent((current) =>
+        current?.assetId === item.id ? null : current,
+      );
+
+    if (checked && state.targetVersionId) {
+      enableBinding.mutate(
+        {
+          asset_id: item.id,
+          version_id: state.targetVersionId,
+          ...(item.binding
+            ? { expected_binding_version: item.binding.version }
+            : {}),
+        },
+        { onSettled: settle },
+      );
+      return;
+    }
+
+    if (!checked && item.binding?.enabled) {
+      disableBinding.mutate(
+        {
+          assetId: item.id,
+          input: { expected_binding_version: item.binding.version },
+        },
+        { onSettled: settle },
+      );
+      return;
+    }
+
+    settle();
+  }
+
   if (query.isLoading) {
     return (
-      <div className="space-y-8" aria-label="正在加载资产">
-        <Skeleton className="h-24 w-full rounded-2xl" />
-        <Skeleton className="h-48 w-full rounded-2xl" />
+      <div className="space-y-4" aria-label="正在加载资产">
+        <Skeleton className="h-10 w-full rounded-lg" />
+        <Skeleton className="h-44 w-full rounded-xl" />
       </div>
     );
   }
@@ -302,85 +517,135 @@ function ProjectAssetCatalog({
   }
 
   const canCreate = project.capabilities.includes("shared_assets.edit");
-  const totalCount = data.system_items.length + data.project_items.length;
   const visibleCount =
-    filteredData.system_items.length + filteredData.project_items.length;
-  const filterActive = searchQuery.trim() !== "" || sourceFilter !== "all";
-  const sourceOptions = [
-    ["all", "全部"],
-    ["system", "系统提供"],
-    ["project", "项目自建"],
-  ] as const;
+    sourceFilter === "system"
+      ? filteredData.system_items.length
+      : filteredData.project_items.length;
+  const sourceCount =
+    sourceFilter === "system"
+      ? data.system_items.length
+      : data.project_items.length;
+  const filterActive = searchQuery.trim() !== "";
+  const sourceOptions = projectAssetSourceOptions(kind);
+  const bindingError = enableBinding.error ?? disableBinding.error;
+  const bindingErrorAssetId = enableBinding.error
+    ? enableBinding.variables?.asset_id
+    : disableBinding.error
+      ? disableBinding.variables?.assetId
+      : null;
 
   return (
     <>
       {renderLead?.({ project, data })}
 
-      <div className="mb-6 flex items-center justify-between gap-4">
-        <p className="text-muted-foreground text-sm">
-          {filterActive
-            ? `显示 ${visibleCount} / 共 ${totalCount} 项`
-            : `共 ${totalCount} 项`}
-        </p>
-        {canCreate && (
-          <Button type="button" onClick={() => setCreateOpen(true)}>
-            <PlusIcon aria-hidden className="size-4" />
-            新建{KIND_META[kind].singular}
-          </Button>
-        )}
-      </div>
+      <Tabs
+        value={sourceFilter}
+        onValueChange={(value) => {
+          setSourceTouched(true);
+          setSourceFilter(value as ProjectAssetSourceFilter);
+        }}
+        className="gap-0"
+      >
+        <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center">
+          {sourceOptions.length > 1 ? (
+            <TabsList
+              variant="line"
+              aria-label="资产来源"
+              className="w-full justify-start lg:w-auto"
+            >
+              {sourceOptions.map(([value, label]) => {
+                const count =
+                  value === "system"
+                    ? data.system_items.length
+                    : data.project_items.length;
+                return (
+                  <TabsTrigger
+                    key={value}
+                    value={value}
+                    className="data-[state=active]:after:bg-selection min-w-0 flex-1 px-3 lg:flex-none"
+                  >
+                    {label}
+                    <span className="text-muted-foreground text-xs tabular-nums">
+                      {count}
+                    </span>
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          ) : null}
 
-      <div className="bg-muted/20 mb-8 flex flex-col gap-3 rounded-2xl border p-3 sm:flex-row sm:items-center">
-        <label className="relative min-w-0 flex-1">
-          <span className="sr-only">搜索{KIND_META[kind].singular}</span>
-          <SearchIcon
-            aria-hidden
-            className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-          />
-          <Input
-            type="search"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            placeholder="搜索名称或 slug"
-            className="bg-background pl-9"
-          />
-        </label>
-        <div
-          role="group"
-          aria-label="来源筛选"
-          className="bg-background flex w-full gap-1 rounded-xl border p-1 sm:w-auto"
-        >
-          {sourceOptions.map(([value, label]) => (
+          <label
+            className={`relative min-w-0 flex-1 ${
+              sourceOptions.length > 1 ? "lg:ml-2" : ""
+            }`}
+          >
+            <span className="sr-only">搜索{KIND_META[kind].singular}</span>
+            <SearchIcon
+              aria-hidden
+              className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+            />
+            <Input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="搜索名称或 slug"
+              className="h-9 bg-transparent pl-9"
+            />
+          </label>
+
+          {filterActive ? (
+            <p
+              role="status"
+              className="text-muted-foreground shrink-0 text-xs tabular-nums"
+            >
+              显示 {visibleCount} / {sourceCount} 项
+            </p>
+          ) : null}
+
+          {canCreate && sourceFilter === "project" ? (
             <Button
-              key={value}
               type="button"
               size="sm"
-              variant={sourceFilter === value ? "default" : "ghost"}
-              className="flex-1 sm:flex-none"
-              aria-pressed={sourceFilter === value}
-              onClick={() => setSourceFilter(value)}
+              className="shrink-0"
+              onClick={() => setCreateOpen(true)}
             >
-              {label}
+              <PlusIcon aria-hidden className="size-4" />
+              新建{KIND_META[kind].singular}
             </Button>
-          ))}
+          ) : null}
         </div>
-      </div>
 
-      {filterActive && visibleCount === 0 && (
-        <p
-          role="status"
-          className="text-muted-foreground mb-6 rounded-2xl border border-dashed px-5 py-6 text-center text-sm"
-        >
-          没有找到匹配的 {KIND_META[kind].singular}，请调整搜索词或来源筛选。
-        </p>
-      )}
-
-      <ProjectAssetListView
-        kind={kind}
-        data={filteredData}
-        selectedAssetId={selectedAssetId}
-        onSelect={(item) => setSelectedAssetId(item.id)}
-      />
+        {sourceOptions.map(([value]) => {
+          const items =
+            value === "system"
+              ? filteredData.system_items
+              : filteredData.project_items;
+          return (
+            <TabsContent key={value} value={value} className="pt-4">
+              {filterActive && items.length === 0 ? (
+                <p
+                  role="status"
+                  className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm"
+                >
+                  没有找到匹配的 {KIND_META[kind].singular}，请调整搜索词。
+                </p>
+              ) : (
+                <ProjectAssetListView
+                  kind={kind}
+                  data={filteredData}
+                  source={value}
+                  selectedAssetId={selectedAssetId}
+                  onSelect={(item) => setSelectedAssetId(item.id)}
+                  onToggleSystemBinding={toggleSystemBinding}
+                  bindingIntent={bindingIntent}
+                  bindingErrorAssetId={bindingErrorAssetId}
+                  bindingError={bindingError}
+                />
+              )}
+            </TabsContent>
+          );
+        })}
+      </Tabs>
 
       {selectedItem && (
         <ProjectAssetDetailSheet
@@ -419,6 +684,18 @@ function ProjectAssetCatalog({
               ? adminAssetErrorMessage(createVersion.error)
               : null
           }
+          modelOptions={modelCatalog.models.map((model) => ({
+            name: model.name,
+            displayName: model.display_name,
+          }))}
+          skillVersionOptions={dependencyVersionOptions(
+            skillDependencies.data as ProjectAssetList | undefined,
+          )}
+          mcpVersionOptions={dependencyVersionOptions(
+            mcpDependencies.data as ProjectAssetList | undefined,
+          )}
+          modelsLoading={modelCatalog.isLoading}
+          modelsError={Boolean(modelCatalog.error)}
           onOpenChange={(next) => !next && setVersionAsset(null)}
           onSubmit={(input: VersionAuthoringInput) =>
             createVersion.mutate({
@@ -457,14 +734,13 @@ export function ProjectAssetPageShell({
   if (!user) return null;
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-      <header className="mb-8 max-w-3xl">
-        <p className="text-primary mb-2 text-sm font-medium">
-          {project.display_name} · 项目资产
-        </p>
-        <h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
-        <p className="text-muted-foreground mt-2 leading-6">{description}</p>
-      </header>
+    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+      <ProjectPageHeader
+        className="mb-5"
+        eyebrow={`${project.display_name} · 项目资产`}
+        title={title}
+        description={description}
+      />
 
       <ProjectAssetCatalog
         accountId={user.id}

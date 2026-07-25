@@ -9,8 +9,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
+import yaml
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -83,6 +85,58 @@ def test_bootstrap_package_exists() -> None:
     assert importlib.util.find_spec("app.shared_assets.bootstrap") is not None
 
 
+def test_packaged_agent_does_not_require_reserved_invalid_remote_mcp() -> None:
+    catalog_module = _catalog_module()
+    catalog = catalog_module.load_bootstrap_catalog()
+    entries = {entry.source_key: entry for entry in catalog.entries}
+    agent_entry = entries["builtin:agent:project-assistant"]
+    assert agent_entry.display_name == "Main"
+    agent_payload = json.loads(
+        catalog_module.catalog_payload(catalog, agent_entry),
+    )
+    assert agent_payload["tool_groups"] == [
+        "web",
+        "file:read",
+        "file:write",
+        "bash",
+        "task",
+    ]
+
+    for source_key in agent_payload["mcp_source_keys"]:
+        mcp_entry = entries[source_key]
+        mcp_payload = json.loads(
+            catalog_module.catalog_payload(catalog, mcp_entry),
+        )
+        assert not (mcp_payload["transport"] in {"http", "sse"} and (urlsplit(str(mcp_payload.get("url", ""))).hostname or "").endswith(".invalid"))
+
+
+def test_packaged_catalog_contains_complete_public_skill_archives() -> None:
+    archive_module = importlib.import_module("app.shared_assets.bootstrap.skill_archive")
+    catalog_module = _catalog_module()
+    catalog = catalog_module.load_bootstrap_catalog()
+    public_root = Path(__file__).resolve().parents[2] / "skills" / "public"
+    expected: dict[str, dict[str, bytes]] = {}
+    for directory in sorted(path for path in public_root.iterdir() if path.is_dir()):
+        skill_path = directory / "SKILL.md"
+        frontmatter = yaml.safe_load(skill_path.read_text(encoding="utf-8").split("---", 2)[1])
+        slug = frontmatter["name"]
+        expected[slug] = {path.relative_to(directory).as_posix(): path.read_bytes() for path in sorted(directory.rglob("*")) if path.is_file()}
+
+    skill_entries = [entry for entry in catalog.entries if entry.kind == "skill"]
+    archived_entries = [entry for entry in skill_entries if entry.payload_format == "skill_archive_v1"]
+
+    assert len(skill_entries) == 22
+    assert len(archived_entries) == 21
+    assert {entry.slug for entry in archived_entries} == set(expected)
+    assert "vercel-deploy" in expected
+    assert "vercel-deploy-claimable" not in expected
+    for entry in archived_entries:
+        archive_files = archive_module.load_skill_archive(
+            catalog_module.catalog_payload(catalog, entry),
+        )
+        assert {file.path: file.content for file in archive_files} == expected[entry.slug]
+
+
 @pytest.mark.postgres
 @pytest.mark.anyio
 async def test_bootstrap_catalog_is_atomic_and_idempotent(m7_database: M7Database) -> None:
@@ -93,7 +147,14 @@ async def test_bootstrap_catalog_is_atomic_and_idempotent(m7_database: M7Databas
     assert first.counts == second.counts
     assert first.created > 0
     assert second.created == 0
-    assert first.counts == {"agent": 1, "skill": 1, "mcp": 1}
+    assert first.counts == {"agent": 1, "skill": 22, "mcp": 1}
+    async with m7_database.session_factory() as session:
+        system_skill_count = await session.scalar(select(func.count()).select_from(SkillRow).where(SkillRow.scope == "system"))
+        project_skill_count = await session.scalar(select(func.count()).select_from(SkillRow).where(SkillRow.scope == "project"))
+        skill_file_count = await session.scalar(select(func.count()).select_from(SkillVersionFileRow))
+    assert system_skill_count == 22
+    assert project_skill_count == 0
+    assert skill_file_count == 89
 
 
 @pytest.mark.postgres
@@ -282,7 +343,7 @@ async def test_bootstrap_rejects_canonical_mcp_version_and_slot_drift(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_bootstrap_agent_graph_contains_canonical_skill_and_mcp_refs(
+async def test_bootstrap_agent_graph_contains_only_executable_canonical_refs(
     m7_database: M7Database,
 ) -> None:
     await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
@@ -293,8 +354,7 @@ async def test_bootstrap_agent_graph_contains_canonical_skill_and_mcp_refs(
 
         assert len(skill_refs) == 1
         assert skill_refs[0].sort_order == 0
-        assert len(mcp_refs) == 1
-        assert mcp_refs[0].sort_order == 0
+        assert mcp_refs == []
 
 
 @pytest.mark.parametrize(

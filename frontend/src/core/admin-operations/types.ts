@@ -2,7 +2,10 @@ import { z } from "zod";
 
 import { auditItemSchema } from "@/core/project-governance/audit";
 
-export const accountIdSchema = z.string().uuid();
+export const accountIdSchema = z.union([
+  z.string().uuid(),
+  z.literal("default"),
+]);
 
 const usageItemSchema = z.discriminatedUnion("dimension", [
   z
@@ -119,8 +122,18 @@ export const operationsOverviewSchema = z.discriminatedUnion("data_status", [
 export const adminProjectSchema = z
   .object({
     project_id: z.string().uuid(),
+    slug: z
+      .string()
+      .min(3)
+      .max(63)
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
+    display_name: z.string().min(1).max(120),
     status: z.enum(["active", "pending_deletion"]),
     is_suspended: z.boolean(),
+    state_version: z.number().int().positive(),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+    deletion_effective_at: z.string().datetime({ offset: true }).nullable(),
   })
   .strict();
 
@@ -186,6 +199,7 @@ export const adminAuditPageSchema = z
 
 export const projectFiltersSchema = z
   .object({
+    query: z.string().min(1).max(120).optional(),
     status: z.enum(["active", "pending_deletion"]).optional(),
     suspended: z.boolean().optional(),
   })

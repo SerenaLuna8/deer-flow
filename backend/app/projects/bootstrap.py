@@ -29,7 +29,7 @@ class BootstrapQuotaPort(Protocol):
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None: ...
 
 
@@ -40,9 +40,9 @@ class _NoopBootstrapQuota:
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None:
-        del session, context, membership_id, membership_version
+        del session, context, membership_id, activation_generation
 
 
 async def bootstrap_default_project(
@@ -87,7 +87,7 @@ async def bootstrap_default_project(
                     session,
                     PrivateWorkContext.from_project(context),
                     membership_id=membership.id,
-                    membership_version=membership.version,
+                    activation_generation=membership.activation_generation,
                 )
                 return BootstrapResult(BootstrapStatus.CREATED, project.id)
             membership = (

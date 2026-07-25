@@ -20,8 +20,10 @@ from app.projects.invitation_models import (
     RedeemedInvitation,
 )
 from app.projects.models import ProjectRole
+from deerflow.persistence.notifications import UserNotificationRow
 from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.user.model import UserRow
 
 
 class InvitationMutationAuditPort(Protocol):
@@ -116,6 +118,17 @@ class InvitationRepository:
             )
             self.session.add(invitation)
             await self.session.flush()
+            recipient_user_id = (await self.session.execute(select(UserRow.id).where(UserRow.email == invited_email))).scalar_one_or_none()
+            if recipient_user_id is not None:
+                self.session.add(
+                    UserNotificationRow(
+                        recipient_user_id=recipient_user_id,
+                        kind="project_invitation",
+                        project_invitation_id=invitation.id,
+                        created_at=now,
+                    )
+                )
+                await self.session.flush()
             view = self._view(invitation)
             if audit is not None:
                 await audit.invitation_created(
@@ -332,6 +345,7 @@ class InvitationRepository:
             membership.ended_by_user_id = None
             membership.end_reason = None
             membership.version += 1
+            membership.activation_generation += 1
             membership.updated_at = now
         else:
             raise ProjectInvitationConflict()

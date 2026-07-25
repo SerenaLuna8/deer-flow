@@ -358,6 +358,67 @@ async def test_transient_failure_requeues_same_run_and_retains_snapshot(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_missing_exact_model_is_terminal_without_retry(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-terminal-model-stale-{uuid.uuid4()}",
+        )
+        executor = RunAgentPrivateExecutor(
+            seed.factory,
+            app_config=SimpleNamespace(
+                get_model_config=lambda _name: None,
+                models=[],
+                skills=SimpleNamespace(container_path="/mnt/skills"),
+            ),
+            bridge=object(),
+            project_checkpointer=object(),
+            store=object(),
+            event_store=object(),
+            agent_factory=object(),
+        )
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=executor,
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        await settlement.commit()
+
+        async with seed.factory() as session:
+            state = (
+                await session.execute(
+                    text(
+                        """SELECT r.status,j.status,j.public_error_code,
+                        j.attempt_count,
+                        (SELECT outcome FROM job_attempts
+                         WHERE job_id=j.id ORDER BY attempt_number DESC LIMIT 1),
+                        (SELECT count(*) FROM dead_jobs WHERE job_id=j.id)
+                        FROM runs r JOIN jobs j ON j.id=r.job_id
+                        WHERE r.run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+
+        assert tuple(state) == (
+            "error",
+            "dead",
+            "RUN_ASSET_STALE",
+            1,
+            "dead",
+            1,
+        )
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_command(
     migrated_postgres_database_url: str,
 ) -> None:

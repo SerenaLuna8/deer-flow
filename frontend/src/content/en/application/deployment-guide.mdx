@@ -1,225 +1,94 @@
 ---
 title: Deployment Guide
-description: "This guide covers all supported deployment methods for DeerFlow App: local development, Docker Compose, and production with Kubernetes-managed sandboxes."
+description: DeerFlow boundaries for local, Docker Compose, and Kubernetes/Helm deployments.
 ---
 
-import { Callout, Steps, Tabs } from "nextra/components";
+import { Callout } from "nextra/components";
 
 # Deployment Guide
 
-This guide covers all supported deployment methods for DeerFlow App: local development, Docker Compose, and production with Kubernetes-managed sandboxes.
+The DeerFlow topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the DeerFlow Compose stack.
 
-## Local development deployment
+<Callout type="warning">
+  The repository provides launch resources, but Docker Compose, Kubernetes/Helm, browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
+</Callout>
 
-The local workflow is the fastest way to run DeerFlow. All services run as native processes on your machine.
+## Prepare the deployment
 
-<Tabs items={["Start", "Stop", "Logs"]}>
-  <Tabs.Tab>
+1. Generate and validate the repository-root `config.yaml`.
+2. Inject model, authentication, and database secrets through `.env` or the deployment platform's secret store. Never bake them into an image or commit them.
+3. Pre-create a non-superuser application role.
+4. Explicitly initialize a fresh PostgreSQL target:
+
 ```bash
-make dev
+export POSTGRES_ADMIN_URL='<administrator URL for the postgres maintenance database>'
+export DATABASE_URL='<fresh DeerFlow target database URL>'
+make setup-db
+make check-db
 ```
 
-Services started:
+Runtime processes only validate the target; they never create a database, repair its schema, or upgrade an old database in place.
 
-| Service     | Port | Description              |
-| ----------- | ---- | ------------------------ |
-| Gateway API | 8001 | FastAPI backend + embedded agent runtime |
-| Frontend    | 3000 | Next.js UI               |
-| nginx       | 2026 | Unified reverse proxy    |
+## Local full stack
 
-Access the app at **http://localhost:2026**.
-
-  </Tabs.Tab>
-  <Tabs.Tab>
 ```bash
+make dev       # hot reload
+make start     # optimized local build
 make stop
 ```
 
-Stops all services. Safe to run even if a service is not running.
+The unified entry point is `http://localhost:2026`. Local logs are under `logs/{gateway,worker,scheduler,frontend,nginx}.log`, and local runtime state defaults to `backend/.deer-flow`.
 
-  </Tabs.Tab>
-  <Tabs.Tab>
-```
-logs/gateway.log     # API gateway and agent runtime logs
-logs/frontend.log    # Next.js dev server logs
-logs/nginx.log       # nginx access/error logs
-```
-
-Tail a log in real time:
+## Docker development
 
 ```bash
-tail -f logs/gateway.log
+make docker-init
+make docker-start
+make docker-logs
+make docker-stop
 ```
 
-  </Tabs.Tab>
-</Tabs>
+`make docker-start` resolves the configured Sandbox provider and starts Provisioner only when required. Compose still needs a reachable external PostgreSQL instance; do not point `DATABASE_URL` at an uninitialized target.
 
-## Docker Compose deployment
-
-Docker Compose runs all services in containers. Use this for a more production-like local setup or for team environments.
-
-### Prerequisites
-
-- Docker (or Docker Desktop / OrbStack on macOS)
-- A configured `config.yaml` at the repo root
-
-### Development compose
+## Compose build mode
 
 ```bash
-# Set the absolute path to your deer-flow repo root
-export DEER_FLOW_ROOT=/path/to/deer-flow
-
-docker compose -f docker/docker-compose-dev.yaml up --build
+make up
+make down
 ```
 
-Services: nginx, frontend, gateway, and optionally provisioner (for K8s-managed sandboxes).
+Before deployment, verify at least the following:
 
-Access the app at **http://localhost:2026**.
+- Expose only Nginx `2026`; keep Gateway `8001`, Frontend `3000`, and Provisioner `8002` internal.
+- Configure TLS, network access control, strong authentication secrets, and a secret manager.
+- Gateway, Worker, and Scheduler use the same canonical `config.yaml` and `DATABASE_URL`.
+- Worker readiness, Scheduler ownership, durable stream reconnect, and project isolation pass in the target environment.
+- `backend/.deer-flow` contains local runtime files/Sandbox projections only; it is not the authority for project business data or the asset catalog.
 
-### Environment variables
+## Kubernetes/Helm
 
-Create a `.env` file in the repo root for secrets and runtime configuration:
+The chart lives under `deploy/helm/deer-flow/`. Provisioner manages Pod lifecycle only for the configured Sandbox provider; it does not own project authentication, Run admission, or Agent graph execution.
+
+For Kubernetes, configure namespaces, images, Services, Ingress/TLS, Secrets, network policy, and Sandbox volumes for the target cluster. Do not expose Gateway or Provisioner directly to the internet.
+
+## Sandbox selection
+
+| Mode | Boundary |
+| --- | --- |
+| `LocalSandboxProvider` | Commands execute in the host environment; trusted local tasks only |
+| Container/AIO provider | Container isolation; validate Docker socket, network, and mount permissions |
+| Provisioner/Kubernetes | A separate service creates Sandbox Pods; requires cluster-level security validation |
+
+Sandbox isolation does not replace project authorization, least-privilege Credentials, or network egress control.
+
+## Verify
 
 ```bash
-# .env
-OPENAI_API_KEY=sk-...
-DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-BETTER_AUTH_SECRET=your-secret-here-min-32-chars
+make check-db
+curl http://localhost:2026/health
+make doctor
 ```
 
-The `docker-compose*.yaml` files include an `env_file: ../.env` directive that loads this automatically.
+After login, inspect Worker, Scheduler, stream, quota, and audit readiness under `/admin/operations`, then exercise a real project-scoped Run and SSE reconnect.
 
-<Callout type="warning">
-  Always set <code>BETTER_AUTH_SECRET</code> to a strong random string before
-  deploying. Without it, the frontend build uses a default that is publicly
-  known.
-</Callout>
-
-### Data persistence
-
-Thread data is stored in `backend/.deer-flow/threads/`. In Docker deployments, this directory is bind-mounted into the gateway container.
-
-To avoid data loss when containers are recreated:
-
-1. Set `DEER_FLOW_ROOT` to the absolute repo root path (or a stable host path).
-2. Verify the `threads/` and `skills/` directories are mounted correctly.
-
-For production, use a named volume or a Persistent Volume Claim (PVC) instead of a host bind-mount.
-
-## Production deployment considerations
-
-### Sandbox mode selection
-
-| Sandbox                                | Use case                                   |
-| -------------------------------------- | ------------------------------------------ |
-| `LocalSandboxProvider`                 | Single-user, trusted local workflows       |
-| `AioSandboxProvider` (Docker)          | Multi-user, moderate isolation requirement |
-| `E2BSandboxProvider` (e2b cloud)       | Hosted/serverless, no Docker/K8s ops, instant Jupyter |
-| `AioSandboxProvider` + K8s Provisioner | Production, strong isolation, multi-user   |
-
-For any deployment with more than one concurrent user, use a container-based sandbox to prevent users from interfering with each other's execution environments.
-
-### Database
-
-PostgreSQL is required for every DeerFlow deployment. Its drivers are included in the default dependencies, so no database-specific `UV_EXTRAS` value is needed.
-
-```bash
-# .env
-DATABASE_URL=postgresql://user:password@postgres:5432/deerflow
-```
-
-```yaml
-# config.yaml
-database:
-  url: $DATABASE_URL
-
-run_events:
-  backend: db
-```
-
-Use a dedicated database and standard PostgreSQL operational controls for production. Legacy provider branches may remain internally until their cleanup task, but they are not selectable through the public configuration.
-
-### K8s Provisioner setup
-
-The provisioner manages sandbox Pods in a Kubernetes cluster. It is included in `docker/docker-compose-dev.yaml`.
-
-<Steps>
-
-#### Configure the provisioner
-
-Set required environment variables in your `.env` or compose override:
-
-```bash
-K8S_NAMESPACE=deer-flow
-SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-```
-
-#### Configure the sandbox provider
-
-```yaml
-# config.yaml
-sandbox:
-  use: deerflow.community.aio_sandbox:AioSandboxProvider
-  provisioner_url: http://provisioner:8002
-```
-
-#### Configure data persistence
-
-For production, use PVCs instead of hostPath volumes:
-
-```bash
-# In .env or compose environment
-USERDATA_PVC_NAME=deer-flow-userdata-pvc
-SKILLS_PVC_NAME=deer-flow-skills-pvc
-```
-
-When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`threads/{thread_id}/user-data`) so each thread gets its own directory in the PVC.
-
-</Steps>
-
-### nginx configuration
-
-nginx routes project REST and streaming requests to Gateway and all page requests to the frontend. Gateway exposes only the final account/project-scoped API surface.
-
-### Authentication
-
-DeerFlow App uses [Better Auth](https://www.better-auth.com/) for session management. In production:
-
-1. Set `BETTER_AUTH_SECRET` to a strong random string (minimum 32 characters).
-2. Set `BETTER_AUTH_URL` to your public-facing URL (e.g., `https://your-domain.com`).
-
-```bash
-# Generate a secret
-openssl rand -base64 32
-```
-
-### Resource recommendations
-
-| Service                         | Minimum          | Recommended      |
-| ------------------------------- | ---------------- | ---------------- |
-| Gateway + agent runtime         | 2 vCPU, 4 GB RAM | 4 vCPU, 8 GB RAM |
-| Frontend                        | 0.5 vCPU, 512 MB | 1 vCPU, 1 GB     |
-| Sandbox container (per session) | 1 vCPU, 1 GB     | 2 vCPU, 2 GB     |
-
-## Deployment verification
-
-After starting, verify the deployment:
-
-```bash
-# Check Gateway health
-curl http://localhost:8001/health
-
-# List configured models (through nginx)
-curl http://localhost:2026/api/models
-```
-
-A working deployment returns a `200` response from each endpoint. The `/api/models` call returns the list of models from your `config.yaml`.
-
-<Cards num={2}>
-  <Cards.Card title="Configuration" href="/docs/application/configuration" />
-  <Cards.Card
-    title="Operations & Troubleshooting"
-    href="/docs/application/operations-and-troubleshooting"
-  />
-</Cards>
+See [Operations & Troubleshooting](/docs/application/operations-and-troubleshooting) for diagnostics.

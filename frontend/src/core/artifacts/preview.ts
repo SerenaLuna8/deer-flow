@@ -13,6 +13,38 @@ type ArtifactPreviewMessage = {
   }>;
 };
 
+export type WriteArtifactSelection = {
+  key: string;
+  url: string;
+};
+
+export function extractWriteArtifactSelections(
+  messages: ArtifactPreviewMessage[],
+): WriteArtifactSelection[] {
+  const selections: WriteArtifactSelection[] = [];
+  for (const message of messages) {
+    if (message.type !== "ai" || !message.id) continue;
+    for (const toolCall of message.tool_calls ?? []) {
+      if (
+        (toolCall.name !== "write_file" && toolCall.name !== "str_replace") ||
+        !toolCall.id ||
+        typeof toolCall.args?.path !== "string" ||
+        !toolCall.args.path
+      ) {
+        continue;
+      }
+      const url = new URL(`write-file:${toolCall.args.path}`);
+      url.searchParams.set("message_id", message.id);
+      url.searchParams.set("tool_call_id", toolCall.id);
+      selections.push({
+        key: `${message.id}/${toolCall.id}`,
+        url: url.toString(),
+      });
+    }
+  }
+  return selections;
+}
+
 export function isWriteFileArtifact(filepath: string) {
   return filepath.startsWith("write-file:");
 }

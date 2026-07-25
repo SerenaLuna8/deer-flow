@@ -5,7 +5,7 @@
 .PHONY: \
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
-	setup-db migrate-db check-db reconcile-usage rotate-credentials \
+	setup-db migrate-db check-db reconcile-usage rotate-credentials import-project-skills \
 	test test-project-foundation-postgres print-project-foundation-postgres-tests \
 	test-project-saas-postgres print-project-saas-postgres-tests release-acceptance \
 	detect-thread-boundaries detect-blocking-io \
@@ -76,16 +76,17 @@ help:
 	@echo "  make config-upgrade                   升级并补齐 config.yaml"
 	@echo "  make check                            检查必要工具"
 	@echo "  make doctor                           检查配置和运行环境"
-	@echo "  make install                          安装前后端依赖和 pre-commit hooks"
+	@echo "  make install                          安装前后端依赖"
 	@echo "  make setup-sandbox                    预拉取 Sandbox 容器镜像"
 	@echo "  make support-bundle                   生成脱敏诊断材料"
 	@echo ""
 	@echo "PostgreSQL 与运维："
-	@echo "  make setup-db                         创建并初始化数据库"
-	@echo "  make migrate-db                       验证或初始化空数据库"
-	@echo "  make check-db                         只读检查数据库状态"
+	@echo "  make setup-db                         空库安装当前 head 并初始化"
+	@echo "  make migrate-db                       未来版本执行 pending migrations"
+	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make reconcile-usage ARGS=...         校准配额用量"
 	@echo "  make rotate-credentials ARGS=...      轮换 Credential envelope"
+	@echo "  make import-project-skills ARGS=...   显式导入 Project Skill"
 	@echo ""
 	@echo "测试与发布验收："
 	@echo "  make test                             运行 M1-M8 PostgreSQL 发布门禁"
@@ -102,8 +103,8 @@ help:
 	@echo "  make docker-logs                      查看 Docker 日志"
 	@echo "  make docker-logs-frontend             查看 Frontend 日志"
 	@echo "  make docker-logs-gateway              查看 Gateway 日志"
-	@echo "  make up                               构建并启动生产容器"
-	@echo "  make down                             停止生产容器"
+	@echo "  make up                               构建并启动 Compose 容器"
+	@echo "  make down                             停止 Compose 容器"
 
 # Tests and release acceptance
 test: test-project-saas-postgres
@@ -143,6 +144,9 @@ reconcile-usage:
 rotate-credentials:
 	@$(MAKE) -C backend rotate-credentials ARGS="$(ARGS)"
 
+import-project-skills:
+	@$(MAKE) -C backend import-project-skills ARGS="$(ARGS)"
+
 check-db:
 	@$(MAKE) -C backend check-db
 
@@ -171,9 +175,6 @@ install:
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
 	@cd frontend && pnpm install
-	@echo "Installing pre-commit hooks..."
-	@uv tool install pre-commit
-	@pre-commit install --overwrite
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="

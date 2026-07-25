@@ -20,6 +20,7 @@ from app.reliability.execution import (
 )
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.reliability.workers import WorkerRegistry
+from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
 from deerflow.config.quota_config import QuotaConfig
@@ -53,12 +54,17 @@ async def run_worker(
         )
         audit_keyring = AuditHmacKeyring.from_environment()
         from app.audit.service import AuditService, _bind_worker_audit_process
-        from app.audit.sinks import OperationalAuditSink
+        from app.audit.sinks import OperationalAuditSink, TrustedOperationAuditSink
 
         audit_service = AuditService(session_factory, audit_keyring)
+        worker_audit_context = _bind_worker_audit_process(audit_service)
         audit_sink = OperationalAuditSink(
             audit_service,
-            process_context=_bind_worker_audit_process(audit_service),
+            process_context=worker_audit_context,
+        )
+        retention_audit_sink = TrustedOperationAuditSink(
+            audit_service,
+            process_context=worker_audit_context,
         )
         quota_config = getattr(config, "quotas", None) or QuotaConfig()
         quota_enforcer = ProjectQuotaEnforcer(
@@ -124,6 +130,12 @@ async def run_worker(
             active_handlers = {
                 "private_run": private_run_handler,
                 "automation_run": private_run_handler,
+                "retention_purge": RetentionPurgeJobHandler(
+                    session_factory,
+                    audit=retention_audit_sink,
+                    quota=quota_enforcer,
+                    job_repository_builder=repository_builder,
+                ),
             }
         registry = WorkerRegistry(session_factory, version=WORKER_VERSION)
         service = WorkerService(

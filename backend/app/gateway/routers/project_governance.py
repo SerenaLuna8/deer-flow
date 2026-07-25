@@ -12,6 +12,7 @@ from app.projects.errors import (
     ProjectMemberQuotaExceeded,
     ProjectMembershipVersionConflict,
     ProjectNotFound,
+    ProjectQuotaStateConflict,
     ProjectValidationFailed,
 )
 from app.projects.invitation_models import (
@@ -25,6 +26,7 @@ GOVERNANCE_DOMAIN_ERRORS = (
     ProjectForbidden,
     ProjectLastAdmin,
     ProjectMemberQuotaExceeded,
+    ProjectQuotaStateConflict,
     ProjectMembershipVersionConflict,
     ProjectInvitationConflict,
     ProjectInvitationInvalid,
@@ -81,6 +83,12 @@ def governance_error(exc: Exception, request_id: str) -> tuple[int, dict[str, st
             409,
             "PROJECT_MEMBERSHIP_VERSION_CONFLICT",
             "Project membership version conflict",
+        ),
+        (
+            ProjectQuotaStateConflict,
+            409,
+            "PROJECT_QUOTA_STATE_CONFLICT",
+            "Project quota state conflict",
         ),
         (
             ProjectInvitationConflict,

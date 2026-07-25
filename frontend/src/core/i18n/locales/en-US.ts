@@ -30,8 +30,17 @@ export const enUS: Translations = {
     more: "More",
     search: "Search",
     loadMore: "Load more",
+    reload: "Reload",
+    retry: "Retry",
+    historyLoadFailed: "Conversation history could not be loaded safely.",
     download: "Download",
     thinking: "Thinking",
+    thinkingInProgress: (seconds?: number) =>
+      seconds === undefined ? "Thinking…" : `Thinking… (${seconds}s)`,
+    thoughtFor: (seconds?: number) =>
+      seconds === undefined
+        ? "Thought for a few seconds"
+        : `Thought for ${seconds} seconds`,
     artifacts: "Artifacts",
     public: "Public",
     custom: "Custom",
@@ -53,6 +62,9 @@ export const enUS: Translations = {
     regenerate: "Regenerate",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
+    feedbackHelpful: "Helpful response",
+    feedbackNotHelpful: "Not helpful response",
+    feedbackSaveFailed: "Failed to save feedback",
   },
 
   // Home
@@ -122,6 +134,7 @@ export const enUS: Translations = {
     inputPolishFailed: "Failed to polish input.",
     inputPolishUndo: "Undo polish",
     inputPolishCancel: "Cancel polishing",
+    model: "Model",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
@@ -298,6 +311,12 @@ export const enUS: Translations = {
       unavailableDescription: "Platform operations could not be loaded.",
       readiness: {
         title: "Readiness",
+        workerCount: "Worker processes",
+        workerCapacity: "Worker capacity",
+        oldestHeartbeat: "Oldest Worker heartbeat",
+        schedulerOwnership: "Scheduler ownership",
+        secondsAgo: "{seconds}s ago",
+        notReported: "Not reported",
         states: {
           ready: "Ready",
           degraded: "Degraded",
@@ -316,6 +335,11 @@ export const enUS: Translations = {
           quota: "Quota",
           audit: "Audit",
         },
+      },
+      channels: {
+        title: "Channel providers",
+        empty: "No channel providers are configured or reporting health.",
+        checkedAt: "Checked {time}",
       },
       counts: {
         projects: "Projects",
@@ -343,6 +367,41 @@ export const enUS: Translations = {
       emptyDescription: "No projects match the current view.",
       older: "Older projects",
       suspended: "Suspended",
+      active: "Active",
+      pendingDeletion: "Pending deletion",
+      details: "Governance details",
+      fields: {
+        projectId: "Project ID",
+        slug: "Project slug",
+        createdAt: "Created",
+        updatedAt: "Updated",
+        deletionAt: "Deletion effective",
+      },
+      filters: {
+        query: "Search",
+        queryPlaceholder: "Search by project name or slug",
+        status: "Lifecycle status",
+        suspension: "Platform suspension",
+        all: "All",
+        apply: "Apply filters",
+        clear: "Clear",
+        invalid: "Search text must contain 1 to 120 characters.",
+      },
+      actions: {
+        suspend: "Platform suspend",
+        resume: "Resume",
+        pending: "Updating…",
+        error:
+          "The platform suspension state could not be updated. Refresh and retry.",
+        confirmSuspendTitle: "Suspend this project?",
+        confirmSuspendDescription:
+          "Platform suspension immediately freezes member private work, blocks new runs, and revokes active run authority without changing lifecycle state or deleting data.",
+        confirmResumeTitle: "Resume this project?",
+        confirmResumeDescription:
+          "Members regain private-work access. Automations that were paused remain paused.",
+        cancel: "Cancel",
+        confirm: "Confirm",
+      },
     },
     jobs: {
       title: "Jobs",
@@ -356,6 +415,16 @@ export const enUS: Translations = {
       requeue: "Requeue safe job",
       requeueing: "Requeueing",
       requeueError: "The safe requeue could not be completed.",
+      filters: {
+        project: "Project ID",
+        status: "Status",
+        type: "Job type",
+        allStatuses: "All statuses",
+        allTypes: "All job types",
+        apply: "Apply filters",
+        clear: "Clear",
+        invalidProject: "Enter a valid project UUID.",
+      },
     },
     audit: {
       title: "Audit",
@@ -376,6 +445,11 @@ export const enUS: Translations = {
     migrationRequired: "Automation migration is required",
     retry: "Retry",
     history: "Run history",
+    fields: {
+      title: "Title",
+      prompt: "Prompt",
+      schedule: "Schedule",
+    },
   },
 
   // Scheduled tasks
@@ -609,6 +683,9 @@ export const enUS: Translations = {
     startConversation: "Start a conversation to see messages here",
     branchCreated: "Conversation branch created",
     branchFailed: "Failed to branch conversation.",
+    runFailedTitle: "Run did not finish",
+    runFailedDescription:
+      "The agent could not produce a response. Check the selected model, asset dependencies, and credentials, then edit or send the message again.",
   },
 
   // Chats
@@ -714,9 +791,12 @@ export const enUS: Translations = {
     answered: "Answered",
     pending: "Sending...",
     readOnly: "Read only",
+    attentionCount: (count: number) =>
+      `${count} item${count === 1 ? "" : "s"} needs attention`,
+    changeBeforeSubmit: "You can change your selection before submitting.",
     otherLabel: "Other answer",
     otherPlaceholder: "Type another answer...",
-    submit: "Submit",
+    submit: "Submit answer",
     emptyError: "Enter an answer before submitting.",
     answeredValue: (value: string) => `Answered: ${value}`,
   },
@@ -733,6 +813,15 @@ export const enUS: Translations = {
       `${count} file${count === 1 ? " was" : "s were"} not added. You can attach up to ${maxFiles} files at once.`,
     totalSizeTooLarge: (count: number, maxTotalSize: string) =>
       `${count} file${count === 1 ? " was" : "s were"} not added. Attachments can total up to ${maxTotalSize}.`,
+    projectStorageTooSmall: (count: number, remainingSize: string) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. The project currently has ${remainingSize} of storage remaining.`,
+    serverTooLarge:
+      "The server rejected files that exceed the upload limits. Adjust them and try again.",
+    storageQuotaExceeded:
+      "Project storage was consumed or exhausted by another operation. Delete files or contact a project administrator.",
+    preflightRejected:
+      "Upload preflight failed. Adjust the files to match the attachment limits.",
+    uploadFailed: "File upload failed. Please try again.",
   },
 
   subtasks: {
@@ -905,6 +994,13 @@ export const enUS: Translations = {
       systemDescription: "Match the operating system preference automatically.",
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
+      chatWidthTitle: "Chat content width",
+      chatWidthDescription:
+        "Adjust the maximum width of messages and the composer to control the space on both sides.",
+      chatWidthNarrow: "Focused",
+      chatWidthStandard: "Standard",
+      chatWidthWide: "Wide",
+      chatWidthFull: "Full width",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
     },
@@ -1019,5 +1115,29 @@ export const enUS: Translations = {
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
     },
+  },
+  setup: {
+    loading: "Loading…",
+    initAdminTitle: "Create admin account",
+    initAdminDescription: "Set up the administrator account to get started.",
+    email: "Email",
+    emailPlaceholder: "you@example.com",
+    password: "Password",
+    passwordPlaceholder: "Password (min. 8 characters)",
+    confirmPassword: "Confirm Password",
+    confirmPasswordPlaceholder: "Confirm password",
+    passwordMismatch: "Passwords do not match",
+    passwordTooShort: "Password must be at least 8 characters",
+    networkError: "Network error. Please try again.",
+    creatingAccount: "Creating account…",
+    createAdminAccount: "Create Admin Account",
+    completeAdminTitle: "Complete admin account setup",
+    completeAdminDescription: "Set your real email and a new password.",
+    yourEmailPlaceholder: "Your email",
+    currentPassword: "Current password",
+    newPassword: "New password",
+    confirmNewPassword: "Confirm new password",
+    settingUp: "Setting up…",
+    completeSetup: "Complete Setup",
   },
 };

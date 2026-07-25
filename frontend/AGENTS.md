@@ -15,7 +15,6 @@ Run from `frontend/`:
 pnpm dev
 pnpm test
 pnpm check
-pnpm test:e2e:m7
 pnpm test:e2e:m8:deterministic
 pnpm test:e2e:m8
 pnpm test:e2e:static
@@ -107,12 +106,19 @@ artifact, input-polish, and durable SSE operations. Project Memory uses
 
 Chats, Memory, Connections, and Automation navigation require a non-static build, server
 readiness `ready`, and `private_work.read_own`. Create/run/upload/connect controls additionally
-require their exact server capability. Viewer can read/list/export and perform allowed
-own-delete actions but never sees mutation controls that require create/manage authority.
+require their exact server capability. Viewer can read/list/export and delete their own
+ready upload/workspace/output files, but never sees mutation controls that require
+create/manage authority.
 
 Durable SSE cursor and deduplication state is keyed by account/project/thread. Event IDs are
 thread-monotonic; duplicate IDs and duplicate terminal frames are ignored. Gateway restart
 must resume from the stored `Last-Event-ID` without cross-scope replay.
+
+During a live project Run, successful `write_file` and `str_replace` tool calls select the
+written file in the artifact preview, open the right-hand file panel, and collapse the desktop
+project navigation. `present_files` remains the explicit publication boundary for rendering
+downloadable file cards inside the conversation. Terminal Run handling must invalidate the
+project Thread file list so finalized UUID-backed file routes are available without a reload.
 
 Input polish is project-scoped and never runs without `private_work.create` plus
 `shared_assets.execute`. The server revalidates the current Thread Agent snapshot and
@@ -123,6 +129,14 @@ Credential-grant closure; the browser never constructs authority fields.
 Project asset pages group visible system and project Agent, Skill, MCP, and Credential rows.
 Queries are keyed by account, project, and kind. UI actions use per-item capabilities and
 optimistic revisions; no role-based inference is allowed.
+
+Global `/admin/assets` Agent, Skill, and MCP pages render the packaged PostgreSQL catalog as
+read-only governance metadata. They must not expose definition create/edit, new-version,
+publish, approval, archive, or suspend controls or client mutations. A published packaged
+System MCP may expose only the dedicated Credential-grant configuration flow; that flow sends
+Credential version IDs plus expected active grant revisions and does not republish or alter
+the MCP definition. System Credential lifecycle controls and project-scoped asset override
+authoring are separate surfaces and remain mutable.
 
 Credential create/replace is an imperative authenticated request, not a TanStack mutation.
 Secret-bearing form values must never enter QueryCache or MutationCache, must be cleared after
@@ -177,14 +191,16 @@ response in the fourth `sendMessage(..., options)` argument under
 - Imports are grouped and alphabetized; use inline type imports.
 - Use `@/*` aliases and `cn()` for conditional Tailwind classes.
 - Runtime responses use strict Zod schemas and reject unknown authority/private fields.
-- Unit tests live under `tests/unit/`; browser tests live under `tests/e2e/` and
-  `tests/e2e-static/`.
+- Unit tests live under `tests/unit/`. Deterministic browser tests live under
+  `tests/e2e/` and `tests/e2e-static/`; Replay full-stack tests live under
+  `tests/e2e-real-backend/`, manual fixture recording under `tests/e2e-record/`,
+  and host-owned M8 acceptance under `tests/e2e-release/`.
 - Features and fixes follow TDD: add the failing test, observe the expected failure, implement
   the minimal change, and rerun focused plus full affected gates.
 
 Backend base URLs may be set for split-origin development. Leave them unset for the normal
 root `make dev` or Docker flow so all browser calls use same-origin `/api/*` through Nginx.
 
-M1–M8 已完成，总体进度为 8/8（100%）。M8 关闭前宿主机验收包含 893 项 frontend unit 和
-79 项完整 Playwright deterministic inventory，均为 0 failed、0 skipped、0 flaky；production/static
-build 与真实桌面版 Chromium journey 同时通过。Firefox 和 Safari/WebKit 仍未经过 M8 生产认证。
+Historical pass counts do not certify the current checkout. Run `pnpm check`, `pnpm test`, and the
+affected Playwright/build gates for the current change. Browser and deployment coverage must be
+reported from the current run rather than copied from an earlier milestone.

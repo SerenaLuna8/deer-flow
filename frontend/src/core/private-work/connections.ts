@@ -56,6 +56,9 @@ const projectConnectionProvidersResponseSchema = z
 export type ProjectConnectionProvider = z.infer<
   typeof projectConnectionProviderSchema
 >;
+export type ProjectConnectionProvidersResponse = z.infer<
+  typeof projectConnectionProvidersResponseSchema
+>;
 
 const connectResponseSchema = z
   .object({
@@ -115,18 +118,16 @@ export function projectConnectionProvidersQueryKey(scope: ProjectClientScope) {
 export async function listProjectConnectionProviders(
   access: ProjectConnectionAccess,
   signal?: AbortSignal,
-): Promise<ProjectConnectionProvider[]> {
+): Promise<ProjectConnectionProvidersResponse> {
   const response = await fetchWithAuth(
     `${projectConnectionsBaseURL(access)}/providers`,
     { signal },
   );
-  return (
-    await readResponse(
-      response,
-      projectConnectionProvidersResponseSchema,
-      "Failed to load project connection providers",
-    )
-  ).providers;
+  return readResponse(
+    response,
+    projectConnectionProvidersResponseSchema,
+    "Failed to load project connection providers",
+  );
 }
 
 export async function listProjectConnections(

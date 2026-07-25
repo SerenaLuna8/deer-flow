@@ -74,6 +74,9 @@ def test_gateway_openapi_keeps_project_private_routes() -> None:
 
 
 def test_gateway_runtime_has_no_legacy_execution_singletons() -> None:
+    from app.gateway import deps
+
+    assert not hasattr(deps, "_enforce_postgres_for_multi_worker")
     source = inspect.getsource(gateway_platform_runtime)
 
     for forbidden in (

@@ -49,7 +49,7 @@ async def _payload_chunks(payload: bytes):
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_m4_release_database_is_at_final_head_and_cutover_ready(
+async def test_m4_release_database_uses_final_baseline(
     migrated_postgres_database_url: str,
 ) -> None:
     assert await m4_release_database_ready(migrated_postgres_database_url)

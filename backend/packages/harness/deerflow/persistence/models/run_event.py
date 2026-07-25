@@ -86,7 +86,6 @@ class RunEventRow(Base):
             "run_id",
             unique=True,
             postgresql_where=text("category = 'stream' AND event_type = 'stream.end'"),
-            sqlite_where=text("category = 'stream' AND event_type = 'stream.end'"),
         ),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_run_events_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_run_events_owner", ondelete="RESTRICT"),

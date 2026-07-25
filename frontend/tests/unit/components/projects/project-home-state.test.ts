@@ -1,5 +1,4 @@
 import { describe, expect, test } from "@rstest/core";
-import { MutationObserver, QueryClient } from "@tanstack/react-query";
 
 import {
   commitProjectHomeAttempt,
@@ -15,16 +14,6 @@ const oldProject = {
 } as Project;
 
 describe("project home identity state", () => {
-  test("query cache clearing does not clear an attached mutation observer", async () => {
-    const client = new QueryClient();
-    const observer = new MutationObserver(client, {
-      mutationFn: () => Promise.resolve(oldProject),
-    });
-    await observer.mutate();
-    client.clear();
-    expect(observer.getCurrentResult().data).toBe(oldProject);
-  });
-
   test("binds enter results to account, slug, and UUID", () => {
     const oldIdentity = projectHomeIdentityKey(
       "u1",
@@ -187,5 +176,50 @@ describe("project home identity state", () => {
         project: { ...firstLookup, agent_count: 1 },
       }),
     ).toBeNull();
+  });
+
+  test("changes identity when editable project metadata changes", () => {
+    const firstLookup = {
+      ...oldProject,
+      display_name: "Alpha",
+      description: "First description",
+      icon: "folder",
+      member_count: 1,
+      agent_count: 0,
+      skill_count: 0,
+      mcp_count: 0,
+    } as Project;
+    const firstIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      firstLookup.id,
+      1,
+      firstLookup,
+    );
+    const renamedIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      firstLookup.id,
+      1,
+      { ...firstLookup, display_name: "Alpha Renamed" },
+    );
+    const describedIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      firstLookup.id,
+      1,
+      { ...firstLookup, description: "Updated description" },
+    );
+    const reiconedIdentity = projectHomeIdentityKey(
+      "u1",
+      "alpha",
+      firstLookup.id,
+      1,
+      { ...firstLookup, icon: "sparkles" },
+    );
+
+    expect(renamedIdentity).not.toBe(firstIdentity);
+    expect(describedIdentity).not.toBe(firstIdentity);
+    expect(reiconedIdentity).not.toBe(firstIdentity);
   });
 });

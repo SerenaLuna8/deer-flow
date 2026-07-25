@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.deps import project_session
 from app.gateway.routers import project_members
-from app.projects.errors import ProjectLastAdmin, ProjectNotFound
+from app.projects.errors import ProjectLastAdmin, ProjectNotFound, ProjectQuotaStateConflict
 from app.projects.membership_models import MembershipView
 from app.projects.models import ProjectRole
 
@@ -105,6 +105,27 @@ def test_remove_and_leave_map_last_admin_and_return_membership(monkeypatch) -> N
     assert removed.json()["detail"]["request_id"] == "req-members"
     assert left.status_code == 200
     assert left.json()["version"] == 3
+
+
+def test_member_quota_state_conflict_is_stable_409(monkeypatch) -> None:
+    monkeypatch.setattr(project_members, "resolve_project_context", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        project_members.MembershipService,
+        "leave",
+        AsyncMock(side_effect=ProjectQuotaStateConflict()),
+    )
+
+    response = _client().post(
+        f"/api/projects/{PROJECT_ID}/leave",
+        json={"version": 1},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "PROJECT_QUOTA_STATE_CONFLICT",
+        "message": "Project quota state conflict",
+        "request_id": "req-members",
+    }
 
 
 def test_member_validation_has_stable_error_and_request_id() -> None:

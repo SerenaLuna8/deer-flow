@@ -10,8 +10,10 @@ import {
   getAssistantTurnUsageMessages,
   getMessageGroups,
   getStreamingMessageLookup,
+  hasActiveAssistantReasoning,
   hasContent,
   hasReasoning,
+  isClarificationOnlyProcessingGroup,
   isAssistantMessageGroupStreaming,
   stripUploadedFilesTag,
 } from "@/core/messages/utils";
@@ -109,6 +111,25 @@ test("reasoning + content (no tool calls) yields a single assistant bubble, not 
   expect(turnUsage.at(-1)?.map((message) => message.id)).toEqual(["ai-1"]);
 });
 
+test("detects reasoning after the latest human turn so a duplicate loading row is not rendered", () => {
+  const reasoningTurn = getMessageGroups([
+    { id: "human-1", type: "human", content: "Explain it" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "Working through it." },
+    },
+  ] as Message[]);
+  const answerOnlyTurn = getMessageGroups([
+    { id: "human-1", type: "human", content: "Explain it" },
+    { id: "ai-1", type: "ai", content: "Done." },
+  ] as Message[]);
+
+  expect(hasActiveAssistantReasoning(reasoningTurn)).toBe(true);
+  expect(hasActiveAssistantReasoning(answerOnlyTurn)).toBe(false);
+});
+
 test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
   // Companion to #3868: only the message that also becomes an assistant bubble
   // (content, no tool calls) is pulled out of the processing group. Reasoning
@@ -150,6 +171,49 @@ test("keeps tool-call reasoning in the processing group while the final answer's
     "tool-1-result",
   ]);
   expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
+});
+
+test("recognizes clarification-only processing as redundant beside the standalone response card", () => {
+  const clarificationOnly = [
+    {
+      id: "ai-clarification",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "I need one preference." },
+      tool_calls: [
+        {
+          id: "call-clarification",
+          name: "ask_clarification",
+          args: { question: "Which direction?" },
+        },
+      ],
+    },
+    {
+      id: "tool-clarification",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call-clarification",
+      content: "Which direction?",
+    },
+  ] as Message[];
+  const mixedTools = [
+    clarificationOnly[0],
+    {
+      id: "ai-write",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "call-write",
+          name: "write_file",
+          args: { path: "/tmp/result.md" },
+        },
+      ],
+    },
+  ] as Message[];
+
+  expect(isClarificationOnlyProcessingGroup(clarificationOnly)).toBe(true);
+  expect(isClarificationOnlyProcessingGroup(mixedTools)).toBe(false);
 });
 
 describe("inline <think> tag splitting", () => {

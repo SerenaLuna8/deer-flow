@@ -8,37 +8,46 @@ import {
 import { projectKeys } from "@/core/projects/query-keys";
 
 import {
-  approveAdminMcpVersion,
+  approveAdminProjectMcpVersion,
   approveProjectMcpVersion,
-  changeAdminAssetStatus,
+  changeAdminProjectAssetStatus,
   changeProjectAssetStatus,
-  createAdminAsset,
-  createAdminAssetVersion,
+  configureAdminMcpCredentialGrants,
+  createAdminProjectAsset,
+  createAdminProjectAssetVersion,
   createProjectAsset,
   createProjectAssetVersion,
+  disableAdminProjectSystemBinding,
   disableProjectSystemBinding,
+  enableAdminProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
   getProjectSkillVersionFile,
   getAdminCredentialRotationStatus,
   listAdminAssetVersions,
   listAdminAssets,
+  listAdminProjectAssetVersions,
+  listAdminProjectAssets,
   listProjectAssetVersions,
   listProjectAssets,
   listSystemAssetCatalog,
-  publishAdminAssetVersion,
   publishProjectAssetVersion,
+  publishAdminProjectAssetVersion,
   revokeAdminCredential,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
-  submitAdminMcpVersion,
+  rollbackAdminProjectSystemBinding,
+  submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
+  upgradeAdminProjectSystemBinding,
   upgradeProjectSystemBinding,
 } from "./api";
 import {
   adminAssetKey,
   adminAssetVersionsKey,
   adminCredentialRotationStatusKey,
+  adminProjectAssetKey,
+  adminProjectAssetVersionsKey,
   projectAssetKey,
   projectAssetVersionsKey,
   projectSkillVersionFileKey,
@@ -53,6 +62,7 @@ import type {
   AssetListKind,
   CreateAssetInput,
   CredentialRotationStatus,
+  ConfigureSystemMcpCredentialGrantsInput,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
   ExpectedAssetVersionInput,
@@ -100,6 +110,17 @@ export function invalidateAdminAssetQueries(
   });
 }
 
+export function invalidateAdminProjectAssetQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+) {
+  return queryClient.invalidateQueries({
+    queryKey: adminProjectAssetKey(accountId, projectId, kind),
+  });
+}
+
 function useProjectInvalidation(
   accountId: string,
   projectId: string,
@@ -115,9 +136,29 @@ function useProjectInvalidation(
     ]);
 }
 
+function useProjectAssetListInvalidation(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+) {
+  const queryClient = useQueryClient();
+  return () =>
+    invalidateProjectAssetQueries(queryClient, accountId, projectId, kind);
+}
+
 function useAdminInvalidation(accountId: string, kind: AssetListKind) {
   const queryClient = useQueryClient();
   return () => invalidateAdminAssetQueries(queryClient, accountId, kind);
+}
+
+function useAdminProjectInvalidation(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+) {
+  const queryClient = useQueryClient();
+  return () =>
+    invalidateAdminProjectAssetQueries(queryClient, accountId, projectId, kind);
 }
 
 export function useProjectAssets(
@@ -147,6 +188,22 @@ export function useAdminAssets(
       kind === "credentials"
         ? listAdminAssets(kind, signal)
         : listAdminAssets(kind, signal),
+    enabled,
+  });
+}
+
+export function useAdminProjectAssets(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+  enabled = true,
+) {
+  return useQuery<ProjectAssetList | ProjectCredentialList>({
+    queryKey: adminProjectAssetKey(accountId, projectId, kind),
+    queryFn: ({ signal }) =>
+      kind === "credentials"
+        ? listAdminProjectAssets(projectId, kind, signal)
+        : listAdminProjectAssets(projectId, kind, signal),
     enabled,
   });
 }
@@ -216,6 +273,19 @@ export function useAdminAssetVersions(
   });
 }
 
+export function useAdminProjectAssetVersions(
+  accountId: string,
+  projectId: string,
+  kind: AssetListKind,
+  assetId: string,
+) {
+  return useQuery<VersionHistoryResponse>({
+    queryKey: adminProjectAssetVersionsKey(accountId, projectId, kind, assetId),
+    queryFn: ({ signal }) =>
+      listAdminProjectAssetVersions(projectId, kind, assetId, signal),
+  });
+}
+
 export function useCreateProjectAsset(
   accountId: string,
   projectId: string,
@@ -229,10 +299,15 @@ export function useCreateProjectAsset(
   });
 }
 
-export function useCreateAdminAsset(accountId: string, kind: MutableAssetKind) {
-  const invalidate = useAdminInvalidation(accountId, kind);
+export function useCreateAdminProjectAsset(
+  accountId: string,
+  projectId: string,
+  kind: MutableAssetKind,
+) {
+  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
   return useMutation({
-    mutationFn: (input: CreateAssetInput) => createAdminAsset(kind, input),
+    mutationFn: (input: CreateAssetInput) =>
+      createAdminProjectAsset(projectId, kind, input),
     onSuccess: invalidate,
   });
 }
@@ -273,19 +348,20 @@ function createProjectVersionForKind(
   throw new TypeError(`Version input does not match ${kind}`);
 }
 
-function createAdminVersionForKind(
+function createAdminProjectVersionForKind(
+  projectId: string,
   kind: MutableAssetKind,
   assetId: string,
   input: VersionAuthoringInput,
 ) {
   if (kind === "agents" && isAgentVersionInput(input)) {
-    return createAdminAssetVersion(kind, assetId, input);
+    return createAdminProjectAssetVersion(projectId, kind, assetId, input);
   }
   if (kind === "skills" && isSkillVersionInput(input)) {
-    return createAdminAssetVersion(kind, assetId, input);
+    return createAdminProjectAssetVersion(projectId, kind, assetId, input);
   }
   if (kind === "mcp-servers" && isMcpVersionInput(input)) {
-    return createAdminAssetVersion(kind, assetId, input);
+    return createAdminProjectAssetVersion(projectId, kind, assetId, input);
   }
   throw new TypeError(`Version input does not match ${kind}`);
 }
@@ -308,6 +384,24 @@ export function useCreateProjectAssetVersion(
   });
 }
 
+export function useCreateAdminProjectAssetVersion(
+  accountId: string,
+  projectId: string,
+  kind: MutableAssetKind,
+) {
+  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
+  return useMutation({
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: VersionAuthoringInput;
+    }) => createAdminProjectVersionForKind(projectId, kind, assetId, input),
+    onSuccess: invalidate,
+  });
+}
+
 export function useForkProjectSkillVersion(
   accountId: string,
   projectId: string,
@@ -323,23 +417,6 @@ export function useForkProjectSkillVersion(
       sourceVersionId: string;
       input: SkillFileForkInput;
     }) => forkProjectSkillVersion(projectId, assetId, sourceVersionId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useCreateAdminAssetVersion(
-  accountId: string,
-  kind: MutableAssetKind,
-) {
-  const invalidate = useAdminInvalidation(accountId, kind);
-  return useMutation({
-    mutationFn: ({
-      assetId,
-      input,
-    }: {
-      assetId: string;
-      input: VersionAuthoringInput;
-    }) => createAdminVersionForKind(kind, assetId, input),
     onSuccess: invalidate,
   });
 }
@@ -364,11 +441,12 @@ export function useChangeProjectAssetStatus(
   });
 }
 
-export function useChangeAdminAssetStatus(
+export function useChangeAdminProjectAssetStatus(
   accountId: string,
+  projectId: string,
   kind: MutableAssetKind,
 ) {
-  const invalidate = useAdminInvalidation(accountId, kind);
+  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
   return useMutation({
     mutationFn: ({
       assetId,
@@ -378,7 +456,8 @@ export function useChangeAdminAssetStatus(
       assetId: string;
       action: "archive" | "suspend";
       input: ExpectedAssetVersionInput;
-    }) => changeAdminAssetStatus(kind, assetId, action, input),
+    }) =>
+      changeAdminProjectAssetStatus(projectId, kind, assetId, action, input),
     onSuccess: invalidate,
   });
 }
@@ -404,11 +483,12 @@ export function usePublishProjectAssetVersion(
   });
 }
 
-export function usePublishAdminAssetVersion(
+export function usePublishAdminProjectAssetVersion(
   accountId: string,
+  projectId: string,
   kind: MutableAssetKind,
 ) {
-  const invalidate = useAdminInvalidation(accountId, kind);
+  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
   return useMutation({
     mutationFn: ({
       assetId,
@@ -418,7 +498,14 @@ export function usePublishAdminAssetVersion(
       assetId: string;
       versionId: string;
       input: ExpectedAssetVersionInput;
-    }) => publishAdminAssetVersion(kind, assetId, versionId, input),
+    }) =>
+      publishAdminProjectAssetVersion(
+        projectId,
+        kind,
+        assetId,
+        versionId,
+        input,
+      ),
     onSuccess: invalidate,
   });
 }
@@ -481,8 +568,15 @@ export function useSubmitProjectMcpVersion(
   });
 }
 
-export function useSubmitAdminMcpVersion(accountId: string) {
-  const invalidate = useAdminInvalidation(accountId, "mcp-servers");
+export function useSubmitAdminProjectMcpVersion(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
   return useMutation({
     mutationFn: ({
       assetId,
@@ -492,7 +586,7 @@ export function useSubmitAdminMcpVersion(accountId: string) {
       assetId: string;
       versionId: string;
       input: ExpectedAssetVersionInput;
-    }) => submitAdminMcpVersion(assetId, versionId, input),
+    }) => submitAdminProjectMcpVersion(projectId, assetId, versionId, input),
     onSuccess: invalidate,
   });
 }
@@ -520,8 +614,15 @@ export function useApproveProjectMcpVersion(
   });
 }
 
-export function useApproveAdminMcpVersion(accountId: string) {
-  const invalidate = useAdminInvalidation(accountId, "mcp-servers");
+export function useApproveAdminProjectMcpVersion(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
   return useMutation({
     mutationFn: ({
       assetId,
@@ -531,7 +632,23 @@ export function useApproveAdminMcpVersion(accountId: string) {
       assetId: string;
       versionId: string;
       input: ApproveMcpInput;
-    }) => approveAdminMcpVersion(assetId, versionId, input),
+    }) => approveAdminProjectMcpVersion(projectId, assetId, versionId, input),
+    onSuccess: invalidate,
+  });
+}
+
+export function useConfigureAdminMcpCredentialGrants(accountId: string) {
+  const invalidate = useAdminInvalidation(accountId, "mcp-servers");
+  return useMutation({
+    mutationFn: ({
+      assetId,
+      versionId,
+      input,
+    }: {
+      assetId: string;
+      versionId: string;
+      input: ConfigureSystemMcpCredentialGrantsInput;
+    }) => configureAdminMcpCredentialGrants(assetId, versionId, input),
     onSuccess: invalidate,
   });
 }
@@ -541,7 +658,7 @@ export function useEnableProjectSystemBinding(
   projectId: string,
   kind: AssetKind,
 ) {
-  const invalidate = useProjectInvalidation(
+  const invalidate = useProjectAssetListInvalidation(
     accountId,
     projectId,
     BINDING_LIST_KIND[kind],
@@ -559,7 +676,7 @@ function useMoveProjectSystemBinding(
   kind: AssetKind,
   action: "upgrade" | "rollback",
 ) {
-  const invalidate = useProjectInvalidation(
+  const invalidate = useProjectAssetListInvalidation(
     accountId,
     projectId,
     BINDING_LIST_KIND[kind],
@@ -600,7 +717,7 @@ export function useDisableProjectSystemBinding(
   projectId: string,
   kind: AssetKind,
 ) {
-  const invalidate = useProjectInvalidation(
+  const invalidate = useProjectAssetListInvalidation(
     accountId,
     projectId,
     BINDING_LIST_KIND[kind],
@@ -613,6 +730,97 @@ export function useDisableProjectSystemBinding(
       assetId: string;
       input: DisableSystemBindingInput;
     }) => disableProjectSystemBinding(projectId, kind, assetId, input),
+    onSuccess: invalidate,
+  });
+}
+
+export function useEnableAdminProjectSystemBinding(
+  accountId: string,
+  projectId: string,
+  kind: AssetKind,
+) {
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    BINDING_LIST_KIND[kind],
+  );
+  return useMutation({
+    mutationFn: (input: EnableSystemBindingInput) =>
+      enableAdminProjectSystemBinding(projectId, kind, input),
+    onSuccess: invalidate,
+  });
+}
+
+function useMoveAdminProjectSystemBinding(
+  accountId: string,
+  projectId: string,
+  kind: AssetKind,
+  action: "upgrade" | "rollback",
+) {
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    BINDING_LIST_KIND[kind],
+  );
+  return useMutation({
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: MoveSystemBindingInput;
+    }) =>
+      action === "upgrade"
+        ? upgradeAdminProjectSystemBinding(projectId, kind, assetId, input)
+        : rollbackAdminProjectSystemBinding(projectId, kind, assetId, input),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpgradeAdminProjectSystemBinding(
+  accountId: string,
+  projectId: string,
+  kind: AssetKind,
+) {
+  return useMoveAdminProjectSystemBinding(
+    accountId,
+    projectId,
+    kind,
+    "upgrade",
+  );
+}
+
+export function useRollbackAdminProjectSystemBinding(
+  accountId: string,
+  projectId: string,
+  kind: AssetKind,
+) {
+  return useMoveAdminProjectSystemBinding(
+    accountId,
+    projectId,
+    kind,
+    "rollback",
+  );
+}
+
+export function useDisableAdminProjectSystemBinding(
+  accountId: string,
+  projectId: string,
+  kind: AssetKind,
+) {
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    BINDING_LIST_KIND[kind],
+  );
+  return useMutation({
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: DisableSystemBindingInput;
+    }) => disableAdminProjectSystemBinding(projectId, kind, assetId, input),
     onSuccess: invalidate,
   });
 }

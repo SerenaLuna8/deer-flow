@@ -33,7 +33,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   logout: () => Promise<void>;
-  refreshUser: () => Promise<void>;
+  refreshUser: () => Promise<User | null>;
   applyUser: (user: User | null) => Promise<void>;
 }
 
@@ -102,23 +102,23 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * Used when initialUser might be stale (e.g., after tab was inactive)
    */
   const refreshUser = useCallback(async () => {
-    if (staticMode) return;
+    if (staticMode) return null;
 
     const attempt = identityCoordinator.startRefresh();
     try {
       const res = await fetch("/api/v1/auth/me", {
         credentials: "include",
+        cache: "no-store",
         signal: attempt.signal,
       });
-      if (!identityCoordinator.isCurrent(attempt)) return;
+      if (!identityCoordinator.isCurrent(attempt)) return null;
 
       if (res.ok) {
         const parsed = userSchema.safeParse(await res.json());
-        if (!identityCoordinator.isCurrent(attempt)) return;
-        await applyAtGeneration(
-          attempt.generation,
-          parsed.success ? parsed.data : null,
-        );
+        if (!identityCoordinator.isCurrent(attempt)) return null;
+        const nextUser = parsed.success ? parsed.data : null;
+        const applied = await applyAtGeneration(attempt.generation, nextUser);
+        return applied ? nextUser : null;
       } else if (res.status === 401) {
         const applied = await applyAtGeneration(attempt.generation, null);
         // Redirect to login if on a protected route
@@ -126,10 +126,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
           router.push(buildLoginUrl(pathname));
         }
       }
+      return null;
     } catch (err) {
-      if (!identityCoordinator.isCurrent(attempt)) return;
+      if (!identityCoordinator.isCurrent(attempt)) return null;
       const applied = await applyAtGeneration(attempt.generation, null);
       if (applied) console.error("Failed to refresh user:", err);
+      return null;
     } finally {
       identityCoordinator.finishRefresh(attempt);
     }

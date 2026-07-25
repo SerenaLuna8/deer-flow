@@ -43,6 +43,7 @@ from app.projects.lifecycle_service import ProjectLifecycleService
 from app.projects.membership_repository import MembershipRepository
 from app.projects.membership_service import MembershipService
 from app.projects.models import ProjectRole
+from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
@@ -960,7 +961,7 @@ async def test_m6_head_keeps_m4_ready_and_scheduler_ownership_is_exclusive(
 ) -> None:
     async with m5_database.factory() as session:
         revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "0001_project_saas_baseline"
+    assert revision == CURRENT_SCHEMA_REVISION
     assert m5_database.database_name.startswith("deerflow_test_")
 
     first_engine = create_async_engine(m5_database.url)

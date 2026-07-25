@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { describeAuditItem } from "@/components/projects/governance/project-audit-view-model";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminAudit } from "@/core/admin-operations/api";
@@ -21,7 +22,7 @@ export function AdminAuditStateView({
   state: AdminAuditState;
   onRetry?: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const labels = t.adminOperations.audit;
   if (state.status === "loading")
     return (
@@ -64,32 +65,35 @@ export function AdminAuditStateView({
     );
   return (
     <ol className="space-y-3">
-      {state.data.items.map((item) => (
-        <li key={item.id} className="bg-card rounded-xl border p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <strong>{item.action}</strong>
-            <time
-              className="text-muted-foreground text-sm"
-              dateTime={item.occurred_at}
-            >
-              {new Date(item.occurred_at).toLocaleString()}
-            </time>
-          </div>
-          <p className="text-muted-foreground mt-2 text-sm">
-            {item.actor} · {item.target_kind} · {item.outcome}
-          </p>
-          {Object.keys(item.metadata).length > 0 ? (
-            <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
-              {Object.entries(item.metadata).map(([key, value]) => (
-                <div key={key}>
-                  <dt className="text-muted-foreground">{key}</dt>
-                  <dd>{String(value)}</dd>
-                </div>
-              ))}
-            </dl>
-          ) : null}
-        </li>
-      ))}
+      {state.data.items.map((item) => {
+        const detail = describeAuditItem(item, locale);
+        return (
+          <li key={item.id} className="bg-card rounded-xl border p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <strong>{detail.action}</strong>
+              <time
+                className="text-muted-foreground text-sm"
+                dateTime={item.occurred_at}
+              >
+                {detail.occurredAt}
+              </time>
+            </div>
+            <p className="text-muted-foreground mt-2 text-sm">
+              {detail.actor} · {detail.target} · {detail.outcome}
+            </p>
+            {detail.metadata.length > 0 ? (
+              <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                {detail.metadata.map((entry) => (
+                  <div key={entry.label}>
+                    <dt className="text-muted-foreground">{entry.label}</dt>
+                    <dd>{entry.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : null}
+          </li>
+        );
+      })}
     </ol>
   );
 }

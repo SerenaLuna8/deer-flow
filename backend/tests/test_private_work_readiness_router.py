@@ -6,7 +6,6 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
@@ -77,45 +76,12 @@ def _assert_public_response(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_readiness_ignores_cutover_marker_state(
-    seed: M4ThreadSeed,
-) -> None:
-    app = _app(seed)
-
-    _assert_public_response(
-        await _get(app, seed),
-        status="ready",
-        code="PRIVATE_WORK_READY",
-    )
-
-    async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """UPDATE private_work_cutover_state
-                SET stage='migration_ready', cutover_at=NULL
-                WHERE id=1"""
-            )
-        )
-    _assert_public_response(await _get(app, seed), status="ready", code="PRIVATE_WORK_READY")
-
-    async with seed.engine.begin() as connection:
-        await connection.execute(text("DELETE FROM private_work_cutover_state WHERE id=1"))
-    _assert_public_response(await _get(app, seed), status="ready", code="PRIVATE_WORK_READY")
-
-
-@pytest.mark.postgres
-@pytest.mark.anyio
-async def test_readiness_requires_final_schema_even_with_complete_marker(
+async def test_readiness_requires_final_baseline_revision(
     seed: M4ThreadSeed,
 ) -> None:
     app = _app(seed)
     async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """UPDATE alembic_version
-                SET version_num='0010_private_file_source'"""
-            )
-        )
+        await connection.exec_driver_sql("UPDATE alembic_version SET version_num='legacy_revision'")
 
     _assert_public_response(
         await _get(app, seed),

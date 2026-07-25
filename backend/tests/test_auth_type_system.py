@@ -9,7 +9,7 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import jwt as pyjwt
 import pytest
@@ -17,6 +17,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
@@ -399,7 +400,10 @@ def test_get_auth_config_missing_env_var_generates_ephemeral(caplog):
     old = cfg._auth_config
     cfg._auth_config = None
     try:
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("dotenv.load_dotenv", return_value=False),
+        ):
             os.environ.pop("AUTH_JWT_SECRET", None)
             with caplog.at_level(logging.WARNING):
                 config = cfg.get_auth_config()
@@ -621,6 +625,140 @@ def test_api_login_success_no_token_in_body(_persistence_engine):
     assert "access_token" not in body
     # Token should be in cookie, not body
     assert "access_token" in resp.cookies
+
+
+def test_logout_revokes_copied_session_token_across_requests(
+    _persistence_engine,
+):
+    """Logout revokes PostgreSQL session authority, not only the browser cookie."""
+
+    _setup_config()
+    client = _get_auth_client()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("logout-revoke"),
+            "password": "Tr0ub4dor3a",
+        },
+    )
+    assert response.status_code == 201
+    copied_token = response.cookies["access_token"]
+    assert client.get("/api/v1/auth/me").status_code == 200
+
+    logout = client.post("/api/v1/auth/logout")
+    assert logout.status_code == 200
+
+    client.cookies.set("access_token", copied_token)
+    rejected = client.get("/api/v1/auth/me")
+    assert rejected.status_code == 401
+    assert rejected.json()["detail"]["code"] == "token_invalid"
+
+
+def test_session_database_stores_hash_not_raw_jwt_sid(_persistence_engine):
+    import hashlib
+
+    from app.gateway.auth.errors import TokenError
+    from app.gateway.auth.jwt import decode_token
+    from app.gateway.auth.sessions import hash_session_id
+    from deerflow.persistence.auth_sessions.model import AuthSessionRow
+    from deerflow.persistence.engine import get_session_factory
+
+    _setup_config()
+    client = _get_auth_client()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("session-hash"),
+            "password": "Tr0ub4dor3a",
+        },
+    )
+    token = response.cookies["access_token"]
+    payload = decode_token(token)
+    assert not isinstance(payload, TokenError)
+
+    async def stored_hashes() -> tuple[str, ...]:
+        async with get_session_factory()() as session:
+            rows = await session.execute(select(AuthSessionRow.session_id_hash))
+            return tuple(rows.scalars())
+
+    hashes = client.portal.call(stored_hashes)
+    assert payload.sid not in hashes
+    assert hash_session_id(payload.sid) in hashes
+    assert hashlib.sha256(payload.sid.encode()).hexdigest() not in hashes
+
+
+def test_password_change_invalidates_every_old_session_and_issues_one_fresh(
+    _persistence_engine,
+):
+    _setup_config()
+    client = _get_auth_client()
+    email = _unique_email("password-global-revoke")
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Tr0ub4dor3a"},
+    )
+    first_token = registered.cookies["access_token"]
+
+    logged_in = client.post(
+        "/api/v1/auth/login/local",
+        data={"username": email, "password": "Tr0ub4dor3a"},
+    )
+    second_token = logged_in.cookies["access_token"]
+    csrf_token = client.cookies[CSRF_COOKIE_NAME]
+
+    changed = client.post(
+        "/api/v1/auth/change-password",
+        headers={CSRF_HEADER_NAME: csrf_token},
+        json={
+            "current_password": "Tr0ub4dor3a",
+            "new_password": "N3w-Password-For-Sessions!",
+        },
+    )
+    assert changed.status_code == 200
+    fresh_token = changed.cookies["access_token"]
+
+    for stale_token in (first_token, second_token):
+        client.cookies.set("access_token", stale_token)
+        rejected = client.get("/api/v1/auth/me")
+        assert rejected.status_code == 401
+        assert rejected.json()["detail"]["code"] == "token_invalid"
+
+    client.cookies.set("access_token", fresh_token)
+    assert client.get("/api/v1/auth/me").status_code == 200
+
+
+def test_register_session_write_failure_is_503_and_account_can_retry_login(
+    monkeypatch,
+    _persistence_engine,
+):
+    from app.gateway.auth.sessions import AuthSessionUnavailable
+    from app.gateway.routers import auth
+
+    _setup_config()
+    client = _get_auth_client()
+    email = _unique_email("register-session-retry")
+    real_issuer = auth.issue_access_session
+    failing_issuer = AsyncMock(side_effect=AuthSessionUnavailable())
+    monkeypatch.setattr(auth, "issue_access_session", failing_issuer)
+
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Tr0ub4dor3a"},
+    )
+    assert registered.status_code == 503
+    assert registered.json()["detail"] == {
+        "code": "DATABASE_UNAVAILABLE",
+        "message": "Authentication storage unavailable",
+    }
+    assert "access_token" not in registered.cookies
+
+    monkeypatch.setattr(auth, "issue_access_session", real_issuer)
+    logged_in = client.post(
+        "/api/v1/auth/login/local",
+        data={"username": email, "password": "Tr0ub4dor3a"},
+    )
+    assert logged_in.status_code == 200
+    assert "access_token" in logged_in.cookies
 
 
 def test_api_register_duplicate_returns_structured_400(_persistence_engine):

@@ -39,9 +39,9 @@ async def init_engine(config: DatabaseConfig) -> None:
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
-        from deerflow.persistence.bootstrap import bootstrap_schema
+        from deerflow.persistence.bootstrap import validate_schema
 
-        await bootstrap_schema(engine)
+        await validate_schema(engine)
     except Exception as exc:
         await engine.dispose()
         _engine = None

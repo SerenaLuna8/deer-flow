@@ -1,12 +1,13 @@
-# Project-scoped Path Examples
+# Project-scoped 路径示例
 
 ## HTTP resources
 
 ```text
-/api/projects/{project_id}/threads
-/api/projects/{project_id}/threads/{thread_id}/runs
-/api/projects/{project_id}/threads/{thread_id}/files
-/api/projects/{project_id}/threads/{thread_id}/artifacts
+/api/projects/{project_id}/private-work/threads
+/api/projects/{project_id}/private-work/threads/{thread_id}/runs
+/api/projects/{project_id}/private-work/threads/{thread_id}/uploads
+/api/projects/{project_id}/private-work/threads/{thread_id}/files/{file_id}
+/api/projects/{project_id}/private-work/artifacts/{artifact_id}
 /api/projects/{project_id}/memory
 /api/projects/{project_id}/automations
 ```

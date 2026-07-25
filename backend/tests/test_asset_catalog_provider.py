@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import threading
 import uuid
 from dataclasses import fields
@@ -47,23 +46,6 @@ def test_catalog_provider_can_be_installed_and_cleared() -> None:
     finally:
         set_asset_catalog_provider(None)
     assert get_asset_catalog_provider() is None
-
-
-def test_postgres_provider_is_permanent_and_has_no_filesystem_fallback() -> None:
-    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
-
-    assert not hasattr(PostgresAssetCatalogProvider, "is_cutover_enabled")
-    source = inspect.getsource(PostgresAssetCatalogProvider).lower()
-    assert "cutover" not in source
-    assert "path(" not in source
-
-
-@pytest.mark.asyncio
-async def test_postgres_provider_returns_empty_kind_without_transition_state() -> None:
-    from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
-
-    provider = PostgresAssetCatalogProvider.for_test()
-    assert await provider.list_system_skills() == ()
 
 
 def _snapshots(generation: int):

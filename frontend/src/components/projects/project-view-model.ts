@@ -65,8 +65,12 @@ export function projectErrorMessage(error: unknown): string {
         return "项目不可用或成员关系已失效，请返回工作空间。";
       case "PROJECT_LAST_ADMIN":
         return "不能移除或降级最后一名 Admin，请先指定其他 Admin。";
+      case "PROJECT_MEMBER_QUOTA_EXCEEDED":
+        return "项目成员容量已满，请联系项目管理员调整成员上限后，重新打开邀请链接。";
       case "PROJECT_MEMBERSHIP_VERSION_CONFLICT":
         return "成员信息已更新，请刷新后重试。";
+      case "PROJECT_QUOTA_STATE_CONFLICT":
+        return "成员配额状态不一致，请刷新后重试；若问题持续，请联系管理员。";
       case "PROJECT_INVITATION_CONFLICT":
         return "该邀请已存在或刚刚被处理，请刷新后重试。";
       case "PROJECT_INVITATION_INVALID":

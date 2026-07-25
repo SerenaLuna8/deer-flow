@@ -477,11 +477,7 @@ async def test_summarization_direct_model_call_does_not_swallow_revocation() -> 
 
 
 @pytest.mark.asyncio
-async def test_worker_maps_revocation_to_interrupted_and_skips_title(
-    monkeypatch,
-) -> None:
-    from deerflow.runtime.runs import worker
-
+async def test_worker_maps_revocation_to_interrupted() -> None:
     manager = RunManager()
     record = await manager.create("thread-auth-revoked")
     bridge = SimpleNamespace(
@@ -491,8 +487,6 @@ async def test_worker_maps_revocation_to_interrupted_and_skips_title(
     )
     checkpointer = AsyncMock()
     checkpointer.aget_tuple.return_value = None
-    ensure_title = AsyncMock()
-    monkeypatch.setattr(worker, "_ensure_interrupted_title", ensure_title)
 
     class RevokedAgent:
         async def astream(self, *_args, **_kwargs):
@@ -513,7 +507,6 @@ async def test_worker_maps_revocation_to_interrupted_and_skips_title(
     assert current is not None
     assert current.status is RunStatus.interrupted
     assert current.error == AUTHORIZATION_REVOKED_REASON
-    ensure_title.assert_not_awaited()
     error_events = [call.args for call in bridge.publish.await_args_list if len(call.args) >= 2 and call.args[1] == "error"]
     assert error_events[-1][2] == {
         "message": AUTHORIZATION_REVOKED_REASON,

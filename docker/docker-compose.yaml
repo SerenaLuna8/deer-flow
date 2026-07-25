@@ -16,6 +16,7 @@
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
+#   DEER_FLOW_PROXY_AUTH_TOKEN       — nginx-to-Gateway client-IP attestation token
 #
 # LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
 # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
@@ -31,8 +32,10 @@ services:
       - "${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+    environment:
+      - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN}
     command: >
-      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+      sh -c "envsubst '$$DEER_FLOW_PROXY_AUTH_TOKEN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
       && nginx -g 'daemon off;'"
     depends_on:
       - frontend
@@ -98,6 +101,7 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
+      - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN}
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills

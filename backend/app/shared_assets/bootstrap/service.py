@@ -25,9 +25,15 @@ from app.shared_assets.bootstrap.catalog import (
     catalog_payload,
     load_bootstrap_catalog,
 )
+from app.shared_assets.bootstrap.skill_archive import load_skill_archive
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
+from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.models import AgentPayload, SkillArchiveFile
-from app.shared_assets.skill_service import _file_views, _snapshot_checksum
+from app.shared_assets.skill_service import (
+    _file_views,
+    _snapshot_checksum,
+    normalize_skill_files,
+)
 from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
@@ -136,7 +142,10 @@ def _agent_checksum(payload: AgentPayload) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _skill_metadata(entry: BootstrapEntry, content: bytes) -> tuple[dict[str, object], str, list[object]]:
+def _skill_metadata(
+    entry: BootstrapEntry,
+    content: bytes,
+) -> tuple[dict[str, object], str, str | None, list[object]]:
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -153,12 +162,16 @@ def _skill_metadata(entry: BootstrapEntry, content: bytes) -> tuple[dict[str, ob
     description = frontmatter.get("description", "")
     if not isinstance(description, str):
         raise BootstrapCatalogError("bootstrap Skill description is invalid")
+    compatibility = frontmatter.get("compatibility")
+    if compatibility is not None and (not isinstance(compatibility, str) or len(compatibility) > 255):
+        raise BootstrapCatalogError("bootstrap Skill compatibility is invalid")
+    compatibility = compatibility.strip() if isinstance(compatibility, str) else None
     requirements = frontmatter.get("required-secrets", [])
     if requirements is None:
         requirements = []
     if not isinstance(requirements, list):
         raise BootstrapCatalogError("bootstrap Skill secret requirements are invalid")
-    return frontmatter, description, requirements
+    return frontmatter, description, compatibility, requirements
 
 
 async def _ensure_builtin_principal(session: AsyncSession) -> None:
@@ -262,10 +275,31 @@ def _matches(row: object, **expected: object) -> bool:
 
 
 async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
-    content = catalog_payload(catalog, entry)
-    frontmatter, description, requirements = _skill_metadata(entry, content)
-    file = SkillArchiveFile(path="SKILL.md", content=content, media_type="text/markdown")
-    checksum = _snapshot_checksum(_file_views((file,)))
+    payload = catalog_payload(catalog, entry)
+    archive_files = (
+        load_skill_archive(payload)
+        if entry.payload_format == "skill_archive_v1"
+        else (
+            SkillArchiveFile(
+                path="SKILL.md",
+                content=payload,
+                media_type="text/markdown",
+            ),
+        )
+    )
+    try:
+        archive_files = normalize_skill_files(
+            archive_files,
+            request_id=entry.source_key,
+        )
+    except AssetValidationFailed as error:
+        raise BootstrapCatalogError("bootstrap Skill archive is invalid") from error
+    skill_manifest = next(file.content for file in archive_files if file.path == "SKILL.md")
+    frontmatter, description, compatibility, requirements = _skill_metadata(
+        entry,
+        skill_manifest,
+    )
+    checksum = _snapshot_checksum(_file_views(archive_files))
     asset_id = _stable_id(entry.source_key)
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
@@ -279,7 +313,7 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             workflow_status="published",
             description=description,
             frontmatter=frontmatter,
-            compatibility=None,
+            compatibility=compatibility,
             secret_requirements=requirements,
             scan_decision="allow",
             scan_summary={"source": "builtin-bootstrap"},
@@ -292,20 +326,30 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
         ):
             raise BootstrapConflict("existing system Skill conflicts with canonical payload")
-        files = (await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version_id).order_by(SkillVersionFileRow.path))).scalars().all()
-        if (
-            asset.current_published_version_id != version_id
-            or len(files) != 1
-            or not _matches(
-                files[0],
-                skill_version_id=version_id,
-                path="SKILL.md",
-                media_type="text/markdown",
-                size_bytes=len(content),
-                sha256=hashlib.sha256(content).hexdigest(),
-                content=content,
+        persisted_files = (await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version_id).order_by(SkillVersionFileRow.path))).scalars().all()
+        expected_files = [
+            (
+                version_id,
+                file.path,
+                file.media_type,
+                len(file.content),
+                hashlib.sha256(file.content).hexdigest(),
+                file.content,
             )
-        ):
+            for file in archive_files
+        ]
+        actual_files = [
+            (
+                file.skill_version_id,
+                file.path,
+                file.media_type,
+                file.size_bytes,
+                file.sha256,
+                bytes(file.content),
+            )
+            for file in persisted_files
+        ]
+        if asset.current_published_version_id != version_id or actual_files != expected_files:
             raise BootstrapConflict("existing system Skill files conflict with canonical payload")
         return False
 
@@ -328,7 +372,7 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         workflow_status="draft",
         description=description,
         frontmatter=frontmatter,
-        compatibility=None,
+        compatibility=compatibility,
         secret_requirements=requirements,
         scan_decision="allow",
         scan_summary={"source": "builtin-bootstrap"},
@@ -338,15 +382,18 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     )
     session.add_all([asset, version])
     await session.flush()
-    session.add(
-        SkillVersionFileRow(
-            skill_version_id=version_id,
-            path="SKILL.md",
-            media_type="text/markdown",
-            size_bytes=len(content),
-            sha256=hashlib.sha256(content).hexdigest(),
-            content=content,
-        )
+    session.add_all(
+        [
+            SkillVersionFileRow(
+                skill_version_id=version_id,
+                path=file.path,
+                media_type=file.media_type,
+                size_bytes=len(file.content),
+                sha256=hashlib.sha256(file.content).hexdigest(),
+                content=file.content,
+            )
+            for file in archive_files
+        ]
     )
     await session.flush()
     version.workflow_status = "published"

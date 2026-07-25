@@ -8,6 +8,7 @@ rs.mock("next/navigation", () => ({
 
 import {
   isProjectNavigationItemActive,
+  ProjectDesktopNav,
   projectNavigationItems,
 } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
@@ -63,8 +64,23 @@ function renderShell(project: Project) {
   );
 }
 
+function renderCollapsedDesktopNav(project: Project) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectPrivateWorkProvider
+          accountId="22222222-2222-4222-8222-222222222222"
+          projectId={project.id}
+        >
+          <ProjectDesktopNav project={project} collapsed footer={null} />
+        </ProjectPrivateWorkProvider>
+      </QueryClientProvider>
+    </I18nProvider>,
+  );
+}
+
 describe("project shell navigation", () => {
-  test("gates project Memory and Connections with private-work readiness", () => {
+  test("gates project Memory with private-work readiness and hides Connections", () => {
     const readyItems = projectNavigationItems(
       adminProject,
       true,
@@ -74,23 +90,22 @@ describe("project shell navigation", () => {
     );
 
     expect(readyItems.map((item) => item.label)).toEqual(
-      expect.arrayContaining(["会话", "Memory", "Connections"]),
+      expect.arrayContaining(["会话", "Memory"]),
+    );
+    expect(readyItems).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Connections" }),
+      ]),
     );
     expect(
       projectNavigationItems(adminProject, false, true, false, false),
     ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ label: "Memory" }),
-        expect.objectContaining({ label: "Connections" }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ label: "Memory" })]),
     );
     expect(
       projectNavigationItems(adminProject, true, false, false, false),
     ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ label: "Memory" }),
-        expect.objectContaining({ label: "Connections" }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ label: "Memory" })]),
     );
   });
 
@@ -124,6 +139,7 @@ describe("project shell navigation", () => {
     expect(html).toContain("工作");
     expect(html).toContain("能力");
     expect(html).toContain("项目管理");
+    expect(html).toContain('aria-label="收起菜单栏"');
     expect(html).toContain('href="/workspace"');
     expect(html).toContain("返回工作空间");
     expect(html).toMatch(
@@ -131,6 +147,29 @@ describe("project shell navigation", () => {
     );
     expect(html).not.toMatch(
       /<a[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/skills"/u,
+    );
+  });
+
+  test("keeps authorized function icons available when the desktop menu is collapsed", () => {
+    const html = renderCollapsedDesktopNav(adminProject);
+
+    expect(html).toContain('data-state="collapsed"');
+    expect(html).toContain('aria-label="展开菜单栏"');
+    for (const label of [
+      "项目概览",
+      "Agent",
+      "Skill",
+      "MCP",
+      "Credential",
+      "成员与邀请",
+      "项目设置",
+      "返回工作空间",
+    ]) {
+      expect(html).toContain(`aria-label="${label}"`);
+      expect(html).toContain(`title="${label}"`);
+    }
+    expect(html).toMatch(
+      /<a[^>]*aria-label="Agent"[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/agents"/u,
     );
   });
 
@@ -149,7 +188,7 @@ describe("project shell navigation", () => {
     ).toBe(true);
   });
 
-  test("shows members to an active member and settings only from capabilities", () => {
+  test("gates governance destinations with their exact server capabilities", () => {
     const roleOnlyAdmin = {
       ...adminProject,
       capabilities: [
@@ -165,11 +204,38 @@ describe("project shell navigation", () => {
         "project.update",
       ] as Project["capabilities"],
     };
+    const sharedAssetReader = {
+      ...adminProject,
+      role: "viewer" as const,
+      capabilities: [
+        "project.read",
+        "shared_assets.read",
+      ] as Project["capabilities"],
+    };
+    const memberManager = {
+      ...adminProject,
+      role: "viewer" as const,
+      capabilities: [
+        "project.read",
+        "project.members.manage",
+      ] as Project["capabilities"],
+    };
+    const credentialApprover = {
+      ...sharedAssetReader,
+      capabilities: [
+        ...sharedAssetReader.capabilities,
+        "mcp.credentials.approve",
+      ] as Project["capabilities"],
+    };
 
-    expect(renderShell(roleOnlyAdmin)).toContain("成员与邀请");
+    expect(renderShell(roleOnlyAdmin)).not.toContain("成员与邀请");
     expect(renderShell(roleOnlyAdmin)).not.toContain("项目设置");
     expect(renderShell(capabilityViewer)).toContain("项目设置");
     expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
+    expect(renderShell(sharedAssetReader)).toContain("Agent");
+    expect(renderShell(sharedAssetReader)).not.toContain("Credential");
+    expect(renderShell(memberManager)).toContain("成员与邀请");
+    expect(renderShell(credentialApprover)).toContain("Credential");
   });
 });

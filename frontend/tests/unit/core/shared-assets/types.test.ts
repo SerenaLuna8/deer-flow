@@ -514,6 +514,20 @@ describe("shared asset contracts", () => {
         expected_asset_version: 1,
       }),
     ).toThrow();
+    for (const name of [
+      "Primary",
+      "1primary",
+      "primary slot",
+      `a${"b".repeat(63)}`,
+    ]) {
+      expect(() =>
+        mcpVersionInputSchema.parse({
+          transport: "http",
+          credential_slots: [{ name, payload_schema: { env: ["TOKEN"] } }],
+          expected_asset_version: 1,
+        }),
+      ).toThrow();
+    }
   });
 
   test("strictly parses system binding metadata", () => {

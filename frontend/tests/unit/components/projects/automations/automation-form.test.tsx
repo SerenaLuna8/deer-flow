@@ -19,6 +19,12 @@ const AGENT = {
   scope: "project" as const,
   displayName: "Research Agent",
 };
+const MAIN_AGENT = {
+  id: "44444444-4444-4444-8444-444444444444",
+  scope: "system" as const,
+  displayName: "Main",
+  isDefault: true,
+};
 const THREAD_ID = "33333333-3333-4333-8333-333333333333";
 const NOW = new Date("2026-07-16T00:00:00Z");
 
@@ -167,6 +173,43 @@ describe("AutomationForm", () => {
     expect(html).toContain('data-testid="automation-context-mode"');
     expect(html).toContain('data-testid="automation-agent"');
     expect(html).toContain("disabled");
+  });
+
+  test.each([
+    ["zh-CN", ["标题", "提示词", "调度"]],
+    ["en-US", ["Title", "Prompt", "Schedule"]],
+  ] as const)("localizes the %s field labels", (locale, labels) => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale={locale}>
+        <AutomationForm
+          mode="create"
+          agents={[AGENT]}
+          canSubmit
+          onSubmit={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    for (const label of labels) {
+      expect(html).toContain(`>${label}<`);
+    }
+  });
+
+  test("selects Main by default when creating an Automation", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <AutomationForm
+          mode="create"
+          agents={[AGENT, MAIN_AGENT]}
+          canSubmit
+          onSubmit={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain(
+      `<option value="system:${MAIN_AGENT.id}" selected="">Main · 系统</option>`,
+    );
   });
 
   test("builds a sparse title-only PATCH for a near-execution once Automation", () => {

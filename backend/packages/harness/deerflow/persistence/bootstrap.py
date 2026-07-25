@@ -1,4 +1,4 @@
-"""Fresh-install-only PostgreSQL bootstrap for the M7 final schema."""
+"""Explicit PostgreSQL migrations and read-only runtime schema validation."""
 
 from __future__ import annotations
 
@@ -24,7 +24,10 @@ from deerflow.persistence.final_schema_contract import (
     verify_m7_catalog,
 )
 
-M7_FINAL_SCHEMA_REVISION = "0001_project_saas_baseline"
+BASELINE_SCHEMA_REVISION = "0001_project_saas_baseline"
+CURRENT_SCHEMA_REVISION = BASELINE_SCHEMA_REVISION
+# Current-schema alias retained for the M7 readiness contract.
+M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _HEAD_REVISION: str | None = None
@@ -37,12 +40,30 @@ _FINAL_ALLOWED_RELATIONS = _FINAL_APP_TABLES | _LANGGRAPH_TABLES | {"alembic_ver
 
 
 class M7RecreateRequired(RuntimeError):
-    """The existing database is not an exact M7 database and must be replaced."""
+    """The existing database is not a recognized, safely migratable schema."""
 
     code = "M7_RECREATE_REQUIRED"
 
     def __init__(self) -> None:
-        super().__init__("M7_RECREATE_REQUIRED: existing pre-M7 or unknown schema must be recreated manually")
+        super().__init__("M7_RECREATE_REQUIRED: unknown revision or schema catalog drift requires manual operator review")
+
+
+class SchemaMigrationRequired(RuntimeError):
+    """A known older schema must be upgraded explicitly before runtime starts."""
+
+    code = "DATABASE_MIGRATION_REQUIRED"
+
+    def __init__(self) -> None:
+        super().__init__("DATABASE_MIGRATION_REQUIRED: run `make migrate-db` before starting DeerFlow")
+
+
+class SchemaSetupRequired(RuntimeError):
+    """An empty database must be initialized explicitly before runtime starts."""
+
+    code = "DATABASE_SETUP_REQUIRED"
+
+    def __init__(self) -> None:
+        super().__init__("DATABASE_SETUP_REQUIRED: run `make setup-db` before starting DeerFlow")
 
 
 def _escape_url_for_alembic(url: str) -> str:
@@ -67,8 +88,8 @@ def _get_head_revision() -> str:
         config = AlembicConfig()
         config.set_main_option("script_location", str(_MIGRATIONS_DIR))
         heads = ScriptDirectory.from_config(config).get_heads()
-        if heads != [M7_FINAL_SCHEMA_REVISION]:
-            raise RuntimeError("M7 migration graph must contain exactly one final head")
+        if heads != [CURRENT_SCHEMA_REVISION]:
+            raise RuntimeError("migration graph must contain exactly one declared current head")
         _HEAD_REVISION = heads[0]
     return _HEAD_REVISION
 
@@ -86,8 +107,10 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
     return frozenset(str(value) for value in rows.scalars())
 
 
-async def classify_database(connection: AsyncConnection) -> Literal["empty", "m7"]:
-    """Classify without mutation before Alembic or seed code can run."""
+async def classify_database(
+    connection: AsyncConnection,
+) -> Literal["empty", "current"]:
+    """Classify a database without mutation before any migration can run."""
 
     objects = await inventory_user_schema_objects(connection)
     if not objects:
@@ -96,8 +119,10 @@ async def classify_database(connection: AsyncConnection) -> Literal["empty", "m7
         raise M7RecreateRequired()
 
     revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-    if revision == M7_FINAL_SCHEMA_REVISION and await verify_m7_catalog(connection):
-        return "m7"
+    if revision == CURRENT_SCHEMA_REVISION:
+        if await verify_m7_catalog(connection):
+            return "current"
+        raise M7RecreateRequired()
     raise M7RecreateRequired()
 
 
@@ -135,20 +160,41 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
         await lock_engine.dispose()
 
 
-async def bootstrap_schema(engine: AsyncEngine) -> None:
-    """Install the final baseline on an empty DB or verify an exact M7 DB."""
+async def migrate_schema(engine: AsyncEngine) -> None:
+    """Explicitly migrate an empty or exact known ancestor database to head."""
 
     if not isinstance(engine, AsyncEngine):
-        raise TypeError("bootstrap_schema() requires an AsyncEngine")
+        raise TypeError("migrate_schema() requires an AsyncEngine")
     _get_head_revision()
     async with _postgres_lock(engine):
         async with engine.connect() as connection:
             state = await classify_database(connection)
-        if state == "empty":
+        if state != "current":
             await _run_alembic_offload(_upgrade, _get_alembic_config(engine), "head")
         async with engine.connect() as connection:
-            if await classify_database(connection) != "m7":
+            if await classify_database(connection) != "current":
                 raise M7RecreateRequired()
+
+
+async def bootstrap_schema(engine: AsyncEngine) -> None:
+    """Install or verify the current schema through an explicit operator path."""
+
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("bootstrap_schema() requires an AsyncEngine")
+    await migrate_schema(engine)
+
+
+async def validate_schema(engine: AsyncEngine) -> None:
+    """Read-only runtime gate; never invokes Alembic or executes DDL."""
+
+    if not isinstance(engine, AsyncEngine):
+        raise TypeError("validate_schema() requires an AsyncEngine")
+    _get_head_revision()
+    async with engine.connect() as connection:
+        state = await classify_database(connection)
+    if state == "current":
+        return
+    raise SchemaSetupRequired()
 
 
 async def _run_alembic_offload(function, *args) -> None:
@@ -172,9 +218,15 @@ async def _run_alembic_offload(function, *args) -> None:
 
 
 __all__ = [
+    "BASELINE_SCHEMA_REVISION",
+    "CURRENT_SCHEMA_REVISION",
     "M7RecreateRequired",
     "M7_FINAL_SCHEMA_REVISION",
+    "SchemaMigrationRequired",
+    "SchemaSetupRequired",
     "bootstrap_schema",
     "classify_database",
     "list_user_relations",
+    "migrate_schema",
+    "validate_schema",
 ]

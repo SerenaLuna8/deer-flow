@@ -16,6 +16,23 @@ import { AssetVersionDiff } from "./asset-version-diff";
 
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
 
+export function activeCredentialGrantVersions(
+  version: McpVersion,
+): Record<string, number> {
+  const slotNames = new Map(
+    version.credential_slots.map((slot) => [slot.id, slot.name]),
+  );
+  return Object.fromEntries(
+    version.credential_grants
+      .filter((grant) => grant.status === "active")
+      .map((grant) => {
+        const slotName = slotNames.get(grant.credential_slot_id);
+        return slotName ? ([slotName, grant.version] as const) : null;
+      })
+      .filter((entry): entry is readonly [string, number] => entry !== null),
+  );
+}
+
 function versionStatus(version: AssetVersion) {
   return "workflow_status" in version
     ? version.workflow_status
@@ -29,10 +46,13 @@ export function AssetVersionHistory({
   onPublish,
   onSubmit,
   onApprove,
+  onConfigureCredentialGrants,
   approvalCredentials = [],
   approvalCredentialScope = "project",
   approvalCredentialsLoading = false,
   approvalCredentialsError,
+  approvalError,
+  configureCredentialGrantsVersionId,
   onRetryApprovalCredentials,
 }: {
   kind: AssetListKind;
@@ -44,15 +64,25 @@ export function AssetVersionHistory({
     version: McpVersion,
     credentialVersions: Record<string, string>,
   ) => void;
+  onConfigureCredentialGrants?: (
+    version: McpVersion,
+    credentialVersions: Record<string, string>,
+    expectedActiveGrantVersions: Record<string, number>,
+  ) => boolean | void | Promise<boolean | void>;
   approvalCredentials?: CredentialVersionOption[];
   approvalCredentialScope?: "system" | "project";
   approvalCredentialsLoading?: boolean;
   approvalCredentialsError?: unknown;
+  approvalError?: unknown;
+  configureCredentialGrantsVersionId?: string | null;
   onRetryApprovalCredentials?: () => void;
 }) {
   const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
     null,
   );
+  const [approvalMode, setApprovalMode] = useState<
+    "publish" | "configure-grants"
+  >("publish");
 
   if (versions.length === 0) {
     return <p className="text-muted-foreground text-sm">尚未创建版本。</p>;
@@ -122,6 +152,24 @@ export function AssetVersionHistory({
                     )}
                   </div>
                 )}
+                {isMcp &&
+                  version.workflow_status === "published" &&
+                  version.id === configureCredentialGrantsVersionId &&
+                  version.credential_slots.length > 0 &&
+                  onConfigureCredentialGrants && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={pending}
+                      onClick={() => {
+                        setApprovalMode("configure-grants");
+                        setApprovalVersion(version);
+                      }}
+                    >
+                      配置 Credential 授权
+                    </Button>
+                  )}
                 <AssetVersionDiff
                   previous={versions[index + 1] ?? null}
                   current={version}
@@ -140,9 +188,25 @@ export function AssetVersionHistory({
         credentialScope={approvalCredentialScope}
         credentialsLoading={approvalCredentialsLoading}
         credentialsError={approvalCredentialsError}
+        approvalError={approvalError}
         onRetryCredentials={onRetryApprovalCredentials}
-        onOpenChange={(open) => !open && setApprovalVersion(null)}
-        onApprove={(version, bindings) => onApprove?.(version, bindings)}
+        mode={approvalMode}
+        onOpenChange={(open) => {
+          if (!open) {
+            setApprovalVersion(null);
+            setApprovalMode("publish");
+          }
+        }}
+        onApprove={(version, bindings) => {
+          if (approvalMode === "configure-grants") {
+            return onConfigureCredentialGrants?.(
+              version,
+              bindings,
+              activeCredentialGrantVersions(version),
+            );
+          }
+          return onApprove?.(version, bindings);
+        }}
       />
     </>
   );

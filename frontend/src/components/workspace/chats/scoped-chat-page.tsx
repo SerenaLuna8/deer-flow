@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
@@ -38,7 +39,11 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
-import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import {
+  CHAT_CONTENT_WIDTH_CSS_VALUES,
+  useLocalSettings,
+  useThreadSettings,
+} from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import {
   useBranchThread,
@@ -72,6 +77,7 @@ export type ScopedChatRouteScope = ChatRouteScope & {
   sidecarVisible?: boolean;
   artifactsVisible?: boolean;
   followupSuggestionsEnabled?: boolean;
+  canDeleteFiles?: boolean;
 };
 
 export function shouldShowThreadWelcome({
@@ -158,6 +164,9 @@ export function ScopedChatPage({
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    historyError,
+    retryHistory,
+    hasTerminalRunFailure,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
@@ -209,7 +218,8 @@ export function ScopedChatPage({
   );
   const metadataSettled =
     !threadMetadata.isLoading && !threadMetadata.isFetching;
-  const historySettled = !isHistoryLoading && !hasMoreHistory;
+  const historySettled =
+    !isHistoryLoading && !hasMoreHistory && historyError === null;
   const hasUsableThreadState = hasThreadMessages || hasMoreHistory;
   const threadMissing =
     !isNewThread &&
@@ -222,7 +232,8 @@ export function ScopedChatPage({
 
   const shouldWelcome = shouldShowThreadWelcome({
     isNewThread,
-    isHistoryLoading: isHistoryLoading || !metadataSettled,
+    isHistoryLoading:
+      isHistoryLoading || !metadataSettled || historyError !== null,
     hasMoreHistory,
     visibleMessageCount,
     dismissed: welcomeDismissedThreadIdsRef.current.has(threadId),
@@ -336,6 +347,7 @@ export function ScopedChatPage({
       ),
     [thread.messages],
   );
+  const hasRunFailure = Boolean(thread.error) || hasTerminalRunFailure;
 
   if (threadMissing && missingThreadFallback != null) {
     return missingThreadFallback;
@@ -366,8 +378,22 @@ export function ScopedChatPage({
         parentThreadId={threadId}
         context={settings.context}
       >
-        <ChatBox threadId={threadId}>
-          <div className="relative flex size-full min-h-0 justify-between">
+        <ChatBox
+          threadId={threadId}
+          canDeleteFiles={scope.canDeleteFiles === true}
+        >
+          <div
+            className="relative flex size-full min-h-0 justify-between"
+            data-chat-content-width={localSettings.appearance.chatContentWidth}
+            style={
+              {
+                "--chat-content-width":
+                  CHAT_CONTENT_WIDTH_CSS_VALUES[
+                    localSettings.appearance.chatContentWidth
+                  ],
+              } as React.CSSProperties
+            }
+          >
             <header
               className={cn(
                 "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 pr-2 pl-12 sm:pr-4 sm:pl-12 xl:pl-4",
@@ -406,15 +432,21 @@ export function ScopedChatPage({
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  key={threadId}
                   className={cn("size-full", !isWelcomeMode && "pt-10")}
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  initialScroll="instant"
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
+                  historyError={historyError}
+                  retryHistory={retryHistory}
                   tokenUsageInlineMode={tokenUsageInlineMode}
+                  canSubmitFeedback={scope.canRun}
+                  canDeleteFiles={scope.canDeleteFiles === true}
                   canRegenerate={
                     scope.regenerateVisible !== false &&
                     scope.canRun &&
@@ -462,8 +494,9 @@ export function ScopedChatPage({
                       "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
                     isWelcomeMode
                       ? "max-w-(--container-width-sm)"
-                      : "max-w-(--container-width-md)",
+                      : "max-w-(--chat-content-width)",
                   )}
+                  data-testid="chat-composer-width"
                 >
                   {((scope.goalVisible !== false && hasGoal) || hasTodos) && (
                     <div
@@ -490,6 +523,18 @@ export function ScopedChatPage({
                         )}
                       </div>
                     </div>
+                  )}
+                  {hasRunFailure && !thread.isLoading && (
+                    <Alert
+                      variant="destructive"
+                      className="border-destructive/30 bg-destructive/5 mb-3"
+                      data-testid="run-failure-alert"
+                    >
+                      <AlertTitle>{t.conversation.runFailedTitle}</AlertTitle>
+                      <AlertDescription>
+                        {t.conversation.runFailedDescription}
+                      </AlertDescription>
+                    </Alert>
                   )}
                   {mountedRef.current ? (
                     <InputBox

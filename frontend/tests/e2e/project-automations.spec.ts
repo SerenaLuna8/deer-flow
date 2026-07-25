@@ -549,7 +549,7 @@ test("409 refreshes the version and 429 leaves a safe explicit retry", async ({
   await expect(page.getByRole("button", { name: "恢复" })).toBeVisible();
 });
 
-test("direct URL without read capability uses not-found and the API rejects an explicit probe", async ({
+test("direct URL without read capability uses forbidden and the API rejects an explicit probe", async ({
   page,
 }) => {
   const forbidden = project(
@@ -564,7 +564,9 @@ test("direct URL without read capability uses not-found and the API rejects an e
   ]);
   await page.goto("/projects/forbidden/automations");
 
-  await expect(page.getByText("This page could not be found.")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "没有访问权限" }),
+  ).toBeVisible();
   const automationApiBase = `/api/projects/${PROJECT_ALPHA}/automations`;
   expect(
     state.requestedPaths.some((path) => path.startsWith(automationApiBase)),

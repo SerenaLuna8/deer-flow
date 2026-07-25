@@ -9,7 +9,7 @@ import {
   PlusIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
@@ -20,37 +20,28 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import {
   adminAssetKey,
   createAdminCredential,
+  migrateAdminCredentialGrants,
   replaceAdminCredential,
   revokeAdminCredential,
   useAdminAssets,
   useAdminAssetVersions,
   useAdminCredentialRotationStatus,
-  useApproveAdminMcpVersion,
-  useChangeAdminAssetStatus,
-  useCreateAdminAsset,
-  useCreateAdminAssetVersion,
-  usePublishAdminAssetVersion,
-  useSubmitAdminMcpVersion,
+  useConfigureAdminMcpCredentialGrants,
   type AdminAssetList,
   type AdminCredentialList,
   type AssetListKind,
   type AssetSummary,
-  type AssetVersion,
   type CreateCredentialInput,
   type CredentialMetadata,
   type ReplaceCredentialInput,
 } from "@/core/shared-assets";
 
 import {
-  CreateAssetDialog,
-  CreateVersionDialog,
+  CredentialGrantMigrationDialog,
+  CredentialRevokeDialog,
   CredentialSecretDialog,
-  type VersionAuthoringInput,
 } from "./admin-asset-dialogs";
-import {
-  adminAssetErrorMessage,
-  assetLifecycleActions,
-} from "./admin-asset-view-model";
+import { adminAssetErrorMessage } from "./admin-asset-view-model";
 import { CredentialRotationStatusCard } from "./credential-rotation-status";
 
 export {
@@ -59,25 +50,24 @@ export {
   versionWorkflowActions,
 } from "./admin-asset-view-model";
 
-type MutableKind = Exclude<AssetListKind, "credentials">;
-type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
+type SystemCatalogKind = Exclude<AssetListKind, "credentials">;
 
 const PAGE_META = {
   agents: {
     title: "系统 Agent",
-    description: "维护所有项目可查看和使用的系统 Agent。",
+    description: "查看由 packaged catalog 初始化的系统 Agent 治理元数据。",
     label: "Agent",
     icon: BotIcon,
   },
   skills: {
     title: "系统 Skill",
-    description: "维护只读共享的系统 Skill 与版本文件。",
+    description: "查看由 packaged catalog 初始化的系统 Skill 与版本元数据。",
     label: "Skill",
     icon: SparklesIcon,
   },
   "mcp-servers": {
     title: "系统 MCP",
-    description: "维护 MCP 定义，并对 Credential 槽位执行强制审批。",
+    description: "查看由 packaged catalog 初始化的系统 MCP 治理元数据。",
     label: "MCP",
     icon: NetworkIcon,
   },
@@ -98,43 +88,22 @@ function ErrorNotice({ error }: { error: unknown }) {
   );
 }
 
-function AssetCard({
+function SystemAssetCard({
   accountId,
   kind,
   asset,
 }: {
   accountId: string;
-  kind: MutableKind;
+  kind: SystemCatalogKind;
   asset: AssetSummary;
 }) {
-  const [versionOpen, setVersionOpen] = useState(false);
   const history = useAdminAssetVersions(accountId, kind, asset.id);
-  const changeStatus = useChangeAdminAssetStatus(accountId, kind);
-  const createVersion = useCreateAdminAssetVersion(accountId, kind);
-  const publish = usePublishAdminAssetVersion(accountId, kind);
-  const submit = useSubmitAdminMcpVersion(accountId);
-  const approve = useApproveAdminMcpVersion(accountId);
+  const configureGrants = useConfigureAdminMcpCredentialGrants(accountId);
   const credentialCatalog = useAdminAssets(
     accountId,
     "credentials",
     kind === "mcp-servers",
   );
-  const pending =
-    changeStatus.isPending ||
-    createVersion.isPending ||
-    publish.isPending ||
-    submit.isPending ||
-    approve.isPending;
-  const error =
-    changeStatus.error ??
-    createVersion.error ??
-    publish.error ??
-    submit.error ??
-    approve.error;
-
-  useEffect(() => {
-    if (createVersion.isSuccess) setVersionOpen(false);
-  }, [createVersion.isSuccess]);
 
   return (
     <Card data-testid={`asset-card-${asset.id}`}>
@@ -167,38 +136,6 @@ function AssetCard({
           </div>
         </dl>
 
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => setVersionOpen(true)}
-            disabled={pending || asset.status !== "active"}
-          >
-            <PlusIcon aria-hidden className="size-4" />
-            创建新版本
-          </Button>
-          {assetLifecycleActions(asset.status).map((action) => (
-            <Button
-              key={action}
-              type="button"
-              size="sm"
-              variant={action === "archive" ? "outline" : "destructive"}
-              disabled={pending}
-              onClick={() =>
-                changeStatus.mutate({
-                  assetId: asset.id,
-                  action,
-                  input: { expected_asset_version: asset.version },
-                })
-              }
-            >
-              {action === "archive" ? "归档" : "暂停"}
-            </Button>
-          ))}
-        </div>
-
-        <ErrorNotice error={error} />
-
         <section aria-label={`${asset.display_name} 版本历史`}>
           <h3 className="mb-3 text-sm font-semibold">版本历史</h3>
           {history.isLoading ? (
@@ -219,7 +156,7 @@ function AssetCard({
             <AssetVersionHistory
               kind={kind}
               versions={history.data?.data ?? []}
-              pending={pending}
+              pending={configureGrants.isPending}
               approvalCredentials={
                 (credentialCatalog.data as AdminCredentialList | undefined)
                   ?.items ?? []
@@ -227,53 +164,37 @@ function AssetCard({
               approvalCredentialScope="system"
               approvalCredentialsLoading={credentialCatalog.isLoading}
               approvalCredentialsError={credentialCatalog.error}
+              approvalError={configureGrants.error}
+              configureCredentialGrantsVersionId={
+                asset.current_published_version_id
+              }
               onRetryApprovalCredentials={() =>
                 void credentialCatalog.refetch()
               }
-              onPublish={(version) =>
-                publish.mutate({
-                  assetId: asset.id,
-                  versionId: version.id,
-                  input: { expected_asset_version: asset.version },
-                })
-              }
-              onSubmit={(version) =>
-                submit.mutate({
-                  assetId: asset.id,
-                  versionId: version.id,
-                  input: { expected_asset_version: asset.version },
-                })
-              }
-              onApprove={(version: McpVersion, credentialVersions) =>
-                approve.mutate({
-                  assetId: asset.id,
-                  versionId: version.id,
-                  input: {
-                    credential_versions: credentialVersions,
-                    expected_asset_version: asset.version,
-                  },
-                })
-              }
+              onConfigureCredentialGrants={async (
+                version,
+                credentialVersions,
+                expectedActiveGrantVersions,
+              ) => {
+                try {
+                  await configureGrants.mutateAsync({
+                    assetId: asset.id,
+                    versionId: version.id,
+                    input: {
+                      credential_versions: credentialVersions,
+                      expected_active_grant_versions:
+                        expectedActiveGrantVersions,
+                    },
+                  });
+                  return true;
+                } catch {
+                  return false;
+                }
+              }}
             />
           )}
         </section>
       </CardContent>
-
-      <CreateVersionDialog
-        kind={kind}
-        asset={asset}
-        open={versionOpen}
-        pending={createVersion.isPending}
-        errorMessage={
-          createVersion.error
-            ? adminAssetErrorMessage(createVersion.error)
-            : null
-        }
-        onOpenChange={setVersionOpen}
-        onSubmit={(input: VersionAuthoringInput) =>
-          createVersion.mutate({ assetId: asset.id, input })
-        }
-      />
     </Card>
   );
 }
@@ -282,11 +203,13 @@ export function CredentialMetadataCard({
   credential,
   pending = false,
   onReplace,
+  onMigrate,
   onRevoke,
 }: {
   credential: CredentialMetadata;
   pending?: boolean;
   onReplace: () => void;
+  onMigrate: () => void;
   onRevoke: () => void;
 }) {
   return (
@@ -321,25 +244,47 @@ export function CredentialMetadataCard({
           </div>
         </dl>
         {credential.status === "active" && (
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={pending}
-              onClick={onReplace}
-            >
-              替换凭据
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="destructive"
-              disabled={pending}
-              onClick={onRevoke}
-            >
-              撤销凭据
-            </Button>
+          <div className="space-y-3">
+            {credential.version > 1 && (
+              <div
+                role="note"
+                className="border-border bg-muted/30 text-muted-foreground rounded-lg border px-3 py-2 text-xs"
+              >
+                替换只创建新版本；既有 Grant 仍固定到 retired
+                version，轮换需要显式迁移。
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={pending}
+                onClick={onReplace}
+              >
+                替换凭据
+              </Button>
+              {credential.version > 1 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={pending}
+                  onClick={onMigrate}
+                >
+                  迁移兼容 Grant
+                </Button>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={pending}
+                onClick={onRevoke}
+              >
+                撤销凭据
+              </Button>
+            </div>
           </div>
         )}
       </CardContent>
@@ -351,15 +296,21 @@ function useSecureCredentialWrite(accountId: string) {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
 
-  async function run(operation: () => Promise<unknown>): Promise<boolean> {
+  async function run(
+    operation: () => Promise<unknown>,
+    successMessage?: string,
+  ): Promise<boolean> {
     setPending(true);
     setErrorMessage(null);
+    setNoticeMessage(null);
     try {
       await operation();
       await queryClient.invalidateQueries({
         queryKey: adminAssetKey(accountId, "credentials"),
       });
+      setNoticeMessage(successMessage ?? null);
       return true;
     } catch (error) {
       setErrorMessage(adminAssetErrorMessage(error));
@@ -372,8 +323,12 @@ function useSecureCredentialWrite(accountId: string) {
   return {
     pending,
     errorMessage,
+    noticeMessage,
     run,
-    clearError: () => setErrorMessage(null),
+    clearError: () => {
+      setErrorMessage(null);
+      setNoticeMessage(null);
+    },
   };
 }
 
@@ -387,6 +342,8 @@ function CredentialCardWithHistory({
   secureWrite: ReturnType<typeof useSecureCredentialWrite>;
 }) {
   const [replaceOpen, setReplaceOpen] = useState(false);
+  const [revokeOpen, setRevokeOpen] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
   const history = useAdminAssetVersions(
     accountId,
     "credentials",
@@ -402,13 +359,14 @@ function CredentialCardWithHistory({
           secureWrite.clearError();
           setReplaceOpen(true);
         }}
-        onRevoke={() =>
-          void secureWrite.run(() =>
-            revokeAdminCredential(credential.id, {
-              expected_credential_version: credential.version,
-            }),
-          )
-        }
+        onMigrate={() => {
+          secureWrite.clearError();
+          setMigrationOpen(true);
+        }}
+        onRevoke={() => {
+          secureWrite.clearError();
+          setRevokeOpen(true);
+        }}
       />
       <div className="border-border/70 rounded-xl border p-4">
         <h3 className="mb-3 text-sm font-semibold">版本历史</h3>
@@ -434,6 +392,38 @@ function CredentialCardWithHistory({
           void secureWrite
             .run(() => replaceAdminCredential(credential.id, input))
             .then((success) => success && setReplaceOpen(false));
+        }}
+      />
+      <CredentialGrantMigrationDialog
+        open={migrationOpen}
+        credentialName={credential.display_name}
+        pending={secureWrite.pending}
+        onOpenChange={setMigrationOpen}
+        onConfirm={() => {
+          void secureWrite
+            .run(
+              () =>
+                migrateAdminCredentialGrants(credential.id, {
+                  expected_credential_version: credential.version,
+                }),
+              "已完成兼容 Grant 迁移；没有待迁移 Grant 时不会更改授权。",
+            )
+            .then((success) => success && setMigrationOpen(false));
+        }}
+      />
+      <CredentialRevokeDialog
+        open={revokeOpen}
+        credentialName={credential.display_name}
+        pending={secureWrite.pending}
+        onOpenChange={setRevokeOpen}
+        onConfirm={() => {
+          void secureWrite
+            .run(() =>
+              revokeAdminCredential(credential.id, {
+                expected_credential_version: credential.version,
+              }),
+            )
+            .then((success) => success && setRevokeOpen(false));
         }}
       />
     </div>
@@ -480,6 +470,14 @@ function CredentialList({
         ) : null}
       </div>
       <CredentialWriteError message={secureWrite.errorMessage} />
+      {secureWrite.noticeMessage && (
+        <p
+          role="status"
+          className="border-border bg-muted/30 text-muted-foreground mb-6 rounded-xl border px-4 py-3 text-sm"
+        >
+          {secureWrite.noticeMessage}
+        </p>
+      )}
       <div className="mb-6 flex justify-end">
         <Button
           type="button"
@@ -522,7 +520,13 @@ function CredentialList({
   );
 }
 
-function EmptyState({ label }: { label: string }) {
+function EmptyState({
+  label,
+  bootstrapOnly = false,
+}: {
+  label: string;
+  bootstrapOnly?: boolean;
+}) {
   return (
     <div className="border-border/70 bg-muted/20 rounded-xl border border-dashed p-12 text-center">
       <ArchiveIcon
@@ -531,42 +535,39 @@ function EmptyState({ label }: { label: string }) {
       />
       <p className="mt-3 font-medium">暂无系统 {label}</p>
       <p className="text-muted-foreground mt-1 text-sm">
-        使用页面上方的创建按钮添加第一项。
+        {bootstrapOnly
+          ? "当前 packaged catalog 中没有该类系统资产。"
+          : "使用页面上方的创建按钮添加第一项。"}
       </p>
     </div>
   );
 }
 
-function MutableAssetList({
+function SystemAssetList({
   accountId,
   kind,
   data,
 }: {
   accountId: string;
-  kind: MutableKind;
+  kind: SystemCatalogKind;
   data: AdminAssetList;
 }) {
-  const [createOpen, setCreateOpen] = useState(false);
-  const create = useCreateAdminAsset(accountId, kind);
-
-  useEffect(() => {
-    if (create.isSuccess) setCreateOpen(false);
-  }, [create.isSuccess]);
-
   return (
-    <>
-      <div className="mb-6 flex justify-end">
-        <Button type="button" onClick={() => setCreateOpen(true)}>
-          <PlusIcon aria-hidden className="size-4" />
-          创建 {PAGE_META[kind].label}
-        </Button>
+    <div>
+      <div
+        role="note"
+        className="border-border bg-muted/30 text-muted-foreground mb-6 rounded-xl border px-4 py-3 text-sm"
+      >
+        系统 {PAGE_META[kind].label} 由版本化、摘要校验的 packaged catalog
+        在数据库初始化时写入，运行期只读。更新系统资产需修改仓库内的 packaged
+        catalog，并通过显式数据库初始化流程发布。
       </div>
       {data.items.length === 0 ? (
-        <EmptyState label={PAGE_META[kind].label} />
+        <EmptyState label={PAGE_META[kind].label} bootstrapOnly />
       ) : (
         <div className="grid gap-5">
           {data.items.map((asset) => (
-            <AssetCard
+            <SystemAssetCard
               key={asset.id}
               accountId={accountId}
               kind={kind}
@@ -575,17 +576,7 @@ function MutableAssetList({
           ))}
         </div>
       )}
-      <CreateAssetDialog
-        kind={kind}
-        open={createOpen}
-        pending={create.isPending}
-        errorMessage={
-          create.error ? adminAssetErrorMessage(create.error) : null
-        }
-        onOpenChange={setCreateOpen}
-        onSubmit={(input) => create.mutate(input)}
-      />
-    </>
+    </div>
   );
 }
 
@@ -635,7 +626,7 @@ function AuthenticatedAdminAssetPage({
           data={query.data as AdminCredentialList}
         />
       ) : (
-        <MutableAssetList
+        <SystemAssetList
           accountId={accountId}
           kind={kind}
           data={query.data as AdminAssetList}

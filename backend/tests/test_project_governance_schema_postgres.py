@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from alembic import command
 from sqlalchemy import CHAR, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import deerflow.persistence.models as persistence_models
 from deerflow.persistence.base import Base
-from deerflow.persistence.bootstrap import _get_alembic_config
+from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 
 PROJECT_COLUMNS = {
     "deletion_requested_at",
@@ -20,6 +18,7 @@ PROJECT_COLUMNS = {
     "deletion_requested_by_user_id",
 }
 MEMBERSHIP_COLUMNS = {
+    "activation_generation",
     "ended_at",
     "retention_until",
     "ended_by_user_id",
@@ -67,7 +66,7 @@ def _assert_token_hash_is_char_64(columns: list[dict]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_m2_schema_has_governance_constraints(
+async def test_final_baseline_schema_has_governance_constraints(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -102,6 +101,7 @@ async def test_m2_schema_has_governance_constraints(
         assert {
             "ck_project_memberships_status",
             "ck_project_memberships_end_reason",
+            "ck_project_memberships_activation_generation",
             "ck_project_memberships_version",
         } <= {constraint["name"] for constraint in membership_checks}
         assert {
@@ -129,112 +129,10 @@ async def test_m2_schema_has_governance_constraints(
         } <= _foreign_key_targets(invitation_fks)
         pending_email_index = next(index for index in invitation_indexes if index["name"] == "uq_project_invitations_pending_email")
         assert pending_email_index["unique"] is True
-        assert version == "0013_project_automation_finalize"
+        assert version == CURRENT_SCHEMA_REVISION
         assert "project_invitations" in Base.metadata.tables
         assert persistence_models.ProjectInvitationRow.__tablename__ == ("project_invitations")
         assert persistence_models.ProjectInvitationRateLimitRow.__tablename__ == ("project_invitation_rate_limits")
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_m1_database_upgrades_to_m2_without_losing_project_data(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    owner_id = str(uuid.uuid4())
-    project_id = uuid.uuid4()
-    membership_id = uuid.uuid4()
-    now = datetime.now(UTC)
-    try:
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "0005_project_foundation")
-        async with engine.begin() as conn:
-            await conn.execute(
-                text(
-                    """INSERT INTO users
-                    (id,email,system_role,created_at,needs_setup,token_version)
-                    VALUES (:id,'owner@example.com','system_admin',:now,false,0)"""
-                ),
-                {"id": owner_id, "now": now},
-            )
-            await conn.execute(
-                text(
-                    """INSERT INTO projects
-                    (id,slug,display_name,created_by_user_id)
-                    VALUES (:id,'existing-project','Existing',:owner_id)"""
-                ),
-                {"id": project_id, "owner_id": owner_id},
-            )
-            await conn.execute(
-                text(
-                    """INSERT INTO project_memberships
-                    (id,project_id,user_id,role)
-                    VALUES (:id,:project_id,:user_id,'admin')"""
-                ),
-                {
-                    "id": membership_id,
-                    "project_id": project_id,
-                    "user_id": owner_id,
-                },
-            )
-
-        await asyncio.to_thread(command.upgrade, cfg, "0006_project_governance")
-
-        async with engine.connect() as conn:
-            project = (
-                await conn.execute(
-                    text(
-                        """SELECT status,deletion_requested_at,
-                        deletion_effective_at,deletion_requested_by_user_id
-                        FROM projects WHERE id=:id"""
-                    ),
-                    {"id": project_id},
-                )
-            ).one()
-            membership = (
-                await conn.execute(
-                    text(
-                        """SELECT status,ended_at,retention_until,
-                        ended_by_user_id,end_reason
-                        FROM project_memberships WHERE id=:id"""
-                    ),
-                    {"id": membership_id},
-                )
-            ).one()
-            version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-            tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-            invitation_columns = await conn.run_sync(lambda sync: inspect(sync).get_columns("project_invitations"))
-            rate_limit_indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitation_rate_limits"))
-
-        assert project == ("active", None, None, None)
-        assert membership == ("active", None, None, None, None)
-        assert "project_invitations" in tables
-        _assert_token_hash_is_char_64(invitation_columns)
-        assert "ix_project_invitation_rate_limits_expires_at" in {index["name"] for index in rate_limit_indexes}
-        assert version == "0006_project_governance"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_m2_downgrade_removes_rate_limit_expiry_index_with_table(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        cfg = _get_alembic_config(engine)
-        await asyncio.to_thread(command.upgrade, cfg, "0006_project_governance")
-        async with engine.connect() as conn:
-            indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("project_invitation_rate_limits"))
-        assert "ix_project_invitation_rate_limits_expires_at" in {index["name"] for index in indexes}
-
-        await asyncio.to_thread(command.downgrade, cfg, "0005_project_foundation")
-        async with engine.connect() as conn:
-            tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-            version = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-        assert "project_invitation_rate_limits" not in tables
-        assert version == "0005_project_foundation"
     finally:
         await engine.dispose()
 

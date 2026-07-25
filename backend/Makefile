@@ -43,14 +43,17 @@ reconcile-usage:
 rotate-credentials:
 	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
 
+import-project-skills:
+	PYTHONPATH=. uv run python scripts/import_project_skills.py $(ARGS)
+
 detect-blocking-io:
 	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.deer-flow/blocking-io-findings.json
 
-# Generate a new alembic revision by autogenerating the diff against the live
+# Generate a new Alembic revision by autogenerating the diff against the live
 # ORM models. Usage: make migrate-rev MSG="add foo column to runs"
-# The Gateway runs `alembic upgrade head` automatically at startup via
-# `bootstrap_schema`, so there is intentionally no `migrate` / `migrate-stamp`
-# target -- the single execution path keeps ops mistakes off the table.
+# Runtime startup is read-only and never runs Alembic or repairs schema.
+# `make migrate-db` is retained as the explicit forward-only path for future
+# committed revisions; manual stamp and downgrade remain unsupported.
 # The script creates a random PostgreSQL database from explicit
 # POSTGRES_ADMIN_URL, upgrades it to head, diffs the live models, then drops it.
 migrate-rev: export MIGRATION_MESSAGE := $(value MSG)

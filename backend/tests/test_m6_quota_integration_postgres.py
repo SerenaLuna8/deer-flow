@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -22,10 +22,16 @@ from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
-from app.projects.context import ProjectContext
-from app.projects.errors import ProjectMemberQuotaExceeded
+from app.projects.context import ProjectContext, resolve_project_context
+from app.projects.errors import (
+    ProjectMemberQuotaExceeded,
+    ProjectNotFound,
+    ProjectQuotaStateConflict,
+)
 from app.projects.invitation_repository import InvitationRepository
 from app.projects.invitation_service import InvitationService
+from app.projects.membership_repository import MembershipRepository
+from app.projects.membership_service import MembershipService
 from app.projects.models import ProjectRole
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.models import (
@@ -95,6 +101,30 @@ async def _wait_for_project_lock_wait(factory) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("operation did not wait on the Project lock")
+
+
+async def _redeem_quota_member(
+    seed,
+    enforcer: ProjectQuotaEnforcer,
+    *,
+    user_id: uuid.UUID,
+    email: str,
+    role: ProjectRole,
+    now: datetime,
+):
+    async with seed.factory() as session:
+        invitations = InvitationService(
+            InvitationRepository(session),
+            quota=enforcer,
+        )
+        created = await invitations.create(
+            _project_context(seed.owner_a),
+            email,
+            role,
+            now,
+        )
+        claim = await invitations.claim(created.token, now)
+        return await invitations.redeem(user_id, email, claim, now)
 
 
 @pytest.mark.postgres
@@ -915,6 +945,269 @@ async def test_member_redeem_at_limit_rolls_back_membership_and_invitation(
             )
         assert invitation_status == "pending"
         assert membership_count == 0
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_member_activation_generation_survives_role_changes_leave_rejoin_and_remove(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    quotas = QuotaService(seed.factory, QuotaConfig(), source_ref_hasher=_source_ref)
+    enforcer = ProjectQuotaEnforcer(quotas)
+    user_id = uuid.uuid4()
+    email = f"{user_id}@example.com"
+    now = datetime(2026, 7, 16, 13, tzinfo=UTC)
+    try:
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO users
+                       (id,email,system_role,created_at,needs_setup,token_version)
+                       VALUES (:id,:email,'user',now(),false,0)"""
+                ),
+                {"id": str(user_id), "email": email},
+            )
+
+        redeemed = await _redeem_quota_member(
+            seed,
+            enforcer,
+            user_id=user_id,
+            email=email,
+            role=ProjectRole.EDITOR,
+            now=now,
+        )
+        admin_context = _project_context(seed.owner_a)
+        async with seed.factory() as session:
+            members = MembershipService(
+                MembershipRepository(session),
+                quota=enforcer,
+            )
+            changed = await members.change_role(
+                admin_context,
+                redeemed.membership_id,
+                ProjectRole.RUNNER,
+                expected_version=1,
+            )
+            assert changed.version == 2
+            changed = await members.change_role(
+                admin_context,
+                redeemed.membership_id,
+                ProjectRole.VIEWER,
+                expected_version=2,
+            )
+            assert changed.version == 3
+
+        async with seed.factory() as session:
+            member_context = await resolve_project_context(
+                session,
+                user_id,
+                seed.owner_a.project_id,
+                "req-member-leave",
+            )
+            left = await MembershipService(
+                MembershipRepository(session),
+                quota=enforcer,
+            ).leave(member_context, expected_version=3)
+            assert left.status == "left"
+            assert left.version == 4
+
+        rejoined = await _redeem_quota_member(
+            seed,
+            enforcer,
+            user_id=user_id,
+            email=email,
+            role=ProjectRole.RUNNER,
+            now=now + timedelta(minutes=1),
+        )
+        assert rejoined.membership_id == redeemed.membership_id
+
+        async with seed.factory() as session:
+            before_remove = (
+                await session.execute(
+                    text(
+                        """SELECT status,version,activation_generation
+                           FROM project_memberships WHERE id=:membership_id"""
+                    ),
+                    {"membership_id": redeemed.membership_id},
+                )
+            ).one()
+        assert tuple(before_remove) == ("active", 5, 2)
+
+        async with seed.factory() as session:
+            members = MembershipService(
+                MembershipRepository(session),
+                quota=enforcer,
+            )
+            changed = await members.change_role(
+                admin_context,
+                redeemed.membership_id,
+                ProjectRole.EDITOR,
+                expected_version=5,
+            )
+            assert changed.version == 6
+            removed = await members.remove(
+                admin_context,
+                redeemed.membership_id,
+                expected_version=6,
+            )
+            assert removed.status == "removed"
+            assert removed.version == 7
+
+        async with seed.factory() as session:
+            state = (
+                await session.execute(
+                    text(
+                        """SELECT status,version,activation_generation,
+                                  COALESCE((SELECT reserved
+                                    FROM project_usage_counters
+                                    WHERE project_id=:project_id
+                                      AND dimension='members'
+                                      AND bucket='lifetime'),0) AS reserved,
+                                  (SELECT count(*) FROM project_usage_ledger
+                                    WHERE project_id=:project_id
+                                      AND dimension='members'
+                                      AND source_kind='release') AS releases
+                           FROM project_memberships WHERE id=:membership_id"""
+                    ),
+                    {
+                        "project_id": seed.owner_a.project_id,
+                        "membership_id": redeemed.membership_id,
+                    },
+                )
+            ).one()
+        assert tuple(state) == ("removed", 7, 2, 0, 2)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_concurrent_leave_and_remove_release_member_activation_once(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    quotas = QuotaService(seed.factory, QuotaConfig(), source_ref_hasher=_source_ref)
+    enforcer = ProjectQuotaEnforcer(quotas)
+    user_id = uuid.uuid4()
+    email = f"{user_id}@example.com"
+    now = datetime(2026, 7, 16, 14, tzinfo=UTC)
+    try:
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO users
+                       (id,email,system_role,created_at,needs_setup,token_version)
+                       VALUES (:id,:email,'user',now(),false,0)"""
+                ),
+                {"id": str(user_id), "email": email},
+            )
+        redeemed = await _redeem_quota_member(
+            seed,
+            enforcer,
+            user_id=user_id,
+            email=email,
+            role=ProjectRole.EDITOR,
+            now=now,
+        )
+        async with seed.factory() as session:
+            member_context = await resolve_project_context(
+                session,
+                user_id,
+                seed.owner_a.project_id,
+                "req-concurrent-leave",
+            )
+
+        async def leave():
+            async with seed.factory() as session:
+                return await MembershipService(
+                    MembershipRepository(session),
+                    quota=enforcer,
+                ).leave(member_context, expected_version=1)
+
+        async def remove():
+            async with seed.factory() as session:
+                return await MembershipService(
+                    MembershipRepository(session),
+                    quota=enforcer,
+                ).remove(
+                    _project_context(seed.owner_a),
+                    redeemed.membership_id,
+                    expected_version=1,
+                )
+
+        results = await asyncio.gather(leave(), remove(), return_exceptions=True)
+        assert sum(isinstance(result, ProjectNotFound) for result in results) == 1
+        assert sum(not isinstance(result, BaseException) for result in results) == 1
+
+        async with seed.factory() as session:
+            state = (
+                await session.execute(
+                    text(
+                        """SELECT status,version,activation_generation,
+                                  COALESCE((SELECT reserved
+                                    FROM project_usage_counters
+                                    WHERE project_id=:project_id
+                                      AND dimension='members'
+                                      AND bucket='lifetime'),0) AS reserved,
+                                  (SELECT count(*) FROM project_usage_ledger
+                                    WHERE project_id=:project_id
+                                      AND dimension='members'
+                                      AND source_kind='release') AS releases
+                           FROM project_memberships WHERE id=:membership_id"""
+                    ),
+                    {
+                        "project_id": seed.owner_a.project_id,
+                        "membership_id": redeemed.membership_id,
+                    },
+                )
+            ).one()
+        assert state.status in {"left", "removed"}
+        assert tuple(state)[1:] == (2, 1, 0, 1)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_missing_member_reservation_maps_conflict_and_rolls_back_leave(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    quotas = QuotaService(seed.factory, QuotaConfig(), source_ref_hasher=_source_ref)
+    enforcer = ProjectQuotaEnforcer(quotas)
+    try:
+        async with seed.factory() as session:
+            with pytest.raises(ProjectQuotaStateConflict):
+                await MembershipService(
+                    MembershipRepository(session),
+                    quota=enforcer,
+                ).leave(_project_context(seed.viewer), expected_version=1)
+
+        async with seed.factory() as session:
+            membership = (
+                await session.execute(
+                    text(
+                        """SELECT status,version,activation_generation,ended_at,
+                                  retention_until,end_reason
+                           FROM project_memberships WHERE id=:membership_id"""
+                    ),
+                    {"membership_id": seed.viewer.membership_id},
+                )
+            ).one()
+            releases = await session.scalar(
+                text(
+                    """SELECT count(*) FROM project_usage_ledger
+                       WHERE project_id=:project_id
+                         AND dimension='members'
+                         AND source_kind='release'"""
+                ),
+                {"project_id": seed.owner_a.project_id},
+            )
+        assert tuple(membership) == ("active", 1, 1, None, None, None)
+        assert releases == 0
     finally:
         await seed.engine.dispose()
 

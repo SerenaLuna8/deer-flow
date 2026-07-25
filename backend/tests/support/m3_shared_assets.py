@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
 from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.agent_service import AgentService, CreateAgent
 from app.shared_assets.binding_service import BindingService, SystemAssetBinding
+from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.credential_service import CreateCredential, CredentialService
 from app.shared_assets.keyring import CredentialKeyring
@@ -33,6 +34,14 @@ from app.shared_assets.models import (
     ResolvedMcpSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.persistence.shared_assets import (
+    AgentRow,
+    AgentVersionMcpRefRow,
+    AgentVersionRow,
+    AgentVersionSkillRefRow,
+    McpServerVersionRow,
+    SkillVersionRow,
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +64,6 @@ class M3Scenario:
     resolver: ProjectAssetResolver
     system_agent_id: uuid.UUID | None = None
     system_agent_v1: uuid.UUID | None = None
-    system_agent_v2: uuid.UUID | None = None
     system_agent_asset_version: int | None = None
     project_agent_id: uuid.UUID | None = None
     project_mcp_id: uuid.UUID | None = None
@@ -115,26 +123,25 @@ class M3Scenario:
     async def close(self) -> None:
         await self.engine.dispose()
 
-    async def publish_system_catalog(self) -> PublishedSystemCatalog:
-        system_agent = await self.agents.create_asset(
-            self.system_admin,
-            CreateAgent("m3-system-agent", "M3 System Agent"),
-        )
-        system_v1 = await self.agents.create_version(
-            self.system_admin,
-            system_agent.id,
-            self._agent_payload("System Agent V1"),
-            expected_asset_version=system_agent.version,
-        )
-        await self.agents.publish(
-            self.system_admin,
-            system_agent.id,
-            system_v1.id,
-            expected_asset_version=system_agent.version + 1,
-        )
+    async def bootstrap_system_catalog(self) -> PublishedSystemCatalog:
+        await bootstrap_system_assets(self.session_factory)
+        async with self.session_factory() as session:
+            system_agent = (
+                await session.execute(
+                    select(AgentRow).where(
+                        AgentRow.source_key == "builtin:agent:project-assistant",
+                    )
+                )
+            ).scalar_one()
+            system_v1 = await session.get(
+                AgentVersionRow,
+                system_agent.current_published_version_id,
+            )
+        if system_v1 is None:
+            raise AssertionError("packaged system Agent has no published version")
         self.system_agent_id = system_agent.id
         self.system_agent_v1 = system_v1.id
-        self.system_agent_asset_version = system_agent.version + 2
+        self.system_agent_asset_version = system_agent.version
 
         project_agent = await self.agents.create_asset(
             self.project_admin,
@@ -199,6 +206,61 @@ class M3Scenario:
         return PublishedSystemCatalog(agent_v1=system_v1.id)
 
     async def bind_system_agent(self, version_id: uuid.UUID) -> SystemAssetBinding:
+        async with self.session_factory() as session:
+            skill_dependencies = tuple(
+                (
+                    await session.execute(
+                        select(
+                            SkillVersionRow.skill_id,
+                            AgentVersionSkillRefRow.skill_version_id,
+                        )
+                        .join(
+                            SkillVersionRow,
+                            SkillVersionRow.id == AgentVersionSkillRefRow.skill_version_id,
+                        )
+                        .where(
+                            AgentVersionSkillRefRow.agent_version_id == version_id,
+                        )
+                        .order_by(SkillVersionRow.skill_id)
+                    )
+                ).all()
+            )
+            mcp_dependencies = tuple(
+                (
+                    await session.execute(
+                        select(
+                            McpServerVersionRow.mcp_server_id,
+                            AgentVersionMcpRefRow.mcp_server_version_id,
+                        )
+                        .join(
+                            McpServerVersionRow,
+                            McpServerVersionRow.id == AgentVersionMcpRefRow.mcp_server_version_id,
+                        )
+                        .where(
+                            AgentVersionMcpRefRow.agent_version_id == version_id,
+                        )
+                        .order_by(McpServerVersionRow.mcp_server_id)
+                    )
+                ).all()
+            )
+        for asset_id, dependency_version_id in skill_dependencies:
+            await self.bindings.enable(
+                self.project_admin,
+                AssetSelection(
+                    kind=AssetKind.SKILL,
+                    asset_id=asset_id,
+                    version_id=dependency_version_id,
+                ),
+            )
+        for asset_id, dependency_version_id in mcp_dependencies:
+            await self.bindings.enable(
+                self.project_admin,
+                AssetSelection(
+                    kind=AssetKind.MCP,
+                    asset_id=asset_id,
+                    version_id=dependency_version_id,
+                ),
+            )
         return await self.bindings.enable(
             self.project_admin,
             AssetSelection(
@@ -208,7 +270,7 @@ class M3Scenario:
             ),
         )
 
-    async def publish_system_agent_v2(self) -> uuid.UUID:
+    async def attempt_runtime_system_agent_version(self) -> uuid.UUID:
         asset_id = self._required(self.system_agent_id)
         expected = self._required(self.system_agent_asset_version)
         draft = await self.agents.create_version(
@@ -217,14 +279,6 @@ class M3Scenario:
             self._agent_payload("System Agent V2"),
             expected_asset_version=expected,
         )
-        await self.agents.publish(
-            self.system_admin,
-            asset_id,
-            draft.id,
-            expected_asset_version=expected + 1,
-        )
-        self.system_agent_v2 = draft.id
-        self.system_agent_asset_version = expected + 2
         return draft.id
 
     async def resolve_bound_agent(self) -> ResolvedAgentSnapshot:
@@ -256,13 +310,11 @@ class M3Scenario:
 
     async def suspend_bound_system_agent(self) -> object:
         expected = self._required(self.system_agent_asset_version)
-        result = await self.agents.suspend(
+        return await self.agents.suspend(
             self.system_admin,
             self._required(self.system_agent_id),
             expected_asset_version=expected,
         )
-        self.system_agent_asset_version = expected + 1
-        return result
 
     async def resolve_project_mcp_before_revoke(self) -> ResolvedMcpSnapshot:
         if not self.project_mcp_is_approved:

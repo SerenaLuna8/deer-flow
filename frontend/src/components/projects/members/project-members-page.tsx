@@ -19,6 +19,7 @@ import {
 import type { ProjectMembership } from "@/core/projects/types";
 
 import { useCurrentProject } from "../project-context";
+import { ProjectPageHeader } from "../project-page-header";
 import { projectErrorMessage } from "../project-view-model";
 
 import { CreateInvitationDialog } from "./create-invitation-dialog";
@@ -52,22 +53,21 @@ export function ProjectMembersPage() {
   const selfMembership = findSelfMembership(members.data ?? [], user);
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">成员与邀请</h1>
-          <p className="text-muted-foreground mt-2">
-            管理项目成员、角色和待处理邀请。
-          </p>
-        </div>
-        {canManage && (
-          <Button type="button" onClick={() => setInvitationOpen(true)}>
-            邀请成员
-          </Button>
-        )}
-      </div>
+    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+      <ProjectPageHeader
+        eyebrow={`${project.display_name} · 项目管理`}
+        title="成员与邀请"
+        description="管理项目成员、角色和待处理邀请。"
+        actions={
+          canManage ? (
+            <Button type="button" onClick={() => setInvitationOpen(true)}>
+              邀请成员
+            </Button>
+          ) : null
+        }
+      />
 
-      <section aria-labelledby="project-members-title" className="mt-8">
+      <section aria-labelledby="project-members-title" className="mt-6">
         <h2 id="project-members-title" className="mb-3 text-lg font-semibold">
           成员
         </h2>
@@ -153,7 +153,7 @@ export function ProjectMembersPage() {
         )}
       </section>
 
-      <section aria-labelledby="project-invitations-title" className="mt-10">
+      <section aria-labelledby="project-invitations-title" className="mt-8">
         <h2
           id="project-invitations-title"
           className="mb-3 text-lg font-semibold"

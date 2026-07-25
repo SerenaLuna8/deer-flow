@@ -11,6 +11,7 @@ from app.private_work.authorization import (
     PrivateRunAuthorizationService,
 )
 from app.private_work.retention import PrivateWorkRetentionService
+from app.private_work.retention_jobs import RetentionJobAdmission
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.lifecycle_repository import ProjectLifecycleRepository
@@ -78,11 +79,13 @@ class ProjectLifecycleService:
         *,
         authorization: object = PrivateRunAuthorizationService,
         retention: object = PrivateWorkRetentionService,
+        retention_jobs: object = RetentionJobAdmission,
         audit: ProjectLifecycleAuditPort | None = None,
     ):
         self.repository = repository
         self._authorization = authorization
         self._retention = retention
+        self._retention_jobs = retention_jobs
         self._audit = audit or _NoopProjectLifecycleAudit()
 
     async def request_deletion(
@@ -108,13 +111,20 @@ class ProjectLifecycleService:
                     reason=AUTHORIZATION_REVOKED_REASON,
                     now=now,
                 )
+            deletion_effective_at = now + timedelta(days=30)
             result = await self.repository.mark_pending_locked(
                 project,
                 actor,
                 requested_at=now,
-                effective_at=now + timedelta(days=30),
+                effective_at=deletion_effective_at,
                 requested_by_user_id=context.user_id,
                 request_id=context.request_id,
+            )
+            await self._retention_jobs.admit_project(
+                self.repository.session,
+                project_id=project.id,
+                deletion_effective_at=deletion_effective_at,
+                now=now,
             )
             await self._audit.project_deletion_requested(
                 self.repository.session,
@@ -136,6 +146,11 @@ class ProjectLifecycleService:
                 project,
                 actor,
                 request_id=request_id,
+            )
+            await self._retention_jobs.restore_project(
+                self.repository.session,
+                project_id=project.id,
+                now=now,
             )
             await self._retention.restore_owners(
                 self.repository.session,

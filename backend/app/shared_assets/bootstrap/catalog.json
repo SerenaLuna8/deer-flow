@@ -2,6 +2,76 @@
   "schema_version": 1,
   "entries": [
     {
+      "source_key": "builtin:skill:academic-paper-review",
+      "kind": "skill",
+      "slug": "academic-paper-review",
+      "display_name": "academic-paper-review",
+      "version": 1,
+      "payload_path": "content/public-skills/academic-paper-review-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "bd3c59b7078d9f30c0e6ba60f272a9138fe35b6c134abadc3eb341c0665c251c"
+    },
+    {
+      "source_key": "builtin:skill:bootstrap",
+      "kind": "skill",
+      "slug": "bootstrap",
+      "display_name": "bootstrap",
+      "version": 1,
+      "payload_path": "content/public-skills/bootstrap-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "03979b721ea93a8a7147d7adaf5da05db836ef9bc03bf5eb308ecb169d1c1147"
+    },
+    {
+      "source_key": "builtin:skill:chart-visualization",
+      "kind": "skill",
+      "slug": "chart-visualization",
+      "display_name": "chart-visualization",
+      "version": 1,
+      "payload_path": "content/public-skills/chart-visualization-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "59047997703d934c2ff77e63ffbd54fddf74ad34fe5384cadb692f253572415c"
+    },
+    {
+      "source_key": "builtin:skill:code-documentation",
+      "kind": "skill",
+      "slug": "code-documentation",
+      "display_name": "code-documentation",
+      "version": 1,
+      "payload_path": "content/public-skills/code-documentation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "a0a8c7bab0003e85104638e969197b809beea5698f46d36984b4fd070fbcd904"
+    },
+    {
+      "source_key": "builtin:skill:consulting-analysis",
+      "kind": "skill",
+      "slug": "consulting-analysis",
+      "display_name": "consulting-analysis",
+      "version": 1,
+      "payload_path": "content/public-skills/consulting-analysis-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "140825a82c8f55d6099f99fa2c8711bf64bcbb099d1732c6d43d387ddf466a0d"
+    },
+    {
+      "source_key": "builtin:skill:data-analysis",
+      "kind": "skill",
+      "slug": "data-analysis",
+      "display_name": "data-analysis",
+      "version": 1,
+      "payload_path": "content/public-skills/data-analysis-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "47c564eb525c57ddb3ced01fccc3a499a8056fe070bb775f518ebd9cf21b3a55"
+    },
+    {
+      "source_key": "builtin:skill:deep-research",
+      "kind": "skill",
+      "slug": "deep-research",
+      "display_name": "deep-research",
+      "version": 1,
+      "payload_path": "content/public-skills/deep-research-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "2a99fe96df03cd61d1eec4e53a871bb9bbe007e496e38e4b076203221dd5fd7c"
+    },
+    {
       "source_key": "builtin:skill:deerflow-core",
       "kind": "skill",
       "slug": "deerflow-core",
@@ -9,6 +79,146 @@
       "version": 1,
       "payload_path": "content/deerflow-core-v1.skill.md",
       "sha256": "7c4ad88ee087dd9c0f9aa386f2c067c08706befeae442f1e2b451524619e3f03"
+    },
+    {
+      "source_key": "builtin:skill:find-skills",
+      "kind": "skill",
+      "slug": "find-skills",
+      "display_name": "find-skills",
+      "version": 1,
+      "payload_path": "content/public-skills/find-skills-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "fc5e8d039c282b378b73edd555cb9de5ef324dec22193d237c97b0209070e651"
+    },
+    {
+      "source_key": "builtin:skill:frontend-design",
+      "kind": "skill",
+      "slug": "frontend-design",
+      "display_name": "frontend-design",
+      "version": 1,
+      "payload_path": "content/public-skills/frontend-design-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "ae40a8cdc9a22a8f064897d8c9d9737187b2c524965b4a60e1144787aff64d3b"
+    },
+    {
+      "source_key": "builtin:skill:github-deep-research",
+      "kind": "skill",
+      "slug": "github-deep-research",
+      "display_name": "github-deep-research",
+      "version": 1,
+      "payload_path": "content/public-skills/github-deep-research-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "01ccc5ed04854abeda7be80013676f8c4c9539ab8c3d46b9a4e569a4e137fa6b"
+    },
+    {
+      "source_key": "builtin:skill:image-generation",
+      "kind": "skill",
+      "slug": "image-generation",
+      "display_name": "image-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/image-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "2dddc0110ac007f67fc3910e8fcfcb6d50b348a3f0bad73dff63e32577e766d4"
+    },
+    {
+      "source_key": "builtin:skill:music-generation",
+      "kind": "skill",
+      "slug": "music-generation",
+      "display_name": "music-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/music-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "9ec15d2960ce33e12a980b1e193261ecbf32d6017655d85bed7f9b5c83035ecc"
+    },
+    {
+      "source_key": "builtin:skill:newsletter-generation",
+      "kind": "skill",
+      "slug": "newsletter-generation",
+      "display_name": "newsletter-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/newsletter-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "570796893db146b2e0354b7085ea95a37e0b3e307e0d414b348ab6e9f2ffc995"
+    },
+    {
+      "source_key": "builtin:skill:podcast-generation",
+      "kind": "skill",
+      "slug": "podcast-generation",
+      "display_name": "podcast-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/podcast-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "c65b179f31b47806cb9ecc7edb62f1f71bb43b0b41eae251d8092e341ce6d5c8"
+    },
+    {
+      "source_key": "builtin:skill:ppt-generation",
+      "kind": "skill",
+      "slug": "ppt-generation",
+      "display_name": "ppt-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/ppt-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "b9207269d956be9e5a9425f2d248b33bbda8509d86b96901c4116c3fd0745ff2"
+    },
+    {
+      "source_key": "builtin:skill:skill-creator",
+      "kind": "skill",
+      "slug": "skill-creator",
+      "display_name": "skill-creator",
+      "version": 1,
+      "payload_path": "content/public-skills/skill-creator-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "86276b27f6b71bbfa3a1f2a336710b27da2ed4210d4b68601877f0f2d203dd26"
+    },
+    {
+      "source_key": "builtin:skill:surprise-me",
+      "kind": "skill",
+      "slug": "surprise-me",
+      "display_name": "surprise-me",
+      "version": 1,
+      "payload_path": "content/public-skills/surprise-me-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "b5a87a8cc81698845f72eed3bbdbfabd1b77a00adb80f519b7d9c178ae325f80"
+    },
+    {
+      "source_key": "builtin:skill:systematic-literature-review",
+      "kind": "skill",
+      "slug": "systematic-literature-review",
+      "display_name": "systematic-literature-review",
+      "version": 1,
+      "payload_path": "content/public-skills/systematic-literature-review-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "4190ad7d4db02836a1d38e6383dbe3d65632ff2b9867a0a8b558d776f1223c87"
+    },
+    {
+      "source_key": "builtin:skill:vercel-deploy",
+      "kind": "skill",
+      "slug": "vercel-deploy",
+      "display_name": "vercel-deploy",
+      "version": 1,
+      "payload_path": "content/public-skills/vercel-deploy-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "fdd0c9fd6dc802e6b6e0af59746049a113a1473893d79faf8ac6a4ca1e81e726"
+    },
+    {
+      "source_key": "builtin:skill:video-generation",
+      "kind": "skill",
+      "slug": "video-generation",
+      "display_name": "video-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/video-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "32060bc5443192edb070c0fa48f174cbdff89062027e50db40aef32356308788"
+    },
+    {
+      "source_key": "builtin:skill:web-design-guidelines",
+      "kind": "skill",
+      "slug": "web-design-guidelines",
+      "display_name": "web-design-guidelines",
+      "version": 1,
+      "payload_path": "content/public-skills/web-design-guidelines-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "15337866f334317451c18e5700a2e0a66f9469c9bbea0f61050012fcb06152c2"
     },
     {
       "source_key": "builtin:mcp:deerflow-docs",
@@ -23,10 +233,10 @@
       "source_key": "builtin:agent:project-assistant",
       "kind": "agent",
       "slug": "project-assistant",
-      "display_name": "Project Assistant",
+      "display_name": "Main",
       "version": 1,
       "payload_path": "content/project-assistant-v1.agent.json",
-      "sha256": "5deb8b7b94dad26ad2a82db6a48258fc022bd966853b43dce40a1dfd118c9f9b"
+      "sha256": "1545e960f515eb1b8471e24bbb7b3bf406016bc6daa327dc7237fcbcbb741c7e"
     }
   ]
 }

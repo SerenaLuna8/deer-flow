@@ -9,11 +9,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import update
-from support.m4_private_threads import (
-    M4ThreadSeed,
-    install_open_project_cutover_guard,
-    seed_m4_thread_database,
-)
+from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.gateway.deps import get_current_user_from_request, project_session
 from app.private_work.memory_service import PrivateMemoryService
@@ -40,7 +36,6 @@ def _project_memory_module() -> ModuleType | None:
 
 def _app(seed: M4ThreadSeed, identity: dict[str, uuid.UUID]) -> FastAPI:
     app = FastAPI()
-    install_open_project_cutover_guard(app)
     module = _project_memory_module()
     if module is not None:
         app.include_router(module.router)
@@ -93,24 +88,33 @@ async def test_project_memory_routes_support_owner_crud(seed: M4ThreadSeed) -> N
         assert initial_body["namespace"] == "default"
         assert initial_body["memory"]["facts"] == []
 
-        imported = await client.post(
-            f"{base}/import",
+        created = await client.post(
+            f"{base}/facts",
             json={
                 "expected_version": initial_body["version"],
-                "memory": _memory("Owner project memory", fact="Ship runnable versions first."),
+                "content": "Ship runnable versions first.",
+                "category": "preference",
+                "confidence": 0.9,
             },
         )
-        assert imported.status_code == 200
-        imported_body = imported.json()
-        fact_id = imported_body["memory"]["facts"][0]["id"]
+        assert created.status_code == 200
+        created_body = created.json()
+        created_fact = created_body["memory"]["facts"][0]
+        assert created_fact["content"] == "Ship runnable versions first."
+        assert created_fact["category"] == "preference"
+        assert created_fact["confidence"] == 0.9
+        assert created_fact["source"] == "manual"
+        assert created_fact["id"]
+        assert created_fact["createdAt"]
+        fact_id = created_fact["id"]
 
         status = await client.get(f"{base}/status")
         assert status.status_code == 200
         assert status.json() == {
             "namespace": "default",
-            "version": imported_body["version"],
+            "version": created_body["version"],
             "fact_count": 1,
-            "last_updated": imported_body["memory"]["lastUpdated"],
+            "last_updated": created_body["memory"]["lastUpdated"],
         }
 
         exported = await client.get(f"{base}/export")
@@ -119,12 +123,12 @@ async def test_project_memory_routes_support_owner_crud(seed: M4ThreadSeed) -> N
 
         reloaded = await client.post(f"{base}/reload")
         assert reloaded.status_code == 200
-        assert reloaded.json() == imported_body
+        assert reloaded.json() == created_body
 
         updated = await client.patch(
             f"{base}/facts/{fact_id}",
             json={
-                "expected_version": imported_body["version"],
+                "expected_version": created_body["version"],
                 "content": "Keep the main flow runnable.",
                 "confidence": 0.95,
             },
@@ -171,6 +175,18 @@ async def test_project_memory_routes_enforce_context_capabilities_and_strict_inp
         assert forbidden.status_code == 403
         assert forbidden.json()["detail"]["code"] == "PRIVATE_WORK_FORBIDDEN"
 
+        create_forbidden = await client.post(
+            f"{base}/facts",
+            json={
+                "expected_version": listed.json()["version"],
+                "content": "Viewer cannot create facts.",
+                "category": "context",
+                "confidence": 0.8,
+            },
+        )
+        assert create_forbidden.status_code == 403
+        assert create_forbidden.json()["detail"]["code"] == "PRIVATE_WORK_FORBIDDEN"
+
         invalid = await client.post(
             f"{base}/import",
             json={
@@ -181,6 +197,19 @@ async def test_project_memory_routes_enforce_context_capabilities_and_strict_inp
         )
         assert invalid.status_code == 422
         assert invalid.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
+
+        create_invalid = await client.post(
+            f"{base}/facts",
+            json={
+                "expected_version": listed.json()["version"],
+                "content": "No client authority fields.",
+                "category": "context",
+                "confidence": 0.8,
+                "source": "forged-thread",
+            },
+        )
+        assert create_invalid.status_code == 422
+        assert create_invalid.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
 
     identity["user_id"] = uuid.uuid4()
     async with httpx.AsyncClient(

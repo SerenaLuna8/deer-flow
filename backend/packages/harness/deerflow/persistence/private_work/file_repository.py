@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -394,6 +394,10 @@ class PrivateFileRepository:
         file_row.status = "ready"
         file_row.updated_at = datetime.now(UTC)
         await self.session.flush()
+        # The PostgreSQL BEFORE UPDATE trigger owns the durable timestamp and
+        # uses the transaction timestamp. Refresh it before constructing the
+        # response so an immediate GET cannot appear to move time backwards.
+        await self.session.refresh(file_row, attribute_names=("updated_at",))
         return self._file_record(file_row)
 
     async def abort(
@@ -436,13 +440,16 @@ class PrivateFileRepository:
         )
         return int(result.rowcount or 0)
 
-    async def mark_deleted(
+    async def delete_ready(
         self,
         *,
         scope: PrivateResourceScope,
         thread_id: str,
         file_id: uuid.UUID,
     ) -> PrivateFileRecord:
+        """Physically delete one exact ready file and its dependent private bytes."""
+
+        project_id, owner_user_id = self._coordinates(scope)
         await self._lock_thread(scope, thread_id)
         row = (
             await self.session.execute(
@@ -456,11 +463,46 @@ class PrivateFileRepository:
         ).scalar_one_or_none()
         if row is None or row.status != "ready":
             raise PrivateFileConflict
-        row.status = "deleted"
-        row.deleted_at = datetime.now(UTC)
-        row.updated_at = row.deleted_at
-        await self.session.flush()
-        return self._file_record(row)
+
+        current = self._file_record(row)
+        await self.session.execute(
+            delete(PrivateArtifactRow).where(
+                PrivateArtifactRow.project_id == project_id,
+                PrivateArtifactRow.owner_user_id == owner_user_id,
+                PrivateArtifactRow.thread_id == thread_id,
+                PrivateArtifactRow.file_id == file_id,
+            )
+        )
+        await self.session.execute(
+            update(PrivateFileRow)
+            .where(
+                PrivateFileRow.project_id == project_id,
+                PrivateFileRow.owner_user_id == owner_user_id,
+                PrivateFileRow.source_file_id == file_id,
+            )
+            .values(source_file_id=None)
+        )
+        await self.session.execute(
+            delete(PrivateFileChunkRow).where(
+                PrivateFileChunkRow.file_id == file_id,
+            )
+        )
+        result = await self.session.execute(
+            delete(PrivateFileRow).where(
+                PrivateFileRow.id == file_id,
+                *self._file_scope(scope, thread_id),
+                PrivateFileRow.status == "ready",
+            )
+        )
+        if result.rowcount != 1:
+            raise PrivateFileConflict
+        now = datetime.now(UTC)
+        return replace(
+            current,
+            status="deleted",
+            deleted_at=now,
+            updated_at=now,
+        )
 
     async def fetch_chunk_page(
         self,

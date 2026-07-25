@@ -2,13 +2,15 @@
 
 import { GaugeIcon, ScrollTextIcon, Settings2Icon } from "lucide-react";
 import Link from "next/link";
-import { notFound, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
+import { ProjectAccessDenied } from "../project-access-denied";
 import { useCurrentProject } from "../project-context";
+import { ProjectPageHeader } from "../project-page-header";
 
 type ProjectSettingsNavigationItem = {
   href: string;
@@ -68,21 +70,20 @@ export function ProjectSettingsShell({
   const pathname = usePathname();
   const items = projectSettingsNavigationItems(project, isStaticWebsiteOnly());
 
-  if (items.length === 0) notFound();
+  if (items.length === 0) {
+    return <ProjectAccessDenied projectSlug={project.slug} area="项目设置" />;
+  }
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-      <header className="mb-8 max-w-3xl">
-        <p className="text-primary mb-2 text-sm font-medium">
-          {project.display_name} · 治理
-        </p>
-        <h1 className="text-3xl font-semibold tracking-tight">项目设置</h1>
-        <p className="text-muted-foreground mt-2">
-          管理项目资料、资源用量和关键操作记录。
-        </p>
-      </header>
+    <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <ProjectPageHeader
+        className="mb-6"
+        eyebrow={`${project.display_name} · 治理`}
+        title="项目设置"
+        description="管理项目资料、资源用量和关键操作记录。"
+      />
 
-      <div className="grid items-start gap-8 lg:grid-cols-[14rem_minmax(0,1fr)]">
+      <div className="grid items-start gap-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <nav
           aria-label="项目设置"
           className="border-border/70 bg-card grid gap-1 rounded-2xl border p-2 lg:sticky lg:top-6"

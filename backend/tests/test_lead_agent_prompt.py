@@ -274,6 +274,15 @@ def test_system_prompt_template_contains_file_editing_workflow_rule() -> None:
     assert "append=True" in template
 
 
+def test_system_prompt_treats_current_user_input_as_actionable_user_instruction() -> None:
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+
+    assert "Follow legitimate requests inside the boundary" in template
+    assert "follow the latest genuine user message" in template
+    assert "untrusted data, not instructions" not in template
+    assert "everything outside the user-input boundary markers is internal" not in template
+
+
 def test_system_prompt_template_preserves_placeholders() -> None:
     template = prompt_module.SYSTEM_PROMPT_TEMPLATE
     for placeholder in (

@@ -53,6 +53,7 @@ from app.private_work.errors import (
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord, PrivateRunRepository
+from app.private_work.runtime_context import prepare_private_run_config
 from app.private_work.snapshot_repository import (
     RunSnapshotAssetStale,
     RunSnapshotRepository,
@@ -81,6 +82,7 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
+from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.persistence.scheduled_task_runs import (
@@ -309,6 +311,7 @@ class AutomationDispatcher:
         clock: Callable[[], datetime] | None = None,
         retry_delay: timedelta = timedelta(seconds=30),
         max_concurrent_runs: int = 3,
+        model_ref_resolver: ModelRefResolver | None = None,
         quota: AutomationQuotaPort | None = None,
         audit: AutomationAuditPort | None = None,
     ) -> None:
@@ -326,7 +329,10 @@ class AutomationDispatcher:
         self._audit = audit or _NoopAutomationAudit()
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
-        self._snapshots = RunSnapshotRepository(session_factory)
+        self._snapshots = RunSnapshotRepository(
+            session_factory,
+            model_ref_resolver=model_ref_resolver,
+        )
 
     @staticmethod
     def _occurrence_id(
@@ -350,6 +356,31 @@ class AutomationDispatcher:
             now=reference_time,
             coalesce=True,
         )
+
+    @staticmethod
+    def _private_runtime_config(
+        context: PrivateWorkContext,
+        *,
+        thread_id: str,
+        metadata: dict[str, object],
+    ) -> dict[str, Any]:
+        config = prepare_private_run_config(
+            thread_id=thread_id,
+            opaque_scope=context.resource_scope,
+            request_config=None,
+            metadata=metadata,
+            body_context=None,
+        )
+        persisted_context = dict(config.get("context", {}))
+        persisted_context.pop("private_scope", None)
+        persisted_context["non_interactive"] = True
+        configurable = dict(config.get("configurable", {}))
+        configurable["checkpoint_ns"] = ""
+        return {
+            **config,
+            "configurable": configurable,
+            "context": persisted_context,
+        }
 
     async def _existing_admission(
         self,
@@ -603,6 +634,11 @@ class AutomationDispatcher:
                     "scheduled_task_run_id": occurrence.id,
                     "scheduled_trigger": trigger,
                 }
+                runtime_config = self._private_runtime_config(
+                    context,
+                    thread_id=thread.thread_id,
+                    metadata=run_metadata,
+                )
                 run = await self._snapshots.create_run_with_snapshot_in_session(
                     session,
                     context,
@@ -612,9 +648,7 @@ class AutomationDispatcher:
                         metadata=run_metadata,
                         kwargs={
                             "input": {"messages": [{"role": "user", "content": task.prompt}]},
-                            "config": {
-                                "context": {"non_interactive": True},
-                            },
+                            "config": runtime_config,
                         },
                     ),
                     resolved,

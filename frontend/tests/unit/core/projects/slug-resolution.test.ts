@@ -5,6 +5,7 @@ import {
   findProjectBySlug,
   listAllProjects,
 } from "@/core/projects/api";
+import { shouldRetryProjectSlugResolution } from "@/core/projects/hooks";
 import { CAPABILITIES, type ProjectPage } from "@/core/projects/types";
 
 const project = (slug: string, id: string) => ({
@@ -89,6 +90,24 @@ describe("project slug resolution", () => {
     await expect(findProjectBySlug("alpha", undefined, list)).rejects.toBe(
       aborted,
     );
+  });
+
+  test("does not retry a member-scoped slug miss but keeps bounded transient retries", () => {
+    const unavailable = new ProjectApiError(
+      404,
+      "PROJECT_NOT_FOUND",
+      "Project not found",
+    );
+    expect(shouldRetryProjectSlugResolution(0, unavailable)).toBe(false);
+
+    const transient = new ProjectApiError(
+      503,
+      "DATABASE_UNAVAILABLE",
+      "Project storage unavailable",
+    );
+    expect(shouldRetryProjectSlugResolution(0, transient)).toBe(true);
+    expect(shouldRetryProjectSlugResolution(2, transient)).toBe(true);
+    expect(shouldRetryProjectSlugResolution(3, transient)).toBe(false);
   });
 });
 

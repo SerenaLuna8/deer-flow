@@ -1,13 +1,14 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type z } from "zod";
+import { z } from "zod";
 
 import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import {
   adminAuditQueryKey,
+  adminProjectLifecycleMutationKey,
   adminJobsQueryKey,
   adminOperationsRoot,
   adminProjectsQueryKey,
@@ -18,6 +19,7 @@ import {
   accountIdSchema,
   adminAuditPageSchema,
   adminJobPageSchema,
+  adminProjectSchema,
   adminProjectPageSchema,
   jobFiltersSchema,
   operationsOverviewSchema,
@@ -173,6 +175,7 @@ export async function fetchAdminProjects(
   const parsedFilters = projectFiltersSchema.parse(filters);
   const params = new URLSearchParams({ limit: "50" });
   withCursor(params, cursor);
+  if (parsedFilters.query) params.set("query", parsedFilters.query);
   if (parsedFilters.status) params.set("status", parsedFilters.status);
   if (parsedFilters.suspended !== undefined) {
     params.set("suspended", String(parsedFilters.suspended));
@@ -182,6 +185,24 @@ export async function fetchAdminProjects(
     { signal },
   );
   return readOperationsResponse(response, adminProjectPageSchema);
+}
+
+export async function changeAdminProjectLifecycle(
+  accountId: string,
+  projectId: string,
+  action: "suspend" | "resume",
+  signal?: AbortSignal,
+): Promise<AdminProjectPage["items"][number]> {
+  accountIdSchema.parse(accountId);
+  const parsedProjectId = z.string().uuid().parse(projectId);
+  const response = await requestOperations(
+    `${operationsBaseURL()}/projects/${parsedProjectId}/${action}`,
+    {
+      method: "POST",
+      signal,
+    },
+  );
+  return readOperationsResponse(response, adminProjectSchema);
 }
 
 export async function fetchAdminJobs(
@@ -334,6 +355,23 @@ export function safeRequeueMutationOptions(accountId: string) {
   };
 }
 
+export function adminProjectLifecycleMutationOptions(accountId: string) {
+  const parsed = accountIdSchema.parse(accountId);
+  return {
+    mutationKey: adminProjectLifecycleMutationKey(parsed),
+    mutationFn: ({
+      projectId,
+      action,
+    }: {
+      projectId: string;
+      action: "suspend" | "resume";
+    }) =>
+      runAbortableMutation(parsed, (signal) =>
+        changeAdminProjectLifecycle(parsed, projectId, action, signal),
+      ),
+  };
+}
+
 export function useOperationsOverview(accountId: string) {
   return useQuery(operationsOverviewQueryOptions(accountId));
 }
@@ -344,6 +382,19 @@ export function useAdminProjects(
   filters: AdminProjectFilters = {},
 ) {
   return useQuery(adminProjectsQueryOptions(accountId, cursor, filters));
+}
+
+export function useAdminProjectLifecycle(accountId: string) {
+  const parsed = accountIdSchema.parse(accountId);
+  const queryClient = useQueryClient();
+  return useMutation({
+    ...adminProjectLifecycleMutationOptions(parsed),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: adminOperationsRoot(parsed),
+      });
+    },
+  });
 }
 
 export function useAdminJobs(

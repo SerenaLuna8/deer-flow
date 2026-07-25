@@ -5,11 +5,48 @@ import {
   appendHtmlPreviewScrollRestoration,
   buildWriteFileDraftContent,
   createHtmlPreviewScrollKey,
+  extractWriteArtifactSelections,
   getArtifactViewState,
 } from "@/core/artifacts/preview";
 
 const ARTIFACT_PATH = "/artifact-fixtures/report.html";
 const UNSUPPORTED_ARTIFACT_PATH = "/artifact-fixtures/data.csv";
+
+test("extracts stable preview selections for streamed file writes", () => {
+  expect(
+    extractWriteArtifactSelections([
+      {
+        type: "human",
+        id: "human-1",
+        content: "Create a report",
+      },
+      {
+        type: "ai",
+        id: "ai-1",
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "write_file",
+            args: {
+              path: ARTIFACT_PATH,
+              content: "<html></html>",
+            },
+          },
+          {
+            id: "call-2",
+            name: "read_file",
+            args: { path: ARTIFACT_PATH },
+          },
+        ],
+      },
+    ]),
+  ).toEqual([
+    {
+      key: "ai-1/call-1",
+      url: `write-file:${ARTIFACT_PATH}?message_id=ai-1&tool_call_id=call-1`,
+    },
+  ]);
+});
 
 test("allows in-progress write artifacts to render a throttled preview", () => {
   expect(

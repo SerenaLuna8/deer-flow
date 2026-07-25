@@ -1,6 +1,6 @@
 "use client";
 
-import { notFound, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,11 @@ import type {
 import type { Capability, Project } from "@/core/projects/types";
 import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";
 
-import { executableProjectAgents } from "../private-work/agent-selector-dialog";
+import {
+  executableProjectAgents,
+  MAIN_PROJECT_AGENT_SLUG,
+} from "../private-work/agent-selector-dialog";
+import { ProjectAccessDenied } from "../project-access-denied";
 import { useCurrentProject } from "../project-context";
 
 import type { AutomationAgentOption } from "./automation-form";
@@ -205,6 +209,8 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
     id: agent.id,
     scope: agent.scope,
     displayName: agent.display_name,
+    isDefault:
+      agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG,
   }));
 
   const createAutomation = useCreateProjectAutomation();
@@ -224,7 +230,9 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
     setScopedActionFeedback(null);
   }, [project.id]);
 
-  if (!permissions.canRead) notFound();
+  if (!permissions.canRead) {
+    return <ProjectAccessDenied projectSlug={project.slug} area="自动化" />;
+  }
 
   const perform = async <T,>(
     action: AutomationAction,

@@ -9,6 +9,7 @@ from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 class SandboxState(TypedDict):
     sandbox_id: NotRequired[str | None]
+    run_id: NotRequired[str | None]
 
 
 class ThreadDataState(TypedDict):
@@ -23,13 +24,14 @@ class ViewedImageData(TypedDict):
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
-    """Reducer for sandbox state - accepts idempotent writes only.
+    """Reducer for sandbox state with run-scoped private lease rotation.
 
     Multiple sandbox tools can initialize lazily in the same graph step and
     emit the same sandbox_id via Command(update=...). LangGraph needs an
-    explicit reducer for that shared state key. Different sandbox ids in the
-    same thread indicate a lifecycle/isolation bug, so fail closed instead of
-    choosing one silently.
+    explicit reducer for that shared state key. Private Runs intentionally use
+    a fresh lease, so a new run_id may replace the checkpointed sandbox. Within
+    one Run, different sandbox ids still indicate a lifecycle/isolation bug and
+    fail closed.
     """
     if new is None:
         return existing
@@ -39,7 +41,12 @@ def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> Sa
     existing_id = existing.get("sandbox_id")
     new_id = new.get("sandbox_id")
     if existing_id == new_id:
-        return existing
+        return {**existing, **new}
+
+    existing_run_id = existing.get("run_id")
+    new_run_id = new.get("run_id")
+    if isinstance(new_run_id, str) and new_run_id and new_run_id != existing_run_id:
+        return new
     raise ValueError(f"Conflicting sandbox state updates: {existing_id!r} != {new_id!r}")
 
 

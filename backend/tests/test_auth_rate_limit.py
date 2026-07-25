@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
+from app.gateway.auth.sessions import AuthSessionUnavailable
 from app.projects.errors import ProjectDatabaseUnavailable
 
 _TEST_SECRET = "test-secret-for-auth-rate-limit-minimum-32"
@@ -86,6 +87,13 @@ def auth_client(monkeypatch):
     monkeypatch.setattr(auth, "get_session_factory", lambda: _SessionFactory())
     monkeypatch.setattr(auth, "AuthenticationRateLimitRepository", lambda _session: limiter)
     monkeypatch.setattr(auth, "get_local_provider", lambda: provider)
+    session_issuer = AsyncMock(return_value="durable-session-token")
+    monkeypatch.setattr(
+        auth,
+        "issue_access_session",
+        session_issuer,
+    )
+    provider.session_issuer = session_issuer
     with TestClient(app, client=("192.0.2.44", 40123)) as client:
         yield client, limiter, provider
 
@@ -172,6 +180,39 @@ def test_registration_is_rate_limited_and_success_does_not_clear_counter(auth_cl
     assert limiter.admissions[0][2] is None
     assert limiter.clears == []
     provider.create_user.assert_awaited_once()
+
+
+@pytest.mark.parametrize("action", ["login", "register"])
+def test_successful_credentials_do_not_issue_cookie_when_session_write_fails(
+    auth_client,
+    action: str,
+) -> None:
+    client, _limiter, provider = auth_client
+    provider.session_issuer.side_effect = AuthSessionUnavailable()
+    if action == "login":
+        provider.authenticate.return_value = SimpleNamespace(
+            id=uuid.uuid4(),
+            token_version=0,
+            needs_setup=False,
+        )
+        response = client.post(
+            "/api/v1/auth/login/local",
+            data={"username": "person@example.com", "password": "correct"},
+        )
+    else:
+        response = client.post(
+            "/api/v1/auth/register",
+            json={"email": "new@example.com", "password": "Str0ng!Register99"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "code": "DATABASE_UNAVAILABLE",
+            "message": "Authentication storage unavailable",
+        }
+    }
+    assert "access_token" not in response.cookies
 
 
 def test_registration_limit_rejects_before_password_hashing(auth_client) -> None:

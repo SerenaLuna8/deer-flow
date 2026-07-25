@@ -16,7 +16,11 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.agent_service import AgentAssetView, AgentVersionView
 from app.shared_assets.binding_service import SystemAssetBinding
-from app.shared_assets.credential_service import CredentialVersionView, CredentialView
+from app.shared_assets.credential_service import (
+    CredentialGrantMigrationView,
+    CredentialVersionView,
+    CredentialView,
+)
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
@@ -31,7 +35,11 @@ from app.shared_assets.mcp_service import (
     McpVersionView,
 )
 from app.shared_assets.models import AssetKind, AssetScope, WorkflowStatus
-from app.shared_assets.skill_service import SkillFileContentView, SkillVersionView
+from app.shared_assets.skill_service import (
+    SkillAssetView,
+    SkillFileContentView,
+    SkillVersionView,
+)
 
 PROJECT_ID = uuid.uuid4()
 NOW = datetime.now(UTC)
@@ -197,6 +205,41 @@ def test_project_asset_list_keeps_unbound_system_assets_visible() -> None:
     assert response.status_code == 200
     assert len(response.json()["system_items"]) == 1
     assert response.json()["system_items"][0]["binding"] is None
+
+
+def test_project_skill_list_includes_published_description_without_changing_other_asset_contracts() -> None:
+    skill_service = AsyncMock()
+    agent_service = AsyncMock()
+    binding_service = AsyncMock()
+    system_skill = SkillAssetView(
+        id=uuid.uuid4(),
+        scope=AssetScope.SYSTEM,
+        project_id=None,
+        slug="academic-paper-review",
+        display_name="academic-paper-review",
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+        version=1,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+        description="Review, analyze, critique, or summarize academic papers.",
+    )
+    skill_service.list_visible.return_value = (system_skill,)
+    agent_service.list_visible.return_value = (_agent(AssetScope.SYSTEM),)
+    binding_service.list_visible.return_value = ()
+    client = _client(
+        agent_service=agent_service,
+        binding_service=binding_service,
+        skill_service=skill_service,
+    )
+
+    skill_response = client.get(f"/api/projects/{PROJECT_ID}/skills")
+    agent_response = client.get(f"/api/projects/{PROJECT_ID}/agents")
+
+    assert skill_response.status_code == 200
+    assert skill_response.json()["system_items"][0]["description"] == system_skill.description
+    assert "description" not in agent_response.json()["system_items"][0]
 
 
 def test_project_asset_capabilities_expose_suspend_only_to_effective_admins() -> None:
@@ -533,6 +576,10 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
         "/api/admin/assets",
         "/api/admin/projects/{project_id}/assets",
     )
+    mutable_prefixes = (
+        "/api/projects/{project_id}",
+        "/api/admin/projects/{project_id}/assets",
+    )
     history_models = {
         "agents": "AgentVersionHistoryResponse",
         "skills": "SkillVersionHistoryResponse",
@@ -551,14 +598,18 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
                 "schema"
             ]
             assert response_schema == {"$ref": f"#/components/schemas/{model_name}"}
+        credential_replace = openapi["paths"][f"{prefix}/credentials/{{credential_id}}/replace"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert credential_replace == {"$ref": "#/components/schemas/CredentialVersionResponse"}
+        credential_migration = openapi["paths"][f"{prefix}/credentials/{{credential_id}}/migrate-grants"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert credential_migration == {"$ref": "#/components/schemas/CredentialGrantMigrationResponse"}
+
+    for prefix in mutable_prefixes:
         for segment, model_name in version_models.items():
             create_schema = openapi["paths"][f"{prefix}/{segment}/{{asset_id}}/versions"]["post"]["responses"]["201"]["content"]["application/json"]["schema"]
             publish_schema = openapi["paths"][f"{prefix}/{segment}/{{asset_id}}/versions/{{version_id}}/publish"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
             expected = {"$ref": f"#/components/schemas/{model_name}"}
             assert create_schema == expected
             assert publish_schema == expected
-        credential_replace = openapi["paths"][f"{prefix}/credentials/{{credential_id}}/replace"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
-        assert credential_replace == {"$ref": "#/components/schemas/CredentialVersionResponse"}
 
     components = openapi["components"]["schemas"]
     for model_name in (*history_models.values(), *version_models.values()):
@@ -589,6 +640,8 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
         "storage_locator",
         "secret_hash",
     } & set(credential_item["properties"])
+    assert components["CredentialGrantMigrationRequest"]["additionalProperties"] is False
+    assert components["CredentialGrantMigrationResponse"]["additionalProperties"] is False
 
 
 def test_credential_history_response_is_secret_storage_safe() -> None:
@@ -630,6 +683,41 @@ def test_credential_history_response_is_secret_storage_safe() -> None:
         "storage_locator",
         "secret_hash",
     } & set(response.json()["data"][0])
+
+
+def test_credential_grant_migration_route_is_strict_and_secret_storage_safe() -> None:
+    service = AsyncMock()
+    credential_id = uuid.uuid4()
+    credential_version_id = uuid.uuid4()
+    service.migrate_grants.return_value = CredentialGrantMigrationView(
+        credential_id=credential_id,
+        credential_version_id=credential_version_id,
+        migrated_count=2,
+    )
+    client = _client(credential_service=service)
+
+    response = client.post(
+        f"/api/projects/{PROJECT_ID}/credentials/{credential_id}/migrate-grants",
+        json={"expected_credential_version": 3},
+    )
+    invalid = client.post(
+        f"/api/projects/{PROJECT_ID}/credentials/{credential_id}/migrate-grants",
+        json={"expected_credential_version": 3, "credential_version_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "credential_id": str(credential_id),
+        "credential_version_id": str(credential_version_id),
+        "migrated_count": 2,
+        "request_id": "req-project-assets",
+    }
+    assert invalid.status_code == 422
+    service.migrate_grants.assert_awaited_once()
+    actor, requested_credential_id = service.migrate_grants.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert requested_credential_id == credential_id
+    assert service.migrate_grants.await_args.kwargs == {"expected_credential_version": 3}
 
 
 @pytest.mark.parametrize(

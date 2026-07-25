@@ -43,6 +43,7 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
+from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.persistence.channel_connections import (
@@ -162,13 +163,17 @@ class PrivateRunAdmissionService:
         resolver: ProjectAssetResolver | None = None,
         revalidator: PrivateWorkRevalidator | None = None,
         snapshots: RunSnapshotRepository | None = None,
+        model_ref_resolver: ModelRefResolver | None = None,
         quota: PrivateRunAdmissionQuotaPort | None = None,
         audit: PrivateRunAdmissionAuditPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._resolver = resolver or ProjectAssetResolver(session_factory)
         self._revalidator = revalidator or PrivateWorkRevalidator()
-        self._snapshots = snapshots or RunSnapshotRepository(session_factory)
+        self._snapshots = snapshots or RunSnapshotRepository(
+            session_factory,
+            model_ref_resolver=model_ref_resolver,
+        )
         self._quota = quota or _NoopPrivateRunAdmissionQuota()
         self._audit = audit or _NoopPrivateRunAdmissionAudit()
 

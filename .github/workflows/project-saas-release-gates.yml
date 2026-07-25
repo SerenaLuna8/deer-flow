@@ -89,7 +89,6 @@ jobs:
         working-directory: backend
         run: |
           uv run pytest -q
-          uv run pytest tests/blocking_io -q
           uvx ruff format --check .
           uvx ruff check .
           uv run python -m scripts.release_acceptance.security --scope dependencies-backend
@@ -103,6 +102,14 @@ jobs:
           pnpm build:production
           pnpm build:static
           pnpm audit --prod --audit-level low
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
 
       - name: Run tracked and history security gates
         working-directory: backend

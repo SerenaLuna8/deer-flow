@@ -122,6 +122,7 @@ _FINAL_POSTGRES_DDL = (
     "DECLARE\n"
     "    parent_version_id uuid;\n"
     "    parent_status text;\n"
+    "    purge_allowed boolean := false;\n"
     "BEGIN\n"
     "    CASE TG_TABLE_NAME\n"
     "        WHEN 'skill_version_files' THEN\n"
@@ -129,24 +130,99 @@ _FINAL_POSTGRES_DDL = (
     "                THEN OLD.skill_version_id ELSE NEW.skill_version_id END;\n"
     "            SELECT workflow_status INTO parent_status\n"
     "            FROM skill_versions WHERE id = parent_version_id FOR UPDATE;\n"
+    "            IF TG_OP = 'DELETE' THEN\n"
+    "                SELECT EXISTS (\n"
+    "                    SELECT 1\n"
+    "                    FROM skill_versions version\n"
+    "                    JOIN skills asset ON asset.id = version.skill_id\n"
+    "                    JOIN projects project ON project.id = asset.project_id\n"
+    "                    WHERE version.id = OLD.skill_version_id\n"
+    "                      AND asset.scope = 'project'\n"
+    "                      AND project.status = 'pending_deletion'\n"
+    "                      AND project.deletion_effective_at IS NOT NULL\n"
+    "                      AND project.deletion_effective_at <= now()\n"
+    "                ) INTO purge_allowed;\n"
+    "            END IF;\n"
     "        WHEN 'agent_version_skill_refs' THEN\n"
     "            parent_version_id := CASE WHEN TG_OP = 'DELETE'\n"
     "                THEN OLD.agent_version_id ELSE NEW.agent_version_id END;\n"
     "            SELECT workflow_status INTO parent_status\n"
     "            FROM agent_versions WHERE id = parent_version_id FOR UPDATE;\n"
+    "            IF TG_OP = 'DELETE' THEN\n"
+    "                SELECT EXISTS (\n"
+    "                    SELECT 1\n"
+    "                    FROM agent_versions version\n"
+    "                    JOIN agents asset ON asset.id = version.agent_id\n"
+    "                    JOIN projects project ON project.id = asset.project_id\n"
+    "                    WHERE version.id = OLD.agent_version_id\n"
+    "                      AND asset.scope = 'project'\n"
+    "                      AND project.status = 'pending_deletion'\n"
+    "                      AND project.deletion_effective_at IS NOT NULL\n"
+    "                      AND project.deletion_effective_at <= now()\n"
+    "                ) OR EXISTS (\n"
+    "                    SELECT 1\n"
+    "                    FROM skill_versions version\n"
+    "                    JOIN skills asset ON asset.id = version.skill_id\n"
+    "                    JOIN projects project ON project.id = asset.project_id\n"
+    "                    WHERE version.id = OLD.skill_version_id\n"
+    "                      AND asset.scope = 'project'\n"
+    "                      AND project.status = 'pending_deletion'\n"
+    "                      AND project.deletion_effective_at IS NOT NULL\n"
+    "                      AND project.deletion_effective_at <= now()\n"
+    "                ) INTO purge_allowed;\n"
+    "            END IF;\n"
     "        WHEN 'agent_version_mcp_refs' THEN\n"
     "            parent_version_id := CASE WHEN TG_OP = 'DELETE'\n"
     "                THEN OLD.agent_version_id ELSE NEW.agent_version_id END;\n"
     "            SELECT workflow_status INTO parent_status\n"
     "            FROM agent_versions WHERE id = parent_version_id FOR UPDATE;\n"
+    "            IF TG_OP = 'DELETE' THEN\n"
+    "                SELECT EXISTS (\n"
+    "                    SELECT 1\n"
+    "                    FROM agent_versions version\n"
+    "                    JOIN agents asset ON asset.id = version.agent_id\n"
+    "                    JOIN projects project ON project.id = asset.project_id\n"
+    "                    WHERE version.id = OLD.agent_version_id\n"
+    "                      AND asset.scope = 'project'\n"
+    "                      AND project.status = 'pending_deletion'\n"
+    "                      AND project.deletion_effective_at IS NOT NULL\n"
+    "                      AND project.deletion_effective_at <= now()\n"
+    "                ) OR EXISTS (\n"
+    "                    SELECT 1\n"
+    "                    FROM mcp_server_versions version\n"
+    "                    JOIN mcp_servers asset ON asset.id = version.mcp_server_id\n"
+    "                    JOIN projects project ON project.id = asset.project_id\n"
+    "                    WHERE version.id = OLD.mcp_server_version_id\n"
+    "                      AND asset.scope = 'project'\n"
+    "                      AND project.status = 'pending_deletion'\n"
+    "                      AND project.deletion_effective_at IS NOT NULL\n"
+    "                      AND project.deletion_effective_at <= now()\n"
+    "                ) INTO purge_allowed;\n"
+    "            END IF;\n"
     "        WHEN 'mcp_version_credential_slots' THEN\n"
     "            parent_version_id := CASE WHEN TG_OP = 'DELETE'\n"
     "                THEN OLD.mcp_server_version_id ELSE NEW.mcp_server_version_id END;\n"
     "            SELECT workflow_status INTO parent_status\n"
     "            FROM mcp_server_versions WHERE id = parent_version_id FOR UPDATE;\n"
+    "            IF TG_OP = 'DELETE' THEN\n"
+    "                SELECT EXISTS (\n"
+    "                    SELECT 1\n"
+    "                    FROM mcp_server_versions version\n"
+    "                    JOIN mcp_servers asset ON asset.id = version.mcp_server_id\n"
+    "                    JOIN projects project ON project.id = asset.project_id\n"
+    "                    WHERE version.id = OLD.mcp_server_version_id\n"
+    "                      AND asset.scope = 'project'\n"
+    "                      AND project.status = 'pending_deletion'\n"
+    "                      AND project.deletion_effective_at IS NOT NULL\n"
+    "                      AND project.deletion_effective_at <= now()\n"
+    "                ) INTO purge_allowed;\n"
+    "            END IF;\n"
     "        ELSE\n"
     "            RAISE EXCEPTION 'unsupported version child table';\n"
     "    END CASE;\n"
+    "    IF TG_OP = 'DELETE' AND purge_allowed THEN\n"
+    "        RETURN OLD;\n"
+    "    END IF;\n"
     "    IF parent_status IS DISTINCT FROM 'draft' THEN\n"
     "        RAISE EXCEPTION 'published version child rows are immutable'\n"
     "            USING ERRCODE = 'integrity_constraint_violation';\n"
@@ -538,6 +614,41 @@ def upgrade() -> None:
     op.create_index("idx_users_oauth_identity", "users", ["oauth_provider", "oauth_id"], unique=True, postgresql_where=sa.text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"))
     op.create_index(op.f("ix_users_email"), "users", ["email"], unique=True)
     op.create_table(
+        "auth_sessions",
+        sa.Column("session_id_hash", sa.CHAR(length=64), nullable=False),
+        sa.Column("user_id", sa.String(length=36), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.CheckConstraint("expires_at > created_at", name="ck_auth_sessions_expiry"),
+        sa.CheckConstraint("session_id_hash ~ '^[0-9a-f]{64}$'", name="ck_auth_sessions_hash"),
+        sa.CheckConstraint("last_seen_at >= created_at AND last_seen_at <= expires_at", name="ck_auth_sessions_last_seen"),
+        sa.CheckConstraint("revoked_at IS NULL OR revoked_at >= created_at", name="ck_auth_sessions_revoked_at"),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("session_id_hash"),
+    )
+    op.create_index(
+        "ix_auth_sessions_expires_at",
+        "auth_sessions",
+        ["expires_at", "session_id_hash"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_auth_sessions_revoked_at",
+        "auth_sessions",
+        ["revoked_at", "session_id_hash"],
+        unique=False,
+        postgresql_where=sa.text("revoked_at IS NOT NULL"),
+    )
+    op.create_index(
+        "ix_auth_sessions_user_active",
+        "auth_sessions",
+        ["user_id", "expires_at"],
+        unique=False,
+        postgresql_where=sa.text("revoked_at IS NULL"),
+    )
+    op.create_table(
         "worker_nodes",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("version", sa.String(length=64), nullable=False),
@@ -766,6 +877,39 @@ def upgrade() -> None:
     )
     op.create_index("uq_project_invitations_pending_email", "project_invitations", ["project_id", "invited_email"], unique=True, postgresql_where=sa.text("status = 'pending'"))
     op.create_table(
+        "user_notifications",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("recipient_user_id", sa.String(length=36), nullable=False),
+        sa.Column("kind", sa.String(length=32), nullable=False),
+        sa.Column("project_invitation_id", sa.Uuid(), nullable=False),
+        sa.Column("read_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("acted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.CheckConstraint("kind = 'project_invitation'", name="ck_user_notifications_kind"),
+        sa.CheckConstraint("version >= 1", name="ck_user_notifications_version"),
+        sa.CheckConstraint("read_at IS NULL OR read_at >= created_at", name="ck_user_notifications_read_at"),
+        sa.CheckConstraint("acted_at IS NULL OR acted_at >= created_at", name="ck_user_notifications_acted_at"),
+        sa.CheckConstraint("acted_at IS NULL OR read_at IS NOT NULL", name="ck_user_notifications_acted_is_read"),
+        sa.ForeignKeyConstraint(["project_invitation_id"], ["project_invitations.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["recipient_user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("project_invitation_id", name="uq_user_notifications_project_invitation_id"),
+    )
+    op.create_index(
+        "ix_user_notifications_recipient_cursor",
+        "user_notifications",
+        ["recipient_user_id", sa.literal_column("created_at DESC"), sa.literal_column("id DESC")],
+        unique=False,
+    )
+    op.create_index(
+        "ix_user_notifications_recipient_unread",
+        "user_notifications",
+        ["recipient_user_id", "created_at"],
+        unique=False,
+        postgresql_where=sa.text("read_at IS NULL"),
+    )
+    op.create_table(
         "project_memberships",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("project_id", sa.Uuid(), nullable=False),
@@ -777,11 +921,13 @@ def upgrade() -> None:
         sa.Column("ended_by_user_id", sa.String(length=36), nullable=True),
         sa.Column("end_reason", sa.String(length=16), nullable=True),
         sa.Column("version", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
+        sa.Column("activation_generation", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
         sa.Column("is_pinned", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("last_entered_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint("end_reason IS NULL OR end_reason IN ('left', 'removed')", name="ck_project_memberships_end_reason"),
+        sa.CheckConstraint("activation_generation >= 1", name="ck_project_memberships_activation_generation"),
         sa.CheckConstraint("role IN ('admin', 'editor', 'runner', 'viewer')", name="ck_project_memberships_role"),
         sa.CheckConstraint("status IN ('active', 'left', 'removed')", name="ck_project_memberships_status"),
         sa.CheckConstraint("version >= 1", name="ck_project_memberships_version"),
@@ -1122,7 +1268,6 @@ def upgrade() -> None:
         ["project_id", "owner_user_id", "thread_id", "run_id"],
         unique=True,
         postgresql_where=sa.text("category = 'stream' AND event_type = 'stream.end'"),
-        sqlite_where=sa.text("category = 'stream' AND event_type = 'stream.end'"),
     )
     op.create_table(
         "skill_versions",

@@ -42,6 +42,27 @@ class TestMergeSandbox:
         new = {"sandbox_id": "sandbox-1"}
         assert merge_sandbox(existing, new) == existing
 
+    def test_current_run_metadata_is_added_to_same_sandbox(self):
+        existing = {"sandbox_id": "sandbox-1"}
+        new = {"sandbox_id": "sandbox-1", "run_id": "run-2"}
+        assert merge_sandbox(existing, new) == new
+
+    def test_new_run_replaces_previous_run_sandbox(self):
+        existing = {"sandbox_id": "sandbox-1", "run_id": "run-1"}
+        new = {"sandbox_id": "sandbox-2", "run_id": "run-2"}
+        assert merge_sandbox(existing, new) == new
+
+    def test_run_scoped_sandbox_replaces_legacy_checkpoint_sandbox(self):
+        existing = {"sandbox_id": "sandbox-1"}
+        new = {"sandbox_id": "sandbox-2", "run_id": "run-2"}
+        assert merge_sandbox(existing, new) == new
+
+    def test_conflicting_sandbox_ids_in_same_run_raise(self):
+        existing = {"sandbox_id": "sandbox-1", "run_id": "run-1"}
+        new = {"sandbox_id": "sandbox-2", "run_id": "run-1"}
+        with pytest.raises(ValueError, match="Conflicting sandbox state updates"):
+            merge_sandbox(existing, new)
+
     def test_both_none_sandbox_id_is_idempotent(self):
         existing = {"sandbox_id": None}
         new = {"sandbox_id": None}

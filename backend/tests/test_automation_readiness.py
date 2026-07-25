@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
@@ -41,97 +40,6 @@ async def test_readiness_reports_scheduler_disabled_without_closing_project_api(
     assert result.project_private_work_ready is True
     assert result.schema_ready is True
     assert result.request_id == seed.owner_a.request_id
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_readiness_ignores_incomplete_automation_marker_without_writing(
-    seed: M4ThreadSeed,
-) -> None:
-    async with seed.engine.begin() as connection:
-        before = await connection.execute(
-            text(
-                """UPDATE automation_cutover_state
-                SET stage='empty_install',migration_run_id=NULL,
-                    empty_domain_probe_complete=true,
-                    final_schema_probe_complete=false,cutover_at=NULL
-                WHERE id=1
-                RETURNING stage,updated_at"""
-            )
-        )
-        before_row = before.one()
-
-    async with seed.factory() as session:
-        result = await AutomationReadinessService().read(
-            session,
-            seed.owner_a,
-            scheduler_enabled=True,
-        )
-
-    async with seed.engine.connect() as connection:
-        after_row = (
-            await connection.execute(
-                text(
-                    """SELECT stage,updated_at
-                    FROM automation_cutover_state WHERE id=1"""
-                )
-            )
-        ).one()
-
-    assert result.status == "ready"
-    assert result.code == AUTOMATION_READY
-    assert result.scheduler_enabled is True
-    assert result.scheduler_status == "stopped"
-    assert result.project_private_work_ready is True
-    assert result.schema_ready is True
-    assert after_row == before_row
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_readiness_ignores_m4_marker_when_schema_is_final(
-    seed: M4ThreadSeed,
-) -> None:
-    async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """UPDATE private_work_cutover_state
-                SET stage='migration_ready',cutover_at=NULL WHERE id=1"""
-            )
-        )
-
-    async with seed.factory() as session:
-        result = await AutomationReadinessService().read(
-            session,
-            seed.owner_a,
-            scheduler_enabled=True,
-        )
-
-    assert result.status == "ready"
-    assert result.code == AUTOMATION_READY
-    assert result.project_private_work_ready is True
-    assert result.schema_ready is True
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_readiness_reports_final_revision_gap_separately_from_m4(
-    seed: M4ThreadSeed,
-) -> None:
-    async with seed.engine.begin() as connection:
-        await connection.execute(text("UPDATE alembic_version SET version_num='0012_project_automation_expand'"))
-
-    async with seed.factory() as session:
-        result = await AutomationReadinessService().read(
-            session,
-            seed.owner_a,
-            scheduler_enabled=True,
-        )
-
-    assert result.status == "unavailable"
-    assert result.code == AutomationUnavailable.code
-    assert result.project_private_work_ready is False
-    assert result.schema_ready is False
 
 
 @pytest.mark.asyncio

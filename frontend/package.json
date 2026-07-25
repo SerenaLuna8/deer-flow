@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "imports": {
+    "#privacy-build-entry": {
+      "deerflow-static": "./src/build/privacy-static.tsx",
+      "default": "./src/build/privacy-production.tsx"
+    },
     "#workspace-build-entry": {
       "deerflow-static": "./src/build/workspace-static.tsx",
       "default": "./src/build/workspace-production.tsx"
     }
   },
   "scripts": {
-    "demo:save": "node scripts/save-demo.js",
     "build": "next build --webpack",
     "build:production": "BUILD_MODE=production next build --webpack",
     "build:static": "BUILD_MODE=static next build --webpack",
@@ -24,8 +27,6 @@
     "start": "next start",
     "test": "rstest",
     "test:e2e": "playwright test",
-    "test:e2e:all": "playwright test && playwright test --config playwright.static.config.ts",
-    "test:e2e:m7": "playwright test tests/e2e/m7-project-only-routes.spec.ts tests/e2e/project-automations.spec.ts",
     "test:e2e:m8": "playwright test --config playwright.m8.config.ts",
     "test:e2e:m8:deterministic": "playwright test",
     "test:e2e:static": "playwright test --config playwright.static.config.ts",
@@ -73,7 +74,6 @@
     "cmdk": "^1.1.1",
     "codemirror": "^6.0.2",
     "date-fns": "^4.1.0",
-    "dotenv": "^17.2.3",
     "embla-carousel-react": "^8.6.0",
     "gsap": "^3.13.0",
     "hast": "^1.0.0",
@@ -138,6 +138,9 @@
       "mermaid": "11.16.0",
       "mermaid>uuid": "11.1.1",
       "postcss": "8.5.10"
+    },
+    "patchedDependencies": {
+      "next-themes@0.4.6": "patches/next-themes@0.4.6.patch"
     }
   }
 }

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.gateway.deps import project_session
 from app.gateway.routers import projects
 from app.projects.capabilities import Capability, capabilities_for
-from app.projects.errors import ProjectDatabaseUnavailable
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectQuotaStateConflict
 from app.projects.models import ProjectQuotaSummary, ProjectRole, ProjectView, QuotaDimensionSummary
 from deerflow.config.quota_config import QuotaConfig
 
@@ -164,6 +164,25 @@ def test_project_database_failure_is_503_without_driver_details(monkeypatch) -> 
     assert response.status_code == 503
     assert response.json() == {"detail": {"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"}}
     assert "postgresql" not in response.text
+
+
+def test_project_create_quota_state_conflict_is_stable_409(monkeypatch) -> None:
+    monkeypatch.setattr(
+        projects.ProjectService,
+        "create",
+        AsyncMock(side_effect=ProjectQuotaStateConflict()),
+    )
+
+    response = _client().post(
+        "/api/projects",
+        json={"slug": "alpha", "display_name": "Alpha"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "PROJECT_QUOTA_STATE_CONFLICT",
+        "message": "Project quota state conflict",
+    }
 
 
 @pytest.mark.asyncio

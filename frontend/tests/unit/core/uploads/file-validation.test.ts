@@ -7,12 +7,18 @@ import {
   splitUnsupportedUploadFiles,
   validateUploadLimits,
 } from "@/core/uploads/file-validation";
+import type { UploadLimits } from "@/core/uploads/limits";
 
 const limits = {
   max_files: 2,
   max_file_size: 5,
   max_total_size: 7,
-};
+  project_storage: {
+    policy: "project_quota" as const,
+    remaining_bytes: 100,
+  },
+  request_id: "upload-limits",
+} satisfies UploadLimits;
 
 test("identifies Finder-style .app bundle uploads as unsupported", () => {
   expect(
@@ -116,6 +122,35 @@ test("does not block files when upload limits are unavailable", () => {
   expect(result.accepted).toEqual([file]);
   expect(result.rejected).toEqual([]);
   expect(result.violations).toEqual([]);
+});
+
+test("rejects the aggregate batch before it exceeds project storage remaining", () => {
+  const storageLimits: UploadLimits = {
+    ...limits,
+    max_files: 10,
+    max_total_size: 20,
+    project_storage: {
+      policy: "project_quota",
+      remaining_bytes: 5,
+    },
+  };
+  const first = new File(["1234"], "first.txt");
+  const exceedsRemaining = new File(["12"], "second.txt");
+
+  const result = validateUploadLimits(
+    [],
+    [first, exceedsRemaining],
+    storageLimits,
+  );
+
+  expect(result.accepted).toEqual([first]);
+  expect(result.violations).toEqual([
+    {
+      code: "project_storage_remaining",
+      files: [exceedsRemaining],
+      limit: 5,
+    },
+  ]);
 });
 
 test("formats binary upload limits for display", () => {

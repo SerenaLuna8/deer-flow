@@ -20,8 +20,29 @@ Run `make config-upgrade` to merge new fields into your config.
 ### Project assets
 
 Agent, Skill and MCP definitions are versioned PostgreSQL assets. System admins
-publish system assets and project members manage project assets through the
-authenticated UI/API. `config.yaml` controls process/runtime settings only.
+只读治理 packaged bootstrap system catalog；项目成员在经过认证的 UI/API 中管理
+project assets。`config.yaml` 只管理进程和运行时设置。
+
+### 认证反向代理
+
+登录、注册和邀请兑换的限流以真实客户端 IP 为输入。Gateway 只接受受信代理提供的
+`X-Real-IP`，并会把该值解析为单个规范 IPv4/IPv6 地址；无效值或逗号分隔链会回退到
+TCP peer，不能用来绕过限流。
+
+```yaml
+auth:
+  trusted_proxies:
+    - 127.0.0.1/32
+    - ::1/128
+```
+
+默认 loopback 仅用于仓库自带的本机 Nginx。Docker Compose 与 Helm 会生成独立的
+`DEER_FLOW_PROXY_AUTH_TOKEN`，由 Nginx 覆盖内部证明 Header，Gateway 以常量时间比较后
+才接受动态容器/Pod 地址转发的 `X-Real-IP`。该 token 不得与
+`DEER_FLOW_INTERNAL_AUTH_TOKEN` 或 `AUTH_JWT_SECRET` 复用，也不得写入 YAML、日志或版本库。
+自定义反向代理应优先配置精确 CIDR；使用自管 Helm application Secret 时必须同时提供
+`BETTER_AUTH_SECRET`、`DEER_FLOW_INTERNAL_AUTH_TOKEN` 和
+`DEER_FLOW_PROXY_AUTH_TOKEN`。
 
 ### Models
 
@@ -246,7 +267,7 @@ Notes:
 - `enabled: false` keeps background polling off by default.
 - `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
 - All scheduler fields are restart-required; edits need a Gateway restart.
-- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend. SQLite silently ignores row-level locks, so multiple workers can double-fire the same task.
+- Scheduler state, occurrence admission and Run jobs always use the configured PostgreSQL database.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
 - The MVP supports only `once` and `cron`.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
@@ -597,9 +618,8 @@ models:
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
-- `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
-- `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
+- `DEER_FLOW_SKILLS_PATH` - Local harness Skill source directory when `skills.path` is omitted; project Run authority still comes from the admitted PostgreSQL snapshot
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
 ## Configuration Location
@@ -706,9 +726,8 @@ genuinely reads the full CLI config directory.
 - Check that `$` prefix is used for env var references
 
 ### "Skills not loading"
-- Check that `deer-flow/skills/` directory exists
-- Verify skills have valid `SKILL.md` files
-- Check `skills.path` or `DEER_FLOW_SKILLS_PATH` if using a custom path
+- Project Run：检查 Skill 是否已经发布、绑定到当前项目并被本次 Run snapshot 固定；业务运行不会把仓库目录当作授权来源。
+- 独立 harness/TUI：检查本地 Skill 目录、`SKILL.md`，以及 `skills.path` 或 `DEER_FLOW_SKILLS_PATH`。
 
 ### "Docker sandbox fails to start"
 - Ensure Docker is running

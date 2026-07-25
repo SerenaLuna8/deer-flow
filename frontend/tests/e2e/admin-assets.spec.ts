@@ -41,6 +41,7 @@ const mcp: AssetSummary = {
   id: MCP_ID,
   slug: "github-mcp",
   display_name: "GitHub MCP",
+  current_published_version_id: MCP_VERSION_ID,
 };
 
 const skill: AssetSummary = {
@@ -54,7 +55,7 @@ const mcpVersion: McpVersion = {
   id: MCP_VERSION_ID,
   mcp_server_id: MCP_ID,
   version_number: 1,
-  workflow_status: "draft",
+  workflow_status: "published",
   definition: {
     description: "GitHub tools",
     transport: "http",
@@ -113,14 +114,19 @@ async function mockAdminAssets(
       credential_versions: Record<string, string>;
       expected_asset_version: number;
     } | null;
-  } = { submit: null, approve: null };
+    grants: {
+      credential_versions: Record<string, string>;
+      expected_active_grant_versions: Record<string, number>;
+    } | null;
+  } = { submit: null, approve: null, grants: null };
   let agentState = structuredClone(agent);
   let agents = [agentState];
   let agentVersions: AgentVersion[] = [];
   let skillState = structuredClone(skill);
   let skillVersions: SkillVersion[] = [];
   let mcpState = structuredClone(mcp);
-  let workflowStatus: McpVersion["workflow_status"] = "draft";
+  let workflowStatus: McpVersion["workflow_status"] = "published";
+  let systemMcpGrants: McpVersion["credential_grants"] = [];
   let directMcpVersion: McpVersion | null = null;
   let credential: AdminCredential | null = seedCredential
     ? {
@@ -333,9 +339,46 @@ async function mockAdminAssets(
       await json(route, {
         data: [
           ...(directMcpVersion ? [directMcpVersion] : []),
-          { ...mcpVersion, workflow_status: workflowStatus },
+          {
+            ...mcpVersion,
+            workflow_status: workflowStatus,
+            credential_grants: systemMcpGrants,
+          },
         ],
         request_id: "request-mcp-history",
+      });
+      return;
+    }
+    if (
+      path.endsWith(
+        `/api/admin/assets/mcp-servers/${MCP_ID}/versions/${MCP_VERSION_ID}/credential-grants`,
+      ) &&
+      method === "POST"
+    ) {
+      mcpWorkflowRequests.grants = request.postDataJSON() as {
+        credential_versions: Record<string, string>;
+        expected_active_grant_versions: Record<string, number>;
+      };
+      systemMcpGrants = [
+        {
+          id: "40000000-0000-4000-8000-000000000001",
+          mcp_server_version_id: MCP_VERSION_ID,
+          credential_slot_id: "30000000-0000-4000-8000-000000000001",
+          credential_version_id:
+            mcpWorkflowRequests.grants.credential_versions["github-token"]!,
+          status: "active",
+          version: 1,
+          created_by_user_id: "system-admin",
+          created_at: "2026-07-13T09:30:00+00:00",
+        },
+      ];
+      await json(route, {
+        data: {
+          ...mcpVersion,
+          workflow_status: "published",
+          credential_grants: systemMcpGrants,
+        },
+        request_id: "request-system-mcp-grants",
       });
       return;
     }
@@ -565,6 +608,21 @@ async function mockAdminAssets(
       return;
     }
     if (
+      path.endsWith(
+        `/api/admin/assets/credentials/${CREDENTIAL_ID}/migrate-grants`,
+      ) &&
+      method === "POST" &&
+      credential
+    ) {
+      await json(route, {
+        credential_id: credential.id,
+        credential_version_id: credential.current_version_id,
+        migrated_count: 1,
+        request_id: "request-credential-migration",
+      });
+      return;
+    }
+    if (
       path.endsWith(`/api/admin/assets/credentials/${CREDENTIAL_ID}/revoke`) &&
       method === "POST" &&
       credential
@@ -598,7 +656,7 @@ async function mockAdminAssets(
   return mcpWorkflowRequests;
 }
 
-test("system admin creates an asset and MCP credential slots require approval", async ({
+test("system Agent Skill and MCP catalog is read only while Credential governance remains available", async ({
   page,
 }) => {
   const mcpWorkflowRequests = await mockAdminAssets(page, {
@@ -609,44 +667,43 @@ test("system admin creates an asset and MCP credential slots require approval", 
   await expect(page).toHaveURL(/\/admin\/assets\/agents$/);
   await expect(page.getByRole("heading", { name: "系统 Agent" })).toBeVisible();
   await expect(page.getByText("Research Agent", { exact: true })).toBeVisible();
+  await expect(page.getByRole("note")).toContainText("packaged catalog");
+  await expect(page.getByRole("note")).toContainText("运行期只读");
+  await expect(page.getByRole("button", { name: "创建 Agent" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "创建新版本" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "归档" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "暂停" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "发布版本" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "创建 Agent" }).click();
-  const createDialog = page.getByRole("dialog", { name: "创建 Agent" });
-  await createDialog.getByLabel("名称").fill("Writer Agent");
-  await createDialog.getByLabel("资产标识").fill("writer-agent");
-  await createDialog.getByRole("button", { name: "创建" }).click();
-  await expect(page.getByText("Writer Agent", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Skill" }).first().click();
+  await expect(page.getByRole("heading", { name: "系统 Skill" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "创建 Skill" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "创建新版本" })).toHaveCount(0);
 
   await page.getByRole("link", { name: "MCP" }).first().click();
   await expect(page.getByRole("heading", { name: "系统 MCP" })).toBeVisible();
-  const mcpCard = page.getByTestId(`asset-card-${MCP_ID}`);
-  await expect(mcpCard.getByRole("button", { name: "提交审批" })).toBeVisible();
-  await expect(mcpCard.getByRole("button", { name: "发布版本" })).toHaveCount(
-    0,
-  );
-  await mcpCard.getByRole("button", { name: "提交审批" }).click();
-  await expect(
-    mcpCard.getByRole("button", { name: "批准并发布" }),
-  ).toBeVisible();
-  await expect(mcpCard.getByRole("button", { name: "发布版本" })).toHaveCount(
-    0,
-  );
-  await mcpCard.getByRole("button", { name: "批准并发布" }).click();
-  const approveDialog = page.getByRole("dialog", { name: "批准 MCP 版本" });
-  await approveDialog
+  await expect(page.getByRole("button", { name: "创建 MCP" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "创建新版本" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "提交审批" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "批准并发布" })).toHaveCount(0);
+  await page.getByRole("button", { name: "配置 Credential 授权" }).click();
+  const grantDialog = page.getByRole("dialog", {
+    name: "配置 MCP Credential 授权",
+  });
+  await grantDialog
     .getByLabel("github-token Credential")
     .selectOption("20000000-0000-4000-8000-000000000005");
-  await approveDialog.getByRole("button", { name: "批准并发布" }).click();
-  await expect(mcpCard.getByText("已发布", { exact: true })).toBeVisible();
-  await expect(mcpCard.getByRole("button", { name: "发布版本" })).toHaveCount(
-    0,
-  );
-  expect(mcpWorkflowRequests.submit).toEqual({ expected_asset_version: 1 });
-  expect(mcpWorkflowRequests.approve).toEqual({
-    credential_versions: {
-      "github-token": "20000000-0000-4000-8000-000000000005",
+  await grantDialog.getByRole("button", { name: "保存授权" }).click();
+  await expect(grantDialog).toHaveCount(0);
+  expect(mcpWorkflowRequests).toEqual({
+    submit: null,
+    approve: null,
+    grants: {
+      credential_versions: {
+        "github-token": "20000000-0000-4000-8000-000000000005",
+      },
+      expected_active_grant_versions: {},
     },
-    expected_asset_version: 2,
   });
 
   await page.getByRole("link", { name: "Credential" }).first().click();
@@ -657,50 +714,12 @@ test("system admin creates an asset and MCP credential slots require approval", 
   await expect(page.getByText("复制密钥")).toHaveCount(0);
 });
 
-test("system admin authors and publishes every asset kind and manages credential lifecycle", async ({
+test("system admin manages the separate system Credential lifecycle", async ({
   page,
 }) => {
   await mockAdminAssets(page);
 
-  await page.goto("/admin/assets/agents");
-  const agentCard = page.getByTestId(`asset-card-${AGENT_ID}`);
-  await agentCard.getByRole("button", { name: "创建新版本" }).click();
-  const agentDialog = page.getByRole("dialog", { name: "创建 Agent 版本" });
-  await agentDialog.getByLabel("描述").fill("Writer agent");
-  await agentDialog.getByLabel("角色设定（Soul）").fill("Write clearly");
-  await agentDialog.getByLabel("模型引用").fill("default");
-  await agentDialog.getByRole("button", { name: "创建版本" }).click();
-  await expect(
-    agentCard.getByRole("button", { name: "发布版本" }),
-  ).toBeVisible();
-  await agentCard.getByRole("button", { name: "发布版本" }).click();
-  await expect(agentCard.getByText("已发布", { exact: true })).toBeVisible();
-
-  await page.getByRole("link", { name: "Skill" }).first().click();
-  const skillCard = page.getByTestId(`asset-card-${SKILL_ID}`);
-  await skillCard.getByRole("button", { name: "创建新版本" }).click();
-  const skillDialog = page.getByRole("dialog", { name: "创建 Skill 版本" });
-  await skillDialog
-    .getByLabel("文件内容")
-    .fill("---\nname: research\n---\n# Research");
-  await skillDialog.getByRole("button", { name: "创建版本" }).click();
-  await expect(
-    skillCard.getByRole("button", { name: "发布版本" }),
-  ).toBeVisible();
-  await skillCard.getByRole("button", { name: "发布版本" }).click();
-  await expect(skillCard.getByText("已发布", { exact: true })).toBeVisible();
-
-  await page.getByRole("link", { name: "MCP" }).first().click();
-  const mcpCard = page.getByTestId(`asset-card-${MCP_ID}`);
-  await mcpCard.getByRole("button", { name: "创建新版本" }).click();
-  const mcpDialog = page.getByRole("dialog", { name: "创建 MCP 版本" });
-  await mcpDialog.getByLabel("描述").fill("Direct MCP");
-  await mcpDialog.getByRole("button", { name: "创建版本" }).click();
-  await expect(mcpCard.getByRole("button", { name: "发布版本" })).toBeVisible();
-  await mcpCard.getByRole("button", { name: "发布版本" }).click();
-  await expect(mcpCard.getByText("已发布", { exact: true })).toBeVisible();
-
-  await page.getByRole("link", { name: "Credential" }).first().click();
+  await page.goto("/admin/assets/credentials");
   await expect(page.getByText("轮换正常", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "创建 Credential" }).click();
   const createCredential = page.getByRole("dialog", {
@@ -725,8 +744,31 @@ test("system admin authors and publishes every asset kind and manages credential
   await replaceCredential.getByRole("button", { name: "替换凭据" }).click();
   await expect(replaceCredential).toHaveCount(0);
   expect(await page.content()).not.toContain("replace-secret-sentinel");
+  await expect(credentialCard).toContainText(
+    "既有 Grant 仍固定到 retired version",
+  );
+  await credentialCard.getByRole("button", { name: "迁移兼容 Grant" }).click();
+  const migrationDialog = page.getByRole("dialog", {
+    name: "迁移 Credential Grant",
+  });
+  await expect(migrationDialog).toContainText("字段结构完全兼容");
+  await migrationDialog.getByRole("button", { name: "确认迁移 Grant" }).click();
+  await expect(page.getByRole("status")).toContainText("已完成兼容 Grant 迁移");
 
   await credentialCard.getByRole("button", { name: "撤销凭据" }).click();
+  const revokeDialog = page.getByRole("dialog", {
+    name: "确认撤销 Credential",
+  });
+  await expect(revokeDialog).toContainText("此操作不可恢复");
+  await revokeDialog.getByRole("button", { name: "取消" }).click();
+  await expect(credentialCard.getByText("已撤销", { exact: true })).toHaveCount(
+    0,
+  );
+  await credentialCard.getByRole("button", { name: "撤销凭据" }).click();
+  await page
+    .getByRole("dialog", { name: "确认撤销 Credential" })
+    .getByRole("button", { name: "确认永久撤销" })
+    .click();
   await expect(
     credentialCard.getByText("已撤销", { exact: true }),
   ).toBeVisible();

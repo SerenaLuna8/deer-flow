@@ -114,12 +114,32 @@ describe("project workbench view model", () => {
     expect(
       projectErrorMessage(
         new ProjectApiError(
+          429,
+          "PROJECT_MEMBER_QUOTA_EXCEEDED",
+          "unsafe capacity detail",
+        ),
+      ),
+    ).toBe(
+      "项目成员容量已满，请联系项目管理员调整成员上限后，重新打开邀请链接。",
+    );
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(
           409,
           "PROJECT_MEMBERSHIP_VERSION_CONFLICT",
           "unsafe raw",
         ),
       ),
     ).toContain("成员信息已更新");
+    expect(
+      projectErrorMessage(
+        new ProjectApiError(
+          409,
+          "PROJECT_QUOTA_STATE_CONFLICT",
+          "unsafe quota ledger detail",
+        ),
+      ),
+    ).toContain("成员配额状态不一致");
     expect(
       projectErrorMessage(
         new ProjectApiError(409, "PROJECT_INVITATION_INVALID", "unsafe raw"),

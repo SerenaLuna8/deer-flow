@@ -46,6 +46,13 @@ class ProjectMemoryImportRequest(StrictPrivateWorkRequest):
     memory: dict[str, Any]
 
 
+class ProjectMemoryCreateRequest(StrictPrivateWorkRequest):
+    expected_version: int = Field(ge=0)
+    content: str = Field(min_length=1, max_length=10_000)
+    category: str = Field(default="context", max_length=32)
+    confidence: float = Field(default=0.8, ge=0, le=1)
+
+
 class ProjectMemoryUpdateRequest(StrictPrivateWorkRequest):
     expected_version: int = Field(ge=0)
     content: str | None = None
@@ -141,6 +148,26 @@ async def import_project_memory(
             body.memory,
             namespace=namespace,
             expected_version=body.expected_version,
+        )
+    )
+    return _snapshot_response(snapshot, namespace)
+
+
+@router.post("/facts", response_model=ProjectMemoryResponse)
+async def create_project_memory_fact(
+    request: Request,
+    body: ProjectMemoryCreateRequest,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryResponse:
+    snapshot = await _call(
+        _service(request).create_fact(
+            context,
+            namespace=namespace,
+            expected_version=body.expected_version,
+            content=body.content,
+            category=body.category,
+            confidence=body.confidence,
         )
     )
     return _snapshot_response(snapshot, namespace)

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import signal
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,6 +22,42 @@ from app.automations.ownership import (
 from app.automations.reconciliation import ReconciliationReport
 from app.scheduler.app import SchedulerApp
 from app.scheduler.service import AutomationSchedulerService
+
+
+async def _child_state(
+    process: asyncio.subprocess.Process,
+    expected: str,
+    *,
+    timeout: float = 10,
+) -> dict[str, object]:
+    assert process.stdout is not None
+    deadline = asyncio.get_running_loop().time() + timeout
+    lines: list[str] = []
+    while asyncio.get_running_loop().time() < deadline:
+        remaining = deadline - asyncio.get_running_loop().time()
+        line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+        if not line:
+            stderr = b""
+            if process.stderr is not None:
+                stderr = await process.stderr.read()
+            raise AssertionError(f"scheduler child exited before {expected}: {stderr.decode(errors='replace')}")
+        decoded = line.decode().strip()
+        lines.append(decoded)
+        payload = json.loads(decoded)
+        if payload.get("state") == expected:
+            return payload
+    raise AssertionError(f"scheduler child did not reach {expected}: {lines}")
+
+
+async def _stop_child(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        process.kill()
+        await asyncio.wait_for(process.wait(), timeout=5)
 
 
 @pytest.mark.asyncio
@@ -125,6 +166,45 @@ async def test_release_contains_raw_driver_disconnect_without_leaking_detail(
     assert connection.closed is True
     assert ownership.is_acquired is False
     assert "private detail" not in caplog.text
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_scheduler_lock_takeover_uses_a_different_process_and_session(
+    migrated_postgres_database_url: str,
+) -> None:
+    child_path = Path(__file__).parent / "support" / "m6_scheduler_ownership_child.py"
+    command = (sys.executable, str(child_path), str(migrated_postgres_database_url))
+    environment = os.environ.copy()
+    backend_root = str(Path(__file__).parent.parent)
+    environment["PYTHONPATH"] = os.pathsep.join(value for value in (backend_root, environment.get("PYTHONPATH", "")) if value)
+    first = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=environment,
+    )
+    second: asyncio.subprocess.Process | None = None
+    try:
+        first_owned = await _child_state(first, "owned")
+        second = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+        await _child_state(second, "contended")
+
+        first.kill()
+        await asyncio.wait_for(first.wait(), timeout=5)
+        second_owned = await _child_state(second, "owned")
+
+        assert first_owned["backend_pid"] != second_owned["backend_pid"]
+        assert first.returncode == -signal.SIGKILL
+    finally:
+        await _stop_child(first)
+        if second is not None:
+            await _stop_child(second)
 
 
 @pytest.mark.postgres

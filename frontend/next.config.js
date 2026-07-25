@@ -35,6 +35,9 @@ const withNextra = nextra({});
 
 /** @type {import("next").NextConfig} */
 const config = {
+  experimental: {
+    authInterrupts: true,
+  },
   distDir:
     acceptanceDistDir ?? (buildMode === "static" ? ".next-static" : ".next"),
   typescript: acceptanceTsconfigPath

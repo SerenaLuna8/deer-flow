@@ -964,7 +964,7 @@ async def test_worker_executor_derives_runtime_identities_from_admitted_owner() 
     executor = RunAgentPrivateExecutor(
         object(),
         app_config=SimpleNamespace(
-            get_model_config=lambda name: object() if name == "test-model" else None,
+            get_model_config=lambda name: SimpleNamespace(name=name) if name == "test-model" else None,
             skills=SimpleNamespace(container_path=None),
             run_events=SimpleNamespace(),
         ),

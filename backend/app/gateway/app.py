@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.gateway.auth.proxy_identity import validate_proxy_identity_config
 from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
@@ -20,6 +21,8 @@ from app.gateway.routers import (
     auth,
     github_webhooks,
     models,
+    notifications,
+    privacy_center,
     private_work,
     project_assets,
     project_audit,
@@ -129,6 +132,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
+        validate_proxy_identity_config(startup_config.auth)
         configure_logging(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
@@ -309,6 +313,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(projects.router)
     app.include_router(project_members.router)
     app.include_router(project_invitations.router)
+    app.include_router(notifications.router)
     app.include_router(project_lifecycle.router)
     app.include_router(project_usage.router)
     app.include_router(project_audit.router)
@@ -318,6 +323,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(project_automations.readiness_router)
     app.include_router(project_automations.router)
     app.include_router(private_work.router)
+    app.include_router(privacy_center.router)
     app.include_router(project_memory.router)
     app.include_router(project_connections.router)
     app.include_router(project_input_polish.router)

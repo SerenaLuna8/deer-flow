@@ -2,8 +2,11 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  filterProjectAssetList,
+  defaultProjectAssetSource,
+  filterProjectAssetItems,
+  projectAssetSourceOptions,
   ProjectAssetListView,
+  systemBindingToggleState,
 } from "@/components/projects/assets/project-asset-page-shell";
 import type { ProjectAssetList } from "@/core/shared-assets";
 
@@ -21,6 +24,8 @@ const catalog: ProjectAssetList = {
       project_id: null,
       slug: "research-agent",
       display_name: "Research Agent",
+      description:
+        "Review, analyze, critique, and summarize academic papers with structured methodology assessment and constructive feedback.",
       status: "active",
       current_published_version_id: LATEST_VERSION_ID,
       version: 19,
@@ -67,58 +72,145 @@ const catalog: ProjectAssetList = {
 };
 
 describe("project asset list", () => {
-  test("filters locally by display name or slug without collapsing source groups", () => {
-    const byName = filterProjectAssetList(catalog, "research", "all");
-    expect(byName.system_items.map((item) => item.id)).toEqual([SYSTEM_ID]);
-    expect(byName.project_items).toEqual([]);
-
-    const bySlug = filterProjectAssetList(catalog, "PROJECT-AGENT", "all");
-    expect(bySlug.system_items).toEqual([]);
-    expect(bySlug.project_items.map((item) => item.id)).toEqual([
-      PROJECT_ASSET_ID,
+  test("hides system-provided Agents without removing other system asset sources", () => {
+    expect(projectAssetSourceOptions("agents")).toEqual([
+      ["project", "项目自建"],
+    ]);
+    expect(projectAssetSourceOptions("skills")).toEqual([
+      ["system", "系统提供"],
+      ["project", "项目自建"],
+    ]);
+    expect(projectAssetSourceOptions("mcp-servers")).toEqual([
+      ["system", "系统提供"],
+      ["project", "项目自建"],
     ]);
   });
 
-  test("filters by source and returns both empty groups for an unmatched search", () => {
-    const projectOnly = filterProjectAssetList(catalog, "", "project");
-    expect(projectOnly.system_items).toEqual([]);
-    expect(projectOnly.project_items.map((item) => item.id)).toEqual([
-      PROJECT_ASSET_ID,
-    ]);
-
-    const empty = filterProjectAssetList(catalog, "not-found", "all");
-    expect(empty.system_items).toEqual([]);
-    expect(empty.project_items).toEqual([]);
-    expect(empty.request_id).toBe(catalog.request_id);
-
-    const html = renderToStaticMarkup(
-      <ProjectAssetListView
-        kind="agents"
-        data={empty}
-        selectedAssetId={null}
-        onSelect={() => undefined}
-      />,
-    );
-    expect(html).toContain("系统提供");
-    expect(html).toContain("项目自建");
+  test("defaults to the useful source when one tab is empty", () => {
+    expect(defaultProjectAssetSource(catalog)).toBe("project");
+    expect(
+      defaultProjectAssetSource({
+        system_items: catalog.system_items,
+        project_items: [],
+      }),
+    ).toBe("system");
+    expect(
+      defaultProjectAssetSource({ system_items: [], project_items: [] }),
+    ).toBe("project");
   });
 
-  test("lists concrete assets and translates binding state into project language", () => {
+  test("filters only the active source tab by display name or slug", () => {
+    expect(
+      filterProjectAssetItems(catalog, "research", "system").map(
+        (item) => item.id,
+      ),
+    ).toEqual([SYSTEM_ID]);
+    expect(filterProjectAssetItems(catalog, "research", "project")).toEqual([]);
+
+    expect(
+      filterProjectAssetItems(catalog, "PROJECT-AGENT", "project").map(
+        (item) => item.id,
+      ),
+    ).toEqual([PROJECT_ASSET_ID]);
+  });
+
+  test("renders one scoped panel without repeating the source label on every row", () => {
     const html = renderToStaticMarkup(
       <ProjectAssetListView
         kind="agents"
         data={catalog}
+        source="system"
         selectedAssetId={null}
         onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
       />,
     );
 
     expect(html).toContain("Research Agent");
+    expect(html).not.toContain("Project Agent");
+    expect(html).not.toContain(">系统提供<");
+    expect(html).not.toContain(">项目自建<");
+    expect(html).toContain('role="switch"');
+    expect(html).toContain("停用 Research Agent");
+  });
+
+  test("renders Skill descriptions with a direct binding switch while preserving detail access", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="skills"
+        data={catalog}
+        source="system"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(
+      "Review, analyze, critique, and summarize academic papers",
+    );
+    expect(html).toContain("查看 Research Agent 详情");
+    expect(html).toContain('role="switch"');
+    expect(html).toContain("停用 Research Agent");
+    expect(html).not.toContain("已有发布版本");
+    expect(html).not.toContain(
+      new Date(catalog.system_items[0]!.updated_at).toLocaleDateString("zh-CN"),
+    );
+  });
+
+  test("does not present active project lifecycle as a fake enable control", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="agents"
+        data={catalog}
+        source="project"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+      />,
+    );
+
     expect(html).toContain("Project Agent");
-    expect(html).toContain("系统提供");
-    expect(html).toContain("项目自建");
-    expect(html).toContain("有新版本");
     expect(html).toContain("尚未发布");
+    expect(html).not.toContain('role="switch"');
+    expect(html).not.toContain(">启用<");
+  });
+
+  test("derives safe system binding switch targets without changing lifecycle semantics", () => {
+    expect(systemBindingToggleState(catalog.system_items[0]!)).toEqual({
+      checked: true,
+      disabled: false,
+      targetVersionId: PINNED_VERSION_ID,
+    });
+
+    expect(
+      systemBindingToggleState({
+        ...catalog.system_items[0]!,
+        binding: null,
+      }),
+    ).toEqual({
+      checked: false,
+      disabled: false,
+      targetVersionId: LATEST_VERSION_ID,
+    });
+
+    expect(
+      systemBindingToggleState({
+        ...catalog.system_items[0]!,
+        binding: null,
+        current_published_version_id: null,
+      }),
+    ).toEqual({
+      checked: false,
+      disabled: true,
+      targetVersionId: null,
+    });
+
+    expect(systemBindingToggleState(catalog.project_items[0]!)).toEqual({
+      checked: false,
+      disabled: true,
+      targetVersionId: null,
+    });
   });
 
   test("does not present optimistic revisions or UUID pointers as content versions", () => {
@@ -126,8 +218,10 @@ describe("project asset list", () => {
       <ProjectAssetListView
         kind="agents"
         data={catalog}
+        source="system"
         selectedAssetId={SYSTEM_ID}
         onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
       />,
     );
 

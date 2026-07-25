@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
 from app.gateway.deps import get_config, private_work_context, project_session, require_project_private_open
+from app.gateway.pagination import trim_run_message_page
 from app.gateway.private_work_schemas import (
     PrivateRunCreateRequest,
     PrivateThreadTokenUsageResponse,
@@ -39,11 +41,15 @@ from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import (
     PrivateWorkConflict,
     PrivateWorkError,
-    PrivateWorkForbidden,
+    PrivateWorkInvalid,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
-from app.private_work.file_service import PrivateFileService
+from app.private_work.feedback_service import (
+    PrivateFeedbackRecord,
+    PrivateFeedbackService,
+)
+from app.private_work.file_service import PrivateFileService, PrivateUploadLimits
 from app.private_work.file_streaming import (
     PrivateFileStreamer,
     private_streaming_response,
@@ -57,7 +63,6 @@ from app.private_work.run_repository import PrivateRunRecord
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRecord, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
-from app.projects.capabilities import Capability
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityDatabaseUnavailable,
@@ -65,7 +70,6 @@ from app.reliability.errors import (
     ReliabilityInvalidStreamCursor,
 )
 from deerflow.config.app_config import AppConfig
-from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
     PrivateFileRecord,
@@ -158,6 +162,19 @@ class PrivateRunDeleteResponse(StrictPrivateWorkResponse):
     success: bool
 
 
+class PrivateRunMessageResponse(StrictPrivateWorkResponse):
+    run_id: str
+    seq: int = Field(ge=0)
+    content: dict[str, Any]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class PrivateRunMessagesPageResponse(StrictPrivateWorkResponse):
+    data: list[PrivateRunMessageResponse]
+    has_more: bool
+
+
 class PrivateFeedbackCreateRequest(StrictPrivateWorkRequest):
     rating: Literal[1, -1]
     comment: str | None = Field(default=None, max_length=4096)
@@ -189,6 +206,19 @@ class PrivateFileResponse(StrictPrivateWorkResponse):
 
 class PrivateFileDeleteResponse(StrictPrivateWorkResponse):
     success: bool
+
+
+class PrivateUploadProjectStorageResponse(StrictPrivateWorkResponse):
+    policy: Literal["project_quota"]
+    remaining_bytes: int = Field(ge=0)
+
+
+class PrivateUploadLimitsResponse(StrictPrivateWorkResponse):
+    max_files: int = Field(ge=1)
+    max_file_size: int = Field(ge=1)
+    max_total_size: int = Field(ge=1)
+    project_storage: PrivateUploadProjectStorageResponse
+    request_id: str = Field(min_length=1)
 
 
 class PrivateWorkReadinessResponse(StrictPrivateWorkResponse):
@@ -426,15 +456,93 @@ def _run_store(request: Request, request_id: str) -> RunStore:
     return store
 
 
-def _feedback_repository(request: Request, request_id: str) -> FeedbackRepository:
-    repository = getattr(request.app.state, "feedback_repo", None)
-    if not isinstance(repository, FeedbackRepository):
+def _feedback_service(request: Request, request_id: str) -> PrivateFeedbackService:
+    service = getattr(request.app.state, "private_feedback_service", None)
+    if not isinstance(service, PrivateFeedbackService):
         raise PrivateWorkUnavailable(request_id)
-    return repository
+    return service
+
+
+def _feedback_response(record: PrivateFeedbackRecord) -> PrivateFeedbackResponse:
+    return PrivateFeedbackResponse(
+        feedback_id=record.feedback_id,
+        run_id=record.run_id,
+        thread_id=record.thread_id,
+        message_id=record.message_id,
+        rating=record.rating,
+        comment=record.comment,
+        created_at=_timestamp(record.created_at),
+    )
 
 
 def _public_event(record: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in record.items() if key not in {"project_id", "owner_user_id", "user_id"}}
+
+
+def _run_message_response(record: Mapping[str, Any]) -> PrivateRunMessageResponse:
+    return PrivateRunMessageResponse(
+        run_id=str(record["run_id"]),
+        seq=int(record["seq"]),
+        content=dict(record["content"]),
+        metadata=dict(record.get("metadata") or {}),
+        created_at=str(record["created_at"]),
+    )
+
+
+_FAILED_PRIVATE_RUN_STATUSES = frozenset({"error", "failed", "timeout"})
+
+
+def _admitted_failure_message(
+    record: PrivateRunRecord,
+    *,
+    before_seq: int | None,
+    after_seq: int | None,
+) -> dict[str, Any] | None:
+    """Recover the submitted visible prompt when a Run fails before journaling."""
+
+    if record.status not in _FAILED_PRIVATE_RUN_STATUSES:
+        return None
+    if before_seq is not None and before_seq <= 0:
+        return None
+    if after_seq is not None:
+        return None
+
+    graph_input = record.kwargs.get("input")
+    if not isinstance(graph_input, Mapping):
+        return None
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return None
+
+    for value in reversed(messages):
+        if not isinstance(value, Mapping):
+            continue
+        message_type = value.get("type")
+        message_role = value.get("role")
+        if message_type != "human" and message_role != "user":
+            continue
+        additional_kwargs = value.get("additional_kwargs")
+        if isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True:
+            continue
+        if not isinstance(value.get("content"), (str, list)):
+            continue
+
+        message_id = value.get("id")
+        content = {
+            "type": "human",
+            "id": message_id if isinstance(message_id, str) and message_id else f"run-admission-{record.run_id}",
+            "content": copy.deepcopy(value["content"]),
+        }
+        if isinstance(additional_kwargs, Mapping):
+            content["additional_kwargs"] = _public_run_metadata(additional_kwargs)
+        return {
+            "run_id": record.run_id,
+            "seq": 0,
+            "content": content,
+            "metadata": {"source": "run_admission"},
+            "created_at": _timestamp(record.created_at),
+        }
+    return None
 
 
 def _runtime_dependency(request: Request, request_id: str, name: str) -> object:
@@ -884,6 +992,46 @@ async def upload_private_file(
     return _file_response(record)
 
 
+def _upload_limits_response(
+    limits: PrivateUploadLimits,
+    *,
+    request_id: str,
+) -> PrivateUploadLimitsResponse:
+    storage = limits.project_storage
+    return PrivateUploadLimitsResponse(
+        max_files=limits.max_files,
+        max_file_size=limits.max_file_size,
+        max_total_size=limits.max_total_size,
+        project_storage=PrivateUploadProjectStorageResponse(
+            policy=storage.policy,
+            remaining_bytes=storage.remaining_bytes,
+        ),
+        request_id=request_id,
+    )
+
+
+@router.get(
+    "/threads/{thread_id}/uploads/limits",
+    response_model=PrivateUploadLimitsResponse,
+)
+async def get_private_upload_limits(
+    thread_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateUploadLimitsResponse:
+    try:
+        limits = await _file_service(
+            request,
+            context.request_id,
+        ).read_upload_limits(
+            context,
+            thread_id=str(thread_id),
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return _upload_limits_response(limits, request_id=context.request_id)
+
+
 @router.get(
     "/threads/{thread_id}/uploads",
     response_model=list[PrivateFileResponse],
@@ -1233,6 +1381,60 @@ async def delete_private_run(
 
 
 @router.get(
+    "/threads/{thread_id}/runs/{run_id}/messages",
+    response_model=PrivateRunMessagesPageResponse,
+)
+async def list_private_run_messages(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=0),
+    after_seq: int | None = Query(default=None, ge=0),
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateRunMessagesPageResponse:
+    try:
+        if before_seq is not None and after_seq is not None:
+            raise PrivateWorkInvalid(context.request_id)
+        run = await _run_service(request, context.request_id).get(
+            context,
+            str(thread_id),
+            str(run_id),
+        )
+        records = await _run_event_store(
+            request,
+            context.request_id,
+        ).list_messages_by_run(
+            str(thread_id),
+            str(run_id),
+            limit=limit + 1,
+            before_seq=before_seq,
+            after_seq=after_seq,
+            scope=context.resource_scope,
+        )
+        if not records:
+            admitted_message = _admitted_failure_message(
+                run,
+                before_seq=before_seq,
+                after_seq=after_seq,
+            )
+            if admitted_message is not None:
+                records = [admitted_message]
+    except PrivateWorkError as error:
+        _raise_http(error)
+
+    data, has_more = trim_run_message_page(
+        records,
+        limit=limit,
+        after_seq=after_seq,
+    )
+    return PrivateRunMessagesPageResponse(
+        data=[_run_message_response(record) for record in data],
+        has_more=has_more,
+    )
+
+
+@router.get(
     "/threads/{thread_id}/messages",
     response_model=list[dict[str, Any]],
 )
@@ -1383,10 +1585,104 @@ async def private_thread_token_usage(
     return PrivateThreadTokenUsageResponse(thread_id=str(thread_id), **aggregate)
 
 
+@router.get(
+    "/threads/{thread_id}/runs/{run_id}/feedback",
+    response_model=PrivateFeedbackResponse | None,
+)
+async def get_private_feedback(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateFeedbackResponse | None:
+    try:
+        record = await _feedback_service(
+            request,
+            context.request_id,
+        ).get(
+            context,
+            thread_id=str(thread_id),
+            run_id=str(run_id),
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return None if record is None else _feedback_response(record)
+
+
+async def _upsert_private_feedback(
+    *,
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    body: PrivateFeedbackCreateRequest,
+    request: Request,
+    context: PrivateWorkContext,
+) -> PrivateFeedbackResponse:
+    try:
+        record = await _feedback_service(
+            request,
+            context.request_id,
+        ).upsert(
+            context,
+            thread_id=str(thread_id),
+            run_id=str(run_id),
+            rating=body.rating,
+            message_id=body.message_id,
+            comment=body.comment,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return _feedback_response(record)
+
+
+@router.put(
+    "/threads/{thread_id}/runs/{run_id}/feedback",
+    response_model=PrivateFeedbackResponse,
+)
+async def upsert_private_feedback(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    body: PrivateFeedbackCreateRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> PrivateFeedbackResponse:
+    return await _upsert_private_feedback(
+        thread_id=thread_id,
+        run_id=run_id,
+        body=body,
+        request=request,
+        context=context,
+    )
+
+
+@router.delete(
+    "/threads/{thread_id}/runs/{run_id}/feedback",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_private_feedback(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> Response:
+    try:
+        await _feedback_service(
+            request,
+            context.request_id,
+        ).delete(
+            context,
+            thread_id=str(thread_id),
+            run_id=str(run_id),
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post(
     "/threads/{thread_id}/runs/{run_id}/feedback",
     response_model=PrivateFeedbackResponse,
     status_code=status.HTTP_201_CREATED,
+    deprecated=True,
 )
 async def create_private_feedback(
     thread_id: uuid.UUID,
@@ -1395,37 +1691,12 @@ async def create_private_feedback(
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateFeedbackResponse:
-    try:
-        await _run_service(request, context.request_id).get(
-            context,
-            str(thread_id),
-            str(run_id),
-        )
-        if Capability.PRIVATE_WORK_CREATE not in context.capabilities:
-            raise PrivateWorkForbidden(context.request_id)
-        record = await _feedback_repository(
-            request,
-            context.request_id,
-        ).create(
-            run_id=str(run_id),
-            thread_id=str(thread_id),
-            rating=body.rating,
-            scope=context.resource_scope,
-            message_id=body.message_id,
-            comment=body.comment,
-        )
-    except PrivateWorkError as error:
-        _raise_http(error)
-    except ValueError:
-        _raise_http(PrivateWorkNotFound(context.request_id))
-    return PrivateFeedbackResponse(
-        feedback_id=str(record["feedback_id"]),
-        run_id=str(record["run_id"]),
-        thread_id=str(record["thread_id"]),
-        message_id=record.get("message_id"),
-        rating=record["rating"],
-        comment=record.get("comment"),
-        created_at=_timestamp(record.get("created_at")),
+    return await _upsert_private_feedback(
+        thread_id=thread_id,
+        run_id=run_id,
+        body=body,
+        request=request,
+        context=context,
     )
 
 

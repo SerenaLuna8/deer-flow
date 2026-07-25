@@ -94,6 +94,11 @@ export type MockAPIOptions = {
     max_files: number;
     max_file_size: number;
     max_total_size: number;
+    project_storage: {
+      policy: "project_quota";
+      remaining_bytes: number;
+    };
+    request_id: string;
   };
   suggestionsEnabled?: boolean;
   runStreamHandler?: (route: Route) => {
@@ -257,6 +262,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     max_files: 10,
     max_file_size: 50 * 1024 * 1024,
     max_total_size: 100 * 1024 * 1024,
+    project_storage: {
+      policy: "project_quota" as const,
+      remaining_bytes: 5 * 1024 * 1024 * 1024,
+    },
+    request_id: "mock-upload-limits",
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -353,6 +363,21 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: "[]",
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/notifications(?:\?.*)?$/, (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [],
+          next_cursor: null,
+          unread_count: 0,
+        }),
       });
     }
     return route.fallback();
@@ -889,16 +914,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  void page.route("**/api/threads/*/uploads/limits", (route) => {
-    if (route.request().method() === "GET") {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(uploadLimits),
-      });
-    }
-    return route.fallback();
-  });
+  void page.route(
+    /\/api\/projects\/[^/]+\/private-work\/threads\/[^/]+\/uploads\/limits$/,
+    (route) => {
+      if (route.request().method() === "GET") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(uploadLimits),
+        });
+      }
+      return route.fallback();
+    },
+  );
 
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
@@ -1016,12 +1044,12 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   void page.route(
-    /\/api\/threads\/([^/]+)\/runs\/([^/]+)\/messages/,
+    /\/api\/projects\/[^/]+\/private-work\/threads\/([^/]+)\/runs\/([^/]+)\/messages/,
     (route) => {
       if (route.request().method() === "GET") {
         const url = route.request().url();
         const matchingThread = threads.find((t) =>
-          url.includes(`/api/threads/${t.thread_id}/runs/`),
+          url.includes(`/threads/${t.thread_id}/runs/`),
         );
         return route.fulfill({
           status: 200,
@@ -1029,11 +1057,12 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           body: JSON.stringify({
             data: (matchingThread?.messages ?? []).map((message, index) => ({
               run_id: `run-${matchingThread?.thread_id ?? "unknown"}`,
+              seq: index + 1,
               content: message,
               metadata: { caller: "lead_agent" },
               created_at: `2025-01-01T00:00:${String(index).padStart(2, "0")}Z`,
             })),
-            hasMore: false,
+            has_more: false,
           }),
         });
       }

@@ -31,6 +31,7 @@ const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
 interface ArtifactsProviderProps {
   children: ReactNode;
   enabled?: boolean;
+  onNavigationOpenChange?: (open: boolean) => void;
 }
 
 function ArtifactsStateProvider({
@@ -118,9 +119,13 @@ export function ArtifactsProvider({
 export function StandaloneArtifactsProvider({
   children,
   enabled = true,
+  onNavigationOpenChange,
 }: ArtifactsProviderProps) {
   return (
-    <ArtifactsStateProvider enabled={enabled} setSidebarOpen={() => undefined}>
+    <ArtifactsStateProvider
+      enabled={enabled}
+      setSidebarOpen={onNavigationOpenChange ?? (() => undefined)}
+    >
       {children}
     </ArtifactsStateProvider>
   );

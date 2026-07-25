@@ -1,8 +1,4 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { describe, expect, test } from "@rstest/core";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
@@ -10,8 +6,6 @@ import {
   projectChatRouteScope,
   projectThreadAvailability,
 } from "@/components/projects/private-work/project-chat-page";
-import { ProjectPrivateWorkCta } from "@/components/projects/project-private-work-cta";
-import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const THREAD_ID = "33333333-3333-4333-8333-333333333333";
@@ -51,6 +45,7 @@ describe("project chat route", () => {
     expect(scope.canRun).toBe(true);
     expect(scope.canUpload).toBe(true);
     expect(scope.canDelete).toBe(true);
+    expect(scope.canDeleteFiles).toBe(true);
     expect(scope.automationVisible).toBe(false);
     expect(scope.goalVisible).toBe(true);
     expect(scope.compactVisible).toBe(true);
@@ -107,39 +102,6 @@ describe("project chat route", () => {
     ).toMatchObject({ automationVisible: false });
   });
 
-  test("viewer sees read-only guidance and never gets a create control", () => {
-    const viewer: Project = {
-      ...project,
-      role: "viewer" as const,
-      capabilities: ["project.read", "private_work.read_own"],
-    };
-    const html = renderToStaticMarkup(
-      <QueryClientProvider client={new QueryClient()}>
-        <ProjectPrivateWorkProvider
-          accountId="22222222-2222-4222-8222-222222222222"
-          projectId={viewer.id}
-        >
-          <ProjectPrivateWorkCta project={viewer} />
-        </ProjectPrivateWorkProvider>
-      </QueryClientProvider>,
-    );
-    expect(html).toContain("你可以查看自己的既有对话，但不能创建新工作");
-    expect(html).not.toContain("开始私有对话");
-  });
-
-  test("project routes consume entered project context and never list projects", () => {
-    for (const file of [
-      "src/app/projects/[project_slug]/chats/page.tsx",
-      "src/app/projects/[project_slug]/chats/[thread_id]/page.tsx",
-    ]) {
-      const source = readFileSync(resolve(process.cwd(), file), "utf8");
-      expect(source).toContain("useCurrentProject");
-      expect(source).not.toMatch(
-        /useProjectBySlug|useProjects|useEnterProject/u,
-      );
-    }
-  });
-
   test("same-project other-owner and cross-project metadata misses share not-found", () => {
     expect(
       projectThreadAvailability({
@@ -165,63 +127,12 @@ describe("project chat route", () => {
         isFetching: false,
       }),
     ).toBe("error");
-    const html = renderToStaticMarkup(<ProjectChatNotFound />);
+    const html = renderToStaticMarkup(
+      <ProjectChatNotFound chatsPath="/projects/research-lab/chats" />,
+    );
     expect(html).toContain("找不到这个对话");
-    expect(html).not.toMatch(/owner|project|跨项目|其他用户/iu);
-  });
-
-  test("project details use the mandatory scoped chat implementation", () => {
-    const shared = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/workspace/chats/scoped-chat-page.tsx",
-      ),
-      "utf8",
-    );
-    const projectRoute = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/app/projects/[project_slug]/chats/[thread_id]/page.tsx",
-      ),
-      "utf8",
-    );
-
-    expect(projectRoute).toContain("ProjectChatPage");
-    const projectPage = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/projects/private-work/project-chat-page.tsx",
-      ),
-      "utf8",
-    );
-    expect(projectPage).toContain("ScopedChatPage");
-    const projectProviders = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/projects/private-work/project-chat-providers.tsx",
-      ),
-      "utf8",
-    );
-    expect(projectProviders).toContain("StandaloneArtifactsProvider");
-    expect(projectProviders).toContain("enabled={true}");
-    expect(projectProviders).not.toMatch(/<ArtifactsProvider>/u);
-    expect(shared).toContain("useThreadStream");
-    expect(shared).toContain("handleStop");
-    expect(shared).toContain("handleSubmitHumanInput");
-    expect(shared).toContain("loadMoreHistory");
-    expect(shared).toContain("scope.canUpload");
-    expect(shared).toContain("scope.regenerateVisible");
-    expect(shared).toContain("scope.branchVisible");
-    expect(shared).toContain("scope.sidecarVisible");
-    expect(shared).toContain("scope.artifactsVisible");
-    expect(shared).toContain("scope.followupSuggestionsEnabled");
-    expect(shared).toContain("scope.privateWork");
-    expect(shared).toContain("scope.automationHref(threadId)");
-    expect(shared).toContain("enabled={scope.sidecarVisible !== false}");
-    expect(projectPage).toContain("useProjectAutomationReadiness");
-    expect(projectPage).toContain("useProjectPrivateWorkScope");
-    expect(projectPage).toContain("sidecarVisible: canRun");
-    expect(projectPage).toContain("artifactsVisible: canRead");
+    expect(html).toContain('href="/projects/research-lab/chats"');
+    expect(html).not.toMatch(/owner|跨项目|其他用户/iu);
   });
 
   test("viewer can open scoped files without gaining sidecar runs or uploads", () => {
@@ -232,6 +143,7 @@ describe("project chat route", () => {
     };
     const scope = projectChatRouteScope(viewer);
     expect(scope.canUpload).toBe(false);
+    expect(scope.canDeleteFiles).toBe(true);
     expect(scope.goalVisible).toBe(true);
     expect(scope.compactVisible).toBe(false);
     expect(scope.branchVisible).toBe(false);
@@ -239,21 +151,5 @@ describe("project chat route", () => {
     expect(scope.sidecarVisible).toBe(false);
     expect(scope.artifactsVisible).toBe(true);
     expect(scope.followupSuggestionsEnabled).toBe(false);
-  });
-
-  test("persistent conversation rail protects scoped deletion outside the thread link", () => {
-    const source = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/projects/private-work/project-conversation-rail.tsx",
-      ),
-      "utf8",
-    );
-    expect(source).toContain("usePrivateWorkAccess");
-    expect(source).toContain("useDeleteThread(privateWork)");
-    expect(source).toContain("ProjectThreadDeleteDialog");
-    expect(source).toContain("deleteThread.mutateAsync");
-    expect(source).toContain("aria-label={`删除 ${title}`}");
-    expect(source).toMatch(/<\/Link>\s*\{canDelete && \(/u);
   });
 });

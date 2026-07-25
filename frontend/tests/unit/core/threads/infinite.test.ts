@@ -381,6 +381,12 @@ describe("invalidateStoppedThreadCaches", () => {
       "thread-token-usage",
       "thread-1",
     ]);
+    expect(queryKeys()).toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "uploads",
+      "list",
+      "thread-1",
+    ]);
   });
 
   test("does not refresh per-thread API caches for mock threads", () => {
@@ -413,6 +419,12 @@ describe("invalidateStoppedThreadCaches", () => {
     expect(queryKeys()).not.toContainEqual([
       ...PRIVATE_WORK_ROOT,
       "thread-token-usage",
+      "thread-1",
+    ]);
+    expect(queryKeys()).not.toContainEqual([
+      ...PRIVATE_WORK_ROOT,
+      "uploads",
+      "list",
       "thread-1",
     ]);
   });

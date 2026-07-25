@@ -43,6 +43,7 @@ import {
   deleteSkillFile,
   editSkillFile,
   listWorkingSkillFiles,
+  markdownPreviewContent,
   renameSkillFile,
 } from "./skill-file-workbench-state";
 
@@ -562,7 +563,9 @@ export function SkillVersionWorkbench({
                 ) : sourceContent !== null ? (
                   displayMode === "preview" && markdown ? (
                     <div className="prose prose-neutral dark:prose-invert min-h-[50vh] max-w-none overflow-auto p-5 text-sm md:min-h-[520px]">
-                      <SafeStreamdown>{sourceContent}</SafeStreamdown>
+                      <SafeStreamdown>
+                        {markdownPreviewContent(sourceContent)}
+                      </SafeStreamdown>
                     </div>
                   ) : editing ? (
                     <Textarea

@@ -12,6 +12,7 @@ import {
   ProjectAssetCatalogView,
   ProjectAssetHistoryView,
   ProjectCredentialCatalogView,
+  dependencyVersionOptions,
   projectAssetCanAuthor,
   projectAssetLifecycleActions,
   projectCredentialShowsHistory,
@@ -134,6 +135,16 @@ const pendingMcpVersion: AssetVersion = {
 };
 
 describe("project shared asset pages", () => {
+  test("maps exact dependency versions to readable system or project labels", () => {
+    expect(dependencyVersionOptions(adminData)).toEqual([
+      {
+        id: VERSION_ID,
+        label: "项目 · Analyst（analyst）",
+      },
+    ]);
+    expect(dependencyVersionOptions(undefined)).toEqual([]);
+  });
+
   test("keeps same-name system and project assets separate with source badges", () => {
     const html = renderToStaticMarkup(
       <ProjectAssetCatalogView kind="agents" data={adminData} />,
@@ -309,7 +320,7 @@ describe("project shared asset pages", () => {
     expect(admin).toContain(">暂停<");
   });
 
-  test("Credential view exposes only metadata and secure capability actions", () => {
+  test("Credential view uses source tabs without repeating scope badges", () => {
     const data: ProjectCredentialList = {
       system_items: [],
       project_items: [
@@ -322,7 +333,7 @@ describe("project shared asset pages", () => {
           credential_type: "token",
           status: "active",
           current_version_id: VERSION_ID,
-          version: 1,
+          version: 2,
           created_by_user_id: "user-1",
           created_at: "2026-07-14T00:00:00Z",
           updated_at: "2026-07-14T00:00:00Z",
@@ -332,11 +343,18 @@ describe("project shared asset pages", () => {
       request_id: "req-credentials",
     };
     const html = renderToStaticMarkup(
-      <ProjectCredentialCatalogView data={data} />,
+      <ProjectCredentialCatalogView data={data} onMigrate={() => undefined} />,
     );
 
     expect(html).toContain("替换凭据");
     expect(html).toContain("撤销凭据");
+    expect(html).toContain("迁移兼容 Grant");
+    expect(html).toContain("既有 Grant 仍固定到 retired version");
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain("系统提供");
+    expect(html).toContain("项目自建");
+    expect(html).not.toContain(">项目<");
+    expect(html).toContain(">有效<");
     expect(html).not.toContain("显示明文");
     expect(html).not.toContain("复制密钥");
     expect(html).not.toContain("ciphertext");
@@ -477,6 +495,8 @@ describe("project shared asset pages", () => {
     expect(source).toContain(
       "replaceProjectCredential(projectId, credential.id, input)",
     );
+    expect(source).toContain("migrateProjectCredentialGrants");
+    expect(source).toContain("CredentialRevokeDialog");
     expect(source).not.toContain("useCreateProjectCredential");
     expect(source).not.toContain("useReplaceProjectCredential");
     expect(source).not.toContain("useMutation(");

@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { headers } from "next/headers";
 import {
   createElement,
+  type ComponentProps,
   type ComponentType,
   type PropsWithChildren,
 } from "react";
@@ -42,7 +43,11 @@ import {
   assetLifecycleActions,
   versionWorkflowActions,
 } from "@/components/admin/assets/admin-asset-page";
-import { AdminAssetsNavigation } from "@/components/admin/assets/admin-assets-shell";
+import {
+  AdminAssetsNavigation,
+  AdminAssetsShell,
+} from "@/components/admin/assets/admin-assets-shell";
+import { AdminProjectAssetsShell } from "@/components/admin/assets/admin-project-assets-shell";
 import { AssetVersionDiff } from "@/components/assets/asset-version-diff";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
@@ -100,6 +105,75 @@ describe("admin asset access and credential safety", () => {
     }
   });
 
+  test("asset routes add only a wrapping sub-navigation without a second app shell", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        AdminAssetsShell,
+        null,
+        createElement("main", null, "assets"),
+      ),
+    );
+
+    expect(html).toContain('data-testid="admin-assets-shell"');
+    expect(html).toContain("平台资产导航");
+    expect(html).not.toContain("退出登录");
+    expect(html).not.toContain("overflow-x-auto");
+    expect(html.match(/<header/g) ?? []).toHaveLength(0);
+  });
+
+  test("admin project override shell keeps project selection explicit and responsive", () => {
+    const projectId = "33333333-3333-4333-8333-333333333333";
+    const html = renderToStaticMarkup(
+      createElement(
+        AdminProjectAssetsShell,
+        { projectId } as ComponentProps<typeof AdminProjectAssetsShell>,
+        createElement("main", null, "override"),
+      ),
+    );
+
+    expect(html).toContain('data-testid="admin-project-assets-shell"');
+    expect(html).toContain("返回项目选择");
+    expect(html).toContain(projectId);
+    expect(html).toContain("不会读取成员、聊天、运行、记忆、文件");
+    expect(html).toContain("grid-cols-2");
+    for (const [segment, label] of [
+      ["agents", "Agent"],
+      ["skills", "Skill"],
+      ["mcp", "MCP"],
+      ["credentials", "Credential"],
+    ]) {
+      expect(html).toContain(
+        `href="/admin/projects/${projectId}/assets/${segment}"`,
+      );
+      expect(html).toContain(label);
+    }
+  });
+
+  test("admin project override never falls back to member routes or global system authoring", () => {
+    const pageSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/admin/assets/admin-project-asset-page.tsx",
+      ),
+      "utf8",
+    );
+    const apiSource = readFileSync(
+      resolve(process.cwd(), "src/core/shared-assets/api.ts"),
+      "utf8",
+    );
+
+    expect(pageSource).toContain("useAdminProjectAssets");
+    expect(pageSource).toContain("createAdminProjectCredential");
+    expect(pageSource).toContain("AdminProjectSystemBindingDialog");
+    expect(pageSource).not.toContain("useCurrentProject");
+    expect(pageSource).not.toContain("createProjectCredential(");
+    expect(pageSource).not.toContain("useMutation(");
+    expect(apiSource).toContain(
+      "/api/admin/projects/${parsedProjectId}/assets/${parsedKind}",
+    );
+    expect(apiSource).not.toContain("createAdminAsset(projectId");
+  });
+
   test("does not construct an asset query while the auth user is null", () => {
     const queryClient = new QueryClient();
     const accountKey = rs.spyOn(sharedAssetKeys, "account");
@@ -131,9 +205,10 @@ describe("admin asset access and credential safety", () => {
       .join("\n");
 
     for (const label of [
-      "模型引用",
+      "逻辑模型",
       "工具组",
-      "Skill 版本 ID",
+      "Skill 依赖版本",
+      "MCP 依赖版本",
       "媒体类型",
       "传输方式",
       "命令",
@@ -156,6 +231,36 @@ describe("admin asset access and credential safety", () => {
     }
   });
 
+  test("agent authoring selects configured logical models and named dependencies", () => {
+    const html = renderToStaticMarkup(
+      createElement(AgentVersionFields, {
+        modelOptions: [
+          { name: "fast", displayName: "Fast model" },
+          { name: "quality", displayName: "Quality model" },
+        ],
+        skillVersionOptions: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            label: "项目 · Research Skill（research-skill）",
+          },
+        ],
+        mcpVersionOptions: [
+          {
+            id: "22222222-2222-4222-8222-222222222222",
+            label: "系统 · GitHub MCP（github-mcp）",
+          },
+        ],
+      }),
+    );
+
+    expect(html).toContain('name="model_ref"');
+    expect(html).toContain('value="fast"');
+    expect(html).toContain("Research Skill");
+    expect(html).toContain("GitHub MCP");
+    expect(html).toContain("仅保存 /api/models 返回的逻辑名称");
+    expect(html).not.toContain('name="model_ref" type="text"');
+  });
+
   test("credential card exposes metadata actions without secret reveal or copy", () => {
     const html = renderToStaticMarkup(
       createElement(CredentialMetadataCard, {
@@ -175,12 +280,15 @@ describe("admin asset access and credential safety", () => {
         },
         onReplace: () => undefined,
         onRevoke: () => undefined,
+        onMigrate: () => undefined,
       }),
     );
 
     expect(html).toContain("GitHub Token");
     expect(html).toContain("替换凭据");
     expect(html).toContain("撤销凭据");
+    expect(html).toContain("迁移兼容 Grant");
+    expect(html).toContain("既有 Grant 仍固定到 retired version");
     expect(html).not.toContain("显示明文");
     expect(html).not.toContain("复制密钥");
     expect(html).not.toContain("plaintext");
@@ -223,6 +331,44 @@ describe("admin asset access and credential safety", () => {
     expect(pageSource).not.toContain("useMutation(");
     expect(dialogSource).toContain('type="password"');
     expect(dialogSource).toContain("event.currentTarget.reset()");
+    expect(dialogSource).toContain("CredentialRevokeDialog");
+    expect(pageSource).toContain("setRevokeOpen(true)");
+    expect(pageSource).toContain("migrateAdminCredentialGrants");
+  });
+
+  test("system Agent Skill and MCP pages are packaged-catalog read only", () => {
+    const pageSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/admin/assets/admin-asset-page.tsx",
+      ),
+      "utf8",
+    );
+    const apiSource = readFileSync(
+      resolve(process.cwd(), "src/core/shared-assets/api.ts"),
+      "utf8",
+    );
+    const hooksSource = readFileSync(
+      resolve(process.cwd(), "src/core/shared-assets/hooks.ts"),
+      "utf8",
+    );
+
+    expect(pageSource).toContain("packaged catalog");
+    expect(pageSource).toContain("运行期只读");
+    for (const name of [
+      "createAdminAsset",
+      "createAdminAssetVersion",
+      "changeAdminAssetStatus",
+      "publishAdminAssetVersion",
+      "submitAdminMcpVersion",
+      "approveAdminMcpVersion",
+    ]) {
+      expect(pageSource).not.toContain(name);
+      expect(apiSource).not.toContain(`function ${name}`);
+      expect(hooksSource).not.toContain(name);
+    }
+    expect(pageSource).toContain("createAdminCredential(input)");
+    expect(apiSource).toContain("function createAdminCredential");
   });
 
   test("lifecycle and workflow controls follow server state", () => {

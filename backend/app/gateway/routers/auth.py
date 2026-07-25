@@ -2,13 +2,11 @@
 
 import asyncio
 import logging
-import os
 import re
 import secrets
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from ipaddress import ip_address, ip_network
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -17,14 +15,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
-from starlette.responses import RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 from app.gateway.auth import (
     UserResponse,
-    create_access_token,
+    decode_token,
 )
 from app.gateway.auth.config import get_auth_config
-from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
 from app.gateway.auth.oidc import OIDCError, OIDCService
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
@@ -36,11 +34,18 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.proxy_identity import resolve_rate_limit_client_ip
 from app.gateway.auth.rate_limit import (
     AUTH_RATE_LIMIT_WINDOW,
     AuthenticationRateLimitAction,
     AuthenticationRateLimitAdmission,
     AuthenticationRateLimitRepository,
+)
+from app.gateway.auth.sessions import (
+    AuthSessionUnavailable,
+    issue_access_session,
+    revoke_access_session,
+    revoke_all_access_sessions,
 )
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
@@ -50,6 +55,7 @@ from app.gateway.deps import (
     get_project_quota_enforcer,
 )
 from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
+from deerflow.config import get_app_config
 from deerflow.config.auth_config import OIDCProviderConfig
 from deerflow.persistence.engine import get_engine, get_session_factory
 
@@ -266,65 +272,10 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
 _AUTH_RATE_LIMIT_RETRY_AFTER_SECONDS = int(AUTH_RATE_LIMIT_WINDOW.total_seconds())
 
 
-def _trusted_proxies() -> list:
-    """Parse ``AUTH_TRUSTED_PROXIES`` env var into a list of ip_network objects.
-
-    Comma-separated CIDR or single-IP entries. Empty / unset = no proxy is
-    trusted (direct mode). Invalid entries are skipped with a logger warning.
-    Read live so env-var overrides take effect immediately and tests can
-    ``monkeypatch.setenv`` without poking a module-level cache.
-    """
-    raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
-    if not raw:
-        return []
-    nets = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            nets.append(ip_network(entry, strict=False))
-        except ValueError:
-            logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
-    return nets
-
-
 def _get_client_ip(request: Request) -> str:
-    """Extract the real client IP for rate limiting.
+    """Return one canonical client IP from an authenticated proxy boundary."""
 
-    Trust model:
-
-    - The TCP peer (``request.client.host``) is always the baseline. It is
-      whatever the kernel reports as the connecting socket — unforgeable
-      by the client itself.
-    - ``X-Real-IP`` is **only** honored if the TCP peer is in the
-      ``AUTH_TRUSTED_PROXIES`` allowlist (set via env var, comma-separated
-      CIDR or single IPs). When set, the gateway is assumed to be behind a
-      reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
-      ``X-Real-IP`` with the original client address.
-    - With no ``AUTH_TRUSTED_PROXIES`` set, ``X-Real-IP`` is silently
-      ignored — closing the bypass where any client could rotate the
-      header to dodge per-IP rate limits in dev / direct-gateway mode.
-
-    ``X-Forwarded-For`` is intentionally NOT used because it is naturally
-    client-controlled at the *first* hop and the trust chain is harder to
-    audit per-request.
-    """
-    peer_host = request.client.host if request.client else None
-
-    trusted = _trusted_proxies()
-    if trusted and peer_host:
-        try:
-            peer_ip = ip_address(peer_host)
-            if any(peer_ip in net for net in trusted):
-                real_ip = request.headers.get("x-real-ip", "").strip()
-                if real_ip:
-                    return real_ip
-        except ValueError:
-            # peer_host wasn't a parseable IP (e.g. "unknown") — fall through
-            pass
-
-    return peer_host or "unknown"
+    return resolve_rate_limit_client_ip(request, get_app_config().auth)
 
 
 def _database_unavailable_error() -> HTTPException:
@@ -335,6 +286,30 @@ def _database_unavailable_error() -> HTTPException:
             "message": "Project storage unavailable",
         },
     )
+
+
+def _auth_session_unavailable_detail() -> dict[str, str]:
+    return {
+        "code": "DATABASE_UNAVAILABLE",
+        "message": "Authentication storage unavailable",
+    }
+
+
+def _auth_session_unavailable_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=_auth_session_unavailable_detail(),
+    )
+
+
+async def _issue_session(user) -> str:
+    try:
+        return await issue_access_session(
+            user_id=str(user.id),
+            token_version=user.token_version,
+        )
+    except AuthSessionUnavailable:
+        raise _auth_session_unavailable_error() from None
 
 
 def _rate_limited_error() -> HTTPException:
@@ -418,7 +393,7 @@ async def login_local(
     await _clear_auth_attempts(
         admission,
     )
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = await _issue_session(user)
     _set_session_cookie(response, token, request)
 
     return LoginResponse(
@@ -446,7 +421,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
             detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
 
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = await _issue_session(user)
     _set_session_cookie(response, token, request)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
@@ -454,7 +429,29 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
-    """Logout current user by clearing the cookie."""
+    """Revoke the current durable session, then clear the cookie."""
+
+    access_token = request.cookies.get("access_token")
+    if access_token:
+        payload = decode_token(access_token)
+        if not isinstance(payload, TokenError):
+            try:
+                await revoke_access_session(payload)
+            except AuthSessionUnavailable:
+                # Do not trap the browser in a local session when the durable
+                # authority is unavailable. The 503 truthfully reports that a
+                # copied token may not yet be revoked, while Max-Age=0 removes
+                # this browser's cookie immediately.
+                failure = JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"detail": _auth_session_unavailable_detail()},
+                )
+                failure.delete_cookie(
+                    key="access_token",
+                    secure=is_secure_request(request),
+                    samesite="lax",
+                )
+                return failure
     response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
     return MessageResponse(message="Successfully logged out")
 
@@ -508,8 +505,13 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
     await provider.update_user(user)
 
-    # Re-issue cookie with new token_version
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    # The token_version update already invalidates every old JWT. Persist the
+    # corresponding session revocations before admitting one fresh session.
+    try:
+        await revoke_all_access_sessions(str(user.id))
+    except AuthSessionUnavailable:
+        raise _auth_session_unavailable_error() from None
+    token = await _issue_session(user)
     _set_session_cookie(response, token, request)
 
     return MessageResponse(message="Password changed successfully")
@@ -662,7 +664,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     except ProjectDatabaseUnavailable:
         raise HTTPException(status_code=503, detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"}) from None
 
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = await _issue_session(user)
     _set_session_cookie(response, token, request)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
@@ -926,7 +928,7 @@ async def oauth_callback(
     user = result["user"]
 
     # ── Issue DeerFlow session ───────────────────────────────────────
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = await _issue_session(user)
 
     redirect_target = state_payload.next_path or "/workspace"
     frontend_base = oidc_config.frontend_base_url or ""

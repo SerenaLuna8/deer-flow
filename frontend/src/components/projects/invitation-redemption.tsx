@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { ProjectApiError } from "@/core/projects/api";
 import {
   useClaimProjectInvitation,
   useRedeemProjectInvitation,
@@ -17,13 +18,40 @@ import {
   createInvitationRedemptionCoordinator,
   type InvitationRedemptionAttempt,
 } from "./invitation-redemption-state";
+import { projectErrorMessage } from "./project-view-model";
+
+const INVITATION_UNAVAILABLE_MESSAGE =
+  "邀请不可用或已失效，请向项目管理员索取新链接。";
 
 type RedemptionState =
   | { status: "preparing" }
   | { status: "sign_in" }
   | { status: "redeeming" }
   | { status: "success"; result: RedeemedProjectInvitation }
-  | { status: "error" };
+  | { status: "error"; message: string };
+
+function invitationRedemptionErrorMessage(error: unknown): string {
+  if (
+    error instanceof ProjectApiError &&
+    error.code === "PROJECT_MEMBER_QUOTA_EXCEEDED"
+  ) {
+    return projectErrorMessage(error);
+  }
+  return INVITATION_UNAVAILABLE_MESSAGE;
+}
+
+function consumeInvitationFragmentToken() {
+  const fragment = window.location.hash.slice(1);
+  const token = new URLSearchParams(fragment).get("token");
+  if (fragment) {
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+  }
+  return token;
+}
 
 export function InvitationRedemption() {
   const { user } = useAuth();
@@ -38,7 +66,7 @@ export function InvitationRedemption() {
   const handledUserRef = useRef<string | null>(user?.id ?? null);
   const currentUserRef = useRef<string | null>(user?.id ?? null);
   const coordinatorRef = useRef(createInvitationRedemptionCoordinator());
-  const fragmentTokenRef = useRef<string | null | undefined>(undefined);
+  const activeAttemptRef = useRef<InvitationRedemptionAttempt | null>(null);
   const [state, setState] = useState<RedemptionState>({ status: "preparing" });
   currentUserRef.current = user?.id ?? null;
 
@@ -62,11 +90,14 @@ export function InvitationRedemption() {
           }
           queueMicrotask(resetRedeem);
         },
-        onError: () => {
+        onError: (error) => {
           if (
             coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
           ) {
-            setState({ status: "error" });
+            setState({
+              status: "error",
+              message: invitationRedemptionErrorMessage(error),
+            });
           }
           queueMicrotask(resetRedeem);
         },
@@ -75,59 +106,95 @@ export function InvitationRedemption() {
     [redeemInvitation, resetRedeem, router, user],
   );
 
+  const beginAttempt = useCallback(
+    (token: string | null) => {
+      const coordinator = coordinatorRef.current;
+      const previousAttempt = activeAttemptRef.current;
+      if (previousAttempt) {
+        coordinator.dispose(previousAttempt);
+      }
+      const attempt = coordinator.begin(currentUserRef.current);
+      activeAttemptRef.current = attempt;
+      setState({ status: "preparing" });
+
+      queueMicrotask(() => {
+        if (!coordinator.isCurrent(attempt, currentUserRef.current)) {
+          return;
+        }
+        if (!token) {
+          if (currentUserRef.current) redeemClaim(attempt);
+          else
+            setState({
+              status: "error",
+              message: INVITATION_UNAVAILABLE_MESSAGE,
+            });
+          return;
+        }
+        claimInvitation(
+          { token },
+          {
+            onSuccess: () => {
+              if (
+                coordinatorRef.current.isCurrent(
+                  attempt,
+                  currentUserRef.current,
+                )
+              ) {
+                redeemClaim(attempt);
+              }
+              queueMicrotask(resetClaim);
+            },
+            onError: () => {
+              if (
+                coordinatorRef.current.isCurrent(
+                  attempt,
+                  currentUserRef.current,
+                )
+              ) {
+                setState({
+                  status: "error",
+                  message: INVITATION_UNAVAILABLE_MESSAGE,
+                });
+              }
+              queueMicrotask(resetClaim);
+            },
+          },
+        );
+      });
+    },
+    [claimInvitation, redeemClaim, resetClaim],
+  );
+
   useEffect(() => {
     const userId = user?.id ?? null;
-    const coordinator = coordinatorRef.current;
-    const attempt = coordinator.begin(userId);
     if (handledUserRef.current !== userId) {
       handledUserRef.current = userId;
       handledRef.current = false;
     }
-    if (fragmentTokenRef.current === undefined) {
-      const fragment = window.location.hash.slice(1);
-      fragmentTokenRef.current = new URLSearchParams(fragment).get("token");
-      window.history.replaceState(null, "", window.location.pathname);
-    }
+    if (handledRef.current) return;
+    handledRef.current = true;
+    beginAttempt(consumeInvitationFragmentToken());
+  }, [beginAttempt, user?.id]);
 
-    queueMicrotask(() => {
-      if (
-        !coordinatorRef.current.isCurrent(attempt, currentUserRef.current) ||
-        handledRef.current
-      ) {
-        return;
-      }
-      handledRef.current = true;
-      const token = fragmentTokenRef.current;
-      fragmentTokenRef.current = null;
-      if (!token) {
-        if (user) redeemClaim(attempt);
-        else setState({ status: "error" });
-        return;
-      }
-      claimInvitation(
-        { token },
-        {
-          onSuccess: () => {
-            if (
-              coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
-            ) {
-              redeemClaim(attempt);
-            }
-            queueMicrotask(resetClaim);
-          },
-          onError: () => {
-            if (
-              coordinatorRef.current.isCurrent(attempt, currentUserRef.current)
-            ) {
-              setState({ status: "error" });
-            }
-            queueMicrotask(resetClaim);
-          },
-        },
-      );
-    });
-    return () => coordinator.dispose(attempt);
-  }, [claimInvitation, redeemClaim, resetClaim, user]);
+  useEffect(() => {
+    const handleHashChange = () => {
+      const token = consumeInvitationFragmentToken();
+      if (!token) return;
+      resetClaim();
+      resetRedeem();
+      beginAttempt(token);
+    };
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, [beginAttempt, resetClaim, resetRedeem]);
+
+  useEffect(
+    () => () => {
+      const attempt = activeAttemptRef.current;
+      if (attempt) coordinatorRef.current.dispose(attempt);
+    },
+    [],
+  );
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-lg items-center px-6 py-12">
@@ -168,7 +235,7 @@ export function InvitationRedemption() {
           <>
             <h1 className="text-2xl font-semibold">无法接受邀请</h1>
             <p role="alert" className="text-muted-foreground mt-3 text-sm">
-              邀请不可用或已失效，请向项目管理员索取新链接。
+              {state.message}
             </p>
             <Button asChild variant="outline" className="mt-6">
               <Link href="/workspace">返回工作空间</Link>

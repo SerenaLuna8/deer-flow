@@ -8,11 +8,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import text
-from support.m4_private_threads import (
-    M4ThreadSeed,
-    install_open_project_cutover_guard,
-    seed_m4_thread_database,
-)
+from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.gateway.deps import get_current_user_from_request, project_session
 from app.gateway.routers import project_connections
@@ -32,7 +28,6 @@ async def seed(migrated_postgres_database_url: str) -> M4ThreadSeed:
 
 def _app(seed: M4ThreadSeed, identity: dict[str, uuid.UUID]) -> FastAPI:
     app = FastAPI()
-    install_open_project_cutover_guard(app)
     app.include_router(project_connections.router)
     repository = ChannelConnectionRepository(seed.factory)
     app.state.project_connection_service = ProjectConnectionService(

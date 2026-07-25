@@ -5,7 +5,9 @@ import {
   LogOutIcon,
   PlusIcon,
   SearchIcon,
+  SettingsIcon,
   ShieldCheckIcon,
+  ShieldUserIcon,
   UserRoundIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -22,6 +24,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SettingsDialog } from "@/components/workspace/settings";
+import { SystemNotificationCenter } from "@/components/workspace/system-notification-center";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -44,7 +48,6 @@ import {
   type ProjectListFilter,
   projectErrorMessage,
 } from "./project-view-model";
-import { WorkspaceInvitations } from "./workspace-invitations";
 import { WorkspaceRecoverySection } from "./workspace-recovery-section";
 
 function ProjectCardWithActions({
@@ -81,6 +84,7 @@ export function ProjectWorkbench({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ProjectListFilter>("all");
   const [createOpen, setCreateOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const projectsQuery = useProjects(userId, {
     ...(search.trim() ? { query: search.trim() } : {}),
@@ -105,6 +109,11 @@ export function ProjectWorkbench({
 
   return (
     <WorkspaceContainer data-testid="project-workbench">
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        defaultSection="appearance"
+      />
       <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b px-4 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <span className="text-primary font-serif text-lg">DeerFlow</span>
@@ -112,37 +121,52 @@ export function ProjectWorkbench({
             工作空间
           </span>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="ghost" aria-label="账户">
-              <UserRoundIcon className="size-4" />
-              <span className="hidden max-w-56 truncate sm:inline">
+        <div className="flex items-center gap-1">
+          <SystemNotificationCenter userId={userId} />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="ghost" aria-label="账户">
+                <UserRoundIcon className="size-4" />
+                <span className="hidden max-w-56 truncate sm:inline">
+                  {accountEmail}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-64">
+              <DropdownMenuLabel className="truncate">
                 {accountEmail}
-              </span>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-64">
-            <DropdownMenuLabel className="truncate">
-              {accountEmail}
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            {systemRole === "system_admin" ? (
-              <>
-                <DropdownMenuItem asChild>
-                  <Link href="/admin/operations">
-                    <ShieldCheckIcon aria-hidden className="size-4" />
-                    平台管理
-                  </Link>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-              </>
-            ) : null}
-            <DropdownMenuItem onSelect={() => void onLogout()}>
-              <LogOutIcon className="size-4" />
-              退出登录
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {systemRole === "system_admin" ? (
+                <>
+                  <DropdownMenuItem asChild>
+                    <Link href="/admin/operations">
+                      <ShieldCheckIcon aria-hidden className="size-4" />
+                      平台管理
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              ) : null}
+              <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
+                <SettingsIcon aria-hidden className="size-4" />
+                系统设置
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem asChild>
+                <Link href="/workspace/privacy">
+                  <ShieldUserIcon aria-hidden className="size-4" />
+                  个人数据中心
+                </Link>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => void onLogout()}>
+                <LogOutIcon className="size-4" />
+                退出登录
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </header>
       <WorkspaceBody className="overflow-y-auto">
         <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -189,7 +213,10 @@ export function ProjectWorkbench({
 
           <section aria-labelledby="workspace-projects-title">
             <div className="mb-4 flex items-center justify-between gap-4">
-              <h2 id="workspace-projects-title" className="text-xl font-semibold">
+              <h2
+                id="workspace-projects-title"
+                className="text-xl font-semibold"
+              >
                 你的项目
               </h2>
               {!projectsQuery.isLoading && !projectsQuery.error && (
@@ -253,7 +280,6 @@ export function ProjectWorkbench({
           </section>
 
           <div className="mt-12">
-            <WorkspaceInvitations userId={userId} />
             <WorkspaceRecoverySection userId={userId} />
           </div>
         </main>

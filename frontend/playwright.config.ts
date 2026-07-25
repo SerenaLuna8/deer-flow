@@ -37,6 +37,10 @@ export default defineConfig({
         env: {
           SKIP_ENV_VALIDATION: "1",
           DEER_FLOW_AUTH_DISABLED: "1",
+          // Deterministic browser tests mock Gateway requests in the page.
+          // Keep server-component capability lookups isolated from any
+          // unrelated Gateway process that may already own port 8001.
+          DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: "http://127.0.0.1:9",
         },
       },
 });

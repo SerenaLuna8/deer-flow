@@ -19,6 +19,7 @@ import {
 } from "@/core/project-governance/usage";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { ProjectAccessDenied } from "../project-access-denied";
 import { useCurrentProject } from "../project-context";
 
 import {
@@ -207,7 +208,12 @@ export function ProjectUsagePage() {
   const staticMode = isStaticWebsiteOnly();
   const access = usePrivateWorkAccess();
 
-  if (!canRead || staticMode) notFound();
+  if (staticMode) notFound();
+  if (!canRead) {
+    return (
+      <ProjectAccessDenied projectSlug={project.slug} area="项目用量与限额" />
+    );
+  }
   return <AuthorizedProjectUsagePage access={access} scope={access.scope} />;
 }
 

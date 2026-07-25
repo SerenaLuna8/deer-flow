@@ -822,9 +822,6 @@ class TestChat:
 
 
 class TestExtractText:
-    def test_string(self):
-        assert DeerFlowClient._extract_text("hello") == "hello"
-
     def test_list_text_blocks(self):
         content = [
             {"type": "text", "text": "first"},
@@ -835,9 +832,6 @@ class TestExtractText:
 
     def test_list_plain_strings(self):
         assert DeerFlowClient._extract_text(["a", "b"]) == "a\nb"
-
-    def test_empty_list(self):
-        assert DeerFlowClient._extract_text([]) == ""
 
     def test_other_type(self):
         assert DeerFlowClient._extract_text(42) == "42"

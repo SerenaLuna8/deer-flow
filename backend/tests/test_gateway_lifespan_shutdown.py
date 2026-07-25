@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
 
+from deerflow.config.auth_config import AuthAppConfig
+
 
 @asynccontextmanager
 async def _noop_gateway_runtime(_app, _startup_config):
@@ -82,7 +84,11 @@ async def _run_lifespan_with_upload_staging_cleanup():
     from app.gateway.app import lifespan
 
     app = FastAPI()
-    startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    startup_config = SimpleNamespace(
+        auth=AuthAppConfig(),
+        log_level="INFO",
+        memory=SimpleNamespace(token_counting="char"),
+    )
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
     cleanup_upload_staging_files = MagicMock(return_value=2)

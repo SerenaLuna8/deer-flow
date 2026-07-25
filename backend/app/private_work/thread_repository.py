@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,12 @@ class PrivateThreadRecord:
 
 
 _UNSET = object()
+_AUTOMATIC_TITLE_PLACEHOLDERS = (
+    "",
+    "New conversation",
+    "Untitled",
+    "新对话",
+)
 
 
 class PrivateThreadRepository:
@@ -196,6 +202,38 @@ class PrivateThreadRepository:
         if row is None:
             raise PrivateWorkConflict("unknown")
         return self._record(row)
+
+    async def set_automatic_display_name(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        display_name: str,
+    ) -> bool:
+        """Persist the one-time backend title without replacing a manual name."""
+
+        normalized = display_name.strip()
+        if not normalized:
+            return False
+        statement = (
+            update(ThreadMetaRow)
+            .where(
+                *self._active_scope(scope, thread_id),
+                ThreadMetaRow.version == 1,
+                or_(
+                    ThreadMetaRow.display_name.is_(None),
+                    ThreadMetaRow.display_name.in_(
+                        _AUTOMATIC_TITLE_PLACEHOLDERS,
+                    ),
+                ),
+            )
+            .values(
+                display_name=normalized,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(ThreadMetaRow.thread_id)
+        )
+        return (await self.session.execute(statement)).scalar_one_or_none() is not None
 
     async def mark_deleted(
         self,

@@ -190,20 +190,9 @@ BANNED_LEGACY_SYMBOLS_BY_PATH = {
 }
 
 HISTORICAL_MARKDOWN_PREFIXES = (
-    "docs/superpowers/plans/",
-    "docs/superpowers/specs/",
     "frontend/public/demo/threads/",
     "frontend/src/content/en/posts/",
     "frontend/src/content/zh/posts/",
-)
-HISTORICAL_MARKDOWN_PATHS = frozenset(
-    {
-        "backend/docs/AUTH_DESIGN.md",
-        "backend/docs/AUTH_TEST_PLAN.md",
-        "backend/docs/AUTH_UPGRADE.md",
-        "backend/docs/MEMORY_SETTINGS_REVIEW.md",
-        "backend/docs/rfc-create-deerflow-agent.md",
-    }
 )
 
 ACTIVE_ROOT_MARKDOWN = frozenset(
@@ -301,7 +290,7 @@ def _active_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
         is_module_root_document = len(parts) == 2 and parts[0] in {"backend", "frontend"}
         if relative not in ACTIVE_ROOT_MARKDOWN and not is_root_document and not is_module_root_document and not any(relative.startswith(prefix) for prefix in ACTIVE_MARKDOWN_PREFIXES):
             continue
-        if relative in HISTORICAL_MARKDOWN_PATHS or any(relative.startswith(prefix) for prefix in HISTORICAL_MARKDOWN_PREFIXES):
+        if any(relative.startswith(prefix) for prefix in HISTORICAL_MARKDOWN_PREFIXES):
             continue
         if any(part in {".git", ".next", "node_modules", ".venv"} for part in path.relative_to(repo_root).parts):
             continue
@@ -602,6 +591,31 @@ def test_production_sources_have_no_legacy_route_literals() -> None:
     assert findings == []
 
 
+def test_runtime_persistence_remains_postgresql_only() -> None:
+    """Reject database compatibility and database backup/restore code in runtime sources."""
+
+    banned_fragments = (
+        "aiosqlite",
+        "create policy",
+        "deer_flow_backup_key",
+        "deer_flow_recovery_journal_key",
+        "enable row level security",
+        "pg_dump",
+        "pg_restore",
+        "sqlite3",
+        "sqlite_where",
+    )
+    findings: list[str] = []
+    for path in _production_files():
+        text = path.read_text(encoding="utf-8").lower()
+        for fragment in banned_fragments:
+            relative_path = path.relative_to(REPO_ROOT).as_posix()
+            if fragment in text:
+                findings.append(f"{relative_path}:{fragment}")
+
+    assert findings == []
+
+
 def test_deerflow_client_has_no_removed_global_compat_methods() -> None:
     from deerflow.client import DeerFlowClient
 
@@ -644,22 +658,19 @@ def test_gateway_has_no_legacy_run_manager_cancellation_chain() -> None:
     assert "notify_local_cancellation" not in _python_symbols(authorization_path)
 
 
-@pytest.mark.parametrize(
-    "source",
-    (
+def test_gateway_run_manager_gate_mutation_rejects_every_chain_shape(tmp_path: Path) -> None:
+    sources = (
         "def get_run_manager():\n    return None\n",
         "from app.private_work.authorization import notify_local_cancellation\n",
         "app.state.run_manager = object()\n",
-    ),
-    ids=("getter", "notifier", "app-state"),
-)
-def test_gateway_run_manager_gate_mutation_rejects_every_chain_shape(tmp_path: Path, source: str) -> None:
-    gateway_root = tmp_path / "backend" / "app" / "gateway"
-    path = gateway_root / "legacy.py"
-    path.parent.mkdir(parents=True)
-    path.write_text(source, encoding="utf-8")
+    )
+    for index, source in enumerate(sources):
+        gateway_root = tmp_path / str(index) / "backend" / "app" / "gateway"
+        path = gateway_root / "legacy.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(source, encoding="utf-8")
 
-    assert _gateway_run_manager_findings(gateway_root) != []
+        assert _gateway_run_manager_findings(gateway_root) != []
 
 
 def test_all_tracked_text_has_no_deleted_readme_translation_literals() -> None:
@@ -670,16 +681,14 @@ def test_helm_chart_has_no_extensions_redis_or_legacy_global_routes() -> None:
     assert _helm_legacy_findings(REPO_ROOT) == []
 
 
-@pytest.mark.parametrize(
-    "content",
-    ("redis:\n  enabled: true\n", "extensionsConfig: '{}'"),
-)
-def test_helm_gate_mutation_rejects_removed_values(tmp_path: Path, content: str) -> None:
-    path = tmp_path / "deploy" / "helm" / "deer-flow" / "values.yaml"
-    path.parent.mkdir(parents=True)
-    path.write_text(content, encoding="utf-8")
+def test_helm_gate_mutation_rejects_removed_values(tmp_path: Path) -> None:
+    for index, content in enumerate(("redis:\n  enabled: true\n", "extensionsConfig: '{}'")):
+        case_root = tmp_path / str(index)
+        path = case_root / "deploy" / "helm" / "deer-flow" / "values.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_text(content, encoding="utf-8")
 
-    assert _helm_legacy_findings(tmp_path) != []
+        assert _helm_legacy_findings(case_root) != []
 
 
 def test_rendered_helm_chart_has_no_extensions_redis_or_legacy_global_routes() -> None:
@@ -944,7 +953,7 @@ def test_all_active_docs_describe_only_final_m7_surfaces() -> None:
     assert _active_doc_residue_findings(documents, repo_root=REPO_ROOT) == []
 
 
-def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exactly(tmp_path: Path) -> None:
+def test_active_doc_inventory_mutation_scans_new_docs_across_active_roots(tmp_path: Path) -> None:
     active = tmp_path / "backend" / "docs" / "new-guide.md"
     active.parent.mkdir(parents=True)
     active.write_text("Call `/api/threads`.\n", encoding="utf-8")
@@ -959,9 +968,9 @@ def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exa
     module_doc = tmp_path / "frontend" / "NEW.md"
     module_doc.parent.mkdir(parents=True)
     module_doc.write_text("Call `/api/threads`.\n", encoding="utf-8")
-    historical = tmp_path / "docs" / "superpowers" / "specs" / "old.md"
-    historical.parent.mkdir(parents=True)
-    historical.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    spec_doc = tmp_path / "docs" / "superpowers" / "specs" / "old.md"
+    spec_doc.parent.mkdir(parents=True)
+    spec_doc.write_text("Call `/api/threads`.\n", encoding="utf-8")
     near_miss = tmp_path / "docs" / "superpowers" / "specs-current" / "guide.md"
     near_miss.parent.mkdir(parents=True)
     near_miss.write_text("Call `/api/threads`.\n", encoding="utf-8")
@@ -971,6 +980,7 @@ def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exa
         ".github/new-guide.md",
         "NEW.md",
         "backend/docs/new-guide.md",
+        "docs/superpowers/specs/old.md",
         "docs/superpowers/specs-current/guide.md",
         "frontend/NEW.md",
         "skills/public/new-skill/SKILL.md",
@@ -979,57 +989,52 @@ def test_active_doc_inventory_mutation_scans_new_docs_and_whitelists_history_exa
         ".github/new-guide.md:1:/api/threads",
         "NEW.md:1:/api/threads",
         "backend/docs/new-guide.md:1:/api/threads",
+        "docs/superpowers/specs/old.md:1:/api/threads",
         "docs/superpowers/specs-current/guide.md:1:/api/threads",
         "frontend/NEW.md:1:/api/threads",
         "skills/public/new-skill/SKILL.md:1:/api/threads",
     ]
 
 
-@pytest.mark.parametrize(
-    ("relative", "content"),
-    (
-        ("skills/public/new-skill/scripts/call.sh", "curl /api/threads\n"),
-        ("deploy/helm/deer-flow/templates/legacy.yaml", "path: /api/threads\n"),
-    ),
-    ids=("public-skill-script", "helm-template"),
-)
 def test_source_gate_mutation_scans_new_skill_scripts_and_helm_templates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    relative: str,
-    content: str,
 ) -> None:
-    _install_mutation_repo(monkeypatch, tmp_path, relative, content)
-    _assert_gate_rejects(
-        test_production_sources_have_no_legacy_route_literals,
-        f"source gate accepted a legacy route in {relative}",
+    cases = (
+        ("skills/public/new-skill/scripts/call.sh", "curl /api/threads\n"),
+        ("deploy/helm/deer-flow/templates/legacy.yaml", "path: /api/threads\n"),
     )
+    for index, (relative, content) in enumerate(cases):
+        with monkeypatch.context() as case_patch:
+            _install_mutation_repo(case_patch, tmp_path / str(index), relative, content)
+            _assert_gate_rejects(
+                test_production_sources_have_no_legacy_route_literals,
+                f"source gate accepted a legacy route in {relative}",
+            )
 
 
-@pytest.mark.parametrize(
-    "relative",
-    (
+def test_source_gate_mutation_rejects_exact_frontend_route_literal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    relatives = (
         "frontend/src/hooks/useLegacy.ts",
         "frontend/src/core/legacy.ts",
         "frontend/src/core/legacy.tsx",
         "frontend/src/core/legacy.js",
-    ),
-)
-def test_source_gate_mutation_rejects_exact_frontend_route_literal(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    relative: str,
-) -> None:
-    _install_mutation_repo(
-        monkeypatch,
-        tmp_path,
-        relative,
-        'const url = "/api/threads";\n',
     )
-    _assert_gate_rejects(
-        test_production_sources_have_no_legacy_route_literals,
-        f"source gate accepted an exact legacy route in {relative}",
-    )
+    for index, relative in enumerate(relatives):
+        with monkeypatch.context() as case_patch:
+            _install_mutation_repo(
+                case_patch,
+                tmp_path / str(index),
+                relative,
+                'const url = "/api/threads";\n',
+            )
+            _assert_gate_rejects(
+                test_production_sources_have_no_legacy_route_literals,
+                f"source gate accepted an exact legacy route in {relative}",
+            )
 
 
 def test_source_gate_mutation_excludes_frontend_test_source(
@@ -1045,86 +1050,71 @@ def test_source_gate_mutation_excludes_frontend_test_source(
     test_production_sources_have_no_legacy_route_literals()
 
 
-@pytest.mark.parametrize(
-    "comment",
-    (
-        '// const legacy = "/api/threads";\nconst current = "/api/projects";\n',
-        '/* const legacy = "/api/threads";\nconst second = `/api/runs`; */\nconst current = "/api/projects";\n',
-    ),
-    ids=("line-comment", "multiline-block-comment"),
-)
 def test_source_gate_mutation_ignores_javascript_comment_literals(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    comment: str,
 ) -> None:
-    _install_mutation_repo(
-        monkeypatch,
-        tmp_path,
-        "frontend/src/hooks/useLegacy.ts",
-        comment,
+    comments = (
+        '// const legacy = "/api/threads";\nconst current = "/api/projects";\n',
+        '/* const legacy = "/api/threads";\nconst second = `/api/runs`; */\nconst current = "/api/projects";\n',
     )
-    test_production_sources_have_no_legacy_route_literals()
+    for index, comment in enumerate(comments):
+        with monkeypatch.context() as case_patch:
+            _install_mutation_repo(
+                case_patch,
+                tmp_path / str(index),
+                "frontend/src/hooks/useLegacy.ts",
+                comment,
+            )
+            test_production_sources_have_no_legacy_route_literals()
 
 
-@pytest.mark.parametrize(
-    "source",
-    (
+def test_source_gate_mutation_keeps_comment_markers_inside_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sources = (
         'const marker = "// not a comment"; const route = "/api/threads";\n',
         'const marker = "/* not a comment */"; const route = "/api/threads";\n',
         'const marker = "\\"// escaped quote"; const route = "/api/threads";\n',
         "const marker = `/* template text */`; const route = `/api/threads`;\n",
         'const route = "https://gateway.example/api/threads";\n',
-    ),
-    ids=(
-        "line-marker-in-string",
-        "block-marker-in-string",
-        "escaped-quote-before-line-marker",
-        "block-marker-in-template",
-        "url-double-slash",
-    ),
-)
-def test_source_gate_mutation_keeps_comment_markers_inside_strings(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    source: str,
-) -> None:
-    _install_mutation_repo(
-        monkeypatch,
-        tmp_path,
-        "frontend/src/hooks/useLegacy.ts",
-        source,
     )
-    _assert_gate_rejects(
-        test_production_sources_have_no_legacy_route_literals,
-        "source gate let a string-contained comment marker hide a legacy route",
-    )
+    for index, source in enumerate(sources):
+        with monkeypatch.context() as case_patch:
+            _install_mutation_repo(
+                case_patch,
+                tmp_path / str(index),
+                "frontend/src/hooks/useLegacy.ts",
+                source,
+            )
+            _assert_gate_rejects(
+                test_production_sources_have_no_legacy_route_literals,
+                "source gate let a string-contained comment marker hide a legacy route",
+            )
 
 
-@pytest.mark.parametrize(
-    "source",
-    (
-        "const route = '/api/threads';\n",
-        'const route = "/api/threads";\n',
-        "const route = `/api/threads`;\n",
-    ),
-    ids=("single-quoted", "double-quoted", "template-literal"),
-)
 def test_source_gate_mutation_rejects_javascript_string_quote_styles(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    source: str,
 ) -> None:
-    _install_mutation_repo(
-        monkeypatch,
-        tmp_path,
-        "frontend/src/hooks/useLegacy.ts",
-        source,
+    sources = (
+        "const route = '/api/threads';\n",
+        'const route = "/api/threads";\n',
+        "const route = `/api/threads`;\n",
     )
-    _assert_gate_rejects(
-        test_production_sources_have_no_legacy_route_literals,
-        "source gate accepted a real legacy JavaScript string literal",
-    )
+    for index, source in enumerate(sources):
+        with monkeypatch.context() as case_patch:
+            _install_mutation_repo(
+                case_patch,
+                tmp_path / str(index),
+                "frontend/src/hooks/useLegacy.ts",
+                source,
+            )
+            _assert_gate_rejects(
+                test_production_sources_have_no_legacy_route_literals,
+                "source gate accepted a real legacy JavaScript string literal",
+            )
 
 
 def test_source_gate_mutation_rejects_config_key_literal_outside_validator(

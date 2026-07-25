@@ -1,9 +1,15 @@
-config_version: 25
+config_version: 26
 log_level: info
 logging:
   enhance:
     enabled: false
     format: text
+auth:
+  # Only these TCP peers may supply X-Real-IP. Loopback covers repository-owned
+  # local nginx; container/Helm nginx uses a separate generated proxy token.
+  trusted_proxies:
+  - 127.0.0.1/32
+  - ::1/128
 token_usage:
   enabled: true
 token_budget:

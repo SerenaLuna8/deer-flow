@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -589,6 +590,53 @@ class McpRepository:
         self.session.add_all(grants)
         await self.session.flush()
         return grants
+
+    async def replace_system_grants(
+        self,
+        version: McpServerVersionRow,
+        slots: Sequence[McpCredentialSlotRow],
+        bindings: Sequence[tuple[McpCredentialSlotRow, CredentialVersionRow]],
+        *,
+        expected_active_grant_versions: Mapping[str, int],
+        user_id: uuid.UUID,
+        request_id: str,
+    ) -> tuple[CredentialGrantRow, ...]:
+        slot_names = {slot.id: slot.name for slot in slots}
+        existing_statement = (
+            select(CredentialGrantRow)
+            .where(
+                CredentialGrantRow.mcp_server_version_id == version.id,
+                CredentialGrantRow.status == "active",
+            )
+            .order_by(CredentialGrantRow.credential_slot_id)
+            .with_for_update(of=CredentialGrantRow)
+        )
+        existing = tuple((await self.session.execute(existing_statement)).scalars().all())
+        if any(grant.credential_slot_id not in slot_names for grant in existing):
+            raise AssetConflict(request_id)
+        actual_versions = {slot_names[grant.credential_slot_id]: grant.version for grant in existing}
+        if dict(expected_active_grant_versions) != actual_versions:
+            raise AssetConflict(request_id)
+
+        desired_versions = {slot.id: credential_version.id for slot, credential_version in bindings}
+        if len(desired_versions) != len(bindings):
+            raise AssetConflict(request_id)
+        if len(existing) == len(desired_versions) and all(desired_versions.get(grant.credential_slot_id) == grant.credential_version_id for grant in existing):
+            return existing
+
+        now = datetime.now(UTC)
+        for grant in existing:
+            grant.status = "revoked"
+            grant.version += 1
+            grant.revoked_at = now
+            grant.revoked_by_user_id = str(user_id)
+        await self.session.flush()
+        return await self.create_grants(
+            version,
+            bindings,
+            user_id=user_id,
+            request_id=request_id,
+        )
 
     async def project_grant_state(self, context: ProjectContext, grant_id: uuid.UUID) -> GrantState:
         self._require_project_actor(context)

@@ -7,7 +7,6 @@ the limit) so pagination stays correct.
 """
 
 import pytest
-from support.memory_event_store import MemoryRunEventStore
 
 
 async def _seed_two_tasks(store, *, scope=None):
@@ -72,34 +71,6 @@ async def _check_no_task_id_returns_all(store, *, scope=None):
     await _seed_two_tasks(store, scope=scope)
     everything = await store.list_events("t1", "r1", **scope_kwargs)
     assert len(everything) == 7  # 2 starts + 5 steps
-
-
-# -- Memory backend --
-
-
-@pytest.mark.anyio
-async def test_memory_task_id_filter():
-    await _check_task_id_filter(MemoryRunEventStore())
-
-
-@pytest.mark.anyio
-async def test_memory_task_id_with_event_types():
-    await _check_task_id_with_event_types(MemoryRunEventStore())
-
-
-@pytest.mark.anyio
-async def test_memory_after_seq_cursor():
-    await _check_after_seq_cursor(MemoryRunEventStore())
-
-
-@pytest.mark.anyio
-async def test_memory_task_id_after_seq_paginate():
-    await _check_task_id_after_seq_paginate(MemoryRunEventStore())
-
-
-@pytest.mark.anyio
-async def test_memory_no_task_id_returns_all():
-    await _check_no_task_id_returns_all(MemoryRunEventStore())
 
 
 # -- PostgreSQL DB backend: exercises the JSON-field filter on the runtime dialect --

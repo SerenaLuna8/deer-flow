@@ -97,11 +97,6 @@ async def _init_db() -> None:
     await init_engine(DatabaseConfig(url=_DATABASE_URL))
 
 
-@pytest.fixture
-def store():
-    return MemoryRunEventStore()
-
-
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_concurrent_db_writes_assign_unique_contiguous_sequence(
@@ -144,272 +139,37 @@ async def test_concurrent_db_writes_assign_unique_contiguous_sequence(
         await seed.engine.dispose()
 
 
-# -- Basic write and query --
+# -- Test-double contract smoke tests --
 
 
-class TestPutAndSeq:
-    @pytest.mark.anyio
-    async def test_put_returns_dict_with_seq(self, store):
-        record = await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="hello")
-        assert "seq" in record
-        assert record["seq"] == 1
-        assert record["thread_id"] == "t1"
-        assert record["run_id"] == "r1"
-        assert record["event_type"] == "human_message"
-        assert record["category"] == "message"
-        assert record["content"] == "hello"
-        assert "created_at" in record
-
-    @pytest.mark.anyio
-    async def test_seq_strictly_increasing_same_thread(self, store):
-        r1 = await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        r2 = await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
-        r3 = await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        assert r1["seq"] == 1
-        assert r2["seq"] == 2
-        assert r3["seq"] == 3
-
-    @pytest.mark.anyio
-    async def test_seq_independent_across_threads(self, store):
-        r1 = await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        r2 = await store.put(thread_id="t2", run_id="r2", event_type="human_message", category="message")
-        assert r1["seq"] == 1
-        assert r2["seq"] == 1
-
-    @pytest.mark.anyio
-    async def test_put_respects_provided_created_at(self, store):
-        ts = "2024-06-01T12:00:00+00:00"
-        record = await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", created_at=ts)
-        assert record["created_at"] == ts
-
-    @pytest.mark.anyio
-    async def test_put_metadata_preserved(self, store):
-        meta = {"model": "gpt-4", "tokens": 100}
-        record = await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace", metadata=meta)
-        assert record["metadata"] == meta
-
-
-# -- list_messages --
-
-
-class TestListMessages:
-    @pytest.mark.anyio
-    async def test_only_returns_message_category(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        await store.put(thread_id="t1", run_id="r1", event_type="run_start", category="lifecycle")
-        messages = await store.list_messages("t1")
-        assert len(messages) == 1
-        assert messages[0]["category"] == "message"
-
-    @pytest.mark.anyio
-    async def test_ascending_seq_order(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="first")
-        await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content="second")
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="third")
-        messages = await store.list_messages("t1")
-        seqs = [m["seq"] for m in messages]
-        assert seqs == sorted(seqs)
-
-    @pytest.mark.anyio
-    async def test_before_seq_pagination(self, store):
-        for i in range(10):
-            await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content=str(i))
-        messages = await store.list_messages("t1", before_seq=6, limit=3)
-        assert len(messages) == 3
-        assert [m["seq"] for m in messages] == [3, 4, 5]
-
-    @pytest.mark.anyio
-    async def test_after_seq_pagination(self, store):
-        for i in range(10):
-            await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content=str(i))
-        messages = await store.list_messages("t1", after_seq=7, limit=3)
-        assert len(messages) == 3
-        assert [m["seq"] for m in messages] == [8, 9, 10]
-
-    @pytest.mark.anyio
-    async def test_limit_restricts_count(self, store):
-        for _ in range(20):
-            await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        messages = await store.list_messages("t1", limit=5)
-        assert len(messages) == 5
-
-    @pytest.mark.anyio
-    async def test_cross_run_unified_ordering(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
-        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r2", event_type="ai_message", category="message")
-        messages = await store.list_messages("t1")
-        assert [m["seq"] for m in messages] == [1, 2, 3, 4]
-        assert messages[0]["run_id"] == "r1"
-        assert messages[2]["run_id"] == "r2"
-
-    @pytest.mark.anyio
-    async def test_default_returns_latest(self, store):
-        for _ in range(10):
-            await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        messages = await store.list_messages("t1", limit=3)
-        assert [m["seq"] for m in messages] == [8, 9, 10]
-
-    @pytest.mark.anyio
-    async def test_pagination_with_interleaved_trace_events(self, store):
-        # Messages and non-message events interleave, so message seqs are
-        # non-contiguous (1, 3, 5, 7, 9). Seq-window pagination must still be
-        # correct over the messages-only projection, including when the cursor
-        # lands in a gap or exactly on a message seq (exclusive bound).
-        for i in range(10):
-            category = "message" if i % 2 == 0 else "trace"
-            await store.put(thread_id="t1", run_id="r1", event_type="e", category=category, content=str(i))
-
-        assert [m["seq"] for m in await store.list_messages("t1")] == [1, 3, 5, 7, 9]
-        # before_seq in a gap: seq < 6 -> [1, 3, 5], last 2
-        assert [m["seq"] for m in await store.list_messages("t1", before_seq=6, limit=2)] == [3, 5]
-        # before_seq on a message seq is exclusive: seq < 5 -> [1, 3]
-        assert [m["seq"] for m in await store.list_messages("t1", before_seq=5, limit=5)] == [1, 3]
-        # after_seq in a gap: seq > 4 -> [5, 7, 9], first 2
-        assert [m["seq"] for m in await store.list_messages("t1", after_seq=4, limit=2)] == [5, 7]
-        # after_seq on a message seq is exclusive: seq > 5 -> [7, 9]
-        assert [m["seq"] for m in await store.list_messages("t1", after_seq=5, limit=5)] == [7, 9]
-
-
-# -- list_events --
-
-
-class TestListEvents:
-    @pytest.mark.anyio
-    async def test_returns_all_categories_for_run(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        await store.put(thread_id="t1", run_id="r1", event_type="run_start", category="lifecycle")
-        events = await store.list_events("t1", "r1")
-        assert len(events) == 3
-
-    @pytest.mark.anyio
-    async def test_event_types_filter(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_start", category="trace")
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        await store.put(thread_id="t1", run_id="r1", event_type="tool_start", category="trace")
-        events = await store.list_events("t1", "r1", event_types=["llm_end"])
-        assert len(events) == 1
-        assert events[0]["event_type"] == "llm_end"
-
-    @pytest.mark.anyio
-    async def test_only_returns_specified_run(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        await store.put(thread_id="t1", run_id="r2", event_type="llm_end", category="trace")
-        events = await store.list_events("t1", "r1")
-        assert len(events) == 1
-        assert events[0]["run_id"] == "r1"
-
-
-# -- list_messages_by_run --
-
-
-class TestListMessagesByRun:
-    @pytest.mark.anyio
-    async def test_only_messages_for_specified_run(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
-        messages = await store.list_messages_by_run("t1", "r1")
-        assert len(messages) == 1
-        assert messages[0]["run_id"] == "r1"
-        assert messages[0]["category"] == "message"
-
-
-# -- count_messages --
-
-
-class TestCountMessages:
-    @pytest.mark.anyio
-    async def test_counts_only_message_category(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
-        assert await store.count_messages("t1") == 2
-
-
-# -- put_batch --
-
-
-class TestPutBatch:
-    @pytest.mark.anyio
-    async def test_batch_assigns_seq(self, store):
-        events = [
-            {"thread_id": "t1", "run_id": "r1", "event_type": "human_message", "category": "message", "content": "a"},
-            {"thread_id": "t1", "run_id": "r1", "event_type": "ai_message", "category": "message", "content": "b"},
-            {"thread_id": "t1", "run_id": "r1", "event_type": "llm_end", "category": "trace"},
+@pytest.mark.anyio
+async def test_memory_event_store_contract_smoke() -> None:
+    store = MemoryRunEventStore()
+    records = await store.put_batch(
+        [
+            {"thread_id": "t1", "run_id": "r1", "event_type": "human_message", "category": "message", "content": "first"},
+            {"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace", "metadata": {"task_id": "task-a"}},
+            {"thread_id": "t1", "run_id": "r2", "event_type": "ai_message", "category": "message", "content": "second"},
         ]
-        results = await store.put_batch(events)
-        assert len(results) == 3
-        assert all("seq" in r for r in results)
+    )
 
-    @pytest.mark.anyio
-    async def test_batch_seq_strictly_increasing(self, store):
-        events = [
-            {"thread_id": "t1", "run_id": "r1", "event_type": "human_message", "category": "message"},
-            {"thread_id": "t1", "run_id": "r1", "event_type": "ai_message", "category": "message"},
-        ]
-        results = await store.put_batch(events)
-        assert results[0]["seq"] == 1
-        assert results[1]["seq"] == 2
+    assert [record["seq"] for record in records] == [1, 2, 3]
+    assert [record["seq"] for record in await store.list_messages("t1")] == [1, 3]
+    assert [record["seq"] for record in await store.list_messages_by_run("t1", "r2")] == [3]
+    assert [record["seq"] for record in await store.list_events("t1", "r1", task_id="task-a")] == [2]
+    assert await store.count_messages("t1") == 2
 
 
-# -- delete --
+@pytest.mark.anyio
+async def test_memory_event_store_delete_contract_smoke() -> None:
+    store = MemoryRunEventStore()
+    await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+    await store.put(thread_id="t1", run_id="r2", event_type="ai_message", category="message")
 
-
-class TestDelete:
-    @pytest.mark.anyio
-    async def test_delete_by_thread(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
-        await store.put(thread_id="t1", run_id="r2", event_type="llm_end", category="trace")
-        count = await store.delete_by_thread("t1")
-        assert count == 3
-        assert await store.list_messages("t1") == []
-        assert await store.count_messages("t1") == 0
-
-    @pytest.mark.anyio
-    async def test_delete_by_run(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
-        await store.put(thread_id="t1", run_id="r2", event_type="llm_end", category="trace")
-        count = await store.delete_by_run("t1", "r2")
-        assert count == 2
-        messages = await store.list_messages("t1")
-        assert len(messages) == 1
-        assert messages[0]["run_id"] == "r1"
-
-    @pytest.mark.anyio
-    async def test_delete_nonexistent_thread_returns_zero(self, store):
-        assert await store.delete_by_thread("nope") == 0
-
-    @pytest.mark.anyio
-    async def test_delete_nonexistent_run_returns_zero(self, store):
-        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
-        assert await store.delete_by_run("t1", "nope") == 0
-
-    @pytest.mark.anyio
-    async def test_delete_nonexistent_thread_for_run_returns_zero(self, store):
-        assert await store.delete_by_run("nope", "r1") == 0
-
-
-# -- Edge cases --
-
-
-class TestEdgeCases:
-    @pytest.mark.anyio
-    async def test_empty_thread_list_messages(self, store):
-        assert await store.list_messages("empty") == []
-
-    @pytest.mark.anyio
-    async def test_empty_run_list_events(self, store):
-        assert await store.list_events("empty", "r1") == []
-
-    @pytest.mark.anyio
-    async def test_empty_thread_count_messages(self, store):
-        assert await store.count_messages("empty") == 0
+    assert await store.delete_by_run("t1", "r2") == 1
+    assert [record["run_id"] for record in await store.list_messages("t1")] == ["r1"]
+    assert await store.delete_by_thread("t1") == 1
+    assert await store.list_messages("t1") == []
 
 
 # -- DB-specific tests --
@@ -656,9 +416,13 @@ class TestDbRunEventStore:
 
 
 def test_run_event_store_factory_is_removed() -> None:
+    import inspect
+
     import deerflow.runtime.events.store as store_module
 
     assert not hasattr(store_module, "make_run_event_store")
+    parameter = inspect.signature(store_module.DbRunEventStore).parameters["session_factory"]
+    assert parameter.default is inspect.Parameter.empty
 
 
 # -- JSONL-specific tests --

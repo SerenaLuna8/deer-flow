@@ -13,7 +13,7 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.run_repository import PrivateRunRecord
-from app.projects.errors import ProjectDatabaseUnavailable, ProjectMemberQuotaExceeded
+from app.projects.errors import ProjectMemberQuotaExceeded, ProjectQuotaStateConflict
 from app.quotas.models import (
     QuotaError,
     QuotaExceeded,
@@ -32,8 +32,8 @@ class ProjectQuotaEnforcer:
         self._quotas = quotas
 
     @staticmethod
-    def _member_key(membership_id: uuid.UUID, membership_version: int) -> str:
-        return f"member:{membership_id}:version:{membership_version}"
+    def _member_key(membership_id: uuid.UUID, activation_generation: int) -> str:
+        return f"member:{membership_id}:activation:{activation_generation}"
 
     @staticmethod
     def _run_key(run_id: str) -> str:
@@ -49,7 +49,7 @@ class ProjectQuotaEnforcer:
         context: PrivateWorkContext,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None:
         try:
             await self._quotas.reserve(
@@ -57,12 +57,12 @@ class ProjectQuotaEnforcer:
                 context,
                 "members",
                 1,
-                self._member_key(membership_id, membership_version),
+                self._member_key(membership_id, activation_generation),
             )
         except QuotaExceeded:
             raise ProjectMemberQuotaExceeded() from None
         except QuotaError:
-            raise ProjectDatabaseUnavailable() from None
+            raise ProjectQuotaStateConflict() from None
 
     async def release_member(
         self,
@@ -70,7 +70,7 @@ class ProjectQuotaEnforcer:
         scope: PrivateResourceScope,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None:
         try:
             await self._quotas.release(
@@ -81,10 +81,10 @@ class ProjectQuotaEnforcer:
                 ),
                 "members",
                 1,
-                self._member_key(membership_id, membership_version),
+                self._member_key(membership_id, activation_generation),
             )
         except QuotaError:
-            raise ProjectDatabaseUnavailable() from None
+            raise ProjectQuotaStateConflict() from None
 
     async def reserve_concurrent_run(
         self,

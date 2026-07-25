@@ -32,16 +32,23 @@ describe("HumanInputCard", () => {
   it("renders request text, options, and the other-answer input", () => {
     const html = renderCard();
 
+    expect(html).toContain('data-human-input-state="open"');
+    expect(html).toContain("1 item needs attention");
     expect(html).toContain("Need your help");
     expect(html).toContain("Need the target environment.");
     expect(html).toContain("Which environment should I deploy to?");
     expect(html).toContain("development");
     expect(html).toContain("staging");
+    expect(html).toContain('role="radio"');
+    expect(html).toContain('aria-checked="false"');
     expect(html).toContain("Other answer");
     expect(html).toContain("Type another answer...");
+    expect(html).toContain("Submit answer");
+    expect(html).toContain("You can change your selection before submitting.");
+    expect(html).toContain('type="text"');
   });
 
-  it("renders answered state as disabled with the selected value", () => {
+  it("collapses answered state to the selected value", () => {
     const response: HumanInputResponse = {
       version: 1,
       kind: "human_input_response",
@@ -53,9 +60,12 @@ describe("HumanInputCard", () => {
     };
     const html = renderCard({ answeredResponse: response });
 
+    expect(html).toContain('data-human-input-state="answered"');
     expect(html).toContain("Answered");
     expect(html).toContain("Answered: staging");
-    expect(html).toContain("disabled");
+    expect(html).not.toContain("development");
+    expect(html).not.toContain("Type another answer...");
+    expect(html).not.toContain("Submit answer");
   });
 
   it("renders read-only state when no submit handler is available", () => {

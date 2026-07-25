@@ -27,18 +27,45 @@ const catalog: ProjectAssetList = {
       binding: null,
     },
   ],
-  system_items: [],
+  system_items: [
+    {
+      id: "33333333-3333-4333-8333-333333333333",
+      scope: "system",
+      project_id: null,
+      slug: "project-assistant",
+      display_name: "Main",
+      status: "active",
+      current_published_version_id: VERSION_ID,
+      version: 1,
+      created_by_user_id: "system",
+      created_at: "2026-07-15T00:00:00Z",
+      updated_at: "2026-07-15T00:00:00Z",
+      capabilities: ["shared_assets.read", "shared_assets.execute"],
+      binding: {
+        project_id: "11111111-1111-4111-8111-111111111111",
+        kind: "agent",
+        asset_id: "33333333-3333-4333-8333-333333333333",
+        version_id: VERSION_ID,
+        enabled: true,
+        version: 1,
+        created_by_user_id: "user-1",
+        updated_by_user_id: "user-1",
+        created_at: "2026-07-15T00:00:00Z",
+        updated_at: "2026-07-15T00:00:00Z",
+      },
+    },
+  ],
   request_id: "request-agents",
 };
 describe("project Agent start-chat continuation", () => {
-  test("selects an executable Agent only for an authorized ready start_chat intent", () => {
+  test("selects Main only for an authorized ready start_chat intent", () => {
     expect(
       projectStartChatCandidate(catalog, {
         requested: true,
         canCreate: true,
         readinessStatus: "ready",
       })?.id,
-    ).toBe(catalog.project_items[0]!.id);
+    ).toBe(catalog.system_items[0]!.id);
     for (const state of [
       { requested: false, canCreate: true, readinessStatus: "ready" as const },
       { requested: true, canCreate: false, readinessStatus: "ready" as const },

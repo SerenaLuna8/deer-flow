@@ -1,25 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from postgres_utils import temporary_postgres_database
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, async_sessionmaker, create_async_engine
 from support.m4_private_threads import seed_m4_thread_database
 
 import deerflow.persistence.models  # noqa: F401
 from app.final_schema import M7_FINAL_SCHEMA_REVISION
+from app.gateway.auth.sessions import generate_session_id, hash_session_id
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.persistence import bootstrap as bootstrap_module
+from deerflow.persistence.auth_sessions import AuthSessionRepository, AuthSessionRow
 from deerflow.persistence.base import Base
+from deerflow.persistence.user.model import UserRow
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
+
+CURRENT_REVISION = "0001_project_saas_baseline"
+FROZEN_BASELINE_SHA256 = "a2239e89966891c13d75a307d54deec2e45f03eb19b10ac8f3bf06d2ffb3eb71"
 
 LEGACY_RELATIONS = {
     "automation_cutover_state",
@@ -279,18 +287,20 @@ async def _native_relational_catalog(
     return snapshot
 
 
-def test_m7_has_one_forward_only_revision() -> None:
+def test_migration_history_has_single_merged_0001_head() -> None:
     revision_files = sorted(path for path in _versions_dir().glob("*.py") if path.name != "__init__.py")
     assert [path.name for path in revision_files] == ["0001_project_saas_baseline.py"]
+    assert hashlib.sha256(revision_files[0].read_bytes()).hexdigest() == FROZEN_BASELINE_SHA256
 
-    spec = importlib.util.spec_from_file_location("m7_final_baseline", revision_files[0])
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.revision == M7_FINAL_SCHEMA_REVISION
-    assert module.down_revision is None
+    baseline_spec = importlib.util.spec_from_file_location("m7_final_baseline", revision_files[0])
+    assert baseline_spec is not None and baseline_spec.loader is not None
+    baseline_module = importlib.util.module_from_spec(baseline_spec)
+    baseline_spec.loader.exec_module(baseline_module)
+    assert baseline_module.revision == CURRENT_REVISION
+    assert baseline_module.down_revision is None
+    assert bootstrap_module._get_head_revision() == CURRENT_REVISION
     with pytest.raises(RuntimeError, match="M7 baseline downgrade is unsupported"):
-        module.downgrade()
+        baseline_module.downgrade()
 
 
 def test_final_metadata_and_contract_have_no_staged_relations() -> None:
@@ -300,14 +310,232 @@ def test_final_metadata_and_contract_have_no_staged_relations() -> None:
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_empty_database_installs_exact_m7_baseline(postgres_database_url: str) -> None:
+async def test_empty_database_installs_merged_0001_head(
+    postgres_database_url: str,
+) -> None:
     engine = create_async_engine(postgres_database_url)
     try:
         await bootstrap_module.bootstrap_schema(engine)
         async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == M7_FINAL_SCHEMA_REVISION
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+            assert await connection.scalar(text("SELECT to_regclass('user_notifications')")) == "user_notifications"
             relations = set((await connection.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"))).scalars())
             assert not (relations & LEGACY_RELATIONS)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_auth_session_authority_is_hashed_revocable_and_restart_safe(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    user_id = str(uuid.uuid4())
+    raw_session_id = generate_session_id()
+    session_hash = hash_session_id(raw_session_id)
+    created_at = datetime.now(UTC)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with factory() as session, session.begin():
+            session.add(
+                UserRow(
+                    id=user_id,
+                    email=f"auth-session-{uuid.uuid4().hex}@example.com",
+                    password_hash=None,
+                    system_role="user",
+                    created_at=created_at,
+                    needs_setup=False,
+                    token_version=7,
+                )
+            )
+
+        await AuthSessionRepository(factory).create(
+            session_id_hash=session_hash,
+            user_id=user_id,
+            created_at=created_at,
+            expires_at=created_at + timedelta(hours=1),
+        )
+
+        # A separately constructed repository sees the same durable authority.
+        restarted_repository = AuthSessionRepository(
+            async_sessionmaker(engine, expire_on_commit=False),
+        )
+        assert await restarted_repository.validate(
+            session_id_hash=session_hash,
+            user_id=user_id,
+            token_version=7,
+            now=created_at + timedelta(minutes=1),
+        )
+        assert not await restarted_repository.validate(
+            session_id_hash=session_hash,
+            user_id=user_id,
+            token_version=8,
+            now=created_at + timedelta(minutes=1),
+        )
+        assert not await restarted_repository.validate(
+            session_id_hash=session_hash,
+            user_id=str(uuid.uuid4()),
+            token_version=7,
+            now=created_at + timedelta(minutes=1),
+        )
+        assert not await restarted_repository.validate(
+            session_id_hash=session_hash,
+            user_id=user_id,
+            token_version=7,
+            now=created_at + timedelta(hours=2),
+        )
+
+        async with factory() as session:
+            stored = await session.scalar(select(AuthSessionRow.session_id_hash))
+        assert stored == session_hash
+        assert raw_session_id != stored
+
+        assert await restarted_repository.revoke(
+            session_id_hash=session_hash,
+            user_id=user_id,
+            now=created_at + timedelta(minutes=2),
+        )
+        assert not await restarted_repository.validate(
+            session_id_hash=session_hash,
+            user_id=user_id,
+            token_version=7,
+            now=created_at + timedelta(minutes=3),
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_auth_session_create_prunes_only_one_bounded_stale_batch(
+    postgres_database_url: str,
+) -> None:
+    from deerflow.persistence.auth_sessions.sql import (
+        _SESSION_PRUNE_BATCH_SIZE,
+        _SESSION_PRUNE_GRACE,
+    )
+
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    user_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    old_created = now - _SESSION_PRUNE_GRACE - timedelta(days=20)
+    old_expiry = now - _SESSION_PRUNE_GRACE - timedelta(days=1)
+    future_expiry = now + timedelta(days=30)
+    expired_hashes = tuple(f"{index + 1:064x}" for index in range(_SESSION_PRUNE_BATCH_SIZE + 2))
+    old_revoked_hash = "a" * 64
+    recent_expired_hash = "b" * 64
+    recent_revoked_hash = "c" * 64
+    active_hash = "d" * 64
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with factory() as session, session.begin():
+            session.add(
+                UserRow(
+                    id=user_id,
+                    email=f"auth-prune-{uuid.uuid4().hex}@example.com",
+                    password_hash=None,
+                    system_role="user",
+                    created_at=old_created,
+                    needs_setup=False,
+                    token_version=0,
+                )
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    AuthSessionRow(
+                        session_id_hash=session_hash,
+                        user_id=user_id,
+                        created_at=old_created,
+                        expires_at=old_expiry,
+                        last_seen_at=old_created,
+                    )
+                    for session_hash in expired_hashes
+                ]
+            )
+            session.add_all(
+                [
+                    AuthSessionRow(
+                        session_id_hash=old_revoked_hash,
+                        user_id=user_id,
+                        created_at=old_created,
+                        expires_at=future_expiry,
+                        revoked_at=old_expiry,
+                        last_seen_at=old_created,
+                    ),
+                    AuthSessionRow(
+                        session_id_hash=recent_expired_hash,
+                        user_id=user_id,
+                        created_at=now - timedelta(days=2),
+                        expires_at=now - timedelta(days=1),
+                        last_seen_at=now - timedelta(days=2),
+                    ),
+                    AuthSessionRow(
+                        session_id_hash=recent_revoked_hash,
+                        user_id=user_id,
+                        created_at=now - timedelta(days=2),
+                        expires_at=future_expiry,
+                        revoked_at=now - timedelta(days=1),
+                        last_seen_at=now - timedelta(days=2),
+                    ),
+                    AuthSessionRow(
+                        session_id_hash=active_hash,
+                        user_id=user_id,
+                        created_at=old_created,
+                        expires_at=future_expiry,
+                        last_seen_at=old_created,
+                    ),
+                ]
+            )
+
+        repository = AuthSessionRepository(factory)
+        first_new_hash = "e" * 64
+        await repository.create(
+            session_id_hash=first_new_hash,
+            user_id=user_id,
+            created_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
+        cutoff = now - _SESSION_PRUNE_GRACE
+        async with factory() as session:
+            eligible_after_first = await session.scalar(select(text("count(*)")).select_from(AuthSessionRow).where((AuthSessionRow.expires_at <= cutoff) | (AuthSessionRow.revoked_at <= cutoff)))
+            retained = set(
+                (
+                    await session.execute(
+                        select(AuthSessionRow.session_id_hash).where(
+                            AuthSessionRow.session_id_hash.in_(
+                                (
+                                    recent_expired_hash,
+                                    recent_revoked_hash,
+                                    active_hash,
+                                    first_new_hash,
+                                )
+                            )
+                        )
+                    )
+                ).scalars()
+            )
+        assert eligible_after_first == 3
+        assert retained == {
+            recent_expired_hash,
+            recent_revoked_hash,
+            active_hash,
+            first_new_hash,
+        }
+
+        second_new_hash = "f" * 64
+        await repository.create(
+            session_id_hash=second_new_hash,
+            user_id=user_id,
+            created_at=now + timedelta(seconds=1),
+            expires_at=now + timedelta(hours=1),
+        )
+        async with factory() as session:
+            eligible_after_second = await session.scalar(select(text("count(*)")).select_from(AuthSessionRow).where((AuthSessionRow.expires_at <= cutoff) | (AuthSessionRow.revoked_at <= cutoff)))
+        assert eligible_after_second == 0
     finally:
         await engine.dispose()
 
@@ -473,14 +701,14 @@ async def test_app_only_and_full_langgraph_stages_have_exact_sequence_index_inve
             app_sequences, app_indexes = await _sequence_index_owners(connection)
             assert app_sequences == EXPECTED_APP_SEQUENCE_OWNERS
             assert not {identity for identity in app_indexes if identity[1] in langgraph_tables}
-            assert await bootstrap_module.classify_database(connection) == "m7"
+            assert await bootstrap_module.classify_database(connection) == "current"
 
         await _bootstrap_existing(postgres_database_url)
         async with engine.connect() as connection:
             full_sequences, full_indexes = await _sequence_index_owners(connection)
             assert full_sequences == EXPECTED_APP_SEQUENCE_OWNERS
             assert {identity for identity in full_indexes if identity[1] in langgraph_tables} == EXPECTED_LANGGRAPH_INDEX_OWNERS
-            assert await bootstrap_module.classify_database(connection) == "m7"
+            assert await bootstrap_module.classify_database(connection) == "current"
         check = await check_postgres(postgres_database_url)
         assert check.healthy is True
     finally:
@@ -612,7 +840,7 @@ async def test_concurrent_empty_setup_converges(postgres_database_url: str) -> N
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_baseline_matches_independent_metadata_database_catalog(
+async def test_migration_head_matches_independent_metadata_database_catalog(
     postgres_database_url: str,
     postgres_admin_url: str,
 ) -> None:

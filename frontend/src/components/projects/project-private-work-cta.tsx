@@ -1,9 +1,8 @@
 "use client";
 
 import { LockKeyholeIcon } from "lucide-react";
-import { useState } from "react";
 
-import { ProjectAgentSelectorDialog } from "@/components/projects/private-work/agent-selector-dialog";
+import { useMainProjectChat } from "@/components/projects/private-work/use-main-project-chat";
 import { Button } from "@/components/ui/button";
 import {
   projectPrivateWorkEntryEnabled,
@@ -14,7 +13,6 @@ import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export function ProjectPrivateWorkCta({ project }: { project: Project }) {
-  const [selectorOpen, setSelectorOpen] = useState(false);
   const canCreate =
     project.capabilities.includes("private_work.create") &&
     project.capabilities.includes("shared_assets.execute");
@@ -40,44 +38,64 @@ export function ProjectPrivateWorkCta({ project }: { project: Project }) {
       </section>
     );
   }
+
   return (
-    <>
-      <section className="border-border/70 bg-muted/30 rounded-2xl border p-6">
-        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="flex items-center gap-2 font-semibold">
-              <LockKeyholeIcon size={18} /> 项目内私有工作
-            </h2>
-            <p className="text-muted-foreground mt-2 text-sm">
-              选择项目可执行 Agent，开始只属于你的对话。
+    <ProjectPrivateWorkCtaEnabled
+      project={project}
+      entryEnabled={entryEnabled}
+      readinessStatus={readiness.data?.status}
+      readinessLoading={readiness.isLoading}
+      readinessError={readiness.isError}
+    />
+  );
+}
+
+function ProjectPrivateWorkCtaEnabled({
+  project,
+  entryEnabled,
+  readinessStatus,
+  readinessLoading,
+  readinessError,
+}: {
+  project: Project;
+  entryEnabled: boolean;
+  readinessStatus?: string;
+  readinessLoading: boolean;
+  readinessError: boolean;
+}) {
+  const mainChat = useMainProjectChat(project);
+
+  return (
+    <section className="border-border/70 bg-muted/30 rounded-2xl border p-6">
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 font-semibold">
+            <LockKeyholeIcon size={18} /> 项目内私有工作
+          </h2>
+          <p className="text-muted-foreground mt-2 text-sm">
+            使用 Main 开始只属于你的项目对话。
+          </p>
+          {!entryEnabled && (
+            <p role="status" className="text-muted-foreground mt-1 text-xs">
+              {readinessStatus === "unavailable" || readinessError
+                ? "暂时无法确认私有工作服务状态。"
+                : readinessLoading
+                  ? "正在确认私有工作服务状态。"
+                  : "私有工作服务尚未就绪。"}
             </p>
-            {!entryEnabled && (
-              <p role="status" className="text-muted-foreground mt-1 text-xs">
-                {readiness.data?.status === "unavailable" || readiness.isError
-                  ? "暂时无法确认私有工作服务状态。"
-                  : readiness.isLoading
-                    ? "正在确认私有工作服务状态。"
-                    : "私有工作服务尚未就绪。"}
-              </p>
-            )}
-          </div>
-          <Button
-            type="button"
-            disabled={!entryEnabled}
-            aria-disabled={!entryEnabled}
-            onClick={() => setSelectorOpen(true)}
-          >
-            开始私有对话
-          </Button>
+          )}
         </div>
-      </section>
-      {selectorOpen && (
-        <ProjectAgentSelectorDialog
-          project={project}
-          open
-          onOpenChange={setSelectorOpen}
-        />
-      )}
-    </>
+        <Button
+          type="button"
+          disabled={!entryEnabled || mainChat.isCreating || mainChat.isLoading}
+          aria-disabled={
+            !entryEnabled || mainChat.isCreating || mainChat.isLoading
+          }
+          onClick={() => void mainChat.startMainChat()}
+        >
+          {mainChat.isCreating ? "正在创建…" : "开始私有对话"}
+        </Button>
+      </div>
+    </section>
   );
 }

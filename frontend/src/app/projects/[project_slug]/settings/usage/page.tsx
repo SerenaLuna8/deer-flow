@@ -2,10 +2,17 @@ import { notFound } from "next/navigation";
 
 import { ProjectUsagePage } from "@/components/projects/governance/project-usage-page";
 import { getI18n } from "@/core/i18n/server";
+import { requireServerProjectCapability } from "@/core/projects/server-capability";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-export default async function ProjectUsageRoute() {
+export default async function ProjectUsageRoute({
+  params,
+}: {
+  params: Promise<{ project_slug: string }>;
+}) {
   if (isStaticWebsiteOnly()) notFound();
+  const { project_slug: slug } = await params;
+  await requireServerProjectCapability(slug, "project.usage.read");
   const { t } = await getI18n();
   const labels = t.project.governance.usage;
   return (

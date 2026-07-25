@@ -19,6 +19,20 @@ const projectOptions = {
 const threadId = "33333333-3333-4333-8333-333333333333";
 const fileId = "55555555-5555-4555-8555-555555555555";
 
+function uploadLimits(overrides: Record<string, unknown> = {}) {
+  return {
+    max_files: 10,
+    max_file_size: 100,
+    max_total_size: 200,
+    project_storage: {
+      policy: "project_quota",
+      remaining_bytes: 800,
+    },
+    request_id: "upload-limits",
+    ...overrides,
+  };
+}
+
 function privateFile(displayName: string) {
   return {
     id: fileId,
@@ -39,6 +53,10 @@ describe("project upload adapter", () => {
     fetchWithAuth
       .mockResolvedValueOnce({
         ok: true,
+        json: async () => uploadLimits(),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
         json: async () => privateFile("a.txt"),
       })
       .mockResolvedValueOnce({
@@ -53,8 +71,11 @@ describe("project upload adapter", () => {
 
     const result = await uploadFiles(threadId, files, projectOptions);
 
-    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
-    for (const call of fetchWithAuth.mock.calls) {
+    expect(fetchWithAuth).toHaveBeenCalledTimes(3);
+    expect(fetchWithAuth.mock.calls[0]![0]).toBe(
+      `${projectOptions.apiBaseURL}/threads/${threadId}/uploads/limits`,
+    );
+    for (const call of fetchWithAuth.mock.calls.slice(1)) {
       const body = call[1]?.body as FormData;
       expect(body.getAll("file")).toHaveLength(1);
       expect(body.getAll("files")).toHaveLength(0);
@@ -62,6 +83,7 @@ describe("project upload adapter", () => {
     expect(result.files).toHaveLength(2);
     expect(result.files[0]).toMatchObject({
       id: fileId,
+      kind: "upload",
       filename: "a.txt",
       virtual_path: "/mnt/user-data/uploads/a.txt",
     });
@@ -77,29 +99,234 @@ describe("project upload adapter", () => {
         ok: true,
         json: async () => ({ success: true }),
       });
-    const { deleteUploadedFile, listUploadedFiles } =
+    const { canDeleteProjectFile, deleteUploadedFile, listUploadedFiles } =
       await import("@/core/uploads/api");
+    const listSignal = new AbortController().signal;
+    const deleteSignal = new AbortController().signal;
 
     await expect(
-      listUploadedFiles(threadId, projectOptions),
+      listUploadedFiles(threadId, projectOptions, listSignal),
     ).resolves.toMatchObject({
       count: 1,
-      files: [{ id: fileId, filename: "notes.txt" }],
+      files: [{ id: fileId, kind: "upload", filename: "notes.txt" }],
     });
-    await deleteUploadedFile(threadId, fileId, projectOptions);
+    expect(canDeleteProjectFile(true, "upload")).toBe(true);
+    expect(canDeleteProjectFile(true, "workspace")).toBe(true);
+    expect(canDeleteProjectFile(true, "output")).toBe(true);
+    expect(canDeleteProjectFile(false, "upload")).toBe(false);
+    expect(canDeleteProjectFile(true, undefined)).toBe(false);
+    await deleteUploadedFile(threadId, fileId, projectOptions, deleteSignal);
 
     expect(fetchWithAuth.mock.calls[0]![0]).toBe(
       `${projectOptions.apiBaseURL}/threads/${threadId}/uploads`,
     );
+    expect(fetchWithAuth.mock.calls[0]![1]).toEqual({ signal: listSignal });
     expect(fetchWithAuth.mock.calls[1]![0]).toBe(
       `${projectOptions.apiBaseURL}/threads/${threadId}/uploads?file_id=${fileId}`,
     );
-    expect(fetchWithAuth.mock.calls[1]![1]).toMatchObject({ method: "DELETE" });
+    expect(fetchWithAuth.mock.calls[1]![1]).toMatchObject({
+      method: "DELETE",
+      signal: deleteSignal,
+    });
   });
 
-  test("declares project upload limits unavailable without requesting a route", async () => {
-    const { supportsUploadLimits } = await import("@/core/uploads/api");
-    expect(supportsUploadLimits(projectOptions)).toBe(false);
+  test("does not start list or delete after the project scope is aborted", async () => {
+    const { deleteUploadedFile, listUploadedFiles } =
+      await import("@/core/uploads/api");
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      listUploadedFiles(threadId, projectOptions, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      deleteUploadedFile(threadId, fileId, projectOptions, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  test("loads and strictly parses exact project-private upload limits", async () => {
+    fetchWithAuth.mockResolvedValueOnce({
+      ok: true,
+      json: async () => uploadLimits(),
+    });
+    const { getUploadLimits, supportsUploadLimits } =
+      await import("@/core/uploads/api");
+    const signal = new AbortController().signal;
+
+    expect(supportsUploadLimits(projectOptions)).toBe(true);
+    await expect(
+      getUploadLimits(threadId, projectOptions, signal),
+    ).resolves.toEqual(uploadLimits());
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      `${projectOptions.apiBaseURL}/threads/${threadId}/uploads/limits`,
+      { signal },
+    );
+    expect(
+      supportsUploadLimits({
+        ...projectOptions,
+        apiBaseURL:
+          "http://localhost:2026/api/projects/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/private-work",
+      }),
+    ).toBe(false);
+  });
+
+  test("rejects malformed limit responses instead of trusting extra fields", async () => {
+    fetchWithAuth.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ...uploadLimits(), unexpected: "private" }),
+    });
+    const { getUploadLimits } = await import("@/core/uploads/api");
+
+    await expect(getUploadLimits(threadId, projectOptions)).rejects.toThrow();
+  });
+
+  test("rejects project quota internals removed from the public response", async () => {
+    fetchWithAuth.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        ...uploadLimits(),
+        project_storage: {
+          policy: "project_quota",
+          remaining_bytes: 800,
+          limit_bytes: 1_000,
+          used_bytes: 100,
+          reserved_bytes: 100,
+        },
+      }),
+    });
+    const { getUploadLimits } = await import("@/core/uploads/api");
+
+    await expect(getUploadLimits(threadId, projectOptions)).rejects.toThrow();
+  });
+
+  test("prevalidates the complete batch before the first sequential POST", async () => {
+    fetchWithAuth.mockResolvedValueOnce({
+      ok: true,
+      json: async () => uploadLimits({ max_total_size: 7 }),
+    });
+    const { uploadFiles } = await import("@/core/uploads/api");
+    const { UploadLimitValidationError } =
+      await import("@/core/uploads/errors");
+    const files = [new File(["1234"], "a.txt"), new File(["5678"], "b.txt")];
+
+    let caught: unknown;
+    try {
+      await uploadFiles(threadId, files, projectOptions);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UploadLimitValidationError);
+    expect(
+      (caught as InstanceType<typeof UploadLimitValidationError>).violations,
+    ).toMatchObject([{ code: "max_total_size", limit: 7 }]);
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  test("preserves authoritative server 413 and 429 errors as structured data", async () => {
+    const { uploadFiles } = await import("@/core/uploads/api");
+    const { UploadApiError } = await import("@/core/uploads/errors");
+
+    for (const scenario of [
+      { status: 413, code: "PRIVATE_WORK_TOO_LARGE" },
+      { status: 429, code: "PROJECT_STORAGE_QUOTA_EXCEEDED" },
+    ]) {
+      fetchWithAuth.mockReset();
+      fetchWithAuth
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => uploadLimits(),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: scenario.status,
+          headers: new Headers({ "Retry-After": "1" }),
+          json: async () => ({
+            detail: {
+              code: scenario.code,
+              message: "Public upload rejection.",
+              request_id: `request-${scenario.status}`,
+            },
+          }),
+        });
+
+      let caught: unknown;
+      try {
+        await uploadFiles(
+          threadId,
+          [new File(["data"], "notes.txt")],
+          projectOptions,
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(UploadApiError);
+      expect(caught).toMatchObject({
+        status: scenario.status,
+        code: scenario.code,
+        requestId: `request-${scenario.status}`,
+        retryAfter: "1",
+      });
+    }
+  });
+
+  test("stops before POST when scope cancellation happens during preflight", async () => {
+    let resolvePreflight!: (value: unknown) => void;
+    fetchWithAuth.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePreflight = resolve;
+      }),
+    );
+    const { uploadFiles } = await import("@/core/uploads/api");
+    const controller = new AbortController();
+    const result = uploadFiles(
+      threadId,
+      [new File(["data"], "notes.txt")],
+      projectOptions,
+      controller.signal,
+    );
+
+    controller.abort();
+    resolvePreflight({
+      ok: true,
+      json: async () => uploadLimits(),
+    });
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not start the next POST when cancellation follows the first POST", async () => {
+    let resolveFirstPost!: (value: unknown) => void;
+    fetchWithAuth
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => uploadLimits(),
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveFirstPost = resolve;
+        }),
+      );
+    const { uploadFiles } = await import("@/core/uploads/api");
+    const controller = new AbortController();
+    const result = uploadFiles(
+      threadId,
+      [new File(["aaaa"], "a.txt"), new File(["bbbb"], "b.txt")],
+      projectOptions,
+      controller.signal,
+    );
+    while (fetchWithAuth.mock.calls.length < 2) {
+      await Promise.resolve();
+    }
+
+    controller.abort();
+    resolveFirstPost({
+      ok: true,
+      json: async () => privateFile("a.txt"),
+    });
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
   });
 });

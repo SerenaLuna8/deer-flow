@@ -3,6 +3,7 @@ from app.shared_assets.binding_service import BindingService, SystemAssetBinding
 from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
 from app.shared_assets.credential_service import (
     CreateCredential,
+    CredentialGrantMigrationView,
     CredentialGrantView,
     CredentialService,
     CredentialVersionView,
@@ -76,6 +77,7 @@ __all__ = [
     "CreateCredential",
     "CreateMcpServer",
     "CreateSkill",
+    "CredentialGrantMigrationView",
     "CredentialGrantView",
     "CredentialService",
     "CredentialVersionView",

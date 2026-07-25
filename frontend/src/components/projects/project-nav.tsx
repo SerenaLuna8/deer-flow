@@ -5,12 +5,12 @@ import {
   BotIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
-  CableIcon,
   FolderKanbanIcon,
   KeyRoundIcon,
   MessagesSquareIcon,
   MenuIcon,
   NetworkIcon,
+  PanelLeftCloseIcon,
   SettingsIcon,
   SparklesIcon,
   UsersIcon,
@@ -113,12 +113,6 @@ export function projectNavigationItems(
         label: "Memory",
         section: "work",
       },
-      {
-        href: `${base}/connections`,
-        icon: CableIcon,
-        label: "Connections",
-        section: "work",
-      },
     );
   }
   if (
@@ -157,20 +151,24 @@ export function projectNavigationItems(
         label: "MCP",
         section: "capabilities",
       },
-      {
-        href: `${base}/credentials`,
-        icon: KeyRoundIcon,
-        label: "Credential",
-        section: "capabilities",
-      },
     );
   }
-  items.push({
-    href: `${base}/members`,
-    icon: UsersIcon,
-    label: "成员与邀请",
-    section: "management",
-  });
+  if (project.capabilities.includes("mcp.credentials.approve")) {
+    items.push({
+      href: `${base}/credentials`,
+      icon: KeyRoundIcon,
+      label: "Credential",
+      section: "capabilities",
+    });
+  }
+  if (project.capabilities.includes("project.members.manage")) {
+    items.push({
+      href: `${base}/members`,
+      icon: UsersIcon,
+      label: "成员与邀请",
+      section: "management",
+    });
+  }
   if (canViewSettings(project)) {
     items.push({
       href: `${base}/settings`,
@@ -239,9 +237,11 @@ function ProjectIdentity({ project }: { project: Project }) {
 function ProjectNavigationLinks({
   project,
   mobile = false,
+  collapsed = false,
 }: {
   project: Project;
   mobile?: boolean;
+  collapsed?: boolean;
 }) {
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
@@ -262,6 +262,7 @@ function ProjectNavigationLinks({
     <ProjectNavigationLinksContent
       project={project}
       mobile={mobile}
+      collapsed={collapsed && !mobile}
       privateWorkReady={privateWorkReady}
       automationReady={automationReady}
       staticWebsiteOnly={staticWebsiteOnly}
@@ -272,12 +273,14 @@ function ProjectNavigationLinks({
 function ProjectNavigationLinksContent({
   project,
   mobile,
+  collapsed,
   privateWorkReady,
   automationReady,
   staticWebsiteOnly,
 }: {
   project: Project;
   mobile: boolean;
+  collapsed: boolean;
   privateWorkReady: boolean;
   automationReady: boolean;
   staticWebsiteOnly: boolean;
@@ -300,26 +303,30 @@ function ProjectNavigationLinksContent({
   }: ProjectNavigationItem) => {
     const visibleLabel = i18nKey ? t.project[i18nKey] : label;
     const active = isProjectNavigationItemActive(href, pathname);
+    const iconOnly = collapsed && !mobile;
     const link = (
       <Link
         key={href}
         href={href}
+        aria-label={iconOnly ? visibleLabel : undefined}
         aria-current={active ? "page" : undefined}
+        title={iconOnly ? visibleLabel : undefined}
         className={cn(
-          "focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:outline-none",
+          "focus-visible:ring-ring relative flex items-center rounded-lg text-sm font-medium transition-colors before:pointer-events-none before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full focus-visible:ring-2 focus-visible:outline-none",
+          iconOnly ? "size-10 justify-center" : "gap-3 px-3 py-2",
           active
-            ? "bg-foreground text-background shadow-sm"
-            : "hover:bg-accent hover:text-accent-foreground",
+            ? "bg-sidebar-accent text-sidebar-accent-foreground before:bg-selection"
+            : "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground before:bg-transparent",
         )}
       >
         <Icon
           aria-hidden
           className={cn(
             "size-4",
-            active ? "text-background" : "text-muted-foreground",
+            active ? "text-foreground" : "text-muted-foreground",
           )}
         />
-        {visibleLabel}
+        {!iconOnly && visibleLabel}
       </Link>
     );
     return mobile ? (
@@ -333,14 +340,22 @@ function ProjectNavigationLinksContent({
   const workspaceLink = (
     <Link
       href="/workspace"
-      className="text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"
+      aria-label={collapsed ? "返回工作空间" : undefined}
+      title={collapsed ? "返回工作空间" : undefined}
+      className={cn(
+        "text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center rounded-lg text-sm font-medium focus-visible:ring-2 focus-visible:outline-none",
+        collapsed ? "size-10 justify-center" : "gap-3 px-3 py-2",
+      )}
     >
       <ArrowLeftIcon aria-hidden className="size-4" />
-      返回工作空间
+      {!collapsed && "返回工作空间"}
     </Link>
   );
   return (
-    <nav aria-label="项目导航" className="flex flex-col gap-5">
+    <nav
+      aria-label="项目导航"
+      className={cn("flex flex-col", collapsed ? "gap-2" : "gap-5")}
+    >
       {PROJECT_NAVIGATION_SECTIONS.map((section) => {
         const sectionLinks = links.filter(
           (item) => item.section === section.id,
@@ -351,7 +366,10 @@ function ProjectNavigationLinksContent({
           <section key={section.id} aria-labelledby={sectionId}>
             <p
               id={sectionId}
-              className="text-muted-foreground mb-1 px-3 text-[11px] font-semibold tracking-[0.14em]"
+              className={cn(
+                "text-muted-foreground mb-1 px-3 text-[11px] font-semibold tracking-[0.14em]",
+                collapsed && "sr-only",
+              )}
             >
               {section.label}
             </p>
@@ -373,29 +391,70 @@ function ProjectNavigationLinksContent({
 export function ProjectDesktopNav({
   project,
   footer,
+  collapsed = false,
+  onCollapsedChange,
   className,
 }: {
   project: Project;
   footer: React.ReactNode;
+  collapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
   className?: string;
 }) {
   return (
     <aside
+      aria-label="项目菜单栏"
+      data-state={collapsed ? "collapsed" : "expanded"}
       className={cn(
-        "border-border/70 bg-card sticky top-0 hidden h-screen w-64 flex-col self-start border-r md:flex",
+        "border-border/70 bg-sidebar sticky top-0 hidden h-screen min-w-0 flex-col self-start overflow-hidden border-r md:flex",
         className,
       )}
     >
-      <div className="border-border/70 border-b px-4 py-5">
-        <ProjectBrand />
-        <div className="mt-5">
-          <ProjectIdentity project={project} />
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <ProjectNavigationLinks project={project} />
-      </div>
-      <div className="border-border/70 border-t p-3">{footer}</div>
+      {collapsed ? (
+        <>
+          <div className="border-border/70 flex justify-center border-b p-2">
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label="展开菜单栏"
+              title="展开菜单栏"
+              onClick={() => onCollapsedChange?.(false)}
+            >
+              <MenuIcon aria-hidden className="size-5" />
+            </Button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            <ProjectNavigationLinks project={project} collapsed />
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="border-border/70 border-b px-4 py-5">
+            <div className="flex items-start justify-between gap-2">
+              <ProjectBrand />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="-mt-1 -mr-1 size-8 shrink-0"
+                aria-label="收起菜单栏"
+                title="收起菜单栏"
+                onClick={() => onCollapsedChange?.(true)}
+              >
+                <PanelLeftCloseIcon aria-hidden className="size-4" />
+              </Button>
+            </div>
+            <div className="mt-5">
+              <ProjectIdentity project={project} />
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            <ProjectNavigationLinks project={project} />
+          </div>
+          <div className="border-border/70 border-t p-3">{footer}</div>
+        </>
+      )}
     </aside>
   );
 }
@@ -420,7 +479,10 @@ export function ProjectMobileNav({
             <MenuIcon aria-hidden className="size-5" />
           </Button>
         </SheetTrigger>
-        <SheetContent side="left" className="w-[min(20rem,85vw)] p-0">
+        <SheetContent
+          side="left"
+          className="bg-sidebar w-[min(20rem,85vw)] p-0"
+        >
           <SheetHeader className="border-border/70 border-b p-4 text-left">
             <SheetTitle className="sr-only">项目导航</SheetTitle>
             <ProjectBrand />

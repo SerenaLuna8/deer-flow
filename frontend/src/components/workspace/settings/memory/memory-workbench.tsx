@@ -109,7 +109,7 @@ export function MemoryHeaderActions(props: {
             {canReload ? (
               <DropdownMenuItem disabled={isReloading} onSelect={onReload}>
                 <RefreshCwIcon aria-hidden="true" />
-                {isReloading ? t.common.loading : "Reload"}
+                {isReloading ? t.common.loading : t.common.reload}
               </DropdownMenuItem>
             ) : null}
             {canImport ? (

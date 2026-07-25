@@ -24,7 +24,9 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     M7RecreateRequired,
     _get_head_revision,
-    bootstrap_schema,
+)
+from deerflow.persistence.bootstrap import (
+    migrate_schema as bootstrap_schema,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -229,7 +231,7 @@ async def _bootstrap_existing(database_url: str) -> str:
         raise PostgresSetupError(exc.code) from None
     except M7RecreateRequired as exc:
         primary_error = exc
-        raise PostgresSetupError("M7_RECREATE_REQUIRED: 目标库不是空库或精确 M7 schema；请创建一个新的空数据库，DeerFlow 不会删除或改写现有数据") from None
+        raise PostgresSetupError("M7_RECREATE_REQUIRED: 目标库 revision 未知或 schema catalog 已漂移；DeerFlow 不会自动删除、覆盖或修复现有数据") from None
     except RuntimeError as exc:
         primary_error = exc
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None

@@ -15,6 +15,7 @@ import {
 } from "@/core/project-governance/audit";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { ProjectAccessDenied } from "../project-access-denied";
 import { useCurrentProject } from "../project-context";
 
 import { describeAuditItem } from "./project-audit-view-model";
@@ -171,7 +172,10 @@ export function ProjectAuditPage() {
   const staticMode = isStaticWebsiteOnly();
   const access = usePrivateWorkAccess();
 
-  if (!canRead || staticMode) notFound();
+  if (staticMode) notFound();
+  if (!canRead) {
+    return <ProjectAccessDenied projectSlug={project.slug} area="项目审计" />;
+  }
   return (
     <AuthorizedProjectAuditPage
       key={access.scope.projectId}

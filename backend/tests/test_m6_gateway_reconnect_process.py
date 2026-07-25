@@ -25,7 +25,10 @@ _PROCESS_TIMEOUT = 60.0
 def _config(database_url: str) -> str:
     return f"""\
 log_level: warning
-models: []
+models:
+  - name: release-model
+    use: langchain_openai.ChatOpenAI
+    model: release-model
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 database:

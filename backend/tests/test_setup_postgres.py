@@ -258,7 +258,7 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_existing_requires_a_new_empty_database(monkeypatch) -> None:
+async def test_bootstrap_existing_rejects_unknown_schema_without_mutation(monkeypatch) -> None:
     connection = AsyncMock()
     connection_context = MagicMock()
     connection_context.__aenter__ = AsyncMock(return_value=connection)
@@ -283,7 +283,8 @@ async def test_bootstrap_existing_requires_a_new_empty_database(monkeypatch) -> 
         await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
 
     assert str(exc_info.value).startswith("M7_RECREATE_REQUIRED:")
-    assert "新的空数据库" in str(exc_info.value)
+    assert "catalog 已漂移" in str(exc_info.value)
+    assert "不会自动删除、覆盖或修复" in str(exc_info.value)
     assert "private-password" not in str(exc_info.value)
     engine.dispose.assert_awaited_once()
 

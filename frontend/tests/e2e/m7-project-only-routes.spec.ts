@@ -86,7 +86,7 @@ test("private surfaces render only inside the selected project shell", async ({
   ]);
 
   for (const [path, heading] of [
-    ["chats", "私有对话"],
+    ["chats", "会话"],
     ["memory", "Memory"],
     ["connections", "Connections"],
   ] as const) {

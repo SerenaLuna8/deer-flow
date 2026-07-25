@@ -24,10 +24,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "replay"
 
 
 def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invalidate process-wide caches so the test-only config/home take effect.
-
-    Same set the real-server e2e resets (see test_setup_agent_http_e2e_real_server).
-    """
+    """Invalidate process-wide caches so the test-only config/home take effect."""
     from deerflow.config import app_config as app_config_module
     from deerflow.config import paths as paths_module
     from deerflow.persistence import engine as engine_module

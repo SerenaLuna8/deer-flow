@@ -12,7 +12,7 @@ import type { ProjectAssetList } from "@/core/shared-assets";
 
 import {
   createProjectChatForAgent,
-  executableProjectAgents,
+  mainProjectAgent,
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
 
@@ -35,7 +35,7 @@ export function projectStartChatCandidate(
   ) {
     return null;
   }
-  return executableProjectAgents(catalog)[0] ?? null;
+  return mainProjectAgent(catalog);
 }
 
 export async function consumeProjectStartChatIntent({

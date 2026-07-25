@@ -108,6 +108,13 @@ class CredentialGrantView:
 
 
 @dataclass(frozen=True)
+class CredentialGrantMigrationView:
+    credential_id: uuid.UUID
+    credential_version_id: uuid.UUID
+    migrated_count: int
+
+
+@dataclass(frozen=True)
 class CredentialRotationStatus:
     eligible_total: int
     current: int
@@ -269,11 +276,17 @@ class CredentialService:
                 raise AssetConflict(actor.request_id)
             now = datetime.now(UTC)
             versions = await repository.lock_all_versions(credential)
+            active_grants = await repository.lock_active_grants(credential)
             for version in versions:
                 if version.status != "revoked":
                     version.status = "revoked"
                     version.revoked_at = now
                     version.revoked_by_user_id = str(actor.user_id)
+            await repository.revoke_grants(
+                tuple(item.grant for item in active_grants),
+                user_id=actor.user_id,
+                revoked_at=now,
+            )
             credential.status = "revoked"
             credential.revoked_at = now
             credential.revoked_by_user_id = str(actor.user_id)
@@ -290,6 +303,56 @@ class CredentialService:
                 credential_id,
                 result.current_version_id,
                 "credential.revoke",
+            ),
+        )
+
+    async def migrate_grants(
+        self,
+        actor: _Actor,
+        credential_id: uuid.UUID,
+        *,
+        expected_credential_version: int,
+    ) -> CredentialGrantMigrationView:
+        self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+
+        async def operation(repository: CredentialRepository) -> CredentialGrantMigrationView:
+            credential = await self._get_credential(repository, actor, credential_id, for_update=True)
+            self._require_expected_version(actor, credential, expected_credential_version)
+            if credential.status != "active":
+                raise AssetConflict(actor.request_id)
+            current = await repository.lock_current_version(credential, request_id=actor.request_id)
+            if current.status != "active":
+                raise AssetConflict(actor.request_id)
+            active_grants = await repository.lock_active_grants(credential)
+            stale_grants = tuple(item for item in active_grants if item.grant.credential_version_id != current.id)
+            target_schema = {key: tuple(values) for key, values in current.payload_schema.items()}
+            for item in stale_grants:
+                if item.mcp_server.scope != credential.scope or item.mcp_server.project_id != credential.project_id:
+                    raise AssetValidationFailed(actor.request_id)
+                slot_schema = {key: tuple(values) for key, values in item.slot.payload_schema.items()}
+                if slot_schema != target_schema:
+                    raise AssetValidationFailed(actor.request_id)
+            await repository.migrate_grants(
+                stale_grants,
+                current,
+                user_id=actor.user_id,
+                migrated_at=datetime.now(UTC),
+            )
+            return CredentialGrantMigrationView(
+                credential_id=credential.id,
+                credential_version_id=current.id,
+                migrated_count=len(stale_grants),
+            )
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                result.credential_id,
+                result.credential_version_id,
+                "credential.grants.migrate",
             ),
         )
 

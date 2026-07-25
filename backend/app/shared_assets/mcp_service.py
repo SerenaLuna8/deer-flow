@@ -319,6 +319,8 @@ class McpService:
         expected_asset_version: int,
     ) -> McpVersionView:
         self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is None:
+            raise AssetForbidden(actor.request_id)
         credential_versions = self._validate_credential_bindings(actor, credential_versions)
 
         async def operation(repository: McpRepository) -> McpVersionView:
@@ -377,6 +379,84 @@ class McpService:
             actor,
             operation,
             governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.approve"),
+        )
+
+    async def configure_system_credential_grants(
+        self,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        credential_versions: Mapping[str, uuid.UUID],
+        expected_active_grant_versions: Mapping[str, int],
+    ) -> McpVersionView:
+        self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+        if not isinstance(actor, SystemAssetGovernanceContext) or actor.project_id is not None:
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        credential_versions = self._validate_credential_bindings(actor, credential_versions)
+        expected_active_grant_versions = self._validate_expected_active_grant_versions(
+            actor,
+            expected_active_grant_versions,
+        )
+
+        async def operation(repository: McpRepository) -> McpVersionView:
+            credentials = CredentialRepository(repository.session)
+            asset = await repository.get_system_asset(actor, asset_id, for_update=True)
+            if not asset.source_key or asset.status != "active" or asset.current_published_version_id != version_id:
+                raise AssetConflict(actor.request_id)
+            record = await repository.get_system_version(
+                actor,
+                asset_id,
+                version_id,
+                for_update=True,
+            )
+            if record.row.workflow_status != WorkflowStatus.PUBLISHED.value or not record.slots or self._checksum(self._definition_from_record(record)) != record.row.payload_checksum:
+                raise AssetConflict(actor.request_id)
+            slots_by_name = {slot.name: slot for slot in record.slots}
+            if set(credential_versions).difference(slots_by_name) or any(slot.required and slot.name not in credential_versions for slot in record.slots):
+                raise AssetValidationFailed(actor.request_id)
+            try:
+                locked_versions = await credentials.lock_system_credential_versions(
+                    actor,
+                    tuple(credential_versions.values()),
+                )
+            except AssetNotFound:
+                raise AssetValidationFailed(actor.request_id) from None
+            bindings: list[tuple[McpCredentialSlotRow, CredentialVersionRow]] = []
+            for slot in record.slots:
+                credential_version_id = credential_versions.get(slot.name)
+                if credential_version_id is None:
+                    continue
+                locked = locked_versions.get(credential_version_id)
+                if locked is None:
+                    raise AssetValidationFailed(actor.request_id)
+                self._validate_slot_credential(actor, asset, slot, locked)
+                bindings.append((slot, locked.version))
+            await repository.replace_system_grants(
+                record.row,
+                record.slots,
+                bindings,
+                expected_active_grant_versions=expected_active_grant_versions,
+                user_id=actor.user_id,
+                request_id=actor.request_id,
+            )
+            refreshed = await repository.get_system_version(
+                actor,
+                asset_id,
+                version_id,
+                for_update=False,
+            )
+            return self._version_view(refreshed)
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                result.id,
+                "mcp.credential_grants.configure",
+            ),
         )
 
     async def publish(
@@ -663,6 +743,21 @@ class McpService:
         return MappingProxyType(normalized)
 
     @staticmethod
+    def _validate_expected_active_grant_versions(
+        actor: _Actor,
+        expected: object,
+    ) -> Mapping[str, int]:
+        request_id = getattr(actor, "request_id", "unknown")
+        if not isinstance(expected, Mapping):
+            raise AssetValidationFailed(request_id)
+        normalized: dict[str, int] = {}
+        for slot_name, grant_version in expected.items():
+            if not isinstance(slot_name, str) or _SLOT_PATTERN.fullmatch(slot_name) is None or not isinstance(grant_version, int) or isinstance(grant_version, bool) or grant_version < 1:
+                raise AssetValidationFailed(request_id)
+            normalized[slot_name] = grant_version
+        return MappingProxyType(normalized)
+
+    @staticmethod
     def _validate_create(actor: _Actor, command: CreateMcpServer) -> CreateMcpServer:
         request_id = getattr(actor, "request_id", "unknown")
         if not isinstance(command, CreateMcpServer):
@@ -846,7 +941,12 @@ class McpService:
     @staticmethod
     def _require_capability(actor: _Actor, capability: Capability) -> None:
         if isinstance(actor, SystemAssetGovernanceContext):
-            return
+            if actor.project_id is not None or capability in {
+                Capability.SHARED_ASSETS_READ,
+                Capability.MCP_CREDENTIALS_APPROVE,
+            }:
+                return
+            raise AssetForbidden(actor.request_id)
         if isinstance(actor, SystemAssetReadContext) and capability is Capability.SHARED_ASSETS_READ:
             return
         if isinstance(actor, ProjectContext) and capability in actor.capabilities:

@@ -72,7 +72,8 @@ imagePullSecrets:
 
 {{/* Name of the Secret holding generated app secrets (auth token, better-auth). */}}
 {{- define "deer-flow.appSecret" -}}
-{{- printf "%s-app" (include "deer-flow.fullname" .) -}}
+{{- if .Values.existingAppSecret -}}{{- .Values.existingAppSecret -}}
+{{- else -}}{{- printf "%s-app" (include "deer-flow.fullname" .) -}}{{- end -}}
 {{- end -}}
 
 {{/* Name of the postgres StatefulSet/Service. */}}

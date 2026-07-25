@@ -65,6 +65,41 @@ def test_skill_file_preview_and_fork_keep_skill_authority() -> None:
         assert (surface.resource_family, surface.operation, surface.layer) == classification
 
 
+def test_asset_names_do_not_turn_list_get_or_create_into_updates() -> None:
+    discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
+    expected = {
+        "frontend:frontend/src/core/shared-assets/api.ts:listSystemAssetCatalog": "list",
+        "frontend:frontend/src/core/shared-assets/api.ts:createProjectAsset": "create",
+        "repository:backend/app/shared_assets/agent_repository.py:AgentRepository.get_project_asset": "get",
+    }
+    for surface_id, operation in expected.items():
+        assert discovered[surface_id].operation == operation
+
+
+def test_notification_auto_title_and_skill_description_surfaces_keep_authority() -> None:
+    discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
+    expected = {
+        "frontend:frontend/src/core/system-notifications/api.ts:acceptSystemNotification": ("invite", "approve", "frontend"),
+        "frontend:frontend/src/core/system-notifications/api.ts:listSystemNotifications": ("invite", "list", "frontend"),
+        "frontend:frontend/src/core/system-notifications/api.ts:markAllSystemNotificationsRead": ("invite", "update", "frontend"),
+        "repository:backend/app/notifications/repository.py:NotificationRepository.list_for_recipient": ("invite", "list", "repository"),
+        "repository:backend/app/notifications/repository.py:NotificationRepository.locate_project_for_accept": ("invite", "approve", "repository"),
+        "repository:backend/app/notifications/repository.py:NotificationRepository.lock_invitation_for_accept": ("invite", "approve", "repository"),
+        "repository:backend/app/notifications/repository.py:NotificationRepository.mark_all_read": ("invite", "update", "repository"),
+        "repository:backend/app/notifications/repository.py:NotificationRepository.mark_invitation_acted": ("invite", "update", "repository"),
+        "repository:backend/app/notifications/repository.py:NotificationRepository.mark_read": ("invite", "update", "repository"),
+        "route:backend/app/gateway/routers/notifications.py:list_notifications": ("invite", "list", "api"),
+        "route:backend/app/gateway/routers/notifications.py:mark_all_notifications_read": ("invite", "update", "api"),
+        "route:backend/app/gateway/routers/notifications.py:mark_notification_read": ("invite", "update", "api"),
+        "route:backend/app/gateway/routers/notifications.py:accept_notification": ("invite", "approve", "api"),
+        "repository:backend/app/private_work/thread_repository.py:PrivateThreadRepository.set_automatic_display_name": ("thread", "update", "repository"),
+        "repository:backend/app/shared_assets/skill_repository.py:SkillRepository.current_published_descriptions": ("skill", "list", "repository"),
+    }
+    for surface_id, classification in expected.items():
+        surface = discovered[surface_id]
+        assert (surface.resource_family, surface.operation, surface.layer) == classification
+
+
 def test_denial_cases_require_zero_database_delta_and_database_evidence(matrix) -> None:
     denial_cases = [case for case in matrix.cases if case.expected_status >= 400]
     assert denial_cases

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +15,12 @@ from app.shared_assets.errors import AssetForbidden, AssetNotFound
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     CredentialEnvelopeRow,
+    CredentialGrantRow,
     CredentialRow,
     CredentialVersionRow,
+    McpCredentialSlotRow,
+    McpServerRow,
+    McpServerVersionRow,
 )
 
 
@@ -23,6 +28,13 @@ from deerflow.persistence.shared_assets import (
 class LockedCredentialVersion:
     credential: CredentialRow
     version: CredentialVersionRow
+
+
+@dataclass(frozen=True)
+class ActiveCredentialGrant:
+    grant: CredentialGrantRow
+    slot: McpCredentialSlotRow
+    mcp_server: McpServerRow
 
 
 def _request_id(context: object) -> str:
@@ -616,3 +628,73 @@ class CredentialRepository:
     ) -> tuple[CredentialVersionRow, ...]:
         statement = select(CredentialVersionRow).where(CredentialVersionRow.credential_id == credential.id).order_by(CredentialVersionRow.version_number).with_for_update(of=CredentialVersionRow)
         return tuple((await self.session.execute(statement)).scalars().all())
+
+    async def lock_active_grants(
+        self,
+        credential: CredentialRow,
+    ) -> tuple[ActiveCredentialGrant, ...]:
+        statement = (
+            select(CredentialGrantRow, McpCredentialSlotRow, McpServerRow)
+            .join(
+                CredentialVersionRow,
+                CredentialVersionRow.id == CredentialGrantRow.credential_version_id,
+            )
+            .join(
+                McpCredentialSlotRow,
+                (McpCredentialSlotRow.id == CredentialGrantRow.credential_slot_id) & (McpCredentialSlotRow.mcp_server_version_id == CredentialGrantRow.mcp_server_version_id),
+            )
+            .join(
+                McpServerVersionRow,
+                McpServerVersionRow.id == CredentialGrantRow.mcp_server_version_id,
+            )
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .where(
+                CredentialVersionRow.credential_id == credential.id,
+                CredentialGrantRow.status == "active",
+            )
+            .order_by(CredentialGrantRow.id)
+            .with_for_update(of=CredentialGrantRow)
+        )
+        return tuple(ActiveCredentialGrant(grant, slot, mcp_server) for grant, slot, mcp_server in (await self.session.execute(statement)).all())
+
+    async def revoke_grants(
+        self,
+        grants: Sequence[CredentialGrantRow],
+        *,
+        user_id: uuid.UUID,
+        revoked_at: datetime,
+    ) -> None:
+        for grant in grants:
+            if grant.status != "active":
+                continue
+            grant.status = "revoked"
+            grant.version += 1
+            grant.revoked_at = revoked_at
+            grant.revoked_by_user_id = str(user_id)
+        await self.session.flush()
+
+    async def migrate_grants(
+        self,
+        grants: Sequence[ActiveCredentialGrant],
+        target_version: CredentialVersionRow,
+        *,
+        user_id: uuid.UUID,
+        migrated_at: datetime,
+    ) -> tuple[CredentialGrantRow, ...]:
+        await self.revoke_grants(
+            tuple(item.grant for item in grants),
+            user_id=user_id,
+            revoked_at=migrated_at,
+        )
+        created = tuple(
+            CredentialGrantRow(
+                mcp_server_version_id=item.grant.mcp_server_version_id,
+                credential_slot_id=item.grant.credential_slot_id,
+                credential_version_id=target_version.id,
+                created_by_user_id=str(user_id),
+            )
+            for item in grants
+        )
+        self.session.add_all(created)
+        await self.session.flush()
+        return created

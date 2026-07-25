@@ -187,7 +187,7 @@
       ],
       "test_selectors": [
         "pytest::tests/test_m6_system_operations_api_postgres.py::test_operations_requires_current_system_admin_and_returns_only_aggregate_public_health",
-        "playwright::tests/e2e/admin-assets.spec.ts::system admin creates an asset and MCP credential slots require approval"
+        "playwright::tests/e2e/admin-assets.spec.ts::system Agent Skill and MCP catalog is read only while Credential governance remains available"
       ],
       "operator_response": "Disable the affected admin surface, regenerate a redacted bundle, and verify role and metadata boundaries before access resumes."
     }

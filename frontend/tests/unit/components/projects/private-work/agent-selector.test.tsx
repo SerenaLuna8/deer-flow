@@ -5,8 +5,10 @@ import {
   AgentSelectorDialog,
   createProjectChatForAgent,
   enableSystemAgentAndCreateProjectChat,
+  ensureMainSystemAgentBindings,
   executableProjectAgents,
   configurableSystemAgents,
+  mainProjectAgent,
   projectAgentsStartChatPath,
   systemAgentDependencyAvailability,
   projectThreadAgentSelection,
@@ -106,6 +108,36 @@ const catalog: ProjectAssetList = {
 };
 
 describe("project Agent selector", () => {
+  test("selects the active packaged Main Agent before or after project binding", () => {
+    const mainCatalog: ProjectAssetList = {
+      ...catalog,
+      system_items: [
+        {
+          ...catalog.system_items[0]!,
+          slug: "project-assistant",
+          display_name: "Main",
+        },
+        {
+          ...catalog.system_items[1]!,
+          slug: "other-system-agent",
+        },
+      ],
+    };
+
+    expect(mainProjectAgent(mainCatalog)?.display_name).toBe("Main");
+    expect(
+      mainProjectAgent({
+        ...mainCatalog,
+        system_items: mainCatalog.system_items.map((item) => ({
+          ...item,
+          binding: item.binding
+            ? { ...item.binding, enabled: false }
+            : item.binding,
+        })),
+      })?.display_name,
+    ).toBe("Main");
+  });
+
   test("shows only active executable project Agents and enabled system bindings", () => {
     const agents = executableProjectAgents(catalog);
 
@@ -126,6 +158,9 @@ describe("project Agent selector", () => {
     expect(html).toContain("项目 Agent");
     expect(html).toContain("系统 Agent");
     expect(html).toContain("选择一个 Agent 开始新的私有对话");
+    expect(html).toContain('aria-modal="true"');
+    expect(html).toContain('data-testid="project-agent-selector-overlay"');
+    expect(html).toContain("data-dialog-initial-focus");
     expect(html).not.toMatch(/logical|复核版本/u);
   });
 
@@ -398,6 +433,65 @@ describe("project Agent selector", () => {
         },
       ],
       ["navigate", `/projects/alpha/chats/${threadId}`],
+    ]);
+  });
+
+  test("enables Main system dependencies before enabling Main", async () => {
+    const mainAgent: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      slug: "project-assistant",
+      display_name: "Main",
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.execute",
+        "shared_assets.manage_bindings",
+      ],
+      binding: null,
+    };
+    const skillVersionId = "99999999-9999-4999-8999-999999999999";
+    const systemSkill: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      slug: "deerflow-core",
+      current_published_version_id: skillVersionId,
+      binding: null,
+    };
+    const calls: unknown[] = [];
+
+    await ensureMainSystemAgentBindings({
+      agent: mainAgent,
+      requiredSkillVersionIds: [skillVersionId],
+      requiredMcpVersionIds: [],
+      skillCatalog: {
+        project_items: [],
+        system_items: [systemSkill],
+        request_id: "req-skills",
+      },
+      mcpCatalog: {
+        project_items: [],
+        system_items: [],
+        request_id: "req-mcp",
+      },
+      enableBinding: async (kind, input) => {
+        calls.push([kind, input]);
+      },
+    });
+
+    expect(calls).toEqual([
+      [
+        "skill",
+        {
+          asset_id: systemSkill.id,
+          version_id: skillVersionId,
+        },
+      ],
+      [
+        "agent",
+        {
+          asset_id: mainAgent.id,
+          version_id: VERSION_ID,
+        },
+      ],
     ]);
   });
 });

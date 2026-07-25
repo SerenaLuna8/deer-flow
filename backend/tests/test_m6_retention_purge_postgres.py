@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text, update
+from support.m3_shared_assets import M3Scenario
 from support.m4_private_threads import seed_m4_thread_database
 
 from app.audit.service import AuditService, _bind_worker_audit_process
 from app.audit.sinks import TrustedOperationAuditSink
+from app.private_work.privacy_center import PrivacyCenterService
 from app.private_work.retention import PrivateWorkRetentionService
+from app.private_work.retention_jobs import RetentionJobAdmission
 from app.private_work.retention_purge import (
     RetentionCandidate,
     RetentionNotEligible,
@@ -18,24 +22,30 @@ from app.private_work.retention_purge import (
     RetentionPurgeRepository,
 )
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
+from app.shared_assets.credential_service import CreateCredential
+from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.skill_service import CreateSkill, SkillService
+from app.worker.retention import RetentionPurgeJobHandler
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.audit.model import AuditLogRow
+from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
+from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.user.model import UserRow
 
 NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 EXPIRED = NOW - timedelta(days=31)
-NOT_EXPIRED = NOW - timedelta(days=29)
 
 
 @pytest.mark.anyio
 async def test_private_work_retention_service_exposes_transactional_purge_boundary() -> None:
-    candidate = RetentionCandidate.file(
+    candidate = RetentionCandidate.project(
         project_id=uuid.uuid4(),
-        owner_user_id=str(uuid.uuid4()),
-        file_id=uuid.uuid4(),
-        deleted_at=EXPIRED,
+        deletion_effective_at=NOW,
         idempotency_key="retention-service-boundary",
         request_id="task17-retention-service",
     )
@@ -65,6 +75,16 @@ def _audit(factory) -> TrustedOperationAuditSink:
     return TrustedOperationAuditSink(
         service,
         process_context=_bind_worker_audit_process(service),
+    )
+
+
+def _quota(factory) -> ProjectQuotaEnforcer:
+    return ProjectQuotaEnforcer(
+        QuotaService(
+            factory,
+            QuotaConfig(),
+            source_ref_hasher=_keyring(),
+        )
     )
 
 
@@ -102,87 +122,1033 @@ async def _seed_deleted_file(seed, *, context, thread_id: str, deleted_at: datet
     return file_id
 
 
-def _file_candidate(seed, file_id: uuid.UUID, *, deleted_at: datetime = EXPIRED) -> RetentionCandidate:
-    return RetentionCandidate.file(
-        project_id=seed.owner_a.project_id,
-        owner_user_id=str(seed.owner_a.user_id),
-        file_id=file_id,
-        deleted_at=deleted_at,
-        idempotency_key=f"file:{file_id}",
-        request_id="task17-file-purge",
-    )
-
-
 def _purger(seed) -> RetentionPurger:
     return RetentionPurger(
         seed.factory,
         audit=_audit(seed.factory),
+        quota=_quota(seed.factory),
     )
 
 
+async def _chunks(payload: bytes):
+    yield payload
+
+
+async def _retention_transaction_snapshot(
+    factory,
+    *,
+    project_id: uuid.UUID,
+    file_id: uuid.UUID,
+) -> dict[str, tuple[tuple[object, ...], ...]]:
+    queries = {
+        "file": """SELECT id,status,size,owner_user_id,project_id
+            FROM files WHERE id=:file_id""",
+        "counter": """SELECT used,reserved,version
+            FROM project_usage_counters
+            WHERE project_id=:project_id
+              AND dimension='storage_bytes'
+              AND bucket='lifetime'""",
+        "ledger": """SELECT id,project_id,dimension,delta,bucket,source_kind,
+                   source_ref_key_id,source_ref_hmac,idempotency_key,request_id
+            FROM project_usage_ledger
+            WHERE project_id=:project_id AND dimension='storage_bytes'
+            ORDER BY id""",
+        "audit": """SELECT id,project_id,action,target_kind,target_ref_key_id,
+                   target_ref_hmac,outcome,request_id,metadata_json
+            FROM audit_logs
+            WHERE project_id=:project_id AND action='purge.completed'
+            ORDER BY id""",
+    }
+    parameters = {"project_id": project_id, "file_id": file_id}
+    async with factory() as session:
+        return {name: tuple(tuple(row) for row in (await session.execute(text(statement), parameters)).all()) for name, statement in queries.items()}
+
+
+@pytest.mark.parametrize(
+    "resource_kind",
+    ("former_owner", "account", "project"),
+)
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_file_purge_relocks_30_day_state_and_deletes_only_exact_scope(
+async def test_retention_purge_releases_exact_ready_file_quota_for_every_scope_kind(
     migrated_postgres_database_url: str,
+    resource_kind: str,
 ) -> None:
+    from app.private_work.file_service import PrivateFileService
+
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    quota = _quota(seed.factory)
+    files = PrivateFileService(seed.factory, quota=quota)
+    project_a_owner_a_thread = f"quota-a-owner-a-{uuid.uuid4()}"
+    project_a_owner_b_thread = f"quota-a-owner-b-{uuid.uuid4()}"
+    project_b_owner_a_thread = f"quota-b-owner-a-{uuid.uuid4()}"
     try:
-        target = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"target-{uuid.uuid4()}", deleted_at=EXPIRED)
-        same_owner = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"same-{uuid.uuid4()}", deleted_at=EXPIRED)
-        other_owner = await _seed_deleted_file(seed, context=seed.owner_b, thread_id=f"other-{uuid.uuid4()}", deleted_at=EXPIRED)
-        too_early = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"early-{uuid.uuid4()}", deleted_at=NOT_EXPIRED)
-        purger = _purger(seed)
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=project_a_owner_a_thread,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_b_scope,
+                thread_id=project_a_owner_b_thread,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await PrivateThreadRepository(session).create(
+                scope=seed.project_b_owner_a_scope,
+                thread_id=project_b_owner_a_thread,
+                agent=ThreadAgentRef(seed.project_b_agent_id, "project"),
+            )
+        project_a_owner_a_file = await files.upload(
+            seed.owner_a,
+            thread_id=project_a_owner_a_thread,
+            logical_path="uploads/owner-a.bin",
+            media_type="application/octet-stream",
+            chunks=_chunks(b"aaaa"),
+        )
+        project_a_owner_b_file = await files.upload(
+            seed.owner_b,
+            thread_id=project_a_owner_b_thread,
+            logical_path="uploads/owner-b.bin",
+            media_type="application/octet-stream",
+            chunks=_chunks(b"bbbbb"),
+        )
+        project_b_owner_a_file = await files.upload(
+            seed.project_b_owner_a,
+            thread_id=project_b_owner_a_thread,
+            logical_path="uploads/project-b.bin",
+            media_type="application/octet-stream",
+            chunks=_chunks(b"cccccc"),
+        )
 
-        with pytest.raises(RetentionNotEligible):
-            await purger.purge(_file_candidate(seed, too_early, deleted_at=NOT_EXPIRED), now=NOW)
-        result = await purger.purge(_file_candidate(seed, target), now=NOW)
+        async with seed.factory() as session, session.begin():
+            owner_a_memberships = (await session.execute(select(ProjectMembershipRow).where(ProjectMembershipRow.user_id == str(seed.owner_a.user_id)).order_by(ProjectMembershipRow.project_id).with_for_update())).scalars().all()
+            if resource_kind == "former_owner":
+                membership = next(row for row in owner_a_memberships if row.project_id == seed.owner_a.project_id)
+                membership.status = "left"
+                membership.ended_at = EXPIRED
+                membership.retention_until = EXPIRED
+                membership.end_reason = "left"
+                membership.version += 1
+                candidate = RetentionCandidate.former_owner(
+                    project_id=membership.project_id,
+                    owner_user_id=membership.user_id,
+                    membership_id=membership.id,
+                    activation_generation=membership.activation_generation,
+                    retention_until=EXPIRED,
+                    idempotency_key=f"quota-former:{membership.id}",
+                    request_id="retention-quota-former",
+                )
+            elif resource_kind == "account":
+                for membership in owner_a_memberships:
+                    membership.status = "left"
+                    membership.ended_at = EXPIRED
+                    membership.retention_until = EXPIRED
+                    membership.end_reason = "left"
+                    membership.version += 1
+                candidate = RetentionCandidate.account(
+                    owner_user_id=str(seed.owner_a.user_id),
+                    project_ids=tuple(
+                        sorted(
+                            (row.project_id for row in owner_a_memberships),
+                            key=str,
+                        )
+                    ),
+                    retention_until=EXPIRED,
+                    idempotency_key=f"quota-account:{seed.owner_a.user_id}",
+                    request_id="retention-quota-account",
+                )
+            else:
+                project = await session.get(
+                    ProjectRow,
+                    seed.owner_a.project_id,
+                    with_for_update=True,
+                )
+                assert project is not None
+                project.status = "pending_deletion"
+                project.deletion_requested_at = EXPIRED
+                project.deletion_effective_at = EXPIRED
+                candidate = RetentionCandidate.project(
+                    project_id=project.id,
+                    deletion_effective_at=EXPIRED,
+                    idempotency_key=f"quota-project:{project.id}",
+                    request_id="retention-quota-project",
+                )
 
-        assert result.resource_kind == "file"
-        assert result.purged_count == 1
+        await RetentionPurger(
+            seed.factory,
+            audit=_audit(seed.factory),
+            quota=quota,
+        ).purge(candidate, now=NOW)
+
         async with seed.factory() as session:
-            assert await session.get(PrivateFileRow, target) is None
-            assert await session.get(PrivateFileRow, same_owner) is not None
-            assert await session.get(PrivateFileRow, other_owner) is not None
-            assert await session.get(PrivateFileRow, too_early) is not None
-            audit = (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalar_one()
-            assert audit.metadata_json == {"resource_kind": "file", "purged_count": 1}
-            assert str(target) not in repr(audit.__dict__)
+            project_a_usage = (
+                await session.execute(
+                    text(
+                        """SELECT used,reserved FROM project_usage_counters
+                    WHERE project_id=:project_id
+                      AND dimension='storage_bytes'
+                      AND bucket='lifetime'"""
+                    ),
+                    {"project_id": seed.owner_a.project_id},
+                )
+            ).one()
+            project_b_usage = (
+                await session.execute(
+                    text(
+                        """SELECT used,reserved FROM project_usage_counters
+                        WHERE project_id=:project_id
+                          AND dimension='storage_bytes'
+                          AND bucket='lifetime'"""
+                    ),
+                    {"project_id": seed.project_b_owner_a.project_id},
+                )
+            ).one()
+            remaining_ids = set(
+                (
+                    await session.execute(
+                        select(PrivateFileRow.id).where(
+                            PrivateFileRow.id.in_(
+                                (
+                                    project_a_owner_a_file.id,
+                                    project_a_owner_b_file.id,
+                                    project_b_owner_a_file.id,
+                                )
+                            )
+                        )
+                    )
+                ).scalars()
+            )
+            release_rows = set(
+                (
+                    await session.execute(
+                        text(
+                            """SELECT project_id,delta,source_kind,
+                                      source_ref_key_id,source_ref_hmac,
+                                      idempotency_key
+                               FROM project_usage_ledger
+                               WHERE dimension='storage_bytes'
+                                 AND source_kind='release'
+                                 AND project_id IN (:project_a,:project_b)"""
+                        ),
+                        {
+                            "project_a": seed.owner_a.project_id,
+                            "project_b": seed.project_b_owner_a.project_id,
+                        },
+                    )
+                ).all()
+            )
+            storage_net_rows = {
+                row.project_id: (row.release_count, row.net_delta)
+                for row in (
+                    await session.execute(
+                        text(
+                            """SELECT project_id,
+                                      count(*) FILTER (
+                                          WHERE source_kind='release'
+                                      ) AS release_count,
+                                      sum(delta) AS net_delta
+                               FROM project_usage_ledger
+                               WHERE dimension='storage_bytes'
+                                 AND project_id IN (:project_a,:project_b)
+                               GROUP BY project_id"""
+                        ),
+                        {
+                            "project_a": seed.owner_a.project_id,
+                            "project_b": seed.project_b_owner_a.project_id,
+                        },
+                    )
+                ).all()
+            }
+        if resource_kind == "former_owner":
+            released_files = (
+                (
+                    seed.owner_a.project_id,
+                    str(seed.owner_a.user_id),
+                    project_a_owner_a_file.id,
+                    project_a_owner_a_file.size,
+                ),
+            )
+        elif resource_kind == "account":
+            released_files = (
+                (
+                    seed.owner_a.project_id,
+                    str(seed.owner_a.user_id),
+                    project_a_owner_a_file.id,
+                    project_a_owner_a_file.size,
+                ),
+                (
+                    seed.project_b_owner_a.project_id,
+                    str(seed.project_b_owner_a.user_id),
+                    project_b_owner_a_file.id,
+                    project_b_owner_a_file.size,
+                ),
+            )
+        else:
+            released_files = (
+                (
+                    seed.owner_a.project_id,
+                    str(seed.owner_a.user_id),
+                    project_a_owner_a_file.id,
+                    project_a_owner_a_file.size,
+                ),
+                (
+                    seed.owner_b.project_id,
+                    str(seed.owner_b.user_id),
+                    project_a_owner_b_file.id,
+                    project_a_owner_b_file.size,
+                ),
+            )
+        expected_release_rows = set()
+        for project_id, owner_user_id, file_id, size in released_files:
+            source_ref = quota._quotas._source_ref(
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                dimension="storage_bytes",
+                bucket="lifetime",
+                operation="release",
+                key=f"file:{file_id}",
+            )
+            expected_release_rows.add(
+                (
+                    project_id,
+                    -size,
+                    "release",
+                    source_ref.key_id,
+                    source_ref.hmac_hex,
+                    quota._quotas._idempotency_digest(source_ref=source_ref),
+                )
+            )
+        assert release_rows == expected_release_rows
+        if resource_kind == "former_owner":
+            assert (tuple(project_a_usage), tuple(project_b_usage)) == (
+                (0, 5),
+                (0, 6),
+            )
+            assert storage_net_rows == {
+                seed.owner_a.project_id: (1, 5),
+                seed.project_b_owner_a.project_id: (0, 6),
+            }
+            assert remaining_ids == {
+                project_a_owner_b_file.id,
+                project_b_owner_a_file.id,
+            }
+        elif resource_kind == "account":
+            assert (tuple(project_a_usage), tuple(project_b_usage)) == (
+                (0, 5),
+                (0, 0),
+            )
+            assert storage_net_rows == {
+                seed.owner_a.project_id: (1, 5),
+                seed.project_b_owner_a.project_id: (1, 0),
+            }
+            assert remaining_ids == {project_a_owner_b_file.id}
+        else:
+            assert (tuple(project_a_usage), tuple(project_b_usage)) == (
+                (0, 0),
+                (0, 6),
+            )
+            assert storage_net_rows == {
+                seed.owner_a.project_id: (2, 0),
+                seed.project_b_owner_a.project_id: (0, 6),
+            }
+            assert remaining_ids == {project_b_owner_a_file.id}
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.parametrize("failure_stage", ("purge", "audit"))
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_retention_purge_rolls_back_quota_release_and_retries_once(
+    migrated_postgres_database_url: str,
+    failure_stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.private_work.file_service import PrivateFileService
+
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    quota = _quota(seed.factory)
+    files = PrivateFileService(seed.factory, quota=quota)
+    thread_id = f"quota-rollback-{uuid.uuid4()}"
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+        target = await files.upload(
+            seed.owner_a,
+            thread_id=thread_id,
+            logical_path="uploads/rollback.bin",
+            media_type="application/octet-stream",
+            chunks=_chunks(b"rollback"),
+        )
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            assert membership is not None
+            membership.status = "left"
+            membership.ended_at = EXPIRED
+            membership.retention_until = EXPIRED
+            membership.end_reason = "left"
+            membership.version += 1
+            candidate = RetentionCandidate.former_owner(
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=EXPIRED,
+                idempotency_key=f"quota-rollback:{failure_stage}:{membership.id}",
+                request_id=f"retention-quota-rollback-{failure_stage}",
+            )
+
+        before = await _retention_transaction_snapshot(
+            seed.factory,
+            project_id=seed.owner_a.project_id,
+            file_id=target.id,
+        )
+        audit = _audit(seed.factory)
+        repository: RetentionPurgeRepository = RetentionPurgeRepository()
+        original_audit = audit.purge_completed
+        if failure_stage == "purge":
+
+            class _FailAfterPurge(RetentionPurgeRepository):
+                async def physically_purge(self, session, value, *, quota):
+                    await super().physically_purge(session, value, quota=quota)
+                    raise RuntimeError("injected failure after purge")
+
+            repository = _FailAfterPurge()
+        else:
+
+            async def _fail_after_audit(*args, **kwargs):
+                await original_audit(*args, **kwargs)
+                raise RuntimeError("injected failure after audit")
+
+            monkeypatch.setattr(audit, "purge_completed", _fail_after_audit)
+
+        with pytest.raises(RuntimeError, match=f"injected failure after {failure_stage}"):
+            await RetentionPurger(
+                seed.factory,
+                audit=audit,
+                quota=quota,
+                repository=repository,
+            ).purge(candidate, now=NOW)
+
+        after_failure = await _retention_transaction_snapshot(
+            seed.factory,
+            project_id=seed.owner_a.project_id,
+            file_id=target.id,
+        )
+        assert after_failure == before
+
+        monkeypatch.setattr(audit, "purge_completed", original_audit)
+        await RetentionPurger(
+            seed.factory,
+            audit=audit,
+            quota=quota,
+        ).purge(candidate, now=NOW)
+
+        after_retry = await _retention_transaction_snapshot(
+            seed.factory,
+            project_id=seed.owner_a.project_id,
+            file_id=target.id,
+        )
+        assert after_retry["file"] == ()
+        assert after_retry["counter"][0][:2] == (0, 0)
+        assert len(after_retry["ledger"]) == len(before["ledger"]) + 1
+        assert sum(row[3] for row in after_retry["ledger"]) == 0
+        assert [row[3] for row in after_retry["ledger"] if row[5] == "release"] == [-target.size]
+        assert len(after_retry["audit"]) == len(before["audit"]) + 1
     finally:
         await seed.engine.dispose()
 
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_database_failure_rolls_back_and_transactional_retry_succeeds(
+async def test_former_owner_deadline_job_is_worker_claimed_without_scheduler(
     migrated_postgres_database_url: str,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     try:
-        file_id = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"retry-{uuid.uuid4()}", deleted_at=EXPIRED)
-        purger = _purger(seed)
-        real_purge = RetentionPurgeRepository.physically_purge
-        attempts = 0
+        target = await _seed_deleted_file(
+            seed,
+            context=seed.owner_a,
+            thread_id=f"former-owner-{uuid.uuid4()}",
+            deleted_at=EXPIRED,
+        )
+        deadline = NOW - timedelta(seconds=1)
+        worker_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            assert membership is not None
+            membership.status = "left"
+            membership.ended_at = NOW - timedelta(days=30)
+            membership.retention_until = deadline
+            membership.end_reason = "left"
+            membership.version += 1
+            await RetentionJobAdmission.admit_former_owner(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=deadline,
+            )
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="retention-test",
+                    capabilities_json=["retention_purge"],
+                    max_concurrent_jobs=1,
+                    heartbeat_at=NOW,
+                )
+            )
 
-        async def fail_once(self, session, candidate):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise RuntimeError("database write failed")
-            return await real_purge(self, session, candidate)
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"retention_purge"}),
+                lease_seconds=90,
+                now=NOW,
+            )
+            assert claim is not None
+            assert claim.scope.project_id == seed.owner_a.project_id
+            assert claim.scope.owner_user_id == str(seed.owner_a.user_id)
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=NOW,
+            )
 
-        monkeypatch.setattr(RetentionPurgeRepository, "physically_purge", fail_once)
-        with pytest.raises(RuntimeError, match="database write failed"):
-            await purger.purge(_file_candidate(seed, file_id), now=NOW)
+        handler = RetentionPurgeJobHandler(
+            seed.factory,
+            audit=_audit(seed.factory),
+            quota=_quota(seed.factory),
+            clock=lambda: NOW,
+        )
+        settlement = await handler(claim, object())  # type: ignore[arg-type]
+        await settlement.commit()
+
         async with seed.factory() as session:
-            assert await session.get(PrivateFileRow, file_id) is not None
-            assert (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalars().all() == []
+            assert await session.get(PrivateFileRow, target) is None
+            row = await session.get(JobRow, claim.job_id)
+            assert row is not None
+            assert row.status == "succeeded"
+    finally:
+        await seed.engine.dispose()
 
-        result = await purger.purge(_file_candidate(seed, file_id), now=NOW)
-        assert result.purged_count == 1
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_rejoin_generation_makes_old_retention_job_cancel_fail_closed(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        target = await _seed_deleted_file(
+            seed,
+            context=seed.owner_a,
+            thread_id=f"rejoin-retention-{uuid.uuid4()}",
+            deleted_at=EXPIRED,
+        )
+        deadline = NOW - timedelta(seconds=1)
+        worker_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            assert membership is not None
+            membership.status = "left"
+            membership.ended_at = NOW - timedelta(days=30)
+            membership.retention_until = deadline
+            membership.end_reason = "left"
+            membership.version += 1
+            await RetentionJobAdmission.admit_former_owner(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=deadline,
+            )
+            membership.status = "active"
+            membership.ended_at = None
+            membership.retention_until = None
+            membership.end_reason = None
+            membership.activation_generation += 1
+            membership.version += 1
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="retention-rejoin-test",
+                    capabilities_json=["retention_purge"],
+                    max_concurrent_jobs=1,
+                    heartbeat_at=NOW,
+                )
+            )
+
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"retention_purge"}),
+                lease_seconds=90,
+                now=NOW,
+            )
+            assert claim is not None
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=NOW,
+            )
+
+        settlement = await RetentionPurgeJobHandler(
+            seed.factory,
+            audit=_audit(seed.factory),
+            quota=_quota(seed.factory),
+            clock=lambda: NOW,
+        )(claim, object())  # type: ignore[arg-type]
+        await settlement.commit()
+
         async with seed.factory() as session:
-            assert await session.get(PrivateFileRow, file_id) is None
-            assert (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalar_one() is not None
+            assert await session.get(PrivateFileRow, target) is not None
+            row = await session.get(JobRow, claim.job_id)
+            assert row is not None
+            assert row.status == "cancelled"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_purge_precedence_cancels_then_restore_resumes_former_owner_case(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        member_deadline = NOW + timedelta(days=30)
+        project_deadline = NOW + timedelta(days=10)
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            project = await session.scalar(select(ProjectRow).where(ProjectRow.id == seed.owner_a.project_id).with_for_update())
+            assert membership is not None
+            assert project is not None
+            membership.status = "left"
+            membership.ended_at = NOW
+            membership.retention_until = member_deadline
+            membership.end_reason = "left"
+            membership.version += 1
+            owner_job_id = await RetentionJobAdmission.admit_former_owner(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=member_deadline,
+            )
+            early_job_id = await RetentionJobAdmission.admit_early_delete(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=member_deadline,
+                now=NOW,
+            )
+            project.status = "pending_deletion"
+            project.deletion_requested_at = NOW
+            project.deletion_effective_at = project_deadline
+            project_job_id = await RetentionJobAdmission.admit_project(
+                session,
+                project_id=project.id,
+                deletion_effective_at=project_deadline,
+                now=NOW,
+            )
+
+        async with seed.factory() as session:
+            owner_job = await session.get(JobRow, owner_job_id)
+            early_job = await session.get(JobRow, early_job_id)
+            project_job = await session.get(JobRow, project_job_id)
+            assert owner_job is not None
+            assert early_job is not None
+            assert project_job is not None
+            assert owner_job.status == "cancelled"
+            assert owner_job.cancel_reason == "project_purge_precedence"
+            assert early_job.status == "queued"
+            assert early_job.cancel_requested_at is None
+            assert project_job.status == "queued"
+
+        restored_at = NOW + timedelta(days=1)
+        async with seed.factory() as session, session.begin():
+            project = await session.scalar(select(ProjectRow).where(ProjectRow.id == seed.owner_a.project_id).with_for_update())
+            assert project is not None
+            project.status = "active"
+            project.deletion_requested_at = None
+            project.deletion_effective_at = None
+            await RetentionJobAdmission.restore_project(
+                session,
+                project_id=project.id,
+                now=restored_at,
+            )
+
+        async with seed.factory() as session:
+            owner_job = await session.get(JobRow, owner_job_id)
+            early_job = await session.get(JobRow, early_job_id)
+            project_job = await session.get(JobRow, project_job_id)
+            assert owner_job is not None
+            assert early_job is not None
+            assert project_job is not None
+            assert owner_job.status == "queued"
+            assert owner_job.available_at == member_deadline
+            assert owner_job.cancel_reason is None
+            assert early_job.status == "queued"
+            assert project_job.status == "cancelled"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_later_project_deletion_never_extends_former_owner_deadline(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        target = await _seed_deleted_file(
+            seed,
+            context=seed.owner_a,
+            thread_id=f"former-owner-before-project-{uuid.uuid4()}",
+            deleted_at=NOW,
+        )
+        member_deadline = NOW + timedelta(days=30)
+        project_requested_at = NOW + timedelta(days=29)
+        project_deadline = project_requested_at + timedelta(days=30)
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            project = await session.scalar(select(ProjectRow).where(ProjectRow.id == seed.owner_a.project_id).with_for_update())
+            assert membership is not None
+            assert project is not None
+            membership.status = "left"
+            membership.ended_at = NOW
+            membership.retention_until = member_deadline
+            membership.end_reason = "left"
+            membership.version += 1
+            owner_job_id = await RetentionJobAdmission.admit_former_owner(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=member_deadline,
+            )
+            project.status = "pending_deletion"
+            project.deletion_requested_at = project_requested_at
+            project.deletion_effective_at = project_deadline
+            project_job_id = await RetentionJobAdmission.admit_project(
+                session,
+                project_id=project.id,
+                deletion_effective_at=project_deadline,
+                now=project_requested_at,
+            )
+
+        async with seed.factory() as session:
+            owner_job = await session.get(JobRow, owner_job_id)
+            project_job = await session.get(JobRow, project_job_id)
+            assert owner_job is not None
+            assert project_job is not None
+            assert owner_job.status == "queued"
+            assert owner_job.cancel_requested_at is None
+            assert project_job.status == "queued"
+        async with seed.factory() as session:
+            cases = await PrivacyCenterService(session).list_cases(
+                seed.owner_a.user_id,
+                now=project_requested_at,
+            )
+            assert len(cases) == 1
+            assert cases[0].retention_kind == "former_owner"
+            assert cases[0].deletion_deadline == member_deadline
+
+        worker_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="former-owner-earlier-deadline-test",
+                    capabilities_json=["retention_purge"],
+                    max_concurrent_jobs=1,
+                    heartbeat_at=member_deadline,
+                )
+            )
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"retention_purge"}),
+                lease_seconds=90,
+                now=member_deadline,
+            )
+            assert claim is not None
+            assert claim.job_id == owner_job_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=member_deadline,
+            )
+
+        settlement = await RetentionPurgeJobHandler(
+            seed.factory,
+            audit=_audit(seed.factory),
+            quota=_quota(seed.factory),
+            clock=lambda: member_deadline,
+        )(claim, object())  # type: ignore[arg-type]
+        await settlement.commit()
+
+        async with seed.factory() as session:
+            assert await session.get(PrivateFileRow, target) is None
+            owner_job = await session.get(JobRow, owner_job_id)
+            project_job = await session.get(JobRow, project_job_id)
+            assert owner_job is not None
+            assert project_job is not None
+            assert owner_job.status == "succeeded"
+            assert project_job.status == "queued"
+            assert project_job.cancel_requested_at is None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_equal_project_deadline_owns_one_exact_purge_case(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        deadline = NOW + timedelta(days=30)
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            project = await session.scalar(select(ProjectRow).where(ProjectRow.id == seed.owner_a.project_id).with_for_update())
+            assert membership is not None
+            assert project is not None
+            membership.status = "removed"
+            membership.ended_at = NOW
+            membership.retention_until = deadline
+            membership.end_reason = "removed"
+            membership.version += 1
+            owner_job_id = await RetentionJobAdmission.admit_former_owner(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=deadline,
+            )
+            project.status = "pending_deletion"
+            project.deletion_requested_at = NOW
+            project.deletion_effective_at = deadline
+            await RetentionJobAdmission.admit_project(
+                session,
+                project_id=project.id,
+                deletion_effective_at=deadline,
+                now=NOW,
+            )
+
+        async with seed.factory() as session:
+            owner_job = await session.get(JobRow, owner_job_id)
+            assert owner_job is not None
+            assert owner_job.status == "cancelled"
+            assert owner_job.cancel_reason == "project_purge_precedence"
+        async with seed.factory() as session:
+            cases = await PrivacyCenterService(session).list_cases(
+                seed.owner_a.user_id,
+                now=NOW,
+            )
+            assert len(cases) == 1
+            assert cases[0].retention_kind == "project"
+            assert cases[0].deletion_deadline == deadline
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_privacy_center_is_account_scoped_exports_no_credentials_and_admits_early_delete(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        target = await _seed_deleted_file(
+            seed,
+            context=seed.owner_a,
+            thread_id=f"privacy-export-{uuid.uuid4()}",
+            deleted_at=EXPIRED,
+        )
+        deadline = NOW + timedelta(days=30)
+        async with seed.factory() as session, session.begin():
+            membership = await session.scalar(
+                select(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.project_id == seed.owner_a.project_id,
+                    ProjectMembershipRow.user_id == str(seed.owner_a.user_id),
+                )
+                .with_for_update()
+            )
+            assert membership is not None
+            membership.status = "left"
+            membership.ended_at = NOW
+            membership.retention_until = deadline
+            membership.end_reason = "left"
+            membership.version += 1
+            await RetentionJobAdmission.admit_former_owner(
+                session,
+                project_id=membership.project_id,
+                owner_user_id=membership.user_id,
+                membership_id=membership.id,
+                activation_generation=membership.activation_generation,
+                retention_until=deadline,
+            )
+
+        async with seed.factory() as session:
+            service = PrivacyCenterService(session)
+            cases = await service.list_cases(seed.owner_a.user_id, now=NOW)
+            assert [case.project_id for case in cases] == [seed.owner_a.project_id]
+        async with seed.factory() as session:
+            assert (
+                await PrivacyCenterService(session).list_cases(
+                    seed.owner_b.user_id,
+                    now=NOW,
+                )
+                == ()
+            )
+        async with seed.factory() as session:
+            exported = await PrivacyCenterService(session).open_case_export(
+                seed.owner_a.user_id,
+                seed.owner_a.project_id,
+                now=NOW,
+            )
+            records = [json.loads(line) async for line in exported]
+            assert records[0]["record_type"] == "manifest"
+            assert records[0]["schema_version"] == 2
+            file_record = next(record for record in records if record["record_type"] == "file")
+            assert file_record["data"]["id"] == str(target)
+            chunk_record = next(record for record in records if record["record_type"] == "file_chunk")
+            assert chunk_record["data"]["file_id"] == str(target)
+            assert chunk_record["data"]["content_base64"] == "ZGF0YQ=="
+            serialized = repr(records).lower()
+            assert "encrypted_access_token" not in serialized
+            assert "encrypted_refresh_token" not in serialized
+            assert "credential_envelope" not in serialized
+        async with seed.factory() as session:
+            admitted = await PrivacyCenterService(session).request_early_delete(
+                seed.owner_a.user_id,
+                seed.owner_a.project_id,
+                now=NOW,
+            )
+            assert admitted.status == "queued"
+        async with seed.factory() as session:
+            early = await session.get(JobRow, admitted.job_id)
+            assert early is not None
+            assert early.available_at == NOW
+            assert early.owner_user_id == str(seed.owner_a.user_id)
+        worker_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="privacy-early-delete-test",
+                    capabilities_json=["retention_purge"],
+                    max_concurrent_jobs=1,
+                    heartbeat_at=NOW,
+                )
+            )
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"retention_purge"}),
+                lease_seconds=90,
+                now=NOW,
+            )
+            assert claim is not None
+            assert claim.job_id == admitted.job_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=NOW,
+            )
+        settlement = await RetentionPurgeJobHandler(
+            seed.factory,
+            audit=_audit(seed.factory),
+            quota=_quota(seed.factory),
+            clock=lambda: NOW,
+        )(claim, object())  # type: ignore[arg-type]
+        await settlement.commit()
+        async with seed.factory() as session:
+            assert await session.get(PrivateFileRow, target) is None
+            purge_audits = (
+                (
+                    await session.execute(
+                        select(AuditLogRow).where(
+                            AuditLogRow.action == "purge.completed",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert [row.metadata_json for row in purge_audits] == [
+                {"resource_kind": "former_owner", "purged_count": 1},
+            ]
+            assert purge_audits[0].actor_process == "worker"
+        async with seed.factory() as session:
+            assert (
+                await PrivacyCenterService(session).list_cases(
+                    seed.owner_a.user_id,
+                    now=NOW,
+                )
+                == ()
+            )
     finally:
         await seed.engine.dispose()
 
@@ -217,6 +1183,242 @@ async def test_project_purge_revalidates_pending_deletion_and_preserves_other_pr
             assert await session.get(ProjectRow, seed.owner_a.project_id) is not None
     finally:
         await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_purge_removes_shared_asset_bodies_secrets_and_invitations(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M3Scenario.create(migrated_postgres_database_url)
+    try:
+        system = await scenario.bootstrap_system_catalog()
+        assert scenario.system_agent_id is not None
+        assert scenario.project_agent_id is not None
+        assert scenario.project_mcp_id is not None
+        assert scenario.project_mcp_version_id is not None
+        assert scenario.project_mcp_asset_version is not None
+        assert scenario.project_credential_id is not None
+        assert scenario.project_credential_version_id is not None
+        await scenario.mcp_servers.approve(
+            scenario.project_admin,
+            scenario.project_mcp_id,
+            scenario.project_mcp_version_id,
+            {"primary": scenario.project_credential_version_id},
+            expected_asset_version=scenario.project_mcp_asset_version,
+        )
+
+        skills = SkillService(scenario.session_factory)
+        project_skill = await skills.create_asset(
+            scenario.project_admin,
+            CreateSkill("retention-project-skill", "Retention Project Skill"),
+        )
+        project_skill_version = await skills.create_version_from_archive(
+            scenario.project_admin,
+            project_skill.id,
+            (
+                SkillArchiveFile(
+                    "SKILL.md",
+                    b"---\nname: retention-project-skill\ndescription: purge sentinel body\n---\n\nprivate project instructions\n",
+                    "text/markdown",
+                ),
+            ),
+            expected_asset_version=project_skill.version,
+        )
+        await skills.publish(
+            scenario.project_admin,
+            project_skill.id,
+            project_skill_version.id,
+            expected_asset_version=project_skill.version + 1,
+        )
+
+        other_credential = await scenario.credentials.create(
+            scenario.other_project_admin,
+            CreateCredential(
+                "retention-other-token",
+                "Retention Other Token",
+                "token",
+            ),
+            {"env": {"OTHER_TOKEN": "other-project-secret"}},
+        )
+        system_credential = await scenario.credentials.create(
+            scenario.system_admin,
+            CreateCredential(
+                "retention-system-token",
+                "Retention System Token",
+                "token",
+            ),
+            {"env": {"SYSTEM_TOKEN": "system-secret"}},
+        )
+
+        invitation_email = f"purge-{uuid.uuid4()}@example.com"
+        invitation_token_hash = uuid.uuid4().hex * 2
+        async with scenario.session_factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO project_system_agent_bindings
+                       (project_id, system_agent_id, system_asset_scope,
+                        agent_version_id, enabled, version,
+                        created_by_user_id, updated_by_user_id)
+                       VALUES (:project_id, :agent_id, 'system', :version_id,
+                               true, 1, :user_id, :user_id)"""
+                ),
+                {
+                    "project_id": scenario.project_admin.project_id,
+                    "agent_id": scenario.system_agent_id,
+                    "version_id": system.agent_v1,
+                    "user_id": str(scenario.project_admin.user_id),
+                },
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO project_invitations
+                       (id, project_id, invited_email, role, token_hash, status,
+                        expires_at, version, created_by_user_id)
+                       VALUES (:id, :project_id, :email, 'viewer', :token_hash,
+                               'pending', :expires_at, 1, :created_by)"""
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "project_id": scenario.project_admin.project_id,
+                    "email": invitation_email,
+                    "token_hash": invitation_token_hash,
+                    "expires_at": NOW + timedelta(days=7),
+                    "created_by": str(scenario.project_admin.user_id),
+                },
+            )
+            project = await session.scalar(select(ProjectRow).where(ProjectRow.id == scenario.project_admin.project_id).with_for_update())
+            assert project is not None
+            project.display_name = "Sensitive Project Name"
+            project.description = "Sensitive project description"
+            project.icon = "secret-icon"
+            project.status = "pending_deletion"
+            project.deletion_requested_at = EXPIRED
+            project.deletion_effective_at = EXPIRED
+            project_job_id = await RetentionJobAdmission.admit_project(
+                session,
+                project_id=project.id,
+                deletion_effective_at=EXPIRED,
+                now=EXPIRED,
+            )
+            worker_id = uuid.uuid4()
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="project-shared-purge-test",
+                    capabilities_json=["retention_purge"],
+                    max_concurrent_jobs=1,
+                    heartbeat_at=NOW,
+                )
+            )
+
+        async with scenario.session_factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"retention_purge"}),
+                lease_seconds=90,
+                now=NOW,
+            )
+            assert claim is not None
+            assert claim.job_id == project_job_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=NOW,
+            )
+
+        settlement = await RetentionPurgeJobHandler(
+            scenario.session_factory,
+            audit=_audit(scenario.session_factory),
+            quota=_quota(scenario.session_factory),
+            clock=lambda: NOW,
+        )(claim, object())  # type: ignore[arg-type]
+        await settlement.commit()
+
+        async with scenario.session_factory() as session:
+            parameters = {"project_id": scenario.project_admin.project_id}
+            for table_name in (
+                "credentials",
+                "agents",
+                "skills",
+                "mcp_servers",
+                "project_invitations",
+                "project_system_agent_bindings",
+                "project_system_skill_bindings",
+                "project_system_mcp_bindings",
+            ):
+                assert (
+                    await session.scalar(
+                        text(f"SELECT count(*) FROM {table_name} WHERE project_id=:project_id"),
+                        parameters,
+                    )
+                    == 0
+                ), table_name
+            for query in (
+                """SELECT count(*) FROM credential_versions version
+                   JOIN credentials asset ON asset.id=version.credential_id
+                   WHERE asset.project_id=:project_id""",
+                """SELECT count(*) FROM credential_envelopes envelope
+                   JOIN credential_versions version ON version.id=envelope.credential_version_id
+                   JOIN credentials asset ON asset.id=version.credential_id
+                   WHERE asset.project_id=:project_id""",
+                """SELECT count(*) FROM credential_grants grant_row
+                   JOIN credential_versions version ON version.id=grant_row.credential_version_id
+                   JOIN credentials asset ON asset.id=version.credential_id
+                   WHERE asset.project_id=:project_id""",
+                """SELECT count(*) FROM skill_version_files file
+                   JOIN skill_versions version ON version.id=file.skill_version_id
+                   JOIN skills asset ON asset.id=version.skill_id
+                   WHERE asset.project_id=:project_id""",
+            ):
+                assert await session.scalar(text(query), parameters) == 0
+
+            assert (
+                await session.get(
+                    ProjectRow,
+                    scenario.other_project_admin.project_id,
+                )
+                is not None
+            )
+            project = await session.get(ProjectRow, scenario.project_admin.project_id)
+            assert project is not None
+            assert project.display_name == "Deleted project"
+            assert project.description == ""
+            assert project.icon == "folder"
+            assert await session.get(JobRow, project_job_id) is not None
+            assert (
+                await session.scalar(
+                    select(AuditLogRow.id).where(
+                        AuditLogRow.project_id == scenario.project_admin.project_id,
+                        AuditLogRow.action == "purge.completed",
+                    )
+                )
+                is not None
+            )
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT count(*) FROM credential_envelopes envelope
+                       JOIN credential_versions version ON version.id=envelope.credential_version_id
+                       WHERE version.credential_id IN (:other_id, :system_id)"""
+                    ),
+                    {
+                        "other_id": other_credential.id,
+                        "system_id": system_credential.id,
+                    },
+                )
+                == 2
+            )
+            assert (
+                await session.scalar(
+                    text("SELECT count(*) FROM agents WHERE id=:id AND scope='system'"),
+                    {"id": scenario.system_agent_id},
+                )
+                == 1
+            )
+    finally:
+        await scenario.close()
 
 
 @pytest.mark.postgres
@@ -358,6 +1560,7 @@ async def test_account_membership_insert_waits_for_owner_lock_and_exact_set_reva
         purger = RetentionPurger(
             seed.factory,
             audit=_audit(seed.factory),
+            quota=_quota(seed.factory),
             repository=BlockingRepository(),
         )
         purge_task = asyncio.create_task(purger.purge(first, now=NOW))
@@ -396,38 +1599,4 @@ async def test_account_membership_insert_waits_for_owner_lock_and_exact_set_reva
             )
     finally:
         release.set()
-        await seed.engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.anyio
-async def test_cancellation_during_transaction_rolls_back_and_keeps_rows(
-    migrated_postgres_database_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seed = await seed_m4_thread_database(migrated_postgres_database_url)
-    try:
-        file_id = await _seed_deleted_file(seed, context=seed.owner_a, thread_id=f"cancel-{uuid.uuid4()}", deleted_at=EXPIRED)
-        purger = _purger(seed)
-        entered = asyncio.Event()
-        release = asyncio.Event()
-        real_purge = RetentionPurgeRepository.physically_purge
-
-        async def delayed(self, session, candidate):
-            result = await real_purge(self, session, candidate)
-            entered.set()
-            await release.wait()
-            return result
-
-        monkeypatch.setattr(RetentionPurgeRepository, "physically_purge", delayed)
-        task = asyncio.create_task(purger.purge(_file_candidate(seed, file_id), now=NOW))
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        task.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        async with seed.factory() as session:
-            assert await session.get(PrivateFileRow, file_id) is not None
-            assert (await session.execute(select(AuditLogRow).where(AuditLogRow.action == "purge.completed"))).scalars().all() == []
-    finally:
         await seed.engine.dispose()

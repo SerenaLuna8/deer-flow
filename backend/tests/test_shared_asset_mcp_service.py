@@ -9,9 +9,11 @@ import pytest
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
+from app.audit.models import AuditAction
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetForbidden, AssetValidationFailed
 
 
@@ -38,10 +40,18 @@ def _safe_definition(service_module):
     )
 
 
+def _system_context() -> SystemAssetGovernanceContext:
+    return SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="req-system-bootstrap-only",
+    )
+
+
 def test_mcp_service_exposes_frozen_contracts_and_scoped_repository() -> None:
     package = importlib.import_module("app.shared_assets")
     service_module = importlib.import_module("app.shared_assets.mcp_service")
     repository_module = importlib.import_module("app.shared_assets.mcp_repository")
+    audit_module = importlib.import_module("app.shared_assets.audit")
 
     assert package.McpService is service_module.McpService
     for value_type in (
@@ -62,6 +72,51 @@ def test_mcp_service_exposes_frozen_contracts_and_scoped_repository() -> None:
     assert list(project_get.parameters) == ["self", "context", "asset_id", "for_update"]
     approve = inspect.signature(service_module.McpService.approve)
     assert list(approve.parameters)[4] == "credential_versions"
+    configure_grants = inspect.signature(service_module.McpService.configure_system_credential_grants)
+    assert list(configure_grants.parameters) == [
+        "self",
+        "actor",
+        "asset_id",
+        "version_id",
+        "credential_versions",
+        "expected_active_grant_versions",
+    ]
+    assert audit_module._ACTIONS["mcp.credential_grants.configure"] is AuditAction.ASSET_UPDATED
+
+
+@pytest.mark.asyncio
+async def test_runtime_system_mcp_authoring_and_generic_approval_stop_before_storage() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("bootstrap-only rejection must not open storage")
+
+    service = service_module.McpService(ExplodingFactory())
+    actor = _system_context()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+
+    with pytest.raises(AssetForbidden):
+        await service.create_asset(
+            actor,
+            service_module.CreateMcpServer("runtime-system", "Runtime System"),
+        )
+    with pytest.raises(AssetForbidden):
+        await service.create_version(
+            actor,
+            asset_id,
+            _safe_definition(service_module),
+            expected_asset_version=1,
+        )
+    with pytest.raises(AssetForbidden):
+        await service.approve(
+            actor,
+            asset_id,
+            version_id,
+            {"primary": uuid.uuid4()},
+            expected_asset_version=1,
+        )
 
 
 @pytest.mark.asyncio

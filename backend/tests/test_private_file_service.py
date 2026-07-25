@@ -69,6 +69,19 @@ def test_private_file_path_rejects_unsafe_or_ambiguous_paths(raw: str) -> None:
         normalize_private_logical_path(raw, request_id="req-path")
 
 
+def test_private_file_delete_kind_allowlist_fails_closed() -> None:
+    from app.private_work.file_service import (
+        USER_DELETABLE_PRIVATE_FILE_KINDS,
+        require_user_deletable_private_file_kind,
+    )
+
+    for kind in USER_DELETABLE_PRIVATE_FILE_KINDS:
+        require_user_deletable_private_file_kind(kind, "req-delete-kind")
+    with pytest.raises(PrivateWorkForbidden) as error:
+        require_user_deletable_private_file_kind("system", "req-delete-kind")
+    assert error.value.request_id == "req-delete-kind"
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -1225,7 +1238,7 @@ async def test_repeated_cancel_during_output_close_still_removes_temp_dir(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_service_lists_and_soft_deletes_ready_file_without_removing_chunks(file_service_seed) -> None:
+async def test_service_delete_physically_removes_exact_file_and_detaches_same_scope_children(file_service_seed) -> None:
     from app.private_work.file_service import PrivateFileService
 
     seed, thread_id = file_service_seed
@@ -1238,8 +1251,45 @@ async def test_service_lists_and_soft_deletes_ready_file_without_removing_chunks
         media_type="text/plain",
         chunks=_chunks(b"keep-the-chunks"),
     )
+    child = await service.upload(
+        seed.owner_a,
+        thread_id=thread_id,
+        logical_path="workspace/derived.md",
+        media_type="text/markdown",
+        chunks=_chunks(b"derived"),
+        kind="workspace",
+        source_file_id=ready.id,
+    )
 
-    assert [item.id for item in await service.list_ready(seed.owner_a, thread_id=thread_id)] == [ready.id]
+    owner_b_thread_id = f"owner-b-file-{uuid.uuid4()}"
+    project_b_thread_id = f"project-b-file-{uuid.uuid4()}"
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_b_scope,
+            thread_id=owner_b_thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+        await PrivateThreadRepository(session).create(
+            scope=seed.project_b_owner_a_scope,
+            thread_id=project_b_thread_id,
+            agent=ThreadAgentRef(seed.project_b_agent_id, "project"),
+        )
+    owner_b_file = await service.upload(
+        seed.owner_b,
+        thread_id=owner_b_thread_id,
+        logical_path="uploads/same-account-other-owner.txt",
+        media_type="text/plain",
+        chunks=_chunks(b"owner-b"),
+    )
+    project_b_file = await service.upload(
+        seed.project_b_owner_a,
+        thread_id=project_b_thread_id,
+        logical_path="uploads/other-project.txt",
+        media_type="text/plain",
+        chunks=_chunks(b"project-b"),
+    )
+
+    assert [item.id for item in await service.list_ready(seed.owner_a, thread_id=thread_id)] == [ready.id, child.id]
     with pytest.raises(PrivateWorkNotFound):
         await service.list_ready(seed.owner_b, thread_id=thread_id)
     with pytest.raises(PrivateWorkNotFound):
@@ -1252,17 +1302,230 @@ async def test_service_lists_and_soft_deletes_ready_file_without_removing_chunks
     deleted = await service.delete_ready(seed.owner_a, thread_id=thread_id, file_id=ready.id)
     assert deleted.status == "deleted"
     assert await service.get_ready(seed.owner_a, thread_id=thread_id, file_id=ready.id) is None
-    assert await service.list_ready(seed.owner_a, thread_id=thread_id) == ()
+    assert [item.id for item in await service.list_ready(seed.owner_a, thread_id=thread_id)] == [child.id]
     with pytest.raises(PrivateWorkNotFound):
         await service.delete_ready(seed.owner_a, thread_id=thread_id, file_id=ready.id)
     async with seed.engine.connect() as connection:
-        assert (
-            await connection.scalar(
-                text("SELECT count(*) FROM file_chunks WHERE file_id=:file_id"),
+        target = (
+            await connection.execute(
+                text("SELECT id FROM files WHERE id=:file_id"),
                 {"file_id": ready.id},
             )
-            == 1
+        ).one_or_none()
+        chunk_count = await connection.scalar(
+            text("SELECT count(*) FROM file_chunks WHERE file_id=:file_id"),
+            {"file_id": ready.id},
         )
+        child_source = await connection.scalar(
+            text("SELECT source_file_id FROM files WHERE id=:file_id"),
+            {"file_id": child.id},
+        )
+        foreign_rows = (
+            await connection.execute(
+                text(
+                    """SELECT files.id,count(file_chunks.file_id) AS chunks
+                    FROM files
+                    JOIN file_chunks ON file_chunks.file_id=files.id
+                    WHERE files.id IN (:owner_b_file_id,:project_b_file_id)
+                    GROUP BY files.id
+                    ORDER BY files.id"""
+                ),
+                {
+                    "owner_b_file_id": owner_b_file.id,
+                    "project_b_file_id": project_b_file.id,
+                },
+            )
+        ).all()
+    assert target is None
+    assert chunk_count == 0
+    assert child_source is None
+    assert foreign_rows == sorted(
+        [(owner_b_file.id, 1), (project_b_file.id, 1)],
+        key=lambda row: row[0],
+    )
+
+    replacement = await service.upload(
+        seed.owner_a,
+        thread_id=thread_id,
+        logical_path="uploads/delete-me.txt",
+        media_type="text/plain",
+        chunks=_chunks(b"replacement"),
+    )
+    await service.delete_ready(
+        seed.owner_a,
+        thread_id=thread_id,
+        file_id=replacement.id,
+    )
+    async with seed.engine.connect() as connection:
+        assert (
+            await connection.scalar(
+                text(
+                    """SELECT count(*)
+                    FROM files
+                    WHERE id IN (:first_id,:replacement_id)"""
+                ),
+                {"first_id": ready.id, "replacement_id": replacement.id},
+            )
+            == 0
+        )
+        assert (
+            await connection.scalar(
+                text(
+                    """SELECT count(*)
+                    FROM file_chunks
+                    WHERE file_id IN (:first_id,:replacement_id)"""
+                ),
+                {"first_id": ready.id, "replacement_id": replacement.id},
+            )
+            == 0
+        )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_contributor_delete_boundary_includes_upload_workspace_and_output(
+    file_service_seed,
+) -> None:
+    from app.private_work.file_service import (
+        USER_DELETABLE_PRIVATE_FILE_KINDS,
+        PrivateFileService,
+        PrivateUpload,
+    )
+
+    seed, thread_id = file_service_seed
+    assert USER_DELETABLE_PRIVATE_FILE_KINDS == {
+        "upload",
+        "workspace",
+        "output",
+    }
+    service = PrivateFileService(seed.factory)
+    ready = await service.upload_many(
+        seed.owner_a,
+        thread_id=thread_id,
+        uploads=(
+            PrivateUpload(
+                logical_path="uploads/delete-upload.txt",
+                media_type="text/plain",
+                chunks=_chunks(b"upload"),
+                kind="upload",
+            ),
+            PrivateUpload(
+                logical_path="workspace/delete-workspace.txt",
+                media_type="text/plain",
+                chunks=_chunks(b"workspace"),
+                kind="workspace",
+            ),
+            PrivateUpload(
+                logical_path="outputs/delete-output.txt",
+                media_type="text/plain",
+                chunks=_chunks(b"output"),
+                kind="output",
+            ),
+        ),
+    )
+
+    for record in ready:
+        assert (
+            await service.delete_ready(
+                seed.owner_a,
+                thread_id=thread_id,
+                file_id=record.id,
+            )
+        ).status == "deleted"
+    assert await service.list_ready(seed.owner_a, thread_id=thread_id) == ()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_branch_copy_delete_detaches_only_the_copied_dependency_chain(
+    file_service_seed,
+) -> None:
+    from app.private_work.file_service import PrivateFileService
+
+    seed, source_thread_id = file_service_seed
+    target_thread_id = f"branch-delete-{uuid.uuid4()}"
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_a_scope,
+            thread_id=target_thread_id,
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+    service = PrivateFileService(seed.factory)
+    source = await service.upload(
+        seed.owner_a,
+        thread_id=source_thread_id,
+        logical_path="uploads/branch-source.txt",
+        media_type="text/plain",
+        chunks=_chunks(b"source"),
+    )
+    derived = await service.upload(
+        seed.owner_a,
+        thread_id=source_thread_id,
+        logical_path="workspace/branch-derived.md",
+        media_type="text/markdown",
+        chunks=_chunks(b"derived"),
+        kind="workspace",
+        source_file_id=source.id,
+    )
+    await service.copy_thread_files(
+        seed.owner_a,
+        source_thread_id,
+        target_thread_id,
+    )
+    async with seed.engine.connect() as connection:
+        target_rows = (
+            await connection.execute(
+                text(
+                    """SELECT id,logical_path,source_file_id
+                    FROM files
+                    WHERE project_id=:project_id
+                      AND owner_user_id=:owner_user_id
+                      AND thread_id=:thread_id
+                    ORDER BY logical_path"""
+                ),
+                {
+                    "project_id": seed.owner_a.project_id,
+                    "owner_user_id": str(seed.owner_a.user_id),
+                    "thread_id": target_thread_id,
+                },
+            )
+        ).all()
+    copied_source, copied_derived = target_rows
+    assert copied_source.logical_path == source.logical_path
+    assert copied_derived.logical_path == derived.logical_path
+    assert copied_derived.source_file_id == copied_source.id
+
+    await service.delete_ready(
+        seed.owner_a,
+        thread_id=target_thread_id,
+        file_id=copied_source.id,
+    )
+    async with seed.engine.connect() as connection:
+        source_rows = (
+            await connection.execute(
+                text(
+                    """SELECT id,source_file_id
+                    FROM files
+                    WHERE id IN (:source_id,:derived_id)
+                    ORDER BY id"""
+                ),
+                {"source_id": source.id, "derived_id": derived.id},
+            )
+        ).all()
+        target_source = await connection.scalar(
+            text("SELECT id FROM files WHERE id=:file_id"),
+            {"file_id": copied_source.id},
+        )
+        target_child_source = await connection.scalar(
+            text("SELECT source_file_id FROM files WHERE id=:file_id"),
+            {"file_id": copied_derived.id},
+        )
+    assert source_rows == sorted(
+        [(source.id, None), (derived.id, source.id)],
+        key=lambda row: row[0],
+    )
+    assert target_source is None
+    assert target_child_source is None
 
 
 @pytest.mark.postgres

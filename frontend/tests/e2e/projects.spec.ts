@@ -260,13 +260,76 @@ test("workspace shows project cards without project navigation", async ({
   await expect(
     page.getByRole("menuitem", { name: "平台管理" }),
   ).toHaveAttribute("href", "/admin/operations");
+  await page.getByRole("menuitem", { name: "系统设置" }).click();
+  const settingsDialog = page.getByRole("dialog", { name: "Settings" });
+  await expect(settingsDialog).toBeVisible();
+  const systemTheme = settingsDialog.getByRole("button", {
+    name: /System.*Match the operating system preference automatically/u,
+  });
+  await expect(systemTheme).toBeVisible();
+  await expect(
+    settingsDialog.getByRole("button", { name: /Light.*Bright palette/u }),
+  ).toBeVisible();
+  const darkTheme = settingsDialog.getByRole("button", {
+    name: /Dark.*Dim palette/u,
+  });
+  await expect(darkTheme).toBeVisible();
+  await darkTheme.click();
+  await expect(page.locator("html")).toHaveClass(/dark/u);
+  await systemTheme.click();
+  await page.keyboard.press("Escape");
+});
+
+test("desktop project menu collapses to icon navigation and expands again", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  mockLangGraphAPI(page);
+  await mockProjectsAPI(page);
+
+  await page.goto("/projects/research-lab");
+  await expect(page.getByTestId("project-home")).toBeVisible();
+
+  const menu = page.getByRole("complementary", { name: "项目菜单栏" });
+  await expect(menu).toHaveAttribute("data-state", "expanded");
+  await expect(menu).toHaveCSS("width", "256px");
+  await expect(menu.getByRole("link", { name: "项目概览" })).toBeVisible();
+
+  await menu.getByRole("button", { name: "收起菜单栏" }).click();
+
+  await expect(menu).toHaveAttribute("data-state", "collapsed");
+  await expect(menu).toHaveCSS("width", "56px");
+  await expect(menu.getByRole("button")).toHaveCount(1);
+  const collapsedOverview = menu.getByRole("link", { name: "项目概览" });
+  await expect(collapsedOverview).toBeVisible();
+  await expect(collapsedOverview).toHaveAttribute("title", "项目概览");
+  await expect(collapsedOverview).toHaveAttribute("aria-current", "page");
+  await expect(collapsedOverview).not.toContainText("项目概览");
+  await expect(menu.getByRole("link", { name: "返回工作空间" })).toBeVisible();
+
+  await menu.getByRole("button", { name: "展开菜单栏" }).click();
+
+  await expect(menu).toHaveAttribute("data-state", "expanded");
+  await expect(menu).toHaveCSS("width", "256px");
+  await expect(menu.getByRole("link", { name: "项目概览" })).toContainText(
+    "项目概览",
+  );
 });
 
 test("project workbench supports create, search, pin, edit, enter, and return", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
-  const api = await mockProjectsAPI(page);
+  const api = await mockProjectsAPI(page, [
+    {
+      ...baseProject,
+      capabilities: [
+        ...baseProject.capabilities,
+        "project.members.manage",
+        "project.lifecycle.manage",
+      ],
+    },
+  ]);
 
   await page.goto("/workspace");
   await expect(page.getByTestId("project-workbench")).toBeVisible();
@@ -300,7 +363,7 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
 
   await page.getByRole("textbox", { name: "搜索项目" }).fill("no-result");
   await expect(page.getByTestId("project-search-empty")).toBeVisible();
-  await page.getByRole("button", { name: "清除搜索" }).click();
+  await page.getByRole("button", { name: "清除筛选" }).click();
 
   const researchCard = page
     .getByTestId("project-card")
@@ -315,13 +378,13 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   await expect(
     page.getByRole("menuitem", { name: "平台管理" }),
   ).toHaveAttribute("href", "/admin/operations");
+  await expect(page.getByRole("menuitem", { name: "系统设置" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "系统设置" }).click();
+  await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("link", { name: "Agent" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Skill" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "MCP" })).toHaveCount(0);
-  await expect(
-    page.getByText("对话和记忆私有，Agent、Skill 和 MCP 共享。"),
-  ).toBeVisible();
   expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
   expect(api.listRequests().at(-1)?.searchParams.get("query")).toBe(
     "research-lab",
@@ -459,7 +522,7 @@ test("project context re-enters on membership version changes and rejects the ol
   await expect(page.getByRole("link", { name: "项目设置" })).toHaveCount(0);
 });
 
-test("project home enables ready private work in dark mobile layout", async ({
+test("project home omits private-work overview sections in dark mobile layout", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 375, height: 812 });
@@ -469,6 +532,8 @@ test("project home enables ready private work in dark mobile layout", async ({
     ...baseProject,
     capabilities: [
       ...baseProject.capabilities,
+      "project.members.manage",
+      "shared_assets.read",
       "shared_assets.execute",
       "private_work.create",
       "private_work.read_own",
@@ -491,7 +556,7 @@ test("project home enables ready private work in dark mobile layout", async ({
   const threadRequests: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname.includes("/threads")) {
-      threadRequests.push(request.url());
+      threadRequests.push(new URL(request.url()).pathname);
     }
   });
 
@@ -505,14 +570,23 @@ test("project home enables ready private work in dark mobile layout", async ({
   await expect(page.getByRole("link", { name: "项目设置" })).toBeVisible();
   await expect(page.getByRole("link", { name: "返回工作空间" })).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "项目隐私边界" })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByText("对话和记忆私有，Agent、Skill 和 MCP 共享。"),
+  ).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "最近私有对话" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("button", { name: "开始私有对话" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("heading", { name: "共享资产" })).toBeVisible();
   await expect(page.getByText("共享 Agent")).toBeVisible();
   await expect(page.getByText("共享 Skill")).toBeVisible();
   await expect(page.getByText("共享 MCP")).toBeVisible();
-  const privateWork = page.getByRole("button", { name: "开始私有对话" });
-  await expect(privateWork).toBeEnabled();
-  expect(threadRequests).toEqual([
-    `http://localhost:3000/api/projects/${PROJECT_ID}/private-work/threads/search`,
-  ]);
+  expect(threadRequests).toEqual([]);
   expect(api.enterPaths()).toEqual([`/api/projects/${PROJECT_ID}/enter`]);
   await expect
     .poll(() =>

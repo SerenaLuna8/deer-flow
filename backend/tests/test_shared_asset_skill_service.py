@@ -7,6 +7,7 @@ import importlib
 import inspect
 import logging
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -353,6 +354,94 @@ def test_skill_history_metadata_query_does_not_select_blob_content() -> None:
     compiled = str(session.statement)
     assert "skill_version_files.content" not in compiled
     assert "skill_version_files.path" in compiled
+
+
+@pytest.mark.asyncio
+async def test_skill_list_loads_current_published_descriptions_in_one_batch() -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    actor = _editor_context()
+    now = datetime.now(UTC)
+    asset = SkillRow(
+        id=uuid.uuid4(),
+        scope="system",
+        project_id=None,
+        slug="described-skill",
+        display_name="Described skill",
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+        version=1,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=now,
+        updated_at=now,
+    )
+
+    class Repository:
+        list_calls = 0
+        description_calls = 0
+
+        async def list_project_visible(self, context):
+            assert context is actor
+            self.list_calls += 1
+            return (asset,)
+
+        async def current_published_descriptions(self, asset_ids):
+            assert asset_ids == (asset.id,)
+            self.description_calls += 1
+            return {asset.id: "Current published description"}
+
+    repository = Repository()
+    service = service_module.SkillService(lambda: None)
+    service._execute = _ServiceWithoutSessions(repository)
+
+    views = await service.list_visible(actor)
+
+    assert repository.list_calls == 1
+    assert repository.description_calls == 1
+    assert len(views) == 1
+    assert views[0].id == asset.id
+    assert views[0].description == "Current published description"
+
+
+@pytest.mark.asyncio
+async def test_project_skill_description_repository_query_is_not_n_plus_one() -> None:
+    repository_module = importlib.import_module("app.shared_assets.skill_repository")
+    now = datetime.now(UTC)
+    asset = SkillRow(
+        id=uuid.uuid4(),
+        scope="system",
+        project_id=None,
+        slug="batched-skill",
+        display_name="Batched skill",
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+        version=1,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=now,
+        updated_at=now,
+    )
+
+    class Result:
+        def __iter__(self):
+            return iter(((asset.id, "Batched description"),))
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return Result()
+
+    session = Session()
+    repository = repository_module.SkillRepository(session)
+
+    descriptions = await repository.current_published_descriptions((asset.id,))
+
+    assert len(session.statements) == 1
+    assert descriptions == {asset.id: "Batched description"}
+    sql = str(session.statements[0])
+    assert "skill_versions" in sql
+    assert "current_published_version_id" in sql
 
 
 @pytest.mark.asyncio

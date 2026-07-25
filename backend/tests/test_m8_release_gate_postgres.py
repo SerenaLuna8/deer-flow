@@ -44,7 +44,6 @@ EXPECTED_M8_SUFFIX = (
 EXPECTED_COMMAND_IDS = (
     "contracts.schemas",
     "contracts.matrix",
-    "contracts.docs",
     "contracts.git_diff",
     "postgres.m1_m8",
     "backend.full",
@@ -129,9 +128,16 @@ def test_deterministic_playwright_gate_executes_the_complete_e2e_inventory() -> 
     assert package["scripts"]["test:e2e:m8:deterministic"] == "playwright test"
     command = next(item for item in COMMANDS if item.command_id == "frontend.e2e_deterministic")
     assert command.summary_parser == "playwright"
-    for workflow_name in ("e2e-tests.yml", "project-saas-release-gates.yml"):
-        workflow = (REPO_ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
-        assert "pnpm test:e2e:m8:deterministic" in workflow
+    workflows = REPO_ROOT / ".github" / "workflows"
+    workflow = (workflows / "project-saas-release-gates.yml").read_text(encoding="utf-8")
+    assert "pnpm test:e2e:m8:deterministic" in workflow
+    duplicate_workflows = (
+        "backend-unit-tests.yml",
+        "backend-blocking-io-tests.yml",
+        "frontend-unit-tests.yml",
+        "e2e-tests.yml",
+    )
+    assert all(not (workflows / workflow_name).exists() for workflow_name in duplicate_workflows)
 
 
 def test_matrix_stage_executes_selector_and_surface_validation() -> None:

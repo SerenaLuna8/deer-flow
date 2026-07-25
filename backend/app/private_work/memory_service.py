@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import math
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -161,6 +163,49 @@ class PrivateMemoryService:
         namespace: str = "default",
         expected_version: int,
     ) -> ProjectMemorySnapshot:
+        return await self._save(
+            context,
+            memory_data,
+            namespace=namespace,
+            expected_version=expected_version,
+        )
+
+    async def create_fact(
+        self,
+        context: PrivateWorkContext,
+        *,
+        namespace: str = "default",
+        expected_version: int,
+        content: str,
+        category: str = "context",
+        confidence: float = 0.8,
+    ) -> ProjectMemorySnapshot:
+        current = await self._read(context, namespace=namespace)
+        if current.version != expected_version:
+            raise PrivateWorkConflict(context.request_id)
+        if not isinstance(content, str) or not content.strip():
+            raise PrivateWorkInvalid(context.request_id)
+        if not isinstance(category, str) or not category.strip() or len(category.strip()) > 32:
+            raise PrivateWorkInvalid(context.request_id)
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            raise PrivateWorkInvalid(context.request_id)
+        confidence = float(confidence)
+        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise PrivateWorkInvalid(context.request_id)
+
+        now = datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
+        memory_data = copy.deepcopy(current.memory)
+        memory_data["lastUpdated"] = now
+        memory_data.setdefault("facts", []).append(
+            {
+                "id": str(uuid.uuid4()),
+                "content": content.strip(),
+                "category": category.strip(),
+                "confidence": confidence,
+                "createdAt": now,
+                "source": "manual",
+            }
+        )
         return await self._save(
             context,
             memory_data,

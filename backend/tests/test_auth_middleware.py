@@ -352,9 +352,7 @@ def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(mon
 
 
 def test_protected_path_with_junk_cookie_rejected(client):
-    """Junk cookie → 401. Middleware strictly validates the JWT now
-    (AUTH_TEST_PLAN test 7.5.8); it no longer silently passes bad
-    tokens through to the route handler."""
+    """Junk cookie → 401 instead of reaching the route handler."""
     client.cookies.set("access_token", "some-token")
     res = client.get("/api/models")
     assert res.status_code == 401

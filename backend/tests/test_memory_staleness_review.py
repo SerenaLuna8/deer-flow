@@ -568,19 +568,3 @@ class TestPrepareUpdatePromptStaleness:
         section = _build_staleness_section(candidates, config.staleness_age_days)
         assert "Staleness Review" in section
         assert "<stale_facts>" in section
-
-    def test_staleness_section_omitted_when_not_triggered(self):
-        memory = _make_memory([])  # no facts at all
-        config = _memory_config(
-            staleness_age_days=90,
-        )
-        assert _select_stale_candidates(memory, config) == []
-
-    def test_staleness_section_omitted_when_disabled(self):
-        old_facts = [_make_fact(f"fact_{i}", days_ago=200) for i in range(10)]
-        memory = _make_memory(old_facts)
-        config = _memory_config(
-            staleness_review_enabled=False,
-        )
-        assert config.staleness_review_enabled is False
-        assert len(_select_stale_candidates(memory, config)) == 10

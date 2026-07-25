@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -793,6 +793,25 @@ class SkillRepository:
         project_rows = (await self.session.execute(project_statement)).scalars().all()
         system_rows = (await self.session.execute(system_statement)).scalars().all()
         return tuple(sorted((*project_rows, *system_rows), key=lambda row: (row.created_at, row.id)))
+
+    async def current_published_descriptions(
+        self,
+        asset_ids: Sequence[uuid.UUID],
+    ) -> Mapping[uuid.UUID, str]:
+        """Load current descriptions in one query for already-authorized rows."""
+
+        ids = tuple(asset_ids)
+        if not ids:
+            return {}
+        statement = (
+            select(SkillRow.id, SkillVersionRow.description)
+            .join(
+                SkillVersionRow,
+                SkillVersionRow.id == SkillRow.current_published_version_id,
+            )
+            .where(SkillRow.id.in_(ids))
+        )
+        return {asset_id: description for asset_id, description in (await self.session.execute(statement))}
 
     async def list_system_visible(
         self,

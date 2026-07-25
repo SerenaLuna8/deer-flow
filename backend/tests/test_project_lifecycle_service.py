@@ -56,8 +56,12 @@ async def test_request_deletion_sets_fixed_thirty_day_window() -> None:
     repository.lock_pending_deletion.return_value = (project, actor)
     repository.lock_active_members.return_value = ()
     repository.mark_pending_locked.return_value = expected
+    retention_jobs = AsyncMock()
 
-    result = await ProjectLifecycleService(repository).request_deletion(context, NOW)
+    result = await ProjectLifecycleService(
+        repository,
+        retention_jobs=retention_jobs,
+    ).request_deletion(context, NOW)
 
     assert result is expected
     repository.mark_pending_locked.assert_awaited_once_with(
@@ -67,6 +71,12 @@ async def test_request_deletion_sets_fixed_thirty_day_window() -> None:
         effective_at=NOW + timedelta(days=30),
         requested_by_user_id=context.user_id,
         request_id=context.request_id,
+    )
+    retention_jobs.admit_project.assert_awaited_once_with(
+        repository.session,
+        project_id=project.id,
+        deletion_effective_at=NOW + timedelta(days=30),
+        now=NOW,
     )
 
 
@@ -87,8 +97,12 @@ async def test_restore_uses_dedicated_user_scope_without_project_context() -> No
     repository.lock_restore.return_value = (project, actor)
     repository.lock_active_members.return_value = ()
     repository.restore_locked.return_value = expected
+    retention_jobs = AsyncMock()
 
-    result = await ProjectLifecycleService(repository).restore(
+    result = await ProjectLifecycleService(
+        repository,
+        retention_jobs=retention_jobs,
+    ).restore(
         user_id,
         project_id,
         "req-restore",
@@ -101,6 +115,11 @@ async def test_restore_uses_dedicated_user_scope_without_project_context() -> No
         project,
         actor,
         request_id="req-restore",
+    )
+    retention_jobs.restore_project.assert_awaited_once_with(
+        repository.session,
+        project_id=project_id,
+        now=NOW,
     )
 
 
@@ -124,6 +143,7 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit() 
     repository.mark_pending_locked.return_value = object()
     authorization = AsyncMock()
     retention = AsyncMock()
+    retention_jobs = AsyncMock()
 
     async def mark_revoked(*_args, **_kwargs):
         events.append("authorization-mark")
@@ -139,6 +159,7 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit() 
         repository,
         authorization=authorization,
         retention=retention,
+        retention_jobs=retention_jobs,
     ).request_deletion(context, NOW)
 
     assert events == [
@@ -151,6 +172,7 @@ async def test_pending_deletion_revokes_and_freezes_all_members_before_commit() 
     ]
     assert authorization.mark_revoked.await_count == 2
     assert retention.freeze_owner.await_count == 2
+    retention_jobs.admit_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -168,13 +190,19 @@ async def test_restore_only_restores_active_members_of_same_project() -> None:
     repository.lock_active_members.return_value = (member,)
     repository.restore_locked.return_value = object()
     retention = AsyncMock()
+    retention_jobs = AsyncMock()
 
-    await ProjectLifecycleService(repository, retention=retention).restore(uuid.uuid4(), project_id, "req-restore", NOW)
+    await ProjectLifecycleService(
+        repository,
+        retention=retention,
+        retention_jobs=retention_jobs,
+    ).restore(uuid.uuid4(), project_id, "req-restore", NOW)
 
     retention.restore_owners.assert_awaited_once()
     kwargs = retention.restore_owners.await_args.kwargs
     assert kwargs["project_id"] == project_id
     assert kwargs["owner_user_ids"] == (member.user_id,)
+    retention_jobs.restore_project.assert_awaited_once()
 
 
 @pytest.mark.asyncio

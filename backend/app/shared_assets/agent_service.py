@@ -467,7 +467,9 @@ class AgentService:
     @staticmethod
     def _require_capability(actor: _Actor, capability: Capability) -> None:
         if isinstance(actor, SystemAssetGovernanceContext):
-            return
+            if actor.project_id is not None or capability is Capability.SHARED_ASSETS_READ:
+                return
+            raise AssetForbidden(actor.request_id)
         if isinstance(actor, SystemAssetReadContext) and capability is Capability.SHARED_ASSETS_READ:
             return
         if isinstance(actor, ProjectContext) and capability in actor.capabilities:

@@ -297,10 +297,15 @@ export const skillVersionSchema = z
   })
   .strict();
 
+const mcpCredentialSlotNameSchema = z
+  .string()
+  .max(63)
+  .regex(/^[a-z][a-z0-9._-]{0,62}$/);
+
 const mcpCredentialSlotSchema = z
   .object({
     id: assetIdSchema,
-    name: z.string().min(1),
+    name: mcpCredentialSlotNameSchema,
     purpose: z.string(),
     payload_schema: stringListMapSchema,
     required: z.boolean(),
@@ -308,7 +313,7 @@ const mcpCredentialSlotSchema = z
   .strict();
 const mcpDefinitionSlotSchema = z
   .object({
-    name: z.string().min(1),
+    name: mcpCredentialSlotNameSchema,
     purpose: z.string(),
     payload_schema: stringListMapSchema,
     required: z.boolean(),
@@ -471,6 +476,7 @@ export const projectAssetItemSchema = assetSummarySchema
   .extend({
     capabilities: assetCapabilitiesSchema,
     binding: systemBindingItemSchema.nullable(),
+    description: z.string().nullable().optional(),
   })
   .strict();
 
@@ -518,6 +524,15 @@ export const assetMutationResponseSchema = z
 export const credentialMutationResponseSchema = z
   .object({
     item: credentialMetadataSchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const credentialGrantMigrationResponseSchema = z
+  .object({
+    credential_id: assetIdSchema,
+    credential_version_id: assetIdSchema,
+    migrated_count: z.number().int().nonnegative(),
     request_id: z.string().min(1),
   })
   .strict();
@@ -577,7 +592,7 @@ export const mcpVersionInputSchema = z
       .array(
         z
           .object({
-            name: z.string().min(1),
+            name: mcpCredentialSlotNameSchema,
             purpose: z.string().default(""),
             payload_schema: stringListMapSchema,
             required: z.boolean().default(true),
@@ -618,6 +633,9 @@ export const replaceCredentialInputSchema = z
 export const revokeCredentialInputSchema = z
   .object({ expected_credential_version: z.number().int().positive() })
   .strict();
+export const migrateCredentialGrantsInputSchema = z
+  .object({ expected_credential_version: z.number().int().positive() })
+  .strict();
 export const approveMcpInputSchema = z
   .object({
     credential_versions: z.custom<Record<string, string>>(
@@ -628,6 +646,21 @@ export const approveMcpInputSchema = z
         ),
     ),
     expected_asset_version: z.number().int().positive(),
+  })
+  .strict();
+export const configureSystemMcpCredentialGrantsInputSchema = z
+  .object({
+    credential_versions: z.custom<Record<string, string>>(
+      (value) =>
+        isStringMap(value) &&
+        Object.values(value).every(
+          (item) => assetIdSchema.safeParse(item).success,
+        ),
+    ),
+    expected_active_grant_versions: z.record(
+      z.string().min(1),
+      z.number().int().positive(),
+    ),
   })
   .strict();
 export const enableSystemBindingInputSchema = z
@@ -676,6 +709,9 @@ export type AssetMutationResponse = z.infer<typeof assetMutationResponseSchema>;
 export type CredentialMutationResponse = z.infer<
   typeof credentialMutationResponseSchema
 >;
+export type CredentialGrantMigrationResponse = z.infer<
+  typeof credentialGrantMigrationResponseSchema
+>;
 export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
 export type AgentVersionInput = z.input<typeof agentVersionInputSchema>;
 export type SkillVersionInput = z.input<typeof skillVersionInputSchema>;
@@ -696,7 +732,13 @@ export type ReplaceCredentialInput = z.input<
   typeof replaceCredentialInputSchema
 >;
 export type RevokeCredentialInput = z.input<typeof revokeCredentialInputSchema>;
+export type MigrateCredentialGrantsInput = z.input<
+  typeof migrateCredentialGrantsInputSchema
+>;
 export type ApproveMcpInput = z.input<typeof approveMcpInputSchema>;
+export type ConfigureSystemMcpCredentialGrantsInput = z.input<
+  typeof configureSystemMcpCredentialGrantsInputSchema
+>;
 export type EnableSystemBindingInput = z.input<
   typeof enableSystemBindingInputSchema
 >;

@@ -102,7 +102,7 @@ export function projectMemoryQueryKey(scope: ProjectClientScope) {
 
 export function projectMemoryMutationKey(
   scope: ProjectClientScope,
-  action: "reload" | "import" | "update-fact" | "delete-fact",
+  action: "reload" | "import" | "create-fact" | "update-fact" | "delete-fact",
 ) {
   return privateWorkQueryKey(scope, "memory", "default", "mutation", action);
 }
@@ -115,6 +115,7 @@ export function projectMemoryPermissions(capabilities: readonly Capability[]) {
     canExport: canRead,
     canReload: canModify,
     canImport: canModify,
+    canAdd: canModify,
     canModify,
     canDelete: canRead,
   };
@@ -173,6 +174,36 @@ export async function reloadProjectMemory(
     signal,
   });
   return readProjectMemoryResponse(response, "Failed to reload project Memory");
+}
+
+export async function createProjectMemoryFact(
+  access: ProjectMemoryAccess,
+  expectedVersion: number,
+  input: MemoryFactInput,
+  signal?: AbortSignal,
+) {
+  const parsedInput = z
+    .object({
+      content: z.string().trim().min(1).max(10_000),
+      category: z.string().trim().min(1).max(32),
+      confidence: z.number().min(0).max(1),
+    })
+    .strict()
+    .parse(input);
+  const { baseURL } = requireProjectMemoryAccess(access);
+  const response = await fetchWithAuth(namespacePath(baseURL, "/facts"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_version: z.number().int().nonnegative().parse(expectedVersion),
+      ...parsedInput,
+    }),
+    signal,
+  });
+  return readProjectMemoryResponse(
+    response,
+    "Failed to create project Memory fact",
+  );
 }
 
 export async function updateProjectMemoryFact(

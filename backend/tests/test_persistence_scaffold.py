@@ -68,7 +68,7 @@ async def test_init_engine_uses_postgres_pool_and_statement_timeout() -> None:
         pool_timeout_seconds=12,
         statement_timeout_seconds=9,
     )
-    with patch("deerflow.persistence.engine.create_async_engine", return_value=engine) as create, patch("deerflow.persistence.bootstrap.bootstrap_schema", new=AsyncMock()):
+    with patch("deerflow.persistence.engine.create_async_engine", return_value=engine) as create, patch("deerflow.persistence.bootstrap.validate_schema", new=AsyncMock()):
         await init_engine(config)
     kwargs = create.call_args.kwargs
     assert kwargs["pool_size"] == 7
@@ -101,6 +101,13 @@ async def test_init_engine_does_not_create_missing_database() -> None:
 
 
 class TestDatabaseConfig:
+    def test_removed_backend_selector_is_rejected(self):
+        with pytest.raises(ValidationError, match="backend"):
+            DatabaseConfig(
+                url="postgresql://localhost/deerflow",
+                backend="memory",
+            )
+
     def test_url_defaults_from_environment(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@db:5432/deerflow")
         c = DatabaseConfig()

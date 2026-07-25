@@ -51,6 +51,7 @@ MAX_SKILL_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_SKILL_TEXT_PREVIEW_BYTES = 1024 * 1024
 MAX_SKILL_EDIT_TEXT_BYTES = 5 * 1024 * 1024
 MAX_SKILL_FILE_CHANGES = 256
+MAX_PROJECT_SKILL_BATCH_ITEMS = 256
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -151,6 +152,21 @@ class CreateSkill:
 
 
 @dataclass(frozen=True)
+class ProjectSkillArchiveImport:
+    files: tuple[SkillArchiveFile, ...]
+
+
+@dataclass(frozen=True)
+class ProjectSkillArchiveImportResult:
+    discovered_count: int
+    planned_create_count: int
+    planned_replace_count: int
+    unchanged_count: int
+    created_count: int
+    replaced_count: int
+
+
+@dataclass(frozen=True)
 class SkillFileView:
     path: str
     media_type: str
@@ -212,6 +228,7 @@ class SkillAssetView:
     created_by_user_id: str
     created_at: datetime
     updated_at: datetime
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,6 +249,19 @@ class SkillVersionView:
     payload_checksum: str
     created_by_user_id: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class _PreparedProjectSkillArchive:
+    command: CreateSkill
+    preview: SkillArchivePreview
+
+
+@dataclass(frozen=True)
+class _ProjectSkillArchivePlanItem:
+    action: Literal["create", "replace", "unchanged"]
+    prepared: _PreparedProjectSkillArchive
+    asset: SkillRow | None
 
 
 def _validate_archive_file(item: SkillArchiveFile, request_id: str) -> SkillArchiveFile:
@@ -573,6 +603,66 @@ class SkillService:
         normalized = normalize_skill_files(files, request_id=request_id)
         return await asyncio.to_thread(_analyze_skill_files, normalized, request_id)
 
+    async def import_project_archives_atomic(
+        self,
+        actor: ProjectContext,
+        imports: Sequence[ProjectSkillArchiveImport],
+        *,
+        execute: bool,
+        replace: bool = False,
+    ) -> ProjectSkillArchiveImportResult:
+        """Validate and import one Project Skill batch in a single transaction."""
+
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        if type(execute) is not bool or type(replace) is not bool:
+            raise AssetValidationFailed(actor.request_id)
+        prepared = await self._prepare_project_archive_imports(actor, imports)
+
+        async def operation(repository: SkillRepository) -> ProjectSkillArchiveImportResult:
+            plan = await self._plan_project_archive_import(
+                repository,
+                actor,
+                prepared,
+                execute=execute,
+                replace=replace,
+            )
+            planned_create_count = sum(item.action == "create" for item in plan)
+            planned_replace_count = sum(item.action == "replace" for item in plan)
+            unchanged_count = sum(item.action == "unchanged" for item in plan)
+            created_count = 0
+            replaced_count = 0
+            if execute:
+                for item in plan:
+                    if item.action == "create":
+                        await self._execute_project_archive_create(
+                            repository,
+                            actor,
+                            item.prepared,
+                        )
+                        created_count += 1
+                    elif item.action == "replace":
+                        if item.asset is None:
+                            raise AssetConflict(actor.request_id)
+                        await self._execute_project_archive_replace(
+                            repository,
+                            actor,
+                            item.prepared,
+                            item.asset,
+                        )
+                        replaced_count += 1
+            return ProjectSkillArchiveImportResult(
+                discovered_count=len(prepared),
+                planned_create_count=planned_create_count,
+                planned_replace_count=planned_replace_count,
+                unchanged_count=unchanged_count,
+                created_count=created_count,
+                replaced_count=replaced_count,
+            )
+
+        return await self._execute(actor, operation)
+
     async def preview_version_file(
         self,
         actor: ProjectContext,
@@ -643,13 +733,7 @@ class SkillService:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: SkillRepository) -> SkillAssetView:
-            if isinstance(actor, ProjectContext):
-                row = await repository.create_project_asset(actor, command)
-            elif actor.project_id is not None:
-                row = await repository.create_override_asset(actor, command)
-            else:
-                row = await repository.create_system_asset(actor, command)
-            return self._asset_view(row)
+            return await self._create_asset_in_transaction(repository, actor, command)
 
         return await self._execute(
             actor,
@@ -668,16 +752,12 @@ class SkillService:
         preview = await self.preview_archive(actor, files)
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
-            asset = await self._get_asset(repository, actor, asset_id, for_update=True)
-            self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status != "active":
-                raise AssetConflict(actor.request_id)
-            return await self._create_version(
+            return await self._create_version_from_preview_in_transaction(
                 repository,
                 actor,
-                asset,
+                asset_id,
                 preview,
-                supersedes_version_id=asset.current_published_version_id,
+                expected_asset_version=expected_asset_version,
             )
 
         return await self._execute(
@@ -756,35 +836,13 @@ class SkillService:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
-            asset = await self._get_asset(repository, actor, asset_id, for_update=True)
-            self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status != "active":
-                raise AssetConflict(actor.request_id)
-            record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
-            if record.row.workflow_status != WorkflowStatus.DRAFT.value:
-                raise AssetConflict(actor.request_id)
-            files = await asyncio.to_thread(
-                self._archive_files,
-                record,
-                actor.request_id,
+            return await self._publish_in_transaction(
+                repository,
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=expected_asset_version,
             )
-            current = await asyncio.to_thread(_analyze_skill_files, files, actor.request_id)
-            expected_requirements = [{"name": requirement.name, "optional": requirement.optional} for requirement in current.secret_requirements]
-            if (
-                current.checksum != record.row.payload_checksum
-                or current.description != record.row.description
-                or dict(current.frontmatter) != record.row.frontmatter
-                or current.compatibility != record.row.compatibility
-                or expected_requirements != record.row.secret_requirements
-                or current.scan_decision != record.row.scan_decision
-                or dict(current.scan_summary) != record.row.scan_summary
-            ):
-                raise AssetValidationFailed(actor.request_id)
-            record.row.workflow_status = WorkflowStatus.PUBLISHED.value
-            asset.current_published_version_id = record.row.id
-            asset.version += 1
-            await repository.session.flush()
-            return self._version_view(record)
 
         return await self._execute(
             actor,
@@ -842,7 +900,16 @@ class SkillService:
                 rows = await repository.list_override_visible(actor)
             else:
                 rows = await repository.list_system_visible(actor)
-            return tuple(self._asset_view(row) for row in rows)
+            descriptions = await repository.current_published_descriptions(
+                tuple(row.id for row in rows),
+            )
+            return tuple(
+                self._asset_view(
+                    row,
+                    description=descriptions.get(row.id, ""),
+                )
+                for row in rows
+            )
 
         return await self._execute(actor, operation)
 
@@ -888,6 +955,274 @@ class SkillService:
             )
 
         return await self._execute(actor, operation)
+
+    async def _prepare_project_archive_imports(
+        self,
+        actor: ProjectContext,
+        imports: Sequence[ProjectSkillArchiveImport],
+    ) -> tuple[_PreparedProjectSkillArchive, ...]:
+        try:
+            snapshot = tuple(imports)
+        except TypeError:
+            raise AssetValidationFailed(actor.request_id) from None
+        if not snapshot or len(snapshot) > MAX_PROJECT_SKILL_BATCH_ITEMS:
+            raise AssetValidationFailed(actor.request_id)
+
+        prepared: list[_PreparedProjectSkillArchive] = []
+        identities: set[str] = set()
+        for item in snapshot:
+            if type(item) is not ProjectSkillArchiveImport:
+                raise AssetValidationFailed(actor.request_id)
+            preview = await self.preview_archive(actor, item.files)
+            name = preview.frontmatter.get("name")
+            if not isinstance(name, str):
+                raise AssetValidationFailed(actor.request_id)
+            command = self._validate_create(
+                actor,
+                CreateSkill(slug=name, display_name=name),
+            )
+            identity = command.slug.casefold()
+            if identity in identities:
+                raise AssetValidationFailed(actor.request_id)
+            identities.add(identity)
+            prepared.append(
+                _PreparedProjectSkillArchive(
+                    command=command,
+                    preview=preview,
+                )
+            )
+        return tuple(sorted(prepared, key=lambda item: item.command.slug.casefold()))
+
+    async def _plan_project_archive_import(
+        self,
+        repository: SkillRepository,
+        actor: ProjectContext,
+        prepared: Sequence[_PreparedProjectSkillArchive],
+        *,
+        execute: bool,
+        replace: bool,
+    ) -> tuple[_ProjectSkillArchivePlanItem, ...]:
+        visible = await repository.list_project_visible(actor)
+        existing: dict[str, SkillRow] = {}
+        for asset in visible:
+            if asset.scope != AssetScope.PROJECT.value or asset.project_id != actor.project_id:
+                continue
+            identity = asset.slug.casefold()
+            if identity in existing:
+                raise AssetConflict(actor.request_id)
+            existing[identity] = asset
+
+        if not replace and any(item.command.slug.casefold() in existing for item in prepared):
+            raise AssetConflict(actor.request_id)
+
+        plan: list[_ProjectSkillArchivePlanItem] = []
+        for item in prepared:
+            selected = existing.get(item.command.slug.casefold())
+            if selected is None:
+                plan.append(
+                    _ProjectSkillArchivePlanItem(
+                        action="create",
+                        prepared=item,
+                        asset=None,
+                    )
+                )
+                continue
+            asset = await repository.get_project_asset(
+                actor,
+                selected.id,
+                for_update=execute,
+            )
+            if asset.status != "active" or asset.current_published_version_id is None:
+                raise AssetConflict(actor.request_id)
+            source = await repository.get_project_version(
+                actor,
+                asset.id,
+                asset.current_published_version_id,
+                for_update=execute,
+            )
+            if source.row.workflow_status != WorkflowStatus.PUBLISHED.value:
+                raise AssetConflict(actor.request_id)
+            await asyncio.to_thread(
+                self._verified_archive_files,
+                source,
+                actor.request_id,
+            )
+            action: Literal["replace", "unchanged"] = "unchanged" if source.row.payload_checksum == item.preview.checksum else "replace"
+            plan.append(
+                _ProjectSkillArchivePlanItem(
+                    action=action,
+                    prepared=item,
+                    asset=asset,
+                )
+            )
+        return tuple(plan)
+
+    async def _execute_project_archive_create(
+        self,
+        repository: SkillRepository,
+        actor: ProjectContext,
+        prepared: _PreparedProjectSkillArchive,
+    ) -> None:
+        asset = await self._create_asset_in_transaction(
+            repository,
+            actor,
+            prepared.command,
+        )
+        await self._record_governance(
+            repository.session,
+            actor,
+            asset.id,
+            None,
+            "skill.create",
+        )
+        draft = await self._create_version_from_preview_in_transaction(
+            repository,
+            actor,
+            asset.id,
+            prepared.preview,
+            expected_asset_version=asset.version,
+        )
+        await self._record_governance(
+            repository.session,
+            actor,
+            asset.id,
+            draft.id,
+            "skill.version.create",
+        )
+        published = await self._publish_in_transaction(
+            repository,
+            actor,
+            asset.id,
+            draft.id,
+            expected_asset_version=asset.version + 1,
+        )
+        await self._record_governance(
+            repository.session,
+            actor,
+            asset.id,
+            published.id,
+            "skill.publish",
+        )
+        if published.workflow_status is not WorkflowStatus.PUBLISHED or published.payload_checksum != prepared.preview.checksum:
+            raise AssetValidationFailed(actor.request_id)
+
+    async def _execute_project_archive_replace(
+        self,
+        repository: SkillRepository,
+        actor: ProjectContext,
+        prepared: _PreparedProjectSkillArchive,
+        asset: SkillRow,
+    ) -> None:
+        expected_asset_version = asset.version
+        source_version_id = asset.current_published_version_id
+        if source_version_id is None:
+            raise AssetConflict(actor.request_id)
+        draft = await self._create_version_from_preview_in_transaction(
+            repository,
+            actor,
+            asset.id,
+            prepared.preview,
+            expected_asset_version=expected_asset_version,
+        )
+        if draft.supersedes_version_id != source_version_id:
+            raise AssetConflict(actor.request_id)
+        await self._record_governance(
+            repository.session,
+            actor,
+            asset.id,
+            draft.id,
+            "skill.version.create",
+        )
+        published = await self._publish_in_transaction(
+            repository,
+            actor,
+            asset.id,
+            draft.id,
+            expected_asset_version=expected_asset_version + 1,
+        )
+        await self._record_governance(
+            repository.session,
+            actor,
+            asset.id,
+            published.id,
+            "skill.publish",
+        )
+        if published.workflow_status is not WorkflowStatus.PUBLISHED or published.payload_checksum != prepared.preview.checksum:
+            raise AssetValidationFailed(actor.request_id)
+
+    async def _create_asset_in_transaction(
+        self,
+        repository: SkillRepository,
+        actor: _Actor,
+        command: CreateSkill,
+    ) -> SkillAssetView:
+        if isinstance(actor, ProjectContext):
+            row = await repository.create_project_asset(actor, command)
+        elif actor.project_id is not None:
+            row = await repository.create_override_asset(actor, command)
+        else:
+            row = await repository.create_system_asset(actor, command)
+        return self._asset_view(row)
+
+    async def _create_version_from_preview_in_transaction(
+        self,
+        repository: SkillRepository,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        preview: SkillArchivePreview,
+        *,
+        expected_asset_version: int,
+    ) -> SkillVersionView:
+        asset = await self._get_asset(repository, actor, asset_id, for_update=True)
+        self._require_expected_version(actor, asset, expected_asset_version)
+        if asset.status != "active":
+            raise AssetConflict(actor.request_id)
+        return await self._create_version(
+            repository,
+            actor,
+            asset,
+            preview,
+            supersedes_version_id=asset.current_published_version_id,
+        )
+
+    async def _publish_in_transaction(
+        self,
+        repository: SkillRepository,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        *,
+        expected_asset_version: int,
+    ) -> SkillVersionView:
+        asset = await self._get_asset(repository, actor, asset_id, for_update=True)
+        self._require_expected_version(actor, asset, expected_asset_version)
+        if asset.status != "active":
+            raise AssetConflict(actor.request_id)
+        record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
+        if record.row.workflow_status != WorkflowStatus.DRAFT.value:
+            raise AssetConflict(actor.request_id)
+        files = await asyncio.to_thread(
+            self._archive_files,
+            record,
+            actor.request_id,
+        )
+        current = await asyncio.to_thread(_analyze_skill_files, files, actor.request_id)
+        expected_requirements = [{"name": requirement.name, "optional": requirement.optional} for requirement in current.secret_requirements]
+        if (
+            current.checksum != record.row.payload_checksum
+            or current.description != record.row.description
+            or dict(current.frontmatter) != record.row.frontmatter
+            or current.compatibility != record.row.compatibility
+            or expected_requirements != record.row.secret_requirements
+            or current.scan_decision != record.row.scan_decision
+            or dict(current.scan_summary) != record.row.scan_summary
+        ):
+            raise AssetValidationFailed(actor.request_id)
+        record.row.workflow_status = WorkflowStatus.PUBLISHED.value
+        asset.current_published_version_id = record.row.id
+        asset.version += 1
+        await repository.session.flush()
+        return self._version_view(record)
 
     async def _create_version(
         self,
@@ -1035,7 +1370,9 @@ class SkillService:
     @staticmethod
     def _require_capability(actor: _Actor, capability: Capability) -> None:
         if isinstance(actor, SystemAssetGovernanceContext):
-            return
+            if actor.project_id is not None or capability is Capability.SHARED_ASSETS_READ:
+                return
+            raise AssetForbidden(actor.request_id)
         if isinstance(actor, SystemAssetReadContext) and capability is Capability.SHARED_ASSETS_READ:
             return
         if isinstance(actor, ProjectContext) and capability in actor.capabilities:
@@ -1120,7 +1457,11 @@ class SkillService:
         return tuple(views)
 
     @staticmethod
-    def _asset_view(row: SkillRow) -> SkillAssetView:
+    def _asset_view(
+        row: SkillRow,
+        *,
+        description: str = "",
+    ) -> SkillAssetView:
         return SkillAssetView(
             id=row.id,
             scope=AssetScope(row.scope),
@@ -1133,6 +1474,7 @@ class SkillService:
             created_by_user_id=row.created_by_user_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            description=description,
         )
 
     @staticmethod

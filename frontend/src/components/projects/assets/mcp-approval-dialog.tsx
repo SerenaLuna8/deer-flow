@@ -19,6 +19,26 @@ type McpApprovalHandler = (
   credentialVersions: Record<string, string>,
 ) => McpApprovalResult | Promise<McpApprovalResult>;
 
+export function mcpApprovalCopy(mode: "publish" | "configure-grants") {
+  if (mode === "configure-grants") {
+    return {
+      title: "配置 MCP Credential 授权",
+      description:
+        "为已发布的 packaged System MCP 选择系统 Credential 当前版本。此操作只配置槽位授权，不修改或重新发布 MCP 定义。",
+      submitLabel: "保存授权",
+      emptyOptionalMessage:
+        "当前没有可选 Credential；可选槽位可留空并保存，以清除既有授权。",
+    } as const;
+  }
+  return {
+    title: "批准 MCP 版本",
+    description:
+      "为每个 Credential 槽位选择当前作用域可见的已启用 Credential 当前版本。批准成功后版本才会发布。",
+    submitLabel: "批准并发布",
+    emptyOptionalMessage: "当前没有可选 Credential；可选槽位可留空并直接批准。",
+  } as const;
+}
+
 export async function settleMcpApproval(
   operation: () => McpApprovalResult | Promise<McpApprovalResult>,
 ): Promise<boolean> {
@@ -101,6 +121,8 @@ export function McpApprovalForm({
   approvalError,
   onRetryCredentials,
   onApprove,
+  submitLabel = "批准并发布",
+  emptyOptionalMessage = "当前没有可选 Credential；可选槽位可留空并直接批准。",
 }: {
   version: McpVersion;
   pending: boolean;
@@ -111,6 +133,8 @@ export function McpApprovalForm({
   approvalError?: unknown;
   onRetryCredentials?: () => void;
   onApprove: McpApprovalHandler;
+  submitLabel?: string;
+  emptyOptionalMessage?: string;
 }) {
   const hasRequiredSlots = version.credential_slots.some(
     (slot) => slot.required,
@@ -185,7 +209,7 @@ export function McpApprovalForm({
             >
               {hasRequiredSlots
                 ? "必填槽位没有可用 Credential。"
-                : "当前没有可选 Credential；可选槽位可留空并直接批准。"}
+                : emptyOptionalMessage}
             </p>
           )}
         </>
@@ -205,7 +229,7 @@ export function McpApprovalForm({
             requiredCredentialsUnavailable
           }
         >
-          批准并发布
+          {submitLabel}
         </Button>
       </DialogFooter>
     </form>
@@ -224,6 +248,7 @@ export function McpApprovalDialog({
   onRetryCredentials,
   onOpenChange,
   onApprove,
+  mode = "publish",
 }: {
   version: McpVersion | null;
   open: boolean;
@@ -236,16 +261,15 @@ export function McpApprovalDialog({
   onRetryCredentials?: () => void;
   onOpenChange: (open: boolean) => void;
   onApprove: McpApprovalHandler;
+  mode?: "publish" | "configure-grants";
 }) {
+  const copy = mcpApprovalCopy(mode);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>批准 MCP 版本</DialogTitle>
-          <DialogDescription>
-            为每个 Credential 槽位选择当前作用域可见的已启用 Credential
-            当前版本。批准成功后版本才会发布。
-          </DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
         {version && (
           <McpApprovalForm
@@ -257,6 +281,8 @@ export function McpApprovalDialog({
             credentialsError={credentialsError}
             approvalError={approvalError}
             onRetryCredentials={onRetryCredentials}
+            submitLabel={copy.submitLabel}
+            emptyOptionalMessage={copy.emptyOptionalMessage}
             onApprove={(approvedVersion, bindings) =>
               void settleMcpApproval(() =>
                 onApprove(approvedVersion, bindings),

@@ -6,13 +6,14 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import {
   approveProjectMcpVersion,
-  createAdminAssetVersion,
+  configureAdminMcpCredentialGrants,
   createProjectAssetVersion,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
   getProjectSkillVersionFile,
   listAdminAssetVersions,
+  listAdminProjectAssets,
   listProjectAssetVersions,
   listSystemAssetCatalog,
   publishProjectAssetVersion,
@@ -23,9 +24,9 @@ import {
 } from "@/core/shared-assets/api";
 import {
   useAdminAssetVersions,
-  useApproveAdminMcpVersion,
+  useAdminProjectAssets,
   useApproveProjectMcpVersion,
-  useCreateAdminAssetVersion,
+  useConfigureAdminMcpCredentialGrants,
   useCreateProjectAssetVersion,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
@@ -33,12 +34,10 @@ import {
   useProjectAssetVersions,
   useProjectSkillVersionFile,
   useSystemAssetCatalog,
-  usePublishAdminAssetVersion,
   usePublishProjectAssetVersion,
   useRevokeAdminCredential,
   useRevokeProjectCredential,
   useRollbackProjectSystemBinding,
-  useSubmitAdminMcpVersion,
   useSubmitProjectMcpVersion,
   useUpgradeProjectSystemBinding,
 } from "@/core/shared-assets/hooks";
@@ -49,12 +48,9 @@ rs.mock("@tanstack/react-query", () => ({
   useQueryClient: rs.fn(),
 }));
 rs.mock("@/core/shared-assets/api", () => ({
-  approveAdminMcpVersion: rs.fn(),
   approveProjectMcpVersion: rs.fn(),
-  changeAdminAssetStatus: rs.fn(),
+  configureAdminMcpCredentialGrants: rs.fn(),
   changeProjectAssetStatus: rs.fn(),
-  createAdminAsset: rs.fn(),
-  createAdminAssetVersion: rs.fn(),
   createProjectAsset: rs.fn(),
   createProjectAssetVersion: rs.fn(),
   disableProjectSystemBinding: rs.fn(),
@@ -62,16 +58,15 @@ rs.mock("@/core/shared-assets/api", () => ({
   forkProjectSkillVersion: rs.fn(),
   getProjectSkillVersionFile: rs.fn(),
   listAdminAssetVersions: rs.fn(),
+  listAdminProjectAssets: rs.fn(),
   listAdminAssets: rs.fn(),
   listProjectAssetVersions: rs.fn(),
   listProjectAssets: rs.fn(),
   listSystemAssetCatalog: rs.fn(),
-  publishAdminAssetVersion: rs.fn(),
   publishProjectAssetVersion: rs.fn(),
   revokeAdminCredential: rs.fn(),
   revokeProjectCredential: rs.fn(),
   rollbackProjectSystemBinding: rs.fn(),
-  submitAdminMcpVersion: rs.fn(),
   submitProjectMcpVersion: rs.fn(),
   upgradeProjectSystemBinding: rs.fn(),
 }));
@@ -100,13 +95,14 @@ beforeEach(() => {
   rs.mocked(useQueryClient).mockReturnValue(client as never);
   for (const api of [
     approveProjectMcpVersion,
-    createAdminAssetVersion,
+    configureAdminMcpCredentialGrants,
     createProjectAssetVersion,
     disableProjectSystemBinding,
     enableProjectSystemBinding,
     forkProjectSkillVersion,
     getProjectSkillVersionFile,
     listAdminAssetVersions,
+    listAdminProjectAssets,
     listProjectAssetVersions,
     listSystemAssetCatalog,
     publishProjectAssetVersion,
@@ -128,8 +124,10 @@ describe("shared asset hooks", () => {
     for (const hook of [
       "useCreateProjectCredential",
       "useCreateAdminCredential",
+      "useCreateAdminProjectCredential",
       "useReplaceProjectCredential",
       "useReplaceAdminCredential",
+      "useReplaceAdminProjectCredential",
     ]) {
       expect(source).not.toContain(`export function ${hook}`);
     }
@@ -273,7 +271,33 @@ describe("shared asset hooks", () => {
     );
   });
 
-  test("wires typed version authoring hooks", async () => {
+  test("loads admin project override data under its own account and project key", async () => {
+    const signal = new AbortController().signal;
+    const override = useAdminProjectAssets(
+      accountId,
+      projectId,
+      "agents",
+    ) as unknown as QueryConfig;
+
+    await override.queryFn({ signal });
+
+    expect(override.queryKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "admin",
+      "project",
+      projectId,
+      "agents",
+    ]);
+    expect(listAdminProjectAssets).toHaveBeenCalledWith(
+      projectId,
+      "agents",
+      signal,
+    );
+  });
+
+  test("wires typed project version authoring hooks", async () => {
     const agentInput = {
       description: "Writer",
       soul: "Be precise",
@@ -286,28 +310,7 @@ describe("shared asset hooks", () => {
     const projectVersion = mutation(
       useCreateProjectAssetVersion(accountId, projectId, "agents"),
     );
-    const adminVersion = mutation(
-      useCreateAdminAssetVersion(accountId, "mcp-servers"),
-    );
     await projectVersion.mutationFn({ assetId, input: agentInput } as never);
-    await adminVersion.mutationFn({
-      assetId,
-      input: {
-        description: "GitHub MCP",
-        transport: "http",
-        command: null,
-        args: [],
-        url: "https://mcp.example.test",
-        env: {},
-        headers: {},
-        oauth: {},
-        routing: {},
-        tool_overrides: {},
-        timeout_seconds: 30,
-        credential_slots: [],
-        expected_asset_version: 1,
-      },
-    } as never);
     await projectVersion.onSuccess();
 
     expect(createProjectAssetVersion).toHaveBeenCalledWith(
@@ -315,14 +318,6 @@ describe("shared asset hooks", () => {
       "agents",
       assetId,
       agentInput,
-    );
-    expect(createAdminAssetVersion).toHaveBeenCalledWith(
-      "mcp-servers",
-      assetId,
-      expect.objectContaining({
-        transport: "http",
-        expected_asset_version: 1,
-      }),
     );
     expect(client.invalidateQueries).toHaveBeenCalledWith({
       queryKey: [
@@ -339,7 +334,27 @@ describe("shared asset hooks", () => {
     });
   });
 
-  test("wires project lifecycle and binding mutations to scope-local invalidation", async () => {
+  test("wires the dedicated packaged System MCP Credential grant hook", async () => {
+    const configure = mutation(useConfigureAdminMcpCredentialGrants(accountId));
+    const input = {
+      credential_versions: { primary: versionId },
+      expected_active_grant_versions: { primary: 1 },
+    };
+
+    await configure.mutationFn({ assetId, versionId, input } as never);
+    await configure.onSuccess();
+
+    expect(configureAdminMcpCredentialGrants).toHaveBeenCalledWith(
+      assetId,
+      versionId,
+      input,
+    );
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["account", accountId, "shared-assets", "admin", "mcp-servers"],
+    });
+  });
+
+  test("keeps binding invalidation on the asset catalog without remounting project context", async () => {
     const publish = mutation(
       usePublishProjectAssetVersion(accountId, projectId, "agents"),
     );
@@ -415,19 +430,27 @@ describe("shared asset hooks", () => {
         "agents",
       ],
     });
-    expect(client.invalidateQueries).toHaveBeenCalledWith({
+    expect(client.invalidateQueries).not.toHaveBeenCalledWith({
       queryKey: ["account", accountId, "projects"],
     });
   });
 
-  test("exports the admin lifecycle hooks", () => {
+  test("keeps only the system Credential admin lifecycle hook", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/core/shared-assets/hooks.ts"),
+      "utf8",
+    );
+
+    expect(typeof useRevokeAdminCredential).toBe("function");
     for (const hook of [
-      usePublishAdminAssetVersion,
-      useRevokeAdminCredential,
-      useSubmitAdminMcpVersion,
-      useApproveAdminMcpVersion,
+      "useCreateAdminAsset",
+      "useCreateAdminAssetVersion",
+      "useChangeAdminAssetStatus",
+      "usePublishAdminAssetVersion",
+      "useSubmitAdminMcpVersion",
+      "useApproveAdminMcpVersion",
     ]) {
-      expect(typeof hook).toBe("function");
+      expect(source).not.toContain(`export function ${hook}`);
     }
   });
 });

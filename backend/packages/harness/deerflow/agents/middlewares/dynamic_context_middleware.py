@@ -273,9 +273,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
 
         if last_date is None:
-            # ── First turn: inject full reminder as a SystemMessage ─────
-            first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
-            if first_idx is None:
+            # ── First available turn: inject full reminder ──────────────
+            # A prior Run can fail before this middleware executes, leaving a
+            # dateless checkpoint with multiple user messages. Target the
+            # latest genuine user message so the ID swap cannot move an older
+            # failed prompt behind the current turn.
+            target_idx = next(
+                (i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])),
+                None,
+            )
+            if target_idx is None:
                 return None
             if memory_block_override is _LEGACY_MEMORY:
                 date_reminder, memory_block = self._build_full_reminder()
@@ -283,11 +290,16 @@ class DynamicContextMiddleware(AgentMiddleware):
                 date_reminder = self._build_date_update_reminder()
                 memory_block = memory_block_override
             logger.info(
-                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
+                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into current HumanMessage id=%r",
                 memory_block is not None,
-                messages[first_idx].id,
+                messages[target_idx].id,
             )
-            result_msgs = self._make_reminder_and_user_messages(messages[first_idx], date_reminder, memory_block, reminder_date=current_date)
+            result_msgs = self._make_reminder_and_user_messages(
+                messages[target_idx],
+                date_reminder,
+                memory_block,
+                reminder_date=current_date,
+            )
             return {"messages": result_msgs}
 
         if last_date == current_date:

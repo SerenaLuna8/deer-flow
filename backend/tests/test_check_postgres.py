@@ -8,6 +8,8 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
+CURRENT_REVISION = "0001_project_saas_baseline"
+
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:
     langgraph_tables = {
@@ -29,7 +31,7 @@ def test_required_tables_exactly_cover_final_application_and_langgraph_schema() 
 
 def _connection(
     *,
-    revision: str | None = "0001_project_saas_baseline",
+    revision: str | None = CURRENT_REVISION,
     present_tables=None,
 ):
     connection = AsyncMock()
@@ -57,12 +59,13 @@ class _Engine:
 async def test_check_is_read_only_parameterized_and_healthy(monkeypatch) -> None:
     connection = _connection()
     monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
-    monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="m7"))
-    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0001_project_saas_baseline")
+    monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="current"))
+    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: CURRENT_REVISION)
 
     result = await check_postgres.check_postgres("postgresql://owner:p%40ss@127.0.0.1:5432/deerflow_test_1_abc")
 
     assert result.healthy is True
+    assert result.schema_state == "ready"
     assert result.revision_matches is True
     assert result.missing_tables == ()
     sql, parameters = connection.execute.await_args.args
@@ -77,16 +80,13 @@ async def test_check_is_read_only_parameterized_and_healthy(monkeypatch) -> None
 async def test_check_distinguishes_missing_revision_and_tables(monkeypatch) -> None:
     connection = _connection(revision=None, present_tables={"users"})
     monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
-    monkeypatch.setattr(
-        check_postgres,
-        "classify_database",
-        AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
-    )
-    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0001_project_saas_baseline")
+    monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="empty"))
+    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: CURRENT_REVISION)
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
     assert result.connected is True
+    assert result.schema_state == "uninitialized"
     assert result.current_revision is None
     assert result.revision_matches is False
     assert "users" not in result.missing_tables
@@ -106,11 +106,12 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
         "classify_database",
         AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
     )
-    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: "0001_project_saas_baseline")
+    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: CURRENT_REVISION)
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
     assert result.current_revision == "0015_project_reliability_finalize"
+    assert result.schema_state == "recreate_required"
     assert result.revision_matches is False
     assert result.missing_tables == ("projects",)
     assert result.healthy is False
@@ -129,6 +130,7 @@ async def test_check_connection_failure_is_sanitized(monkeypatch) -> None:
 
     assert result.connected is False
     assert result.healthy is False
+    assert result.schema_state == "unavailable"
     assert "database-secret" not in repr(result) + result.error
 
 
@@ -138,10 +140,11 @@ def test_check_result_contains_only_safe_connection_metadata() -> None:
         port=5432,
         database="deerflow_test_1_abc",
         server_version="PostgreSQL 17.5",
-        current_revision="0001_project_saas_baseline",
-        head_revision="0001_project_saas_baseline",
+        current_revision=CURRENT_REVISION,
+        head_revision=CURRENT_REVISION,
         revision_matches=True,
         missing_tables=(),
+        schema_state="ready",
     )
     fields = result.__dataclass_fields__
     assert not {"username", "password", "url", "automation_status", "reliability_status"} & set(fields)

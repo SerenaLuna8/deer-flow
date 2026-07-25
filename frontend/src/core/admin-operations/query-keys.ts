@@ -60,3 +60,12 @@ export function safeRequeueMutationKey(accountId: string) {
     "safe-requeue",
   ] as const;
 }
+
+export function adminProjectLifecycleMutationKey(accountId: string) {
+  return [
+    ...adminOperationsRoot(accountId),
+    "projects",
+    "mutation",
+    "lifecycle",
+  ] as const;
+}

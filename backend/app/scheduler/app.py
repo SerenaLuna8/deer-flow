@@ -20,6 +20,7 @@ from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.scheduler.service import AutomationSchedulerService
+from app.shared_assets.model_refs import ConfiguredModelRefResolver
 from deerflow.config import get_app_config
 from deerflow.persistence import (
     close_engine,
@@ -122,6 +123,7 @@ async def run_scheduler(
             dispatcher=AutomationDispatcher(
                 session_factory,
                 max_concurrent_runs=config.scheduler.max_concurrent_runs,
+                model_ref_resolver=ConfiguredModelRefResolver(config),
                 quota=quota_enforcer,
                 audit=audit_sink,
             ),

@@ -21,6 +21,7 @@ from app.audit.models import (
     resolve_system_audit_context,
 )
 from app.quotas.models import QUOTA_DIMENSIONS, QuotaDimension
+from app.reliability.errors import ReliabilityInvalid, ReliabilityNotFound
 from deerflow.persistence.jobs.model import DeadJobRow, JobRow
 from deerflow.persistence.projects.model import ProjectRow
 from deerflow.persistence.quotas.model import ProjectUsageCounterRow
@@ -117,8 +118,14 @@ def safe_channel_provider_health(
 @dataclass(frozen=True, slots=True)
 class AdminProjectRecord:
     project_id: uuid.UUID
+    slug: str
+    display_name: str
     status: ProjectStatus
     is_suspended: bool
+    state_version: int
+    created_at: datetime
+    updated_at: datetime
+    deletion_effective_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,17 +262,41 @@ class SystemOperationsRepository:
         *,
         limit: int,
         cursor: str | None,
+        query: str | None,
         status: ProjectStatus | None,
         suspended: bool | None,
+        request_id: str,
     ) -> AdminProjectPage:
         selected_cursor = _decode_cursor(cursor, kind="project")
         statement = select(
             ProjectRow.id,
+            ProjectRow.slug,
+            ProjectRow.display_name,
             ProjectRow.status,
             ProjectRow.is_suspended,
+            ProjectRow.membership_version,
+            ProjectRow.created_at,
+            ProjectRow.updated_at,
+            ProjectRow.deletion_effective_at,
         )
         if selected_cursor is not None:
             statement = statement.where(ProjectRow.id < selected_cursor)
+        if query is not None:
+            normalized_query = query.strip().lower()
+            if not normalized_query:
+                raise ReliabilityInvalid(request_id)
+            statement = statement.where(
+                or_(
+                    func.lower(ProjectRow.slug).contains(
+                        normalized_query,
+                        autoescape=True,
+                    ),
+                    func.lower(ProjectRow.display_name).contains(
+                        normalized_query,
+                        autoescape=True,
+                    ),
+                )
+            )
         if status is not None:
             statement = statement.where(ProjectRow.status == status)
         if suspended is not None:
@@ -276,8 +307,14 @@ class SystemOperationsRepository:
             items=tuple(
                 AdminProjectRecord(
                     project_id=row.id,
+                    slug=row.slug,
+                    display_name=row.display_name,
                     status=row.status,
                     is_suspended=row.is_suspended,
+                    state_version=row.membership_version,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                    deletion_effective_at=row.deletion_effective_at,
                 )
                 for row in page_rows
             ),
@@ -289,6 +326,41 @@ class SystemOperationsRepository:
                 if len(rows) > limit
                 else None
             ),
+        )
+
+    async def get_project(
+        self,
+        project_id: uuid.UUID,
+        *,
+        request_id: str,
+    ) -> AdminProjectRecord:
+        row = (
+            await self.session.execute(
+                select(
+                    ProjectRow.id,
+                    ProjectRow.slug,
+                    ProjectRow.display_name,
+                    ProjectRow.status,
+                    ProjectRow.is_suspended,
+                    ProjectRow.membership_version,
+                    ProjectRow.created_at,
+                    ProjectRow.updated_at,
+                    ProjectRow.deletion_effective_at,
+                ).where(ProjectRow.id == project_id)
+            )
+        ).one_or_none()
+        if row is None:
+            raise ReliabilityNotFound(request_id)
+        return AdminProjectRecord(
+            project_id=row.id,
+            slug=row.slug,
+            display_name=row.display_name,
+            status=row.status,
+            is_suspended=row.is_suspended,
+            state_version=row.membership_version,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            deletion_effective_at=row.deletion_effective_at,
         )
 
     async def list_jobs(

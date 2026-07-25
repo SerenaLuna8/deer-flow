@@ -34,6 +34,7 @@ make check
 make install
 make config
 make setup-db
+make migrate-db
 make check-db
 make doctor
 make dev
@@ -42,11 +43,21 @@ make stop
 make support-bundle
 ```
 
-The required fresh-install order is:
+The new-install order is:
 
 ```bash
 # DATABASE_URL names a new empty target; POSTGRES_ADMIN_URL names its maintenance DB.
 make setup-db
+make check-db
+make start
+```
+
+After future revisions are added, for an existing database at a supported ancestor revision:
+
+```bash
+# DATABASE_URL names the existing target; no administrator URL is required.
+make migrate-db
+make check-db
 make start
 ```
 
@@ -66,30 +77,28 @@ make check-db
 `scheduler.enabled=false` leaves project Automation APIs and manual triggers available but
 does not acquire the Scheduler ownership lock or start polling.
 
-## Fresh PostgreSQL baseline
+## Forward-only PostgreSQL migrations
 
-The application schema has one static Alembic revision:
+The project has not shipped yet, so all current schema requirements are consolidated in the
+single `0001_project_saas_baseline.py` revision. Treat this merged baseline as immutable from
+this point forward. Every future schema change starts at `0002` and adds a new linear Alembic
+revision; never edit, squash, or restamp a revision that may already exist in a released database.
 
-```text
-packages/harness/deerflow/persistence/migrations/versions/
-└── 0001_project_saas_baseline.py
-```
+`make setup-db` requires an explicit administrator URL and application URL. It creates the
+named empty target if needed, applies the complete committed migration chain through head,
+seeds the packaged system asset catalog, initializes the LangGraph checkpointer/store schema,
+and bootstraps the default project. The application role must be an ordinary non-superuser.
 
-`make setup-db` requires an explicit administrator URL and an explicit application URL. It
-creates the named target if needed, requires that target to be empty, installs
-`0001_project_saas_baseline`, seeds the packaged system asset catalog in one transaction,
-initializes the LangGraph checkpointer/store schema, and bootstraps the default project.
-The application role must be an ordinary non-superuser. Runtime startup only validates the
-target and never creates or repairs it.
+`make migrate-db` is retained for future revisions. It uses only `DATABASE_URL` and upgrades an
+existing database from a verified, known ancestor revision by applying its pending committed
+migrations through head. It never creates the database. Runtime startup only performs read-only
+validation: an ancestor revision reports migration required, while an unknown revision,
+unversioned nonempty schema, or catalog drift fails closed without DDL or repair.
 
-An old revision, an unknown nonempty schema, or extra/missing root objects fails before DDL
-with `M7_RECREATE_REQUIRED`. The operator must retain the old database if needed, create a
-new empty database, update `DATABASE_URL`, and rerun `make setup-db`. Downgrade, manual stamp,
-in-place conversion, and automatic deletion are unsupported.
-
-`make check-db` is read-only. It verifies the exact M7 revision, required application and
-LangGraph relations, and final readiness without printing credentials or full connection
-URLs.
+`make check-db` is also read-only. It reports current/head revision, required application and
+LangGraph relations, and whether setup, migration, or operator intervention is required without
+printing credentials or full connection URLs. Downgrade, manual stamp, automatic repair,
+automatic deletion, and destructive reset are unsupported.
 
 ### Release PostgreSQL gate
 
@@ -164,6 +173,23 @@ files, and digest mismatch. One transaction writes published system Agent, Skill
 rows under the fixed non-login builtin principal. Repeated setup with the same catalog is
 idempotent; a conflict rolls back the whole seed. The seed never creates a Credential,
 project binding, membership, or secret.
+
+The 21 directories under `../skills/public/` are maintained as complete multi-file system
+Skill archives, including `SKILL.md`, scripts, references, templates, and other regular
+files. Regenerate the checked-in archives and manifest entries from `backend/` with
+`PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`; use `--check`
+to verify that they are current. Runtime processes never scan `skills/public/`, and setup
+does not create project bindings for these assets.
+
+The runtime system catalog is bootstrap-only. Global `/api/admin/assets` Agent, Skill, and
+MCP definition/version routes expose governance metadata with GET only; Gateway and domain
+services reject runtime create, version authoring, publish, submit/approve, archive, and
+suspend even for a system admin. The one MCP-specific write is the dedicated
+`.../versions/{version_id}/credential-grants` route for the current published packaged MCP:
+it replaces only active System Credential grants with optimistic grant revisions and never
+changes the definition, workflow state, checksum, published pointer, or asset revision.
+System Credential lifecycle routes and project-scoped admin overrides remain independently
+mutable.
 
 Runtime processes use PostgreSQL as the only catalog authority. Gateway admission persists
 the exact secret-free Agent/Skill/MCP and Credential-grant snapshot for a Run. Worker reloads
@@ -254,9 +280,7 @@ Python is 3.12+, Ruff uses double quotes and a 240-character line limit, and all
 interfaces should use precise types. Keep public errors stable and free of SQL, connection,
 credential, private resource, and exception detail.
 
-M1–M8 已完成，总体进度为 8/8（100%）。M8 宿主机发布验收的后端 full gate 为 6867 passed、
-0 failed、940 个由专用 live/PostgreSQL 阶段覆盖的 expected skip；固定 M1–M8 PostgreSQL gate 为
-326 passed、0 skipped。认证范围及未认证部署方式见根 `AGENTS.md` 和 operator runbook。
-`M8_RELEASE_POSTGRES_TESTS` 保留该 20 文件前缀并只追加三个 M8 PostgreSQL 文件；最终
-0-skip gate 是根目录 `make test-project-saas-postgres`。完整宿主机验收使用随机自有
-`deerflow_test_*` 数据库并通过根目录 `make release-acceptance` 执行。
+Historical pass counts do not certify the current checkout. `M8_RELEASE_POSTGRES_TESTS` keeps the
+20-file foundation prefix and appends three M8 PostgreSQL files; the current zero-skip gate is
+`make test-project-saas-postgres` from the repository root. Full host acceptance uses owned random
+`deerflow_test_*` databases and runs through `make release-acceptance`.

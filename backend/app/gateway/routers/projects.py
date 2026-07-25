@@ -18,7 +18,7 @@ from app.gateway.deps import (
 )
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context
-from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectMemberQuotaExceeded, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectMemberQuotaExceeded, ProjectNotFound, ProjectQuotaStateConflict, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectRole, ProjectView
 from app.projects.repository import ProjectRepository
 from app.projects.service import ProjectService
@@ -39,7 +39,7 @@ class ProjectRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"], route_class=ProjectRoute)
-DOMAIN_ERRORS = (ProjectNotFound, ProjectForbidden, ProjectSlugConflict, ProjectMemberQuotaExceeded, ProjectValidationFailed, ProjectDatabaseUnavailable)
+DOMAIN_ERRORS = (ProjectNotFound, ProjectForbidden, ProjectSlugConflict, ProjectMemberQuotaExceeded, ProjectQuotaStateConflict, ProjectValidationFailed, ProjectDatabaseUnavailable)
 
 
 class CreateProjectRequest(BaseModel):
@@ -116,6 +116,7 @@ def _raise_domain(exc: Exception) -> None:
         ProjectForbidden: (403, "PROJECT_FORBIDDEN"),
         ProjectSlugConflict: (409, "PROJECT_SLUG_CONFLICT"),
         ProjectMemberQuotaExceeded: (429, "PROJECT_MEMBER_QUOTA_EXCEEDED"),
+        ProjectQuotaStateConflict: (409, "PROJECT_QUOTA_STATE_CONFLICT"),
         ProjectValidationFailed: (422, "PROJECT_VALIDATION_FAILED"),
         ProjectDatabaseUnavailable: (503, "DATABASE_UNAVAILABLE"),
     }

@@ -47,7 +47,7 @@ function TokenUsageSummary({
 export function MessageTokenUsageList({
   className,
   enabled = false,
-  isLoading: _isLoading = false,
+  isLoading = false,
   messages,
 }: {
   className?: string;
@@ -55,7 +55,7 @@ export function MessageTokenUsageList({
   isLoading?: boolean;
   messages: Message[];
 }) {
-  if (!enabled) {
+  if (!enabled || isLoading) {
     return null;
   }
 

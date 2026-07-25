@@ -1,100 +1,77 @@
 ---
 title: Quick Start
-description: This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. Gateway, Frontend, and nginx start together and are accessible through a single URL.
+description: Start the DeerFlow project-first stack with a fresh PostgreSQL database and make dev.
 ---
 
 import { Callout, Steps } from "nextra/components";
 
 # Quick Start
 
-<Callout type="info" emoji="⚡">
-  Get DeerFlow App running locally in about 10 minutes. You need a machine with
-  Python 3.12+, Node.js 22+, and at least one LLM API key.
-</Callout>
-
-This guide walks you through starting DeerFlow App on your local machine using the `make dev` workflow. Gateway, Frontend, and nginx start together and are accessible through a single URL.
+The local stack consists of Nginx, Frontend, Gateway, Worker, and an optional Scheduler. The unified entry point is `http://localhost:2026`; only Worker executes the Agent graph.
 
 ## Prerequisites
 
-Check that all required tools are installed:
+| Tool | Requirement |
+| --- | --- |
+| Python | 3.12+ |
+| Node.js | 22+ |
+| pnpm | 10.26.2+ |
+| uv | Current stable release |
+| PostgreSQL | An instance where a fresh target database can be created |
+| Nginx | Required by the local full-stack entry point |
 
 ```bash
 make check
 ```
 
-Required:
-
-| Tool    | Minimum version    |
-| ------- | ------------------ |
-| Python  | 3.12               |
-| uv      | latest             |
-| Node.js | 22                 |
-| pnpm    | 10                 |
-| nginx   | any recent version |
-
-On macOS, install with `brew install python uv node pnpm nginx`. On Linux, use your distribution's package manager.
-
-## Steps
-
 <Steps>
 
-### Clone the repository
+### Clone and install
 
 ```bash
-git clone https://github.com/bytedance/deer-flow.git
+git clone https://github.com/SerenaLuna8/deer-flow.git
 cd deer-flow
-```
-
-### Install dependencies
-
-```bash
 make install
 ```
 
-This installs both backend Python dependencies (via `uv`) and frontend Node.js dependencies (via `pnpm`).
-
-### Create your config file
+### Generate configuration
 
 ```bash
-cp config.example.yaml config.yaml
+make setup
 ```
 
-Then edit `config.yaml` to add at least one model. The minimum change is adding a model under the `models:` section:
+The wizard creates the repository-root `config.yaml`. Configure at least one model and provide referenced secrets through the root `.env` or process environment. Do not commit either local file.
 
-```yaml
-models:
-  - name: gpt-4o
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-    supports_vision: true
-```
+### Initialize PostgreSQL
 
-Set the corresponding environment variable before starting:
+DeerFlow supports only a fresh PostgreSQL target. Runtime startup never creates a database, repairs its schema, or upgrades an old database in place. The application role must already exist.
 
 ```bash
-export OPENAI_API_KEY=sk-...
+export POSTGRES_ADMIN_URL='<administrator URL for the postgres maintenance database>'
+export DATABASE_URL='<fresh DeerFlow target database URL>'
+make setup-db
+make check-db
 ```
 
-See the [Application Configuration](/docs/application/configuration) page for examples with other model providers.
+<Callout type="warning">
+  Point <code>setup-db</code> only at a fresh target. Test gates must use a separate disposable PostgreSQL instance.
+</Callout>
 
-### Start all services
+### Start and open the application
 
 ```bash
 make dev
 ```
 
-This starts:
+Open [http://localhost:2026](http://localhost:2026). `make dev` starts:
 
-- Gateway API and embedded agent runtime on port `8001`
-- Frontend on port `3000`
-- nginx reverse proxy on port `2026`
+- Nginx on `2026`
+- Frontend on `3000`
+- Gateway on `8001`
+- Worker with no public port
+- Scheduler with no public port only when `scheduler.enabled=true`
 
-Open [http://localhost:2026](http://localhost:2026) in your browser.
-
-### Stop all services
+### Stop
 
 ```bash
 make stop
@@ -102,29 +79,13 @@ make stop
 
 </Steps>
 
-## What happens when you run `make dev`
+## Logs and diagnostics
 
-- Existing service processes are stopped first (safe to run after an interrupted start).
-- Each service is started in the background and writes logs to the `logs/` directory.
-- nginx proxies all traffic through port `2026`, so you only need one URL.
+Local logs are written under `logs/`: `gateway.log`, `worker.log`, `scheduler.log`, `frontend.log`, and `nginx.log`. For configuration or startup failures, begin with:
 
-Log files:
+```bash
+make doctor
+make support-bundle
+```
 
-| Service   | Log file             |
-| --------- | -------------------- |
-| Gateway   | `logs/gateway.log`   |
-| Frontend  | `logs/frontend.log`  |
-| nginx     | `logs/nginx.log`     |
-
-<Callout type="tip">
-  If something is not working, check the log files first. Most startup errors
-  (missing API keys, config parsing failures) appear in `logs/gateway.log`.
-</Callout>
-
-<Cards num={2}>
-  <Cards.Card
-    title="Deployment Guide"
-    href="/docs/application/deployment-guide"
-  />
-  <Cards.Card title="Configuration" href="/docs/application/configuration" />
-</Cards>
+See [Configuration](/docs/application/configuration) and the [Deployment Guide](/docs/application/deployment-guide) for the full boundaries.

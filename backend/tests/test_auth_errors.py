@@ -39,6 +39,7 @@ def test_auth_error_response_from_dict():
 # ── decode_token typed failure tests ──────────────────────────────
 
 _TEST_SECRET = "test-secret-for-jwt-decode-token-tests"
+_SESSION_ID = "a" * 43
 
 
 def _setup_config():
@@ -69,7 +70,7 @@ def test_decode_token_returns_token_error_on_malformed():
 
 def test_decode_token_returns_payload_on_valid():
     _setup_config()
-    token = create_access_token("user-123")
+    token = create_access_token("user-123", session_id=_SESSION_ID)
     result = decode_token(token)
     assert not isinstance(result, TokenError)
     assert result.sub == "user-123"

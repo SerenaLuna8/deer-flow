@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncIterable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.exc import DBAPIError
@@ -22,6 +22,7 @@ from app.private_work.context import PrivateWorkContext, require_issued_private_
 from app.private_work.errors import (
     PrivateWorkConflict,
     PrivateWorkError,
+    PrivateWorkForbidden,
     PrivateWorkInvalid,
     PrivateWorkNotFound,
     PrivateWorkTooLarge,
@@ -34,7 +35,9 @@ from app.private_work.file_paths import (
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from app.projects.quota_summary import load_project_quota_summary
 from app.upload_contracts import PRIVATE_UPLOAD_DEFAULTS
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
     PrivateFileChunkRecord,
@@ -54,6 +57,12 @@ _T = TypeVar("_T")
 PRIVATE_DEFAULT_MAX_FILES = PRIVATE_UPLOAD_DEFAULTS.max_files
 PRIVATE_DEFAULT_MAX_FILE_SIZE = PRIVATE_UPLOAD_DEFAULTS.max_file_size
 PRIVATE_DEFAULT_MAX_TOTAL_SIZE = PRIVATE_UPLOAD_DEFAULTS.max_total_size
+USER_DELETABLE_PRIVATE_FILE_KINDS = frozenset({"upload", "workspace", "output"})
+
+
+def require_user_deletable_private_file_kind(kind: str, request_id: str) -> None:
+    if kind not in USER_DELETABLE_PRIVATE_FILE_KINDS:
+        raise PrivateWorkForbidden(request_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +74,39 @@ class PrivateFileLimits:
     def __post_init__(self) -> None:
         if self.max_files < 1 or self.max_file_size < 1 or self.max_total_size < 1:
             raise ValueError("private file limits must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateUploadProjectStorage:
+    policy: Literal["project_quota"]
+    limit_bytes: int
+    used_bytes: int
+    reserved_bytes: int
+    remaining_bytes: int
+
+    def __post_init__(self) -> None:
+        values = (
+            self.limit_bytes,
+            self.used_bytes,
+            self.reserved_bytes,
+            self.remaining_bytes,
+        )
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("private upload storage policy must be non-negative")
+        expected = max(
+            0,
+            self.limit_bytes - self.used_bytes - self.reserved_bytes,
+        )
+        if self.remaining_bytes != expected:
+            raise ValueError("private upload storage remaining bytes are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateUploadLimits:
+    max_files: int
+    max_file_size: int
+    max_total_size: int
+    project_storage: PrivateUploadProjectStorage
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,11 +172,13 @@ class PrivateFileService:
         *,
         conversion_temp_root: Path | None = None,
         quota: PrivateFileQuotaPort | None = None,
+        quota_config: QuotaConfig | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
         self._conversion_temp_root = conversion_temp_root
         self._quota = quota or _NoopPrivateFileQuota()
+        self._quota_config = quota_config or QuotaConfig()
 
     @staticmethod
     def _media_type(value: str, request_id: str) -> str:
@@ -620,6 +664,61 @@ class PrivateFileService:
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
 
+    async def read_upload_limits(
+        self,
+        context: PrivateWorkContext,
+        *,
+        thread_id: str,
+        limits: PrivateFileLimits | None = None,
+    ) -> PrivateUploadLimits:
+        """Read the current authoritative upload and project-storage limits.
+
+        This is an advisory snapshot for client preflight. Upload finalization
+        still performs the authoritative quota reservation, so a concurrent
+        writer can legitimately turn a successful preflight into a 429.
+        """
+
+        context = require_issued_private_work_context(context)
+        selected_limits = limits or PrivateFileLimits()
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                )
+                if not await PrivateThreadRepository(session).check_access(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                ):
+                    raise PrivateWorkNotFound(context.request_id)
+                quota = await load_project_quota_summary(
+                    session,
+                    context.project_id,
+                    self._quota_config,
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+        storage = quota.storage_bytes
+        return PrivateUploadLimits(
+            max_files=selected_limits.max_files,
+            max_file_size=selected_limits.max_file_size,
+            max_total_size=selected_limits.max_total_size,
+            project_storage=PrivateUploadProjectStorage(
+                policy="project_quota",
+                limit_bytes=storage.limit,
+                used_bytes=storage.used,
+                reserved_bytes=storage.reserved,
+                remaining_bytes=max(
+                    0,
+                    storage.limit - storage.used - storage.reserved,
+                ),
+            ),
+        )
+
     async def delete_ready(
         self,
         context: PrivateWorkContext,
@@ -627,7 +726,7 @@ class PrivateFileService:
         thread_id: str,
         file_id: uuid.UUID,
     ) -> PrivateFileRecord:
-        """Soft-delete a ready file while retaining authoritative chunk bytes."""
+        """Physically delete one user-owned ready file and release its quota."""
 
         context = require_issued_private_work_context(context)
         try:
@@ -639,24 +738,20 @@ class PrivateFileService:
                     lock=True,
                 )
                 repository = PrivateFileRepository(session)
-                current = await repository.get(
+                deleted = await repository.delete_ready(
                     scope=context.resource_scope,
                     thread_id=thread_id,
                     file_id=file_id,
-                    lock=True,
                 )
-                if current is None or current.status != "ready":
-                    raise PrivateFileConflict
-                deleted = await repository.mark_deleted(
-                    scope=context.resource_scope,
-                    thread_id=thread_id,
-                    file_id=file_id,
+                require_user_deletable_private_file_kind(
+                    deleted.kind,
+                    context.request_id,
                 )
                 await self._quota.release_file(
                     session,
                     context.resource_scope,
                     file_id=file_id,
-                    size=current.size,
+                    size=deleted.size,
                     request_id=context.request_id,
                 )
                 return deleted

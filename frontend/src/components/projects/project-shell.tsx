@@ -1,7 +1,20 @@
 "use client";
 
-import { LogOutIcon, ShieldCheckIcon, UserRoundIcon } from "lucide-react";
+import {
+  LogOutIcon,
+  SettingsIcon,
+  ShieldCheckIcon,
+  UserRoundIcon,
+} from "lucide-react";
 import Link from "next/link";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,20 +25,42 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { SettingsDialog } from "@/components/workspace/settings";
 import type { User } from "@/core/auth/types";
 import type { Project } from "@/core/projects/types";
+import { cn } from "@/lib/utils";
 
 import { ProjectDesktopNav, ProjectMobileNav } from "./project-nav";
+
+type ProjectDesktopNavigationState = {
+  collapsed: boolean;
+  setCollapsed: Dispatch<SetStateAction<boolean>>;
+};
+
+const ProjectDesktopNavigationContext =
+  createContext<ProjectDesktopNavigationState | null>(null);
+
+export function useProjectDesktopNavigation() {
+  const context = useContext(ProjectDesktopNavigationContext);
+  if (!context) {
+    throw new Error(
+      "useProjectDesktopNavigation must be used within ProjectShell",
+    );
+  }
+  return context;
+}
 
 function ProjectAccountMenu({
   accountEmail,
   systemRole,
   compact = false,
+  onOpenSettings,
   onLogout,
 }: {
   accountEmail: string;
   systemRole: User["system_role"];
   compact?: boolean;
+  onOpenSettings: () => void;
   onLogout: () => void | Promise<void>;
 }) {
   return (
@@ -57,6 +92,11 @@ function ProjectAccountMenu({
             <DropdownMenuSeparator />
           </>
         ) : null}
+        <DropdownMenuItem onSelect={onOpenSettings}>
+          <SettingsIcon aria-hidden className="size-4" />
+          系统设置
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void onLogout()}>
           <LogOutIcon aria-hidden className="size-4" />
           退出登录
@@ -79,35 +119,61 @@ export function ProjectShell({
   onLogout: () => void | Promise<void>;
   children: React.ReactNode;
 }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [desktopNavCollapsed, setDesktopNavCollapsed] = useState(false);
+  const desktopNavigation = useMemo(
+    () => ({
+      collapsed: desktopNavCollapsed,
+      setCollapsed: setDesktopNavCollapsed,
+    }),
+    [desktopNavCollapsed],
+  );
+
   return (
-    <div
-      data-testid="project-shell"
-      className="bg-background min-h-screen w-full overflow-x-hidden md:grid md:grid-cols-[16rem_minmax(0,1fr)]"
-    >
-      <ProjectDesktopNav
-        project={project}
-        footer={
-          <ProjectAccountMenu
-            accountEmail={accountEmail}
-            systemRole={systemRole}
-            onLogout={onLogout}
-          />
-        }
+    <ProjectDesktopNavigationContext.Provider value={desktopNavigation}>
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        defaultSection="appearance"
       />
-      <div className="min-w-0">
-        <ProjectMobileNav
+      <div
+        data-testid="project-shell"
+        className={cn(
+          "bg-background min-h-screen w-full overflow-x-hidden md:grid md:transition-[grid-template-columns] md:duration-200 md:ease-out",
+          desktopNavCollapsed
+            ? "md:grid-cols-[3.5rem_minmax(0,1fr)]"
+            : "md:grid-cols-[16rem_minmax(0,1fr)]",
+        )}
+      >
+        <ProjectDesktopNav
           project={project}
-          account={
+          collapsed={desktopNavCollapsed}
+          onCollapsedChange={setDesktopNavCollapsed}
+          footer={
             <ProjectAccountMenu
               accountEmail={accountEmail}
               systemRole={systemRole}
-              compact
+              onOpenSettings={() => setSettingsOpen(true)}
               onLogout={onLogout}
             />
           }
         />
-        <div className="min-w-0">{children}</div>
+        <div className="min-w-0">
+          <ProjectMobileNav
+            project={project}
+            account={
+              <ProjectAccountMenu
+                accountEmail={accountEmail}
+                systemRole={systemRole}
+                compact
+                onOpenSettings={() => setSettingsOpen(true)}
+                onLogout={onLogout}
+              />
+            }
+          />
+          <div className="min-w-0">{children}</div>
+        </div>
       </div>
-    </div>
+    </ProjectDesktopNavigationContext.Provider>
   );
 }

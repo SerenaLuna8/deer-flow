@@ -3,14 +3,21 @@ import { QueryClient } from "@tanstack/react-query";
 
 import {
   invalidateAdminAssetQueries,
+  invalidateAdminProjectAssetQueries,
   invalidateProjectAssetQueries,
 } from "@/core/shared-assets/hooks";
 import {
   adminAssetKey,
+  adminProjectAssetKey,
+  adminProjectAssetVersionsKey,
   projectAssetKey,
   projectAssetVersionsKey,
   projectSkillVersionFileKey,
 } from "@/core/shared-assets/query-keys";
+
+const ADMIN_PROJECT_ID = "33333333-3333-4333-8333-333333333333";
+const OTHER_ADMIN_PROJECT_ID = "44444444-4444-4444-8444-444444444444";
+const ADMIN_ASSET_ID = "11111111-1111-4111-8111-111111111111";
 
 describe("shared asset query isolation", () => {
   test("keys always include account and project keys also include project and kind", () => {
@@ -115,5 +122,39 @@ describe("shared asset query isolation", () => {
     expect(client.getQueryState(target)?.isInvalidated).toBe(true);
     expect(client.getQueryState(otherAccount)?.isInvalidated).toBe(false);
     expect(client.getQueryState(otherKind)?.isInvalidated).toBe(false);
+  });
+
+  test("admin project override keys cannot collide with global admin or member project caches", async () => {
+    const client = new QueryClient();
+    const target = adminProjectAssetKey("u1", ADMIN_PROJECT_ID, "agents");
+    const targetVersions = adminProjectAssetVersionsKey(
+      "u1",
+      ADMIN_PROJECT_ID,
+      "agents",
+      ADMIN_ASSET_ID,
+    );
+    const untouched = [
+      adminAssetKey("u1", "agents"),
+      projectAssetKey("u1", ADMIN_PROJECT_ID, "agents"),
+      adminProjectAssetKey("u2", ADMIN_PROJECT_ID, "agents"),
+      adminProjectAssetKey("u1", OTHER_ADMIN_PROJECT_ID, "agents"),
+      adminProjectAssetKey("u1", ADMIN_PROJECT_ID, "skills"),
+    ] as const;
+    client.setQueryData(target, "target");
+    client.setQueryData(targetVersions, "target versions");
+    for (const key of untouched) client.setQueryData(key, "untouched");
+
+    await invalidateAdminProjectAssetQueries(
+      client,
+      "u1",
+      ADMIN_PROJECT_ID,
+      "agents",
+    );
+
+    expect(client.getQueryState(target)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(targetVersions)?.isInvalidated).toBe(true);
+    for (const key of untouched) {
+      expect(client.getQueryState(key)?.isInvalidated).toBe(false);
+    }
   });
 });

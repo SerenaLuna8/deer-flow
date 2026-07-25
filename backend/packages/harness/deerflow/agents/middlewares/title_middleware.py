@@ -91,15 +91,33 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return False
 
     @staticmethod
+    def _is_hidden_from_ui_message(message: object) -> bool:
+        if isinstance(message, dict):
+            additional_kwargs = message.get("additional_kwargs")
+        else:
+            additional_kwargs = getattr(message, "additional_kwargs", None)
+        return isinstance(additional_kwargs, dict) and additional_kwargs.get("hide_from_ui") is True
+
+    @staticmethod
     def _is_user_message_for_title(message: object) -> bool:
-        return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message)
+        return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message) and not TitleMiddleware._is_hidden_from_ui_message(message)
+
+    @staticmethod
+    def _message_has_tool_calls(message: object) -> bool:
+        if isinstance(message, dict):
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                return True
+            additional_kwargs = message.get("additional_kwargs")
+            return isinstance(additional_kwargs, dict) and bool(additional_kwargs.get("tool_calls"))
+        return bool(getattr(message, "tool_calls", None))
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
         messages = state.get("messages") or []
         user_msg_content = next((self._message_content(m) for m in messages if self._is_user_message_for_title(m)), "")
         return self._normalize_content(user_msg_content)
 
-    def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
+    def _should_generate_title(self, state: TitleMiddlewareState) -> bool:
         """Check if we should generate a title for this thread."""
         config = self._get_title_config()
         if not config.enabled:
@@ -113,19 +131,27 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         # Defensively coerce a None ``messages`` channel (possible when reading a
         # partially-initialized checkpoint) into an empty list so ``len()`` is safe.
         messages = state.get("messages") or []
-        min_messages = 1 if allow_partial_exchange else 2
-        if len(messages) < min_messages:
+        if len(messages) < 2:
             return False
 
         # Count user and assistant messages
         user_messages = [m for m in messages if self._is_user_message_for_title(m)]
         assistant_messages = [m for m in messages if self._message_type(m) == "ai"]
 
-        # Normal path: title only after first complete exchange. Interrupted path
-        # (``allow_partial_exchange=True``) accepts a lone first-turn user message
-        # so a fallback title can still be persisted when the run is cancelled
-        # before any AI chunk reaches the checkpoint.
-        return len(user_messages) == 1 and (len(assistant_messages) >= 1 or allow_partial_exchange)
+        if len(user_messages) != 1:
+            return False
+        if not assistant_messages:
+            return False
+
+        final_assistant = assistant_messages[-1]
+        if self._message_has_tool_calls(final_assistant):
+            return False
+        final_content = self._strip_think_tags(
+            self._normalize_content(
+                self._message_content(final_assistant),
+            )
+        )
+        return bool(final_content)
 
     def _build_title_prompt(self, state: TitleMiddlewareState) -> tuple[str, str]:
         """Extract user/assistant messages and build the title prompt.
@@ -185,9 +211,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         ]
         return config
 
-    def _generate_title_result(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> dict | None:
+    def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
         """Generate a local fallback title without blocking on an LLM call."""
-        if not self._should_generate_title(state, allow_partial_exchange=allow_partial_exchange):
+        if not self._should_generate_title(state):
             return None
 
         user_msg = self._get_title_user_message(state)

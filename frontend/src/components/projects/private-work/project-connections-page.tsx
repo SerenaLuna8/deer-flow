@@ -67,6 +67,7 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
     useState<ChannelProviderId | null>(null);
   const [pendingProvider, setPendingProvider] =
     useState<ChannelProviderId | null>(null);
+  const providerStates = providers.data?.providers ?? [];
 
   const handleAgentSelect = async (agent: ExecutableProjectAgent) => {
     const provider = selectedProvider;
@@ -139,9 +140,24 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
             重试
           </Button>
         </div>
+      ) : providers.data?.enabled === false ? (
+        <div className="rounded-xl border border-dashed p-6 text-center">
+          <h2 className="font-medium">Connections 功能尚未启用</h2>
+          <p className="text-muted-foreground mt-2 text-sm">
+            当前部署没有启用项目连接功能。请联系系统管理员检查渠道配置并重启服务。
+          </p>
+        </div>
+      ) : providerStates.length === 0 ? (
+        <div className="rounded-xl border border-dashed p-6 text-center">
+          <h2 className="font-medium">当前没有可用的连接渠道</h2>
+          <p className="text-muted-foreground mt-2 text-sm">
+            系统尚未启用任何 IM
+            provider。配置完成后，可在这里将账号绑定到当前项目。
+          </p>
+        </div>
       ) : (
         <ul className="grid gap-3 md:grid-cols-2">
-          {(providers.data ?? []).map((providerState) => {
+          {providerStates.map((providerState) => {
             const provider = providerState.provider as ChannelProviderId;
             const connection = connections.data?.find(
               (item) =>

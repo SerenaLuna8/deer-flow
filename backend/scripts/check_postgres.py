@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -28,6 +29,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "artifacts",
     "asset_catalog_state",
     "audit_logs",
+    "auth_sessions",
     "channel_connections",
     "channel_conversations",
     "channel_credentials",
@@ -74,6 +76,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "threads_meta",
     "user_project_memories",
     "user_project_memory_facts",
+    "user_notifications",
     "users",
     "worker_nodes",
 )
@@ -89,12 +92,19 @@ class PostgresCheckResult:
     head_revision: str | None = None
     revision_matches: bool = False
     missing_tables: tuple[str, ...] = ()
+    schema_state: Literal[
+        "ready",
+        "migration_required",
+        "uninitialized",
+        "recreate_required",
+        "unavailable",
+    ] = "unavailable"
     connected: bool = True
     error: str = ""
 
     @property
     def healthy(self) -> bool:
-        return self.connected and self.revision_matches and not self.missing_tables and not self.error
+        return self.connected and self.schema_state == "ready" and self.revision_matches and not self.missing_tables and not self.error
 
 
 def get_head_revision() -> str:
@@ -125,9 +135,20 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             present = set(rows.scalars())
             missing_tables = tuple(sorted(set(REQUIRED_TABLES) - present))
             try:
-                final_schema = await classify_database(connection) == "m7"
+                database_state = await classify_database(connection)
             except M7RecreateRequired:
-                final_schema = False
+                schema_state = "recreate_required"
+                error = "M7_RECREATE_REQUIRED: revision 未知或 schema catalog 发生漂移，需要人工检查"
+            else:
+                if database_state == "current":
+                    schema_state = "ready"
+                    error = ""
+                elif database_state == "upgradeable":
+                    schema_state = "migration_required"
+                    error = "数据库版本落后；请运行 `make migrate-db` 完成向前迁移"
+                else:
+                    schema_state = "uninitialized"
+                    error = "数据库尚未初始化；请运行 `make setup-db`"
             return PostgresCheckResult(
                 host=target.host,
                 port=target.port,
@@ -137,7 +158,8 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                 head_revision=head,
                 revision_matches=current_revision == head,
                 missing_tables=missing_tables,
-                error="" if final_schema else "M7_RECREATE_REQUIRED: schema catalog does not match the final M7 baseline",
+                schema_state=schema_state,
+                error=error,
             )
     except Exception:
         return PostgresCheckResult(
@@ -145,6 +167,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             port=target.port,
             database=target.database,
             head_revision=head,
+            schema_state="unavailable",
             connected=False,
             error="无法连接或读取 PostgreSQL；请检查 DATABASE_URL、数据库状态和访问权限",
         )
@@ -168,6 +191,7 @@ def print_result(result: PostgresCheckResult) -> None:
         print(f"版本: {result.server_version}")
     print(f"当前 Alembic revision: {result.current_revision or '缺失'}")
     print(f"目标 Alembic revision: {result.head_revision or '未知'}")
+    print(f"Schema 状态: {result.schema_state}")
     if result.missing_tables:
         print(f"缺失表: {', '.join(result.missing_tables)}")
     if result.error:

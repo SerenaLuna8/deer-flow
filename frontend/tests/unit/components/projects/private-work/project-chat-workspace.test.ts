@@ -18,6 +18,7 @@ import {
   ProjectThreadDeleteDialog,
   projectThreadDeleteLandingPath,
 } from "@/components/projects/private-work/project-thread-delete-dialog";
+import { ProjectThreadRenameDialog } from "@/components/projects/private-work/project-thread-rename-dialog";
 import { resolveChatRightPanel } from "@/components/workspace/chats/chat-box";
 import { shouldShowThreadWelcome } from "@/components/workspace/chats/scoped-chat-page";
 import type { Project } from "@/core/projects/types";
@@ -80,26 +81,6 @@ const project = {
 } as Project;
 
 describe("project chat workspace", () => {
-  test("mounts the conversation rail in the shared Chats parent layout", () => {
-    const layout = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/app/projects/[project_slug]/chats/layout.tsx",
-      ),
-      "utf8",
-    );
-    const workspace = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/projects/private-work/project-chat-workspace.tsx",
-      ),
-      "utf8",
-    );
-
-    expect(layout).toContain("<ProjectChatWorkspace>{children}");
-    expect(workspace).toContain("<ProjectConversationRail project={project}");
-  });
-
   test("filters the persistent conversation rail by normalized title", () => {
     const threads = [
       thread("thread-1", "Release Research"),
@@ -127,13 +108,14 @@ describe("project chat workspace", () => {
     expect(projectConversationPermissions(project)).toEqual({
       canCreate: true,
       canDelete: true,
+      canRename: true,
     });
     expect(
       projectConversationPermissions({
         ...project,
         capabilities: ["project.read", "private_work.read_own"],
       }),
-    ).toEqual({ canCreate: false, canDelete: true });
+    ).toEqual({ canCreate: false, canDelete: true, canRename: false });
   });
 
   test("returns to the encoded Chats landing only after deleting the active thread", () => {
@@ -172,6 +154,28 @@ describe("project chat workspace", () => {
 
     (confirm?.props.onClick as (() => void) | undefined)?.();
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  test("trims a manual conversation title before saving", () => {
+    const onConfirm = rs.fn();
+    const dialog = ProjectThreadRenameDialog({
+      open: true,
+      value: "  Release plan  ",
+      pending: false,
+      onValueChange: rs.fn(),
+      onOpenChange: rs.fn(),
+      onConfirm,
+    });
+    const elements = descendants(dialog);
+    const form = elements.find((element) => element.type === "form");
+
+    expect(form).toBeDefined();
+    (
+      form?.props.onSubmit as
+        | ((event: { preventDefault: () => void }) => void)
+        | undefined
+    )?.({ preventDefault: rs.fn() });
+    expect(onConfirm).toHaveBeenCalledWith("Release plan");
   });
 
   test("treats an empty pre-created project Thread as the welcome state", () => {
@@ -250,5 +254,23 @@ describe("project chat workspace", () => {
         staticWebsiteOnly: true,
       }),
     ).toBeNull();
+  });
+
+  test("switching conversations remounts the transcript and jumps to the bottom", () => {
+    const scopedChat = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/workspace/chats/scoped-chat-page.tsx",
+      ),
+      "utf8",
+    );
+    const mainMessageList =
+      /<MessageList[\s\S]*?testId="main-message-list"[\s\S]*?\/>/u.exec(
+        scopedChat,
+      )?.[0];
+
+    expect(mainMessageList).toBeDefined();
+    expect(mainMessageList).toContain("key={threadId}");
+    expect(mainMessageList).toContain('initialScroll="instant"');
   });
 });

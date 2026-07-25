@@ -15,6 +15,7 @@ test("builds thread submit messages with hidden sidecar context before the visib
 
   const messages = buildThreadSubmitMessages({
     text: "What should we do next?",
+    messageId: "human-visible-1",
     additionalInputMessages: [hiddenContext],
   });
 
@@ -22,6 +23,7 @@ test("builds thread submit messages with hidden sidecar context before the visib
     hiddenContext,
     {
       type: "human",
+      id: "human-visible-1",
       content: [{ type: "text", text: "What should we do next?" }],
       additional_kwargs: {},
     },
@@ -31,6 +33,7 @@ test("builds thread submit messages with hidden sidecar context before the visib
 test("keeps uploaded files on the visible user message only", () => {
   const messages = buildThreadSubmitMessages({
     text: "Use this file",
+    messageId: "human-visible-2",
     additionalInputMessages: [
       {
         type: "human",
@@ -74,6 +77,7 @@ test("keeps human input response metadata on the hidden user message", () => {
 
   const messages = buildThreadSubmitMessages({
     text: 'For your clarification "Which environment?", my answer is: staging',
+    messageId: "human-hidden-response",
     additionalKwargs: {
       hide_from_ui: true,
       human_input_response: response,
@@ -83,6 +87,7 @@ test("keeps human input response metadata on the hidden user message", () => {
   expect(messages).toEqual([
     {
       type: "human",
+      id: "human-hidden-response",
       content: [
         {
           type: "text",

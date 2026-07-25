@@ -16,10 +16,9 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.projects.context import ProjectContext, resolve_project_context
-from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
 from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
-from deerflow.persistence.shared_assets import SkillVersionFileRow, SkillVersionRow
+from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 
 
 async def _seed_actor_and_project(
@@ -70,23 +69,6 @@ async def _seed_actor_and_project(
         )
     async with factory() as session:
         return await resolve_project_context(session, user_id, project_id, f"req-{label}")
-
-
-async def _seed_system_admin(engine: AsyncEngine) -> SystemAssetGovernanceContext:
-    user_id = uuid.uuid4()
-    async with engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version)
-                VALUES (:id,:email,'system_admin',:now,false,0)"""
-            ),
-            {
-                "id": str(user_id),
-                "email": f"system-{user_id}@example.com",
-                "now": datetime.now(UTC),
-            },
-        )
-    return SystemAssetGovernanceContext(user_id=user_id, request_id="req-system")
 
 
 def _archive(*, required_secret: bool = False) -> tuple[SkillArchiveFile, ...]:
@@ -353,26 +335,30 @@ async def test_archived_snapshot_remains_loadable_while_suspended_snapshot_fails
 async def test_bound_system_skill_snapshot_is_visible_only_in_bound_project(
     migrated_postgres_database_url: str,
 ) -> None:
+    bootstrap_module = importlib.import_module("app.shared_assets.bootstrap")
+    catalog_module = importlib.import_module("app.shared_assets.bootstrap.catalog")
+    archive_module = importlib.import_module("app.shared_assets.bootstrap.skill_archive")
     service_module = importlib.import_module("app.shared_assets.skill_service")
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     project = await _seed_actor_and_project(engine, factory, label="skill-bound")
     outsider = await _seed_actor_and_project(engine, factory, label="skill-unbound")
-    system = await _seed_system_admin(engine)
     service = service_module.SkillService(factory)
     try:
-        asset = await service.create_asset(system, service_module.CreateSkill("system-skill", "System Skill"))
-        draft = await service.create_version_from_archive(
-            system,
-            asset.id,
-            _archive(),
-            expected_asset_version=1,
-        )
+        await bootstrap_module.bootstrap_system_assets(factory)
+        async with factory() as session:
+            asset = (await session.execute(select(SkillRow).where(SkillRow.source_key == "builtin:skill:academic-paper-review"))).scalar_one()
+        catalog = catalog_module.load_bootstrap_catalog()
+        entry = next(item for item in catalog.entries if item.source_key == "builtin:skill:academic-paper-review")
+        expected_files = archive_module.load_skill_archive(catalog_module.catalog_payload(catalog, entry))
+        published_version_id = asset.current_published_version_id
+        assert published_version_id is not None
         with pytest.raises(AssetNotFound):
-            await service.load_version_files(system, asset.id, draft.id)
-        published = await service.publish(system, asset.id, draft.id, expected_asset_version=2)
-        with pytest.raises(AssetNotFound):
-            await service.load_version_files(project, asset.id, published.id)
+            await service.load_version_files(
+                project,
+                asset.id,
+                published_version_id,
+            )
 
         async with engine.begin() as connection:
             await connection.execute(
@@ -384,14 +370,25 @@ async def test_bound_system_skill_snapshot_is_visible_only_in_bound_project(
                 {
                     "project": project.project_id,
                     "asset": asset.id,
-                    "version": published.id,
+                    "version": published_version_id,
                     "user": str(project.user_id),
                 },
             )
 
-        assert await service.load_version_files(project, asset.id, published.id) == _archive()
+        assert (
+            await service.load_version_files(
+                project,
+                asset.id,
+                published_version_id,
+            )
+            == expected_files
+        )
         with pytest.raises(AssetNotFound):
-            await service.load_version_files(outsider, asset.id, published.id)
+            await service.load_version_files(
+                outsider,
+                asset.id,
+                published_version_id,
+            )
     finally:
         await engine.dispose()
 

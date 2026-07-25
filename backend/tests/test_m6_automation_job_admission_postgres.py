@@ -416,13 +416,20 @@ async def test_late_scheduled_admission_preserves_tick_but_uses_admission_time(
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     admitted_at = NOW + timedelta(minutes=17)
+    database_updated_at = None
+
+    class TimestampCapturingDispatcher(AutomationDispatcher):
+        async def _after_job_attached(self, session, _admission) -> None:
+            nonlocal database_updated_at
+            database_updated_at = await session.scalar(text("SELECT now()"))
+
     try:
         task = await _create_due_task(
             seed,
             task_id=f"m6-late-{uuid.uuid4().hex[:20]}",
         )
 
-        admitted = await AutomationDispatcher(
+        admitted = await TimestampCapturingDispatcher(
             seed.factory,
             clock=lambda: admitted_at,
         ).admit_occurrence(
@@ -441,7 +448,8 @@ async def test_late_scheduled_admission_preserves_tick_but_uses_admission_time(
                 )
             ).one()
         assert row.next_run_at > admitted_at
-        assert row.updated_at == admitted_at
+        assert database_updated_at is not None
+        assert row.updated_at == database_updated_at
     finally:
         await seed.engine.dispose()
 
@@ -839,21 +847,33 @@ async def test_automation_terminal_port_never_waits_on_locked_parent_definition(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "context_mode",
+    ("fresh_thread_per_run", "reuse_thread"),
+)
 async def test_automation_job_executes_in_worker_and_reconciles_occurrence(
     migrated_postgres_database_url: str,
+    context_mode: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    executions = []
 
     class Executor:
         async def execute(self, execution, _authority):
+            executions.append(execution)
             assert execution.run.metadata["scheduled_trigger"] == "scheduled"
             return AgentExecutionResult.succeeded()
 
     try:
-        task = await _create_due_task(
-            seed,
-            task_id=f"m6-worker-auto-{uuid.uuid4().hex[:16]}",
-        )
+        task_id = f"m6-worker-auto-{uuid.uuid4().hex[:16]}"
+        if context_mode == "reuse_thread":
+            task = await _create_reuse_task(
+                seed,
+                task_id=task_id,
+                thread_id=f"m6-worker-reuse-{uuid.uuid4()}",
+            )
+        else:
+            task = await _create_due_task(seed, task_id=task_id)
         admitted = await AutomationDispatcher(seed.factory).admit_occurrence(
             _definition(seed, task),
             scheduled_for=NOW,
@@ -886,6 +906,20 @@ async def test_automation_job_executes_in_worker_and_reconciles_occurrence(
             JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
         )
         await settlement.commit()
+
+        assert len(executions) == 1
+        assert executions[0].config == {
+            "recursion_limit": 100,
+            "metadata": admitted.run.metadata,
+            "configurable": {
+                "thread_id": admitted.run.thread_id,
+                "checkpoint_ns": "",
+            },
+            "context": {
+                "thread_id": admitted.run.thread_id,
+                "non_interactive": True,
+            },
+        }
 
         async with seed.factory() as session:
             state = (

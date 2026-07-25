@@ -30,6 +30,7 @@ import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
   findToolCallResult,
+  isClarificationOnlyProcessingGroup,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -41,17 +42,23 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import {
+  ThinkingDisclosure,
+  ThinkingDisclosureContent,
+} from "./thinking-disclosure";
 
 export function MessageGroup({
   className,
   messages,
   isLoading = false,
+  turnStartTime,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  turnStartTime?: number | null;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
 }) {
@@ -60,7 +67,13 @@ export function MessageGroup({
   const [showLastThinking, setShowLastThinking] = useState(
     isStaticWebsiteOnly(),
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const steps = useMemo(
+    () =>
+      isClarificationOnlyProcessingGroup(messages)
+        ? []
+        : convertToSteps(messages),
+    [messages],
+  );
   const debugStepByMessageId = useMemo(
     () =>
       new Map(
@@ -223,6 +236,32 @@ export function MessageGroup({
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
 
+  if (steps.length === 0) {
+    return null;
+  }
+
+  if (
+    lastReasoningStep &&
+    !lastToolCallStep &&
+    steps.every((step) => step.type === "reasoning")
+  ) {
+    return (
+      <ThinkingDisclosure
+        className={className}
+        isStreaming={isLoading}
+        startTimeProp={turnStartTime}
+      >
+        <ThinkingDisclosureContent>
+          <MarkdownContent
+            content={lastReasoningStep.reasoning ?? ""}
+            isLoading={isLoading}
+            rehypePlugins={rehypePlugins}
+          />
+        </ThinkingDisclosureContent>
+      </ThinkingDisclosure>
+    );
+  }
+
   return (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
@@ -308,7 +347,11 @@ export function MessageGroup({
                 className="font-normal"
                 label={
                   <DebugStepLabel
-                    label={t.common.thinking}
+                    label={
+                      isLoading
+                        ? t.common.thinkingInProgress()
+                        : t.common.thoughtFor()
+                    }
                     token={shouldInlineThinkingToken({
                       debugStep: lastReasoningDebugStep,
                       toolCallCount: lastReasoningStep.messageId
@@ -732,7 +775,10 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         steps.push(step);
       }
       for (const tool_call of message.tool_calls ?? []) {
-        if (tool_call.name === "task") {
+        if (
+          tool_call.name === "task" ||
+          tool_call.name === "ask_clarification"
+        ) {
           continue;
         }
         const step: CoTToolCallStep = {

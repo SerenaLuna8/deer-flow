@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.middlewares import title_middleware as title_middleware_module
@@ -45,6 +45,65 @@ class TestTitleMiddlewareCoreLogic:
         }
 
         assert middleware._should_generate_title(state) is True
+
+    def test_should_wait_for_the_first_turn_final_answer_after_tools(self):
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        tool_call = {
+            "name": "lookup",
+            "args": {"query": "DeerFlow"},
+            "id": "call-1",
+            "type": "tool_call",
+        }
+        in_progress_state = {
+            "messages": [
+                HumanMessage(content="查一下并总结"),
+                AIMessage(content="", tool_calls=[tool_call]),
+            ]
+        }
+        completed_state = {
+            "messages": [
+                *in_progress_state["messages"],
+                ToolMessage(content="结果", tool_call_id="call-1"),
+                AIMessage(content="这是最终总结"),
+            ]
+        }
+
+        assert middleware._should_generate_title(in_progress_state) is False
+        assert middleware._should_generate_title(completed_state) is True
+
+    def test_hidden_clarification_response_stays_inside_the_first_turn(self):
+        _set_test_title_config(enabled=True, max_chars=20)
+        middleware = TitleMiddleware()
+        tool_call = {
+            "name": "ask_clarification",
+            "args": {"question": "请选择"},
+            "id": "call-clarification",
+            "type": "tool_call",
+        }
+        state = {
+            "messages": [
+                HumanMessage(content="帮我写一篇故事"),
+                AIMessage(content="我先确认一下。", tool_calls=[tool_call]),
+                ToolMessage(
+                    content="请选择故事风格",
+                    tool_call_id="call-clarification",
+                ),
+                HumanMessage(
+                    content=[{"type": "text", "text": "自由发挥"}],
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        "human_input_response": {"answers": ["自由发挥"]},
+                    },
+                ),
+                AIMessage(content="好的，这是完整故事。"),
+            ]
+        }
+
+        assert middleware._should_generate_title(state) is True
+        assert middleware._generate_title_result(state) == {
+            "title": "帮我写一篇故事",
+        }
 
     def test_should_generate_title_with_dynamic_context_reminder(self):
         _set_test_title_config(enabled=True)
@@ -367,25 +426,6 @@ class TestTitleMiddlewareCoreLogic:
         assert "<system-reminder>" not in prompt
         assert "User prefers Python" not in prompt
 
-    def test_should_generate_title_partial_exchange_allows_user_only(self):
-        """Interrupted-run path can produce a fallback from a lone human message."""
-        _set_test_title_config(enabled=True)
-        middleware = TitleMiddleware()
-        state = {"messages": [HumanMessage(content="只有人类消息，AI 还没回复")]}
-
-        assert middleware._should_generate_title(state) is False
-        assert middleware._should_generate_title(state, allow_partial_exchange=True) is True
-
-    def test_should_generate_title_partial_exchange_skips_when_titled(self):
-        """Existing title still wins, even on the interrupted-run path."""
-        _set_test_title_config(enabled=True)
-        middleware = TitleMiddleware()
-        state = {
-            "messages": [HumanMessage(content="问题")],
-            "title": "Already set",
-        }
-        assert middleware._should_generate_title(state, allow_partial_exchange=True) is False
-
     def test_should_generate_title_handles_dict_messages(self):
         """Checkpoint channel_values store messages as dicts; the middleware must accept them."""
         _set_test_title_config(enabled=True)
@@ -420,7 +460,6 @@ class TestTitleMiddlewareCoreLogic:
         state = {"messages": None}
 
         assert middleware._should_generate_title(state) is False
-        assert middleware._should_generate_title(state, allow_partial_exchange=True) is False
 
     def test_build_title_prompt_handles_none_messages_channel(self):
         """``_build_title_prompt`` must also tolerate a None messages channel."""
@@ -446,33 +485,6 @@ class TestTitleMiddlewareCoreLogic:
             ]
         }
         assert middleware._should_generate_title(state) is True
-
-    def test_partial_exchange_with_dict_human_message(self):
-        """Interrupted-run path must accept a lone dict-form first-turn user message."""
-        _set_test_title_config(enabled=True, max_chars=20)
-        middleware = TitleMiddleware()
-        state = {"messages": [{"role": "user", "content": "请帮我写测试"}]}
-
-        result = middleware._generate_title_result(state, allow_partial_exchange=True)
-        assert result == {"title": "请帮我写测试"}
-
-    def test_partial_exchange_ignores_dict_dynamic_context_reminder(self):
-        """Checkpoint dicts can include hidden memory reminders that should not count as real user turns."""
-        _set_test_title_config(enabled=True, max_chars=20)
-        middleware = TitleMiddleware()
-        state = {
-            "messages": [
-                {
-                    "type": "human",
-                    "content": "<memory>User prefers concise titles.</memory>",
-                    "additional_kwargs": {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
-                },
-                {"type": "human", "content": "请帮我写测试", "additional_kwargs": {}},
-            ]
-        }
-
-        assert middleware._should_generate_title(state, allow_partial_exchange=True) is True
-        assert middleware._generate_title_result(state, allow_partial_exchange=True) == {"title": "请帮我写测试"}
 
     def test_generate_title_async_strips_think_tags_in_response(self, monkeypatch):
         """Async title generation strips <think> blocks from the model response."""

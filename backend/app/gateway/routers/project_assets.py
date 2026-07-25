@@ -112,6 +112,10 @@ class ProjectAssetItemResponse(AssetItemResponse):
     binding: BindingItemResponse | None
 
 
+class ProjectSkillItemResponse(ProjectAssetItemResponse):
+    description: str
+
+
 class CredentialItemResponse(_StrictModel):
     id: uuid.UUID
     scope: AssetScope
@@ -134,6 +138,12 @@ class ProjectCredentialItemResponse(CredentialItemResponse):
 class ScopedAssetListResponse(_StrictModel):
     system_items: list[ProjectAssetItemResponse]
     project_items: list[ProjectAssetItemResponse]
+    request_id: str
+
+
+class ScopedSkillAssetListResponse(_StrictModel):
+    system_items: list[ProjectSkillItemResponse]
+    project_items: list[ProjectSkillItemResponse]
     request_id: str
 
 
@@ -276,6 +286,11 @@ class McpApproveRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
 
 
+class SystemMcpCredentialGrantRequest(_StrictModel):
+    credential_versions: dict[str, uuid.UUID]
+    expected_active_grant_versions: dict[str, int] = Field(default_factory=dict)
+
+
 class CredentialCreateRequest(_StrictModel):
     name: str
     display_name: str
@@ -289,6 +304,10 @@ class CredentialReplaceRequest(_StrictModel):
 
 
 class CredentialRevokeRequest(_StrictModel):
+    expected_credential_version: int = Field(ge=1)
+
+
+class CredentialGrantMigrationRequest(_StrictModel):
     expected_credential_version: int = Field(ge=1)
 
 
@@ -420,6 +439,13 @@ class CredentialVersionItemResponse(_StrictModel):
     supersedes_version_id: uuid.UUID | None
     created_by_user_id: str
     created_at: datetime
+
+
+class CredentialGrantMigrationResponse(_StrictModel):
+    credential_id: uuid.UUID
+    credential_version_id: uuid.UUID
+    migrated_count: int = Field(ge=0)
+    request_id: str
 
 
 class AgentVersionResponse(_StrictModel):
@@ -663,17 +689,19 @@ def _scoped_assets(
     bindings,
     context: ProjectContext,
     kind: AssetKind,
-) -> ScopedAssetListResponse:
+) -> ScopedAssetListResponse | ScopedSkillAssetListResponse:
     by_asset_id = {binding.asset_id: binding for binding in bindings}
+    item_model = ProjectSkillItemResponse if kind is AssetKind.SKILL else ProjectAssetItemResponse
     items = [
-        ProjectAssetItemResponse(
+        item_model(
             **vars(view),
             capabilities=_asset_item_capabilities(context, view.scope, kind),
             binding=(BindingItemResponse(**vars(by_asset_id[view.id])) if view.scope is AssetScope.SYSTEM and view.id in by_asset_id else None),
         )
         for view in views
     ]
-    return ScopedAssetListResponse(
+    response_model = ScopedSkillAssetListResponse if kind is AssetKind.SKILL else ScopedAssetListResponse
+    return response_model(
         system_items=[item for item in items if item.scope is AssetScope.SYSTEM],
         project_items=[item for item in items if item.scope is AssetScope.PROJECT],
         request_id=context.request_id,
@@ -685,7 +713,7 @@ async def _list_assets(
     kind: AssetKind,
     service,
     binding_service: BindingService,
-) -> ScopedAssetListResponse:
+) -> ScopedAssetListResponse | ScopedSkillAssetListResponse:
     try:
         views = await service.list_visible(context)
         bindings = await binding_service.list_visible(context, kind)
@@ -774,7 +802,12 @@ def _mcp_definition(body: McpVersionRequest) -> McpDefinition:
     )
 
 
-def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
+def register_asset_routes(
+    router: APIRouter,
+    actor_dependency,
+    *,
+    include_shared_asset_mutations: bool = True,
+) -> None:
     async def create_agent(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateAgent(body.slug, body.display_name)))
 
@@ -870,33 +903,54 @@ def register_asset_mutation_routes(router: APIRouter, actor_dependency) -> None:
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
-    for path, endpoint, methods, response_model, code in (
-        ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
+    async def migrate_credential_grants(credential_id: uuid.UUID, body: CredentialGrantMigrationRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
+        try:
+            view = await service.migrate_grants(
+                actor,
+                credential_id,
+                expected_credential_version=body.expected_credential_version,
+            )
+            return CredentialGrantMigrationResponse(**vars(view), request_id=actor.request_id)
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+
+    read_routes = (
         ("/agents/{asset_id}", get_agent, ["GET"], AssetMutationResponse, 200),
         ("/agents/{asset_id}/versions", get_agent_versions, ["GET"], AgentVersionHistoryResponse, 200),
+        ("/skills/{asset_id}", get_skill, ["GET"], AssetMutationResponse, 200),
+        ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], SkillVersionHistoryResponse, 200),
+        ("/mcp-servers/{asset_id}", get_mcp, ["GET"], AssetMutationResponse, 200),
+        ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], McpVersionHistoryResponse, 200),
+    )
+    shared_asset_write_routes = (
+        ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
         ("/agents/{asset_id}/versions", create_agent_version, ["POST"], AgentVersionResponse, 201),
         ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent, ["POST"], AgentVersionResponse, 200),
         ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
-        ("/skills/{asset_id}", get_skill, ["GET"], AssetMutationResponse, 200),
-        ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], SkillVersionHistoryResponse, 200),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], SkillVersionResponse, 200),
         ("/mcp-servers", create_mcp, ["POST"], AssetMutationResponse, 201),
-        ("/mcp-servers/{asset_id}", get_mcp, ["GET"], AssetMutationResponse, 200),
-        ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], McpVersionHistoryResponse, 200),
         ("/mcp-servers/{asset_id}/versions", create_mcp_version, ["POST"], McpVersionResponse, 201),
         ("/mcp-servers/{asset_id}/versions/{version_id}/publish", publish_mcp, ["POST"], McpVersionResponse, 200),
         ("/mcp-servers/{asset_id}/versions/{version_id}/submit-approval", submit_mcp, ["POST"], McpVersionResponse, 200),
         ("/mcp-servers/{asset_id}/versions/{version_id}/approve", approve_mcp, ["POST"], McpVersionResponse, 200),
+    )
+    credential_routes = (
         ("/credentials", create_credential, ["POST"], CredentialMutationResponse, 201),
         ("/credentials/{credential_id}", get_credential, ["GET"], CredentialMutationResponse, 200),
         ("/credentials/{credential_id}/versions", get_credential_versions, ["GET"], CredentialVersionHistoryResponse, 200),
         ("/credentials/{credential_id}/replace", replace_credential, ["POST"], CredentialVersionResponse, 200),
         ("/credentials/{credential_id}/revoke", revoke_credential, ["POST"], CredentialMutationResponse, 200),
-    ):
+        ("/credentials/{credential_id}/migrate-grants", migrate_credential_grants, ["POST"], CredentialGrantMigrationResponse, 200),
+    )
+    routes = (*read_routes, *credential_routes)
+    if include_shared_asset_mutations:
+        routes = (*routes, *shared_asset_write_routes)
+    for path, endpoint, methods, response_model, code in routes:
         router.add_api_route(path, endpoint, methods=methods, response_model=response_model, status_code=code)
-    for segment, dependency in (("agents", get_agent_service), ("skills", get_skill_service), ("mcp-servers", get_mcp_service)):
-        add_status_routes(segment, dependency)
+    if include_shared_asset_mutations:
+        for segment, dependency in (("agents", get_agent_service), ("skills", get_skill_service), ("mcp-servers", get_mcp_service)):
+            add_status_routes(segment, dependency)
 
 
 @project_router.get(
@@ -972,7 +1026,7 @@ async def list_project_agents(
     return await _list_assets(context, AssetKind.AGENT, service, binding_service)
 
 
-@project_router.get("/skills", response_model=ScopedAssetListResponse)
+@project_router.get("/skills", response_model=ScopedSkillAssetListResponse)
 async def list_project_skills(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[SkillService, Depends(get_skill_service)],
@@ -1101,4 +1155,4 @@ for _segment, _kind in _BINDING_KINDS.items():
     _register_binding_routes(_segment, _kind)
 
 
-register_asset_mutation_routes(project_router, project_asset_context)
+register_asset_routes(project_router, project_asset_context)

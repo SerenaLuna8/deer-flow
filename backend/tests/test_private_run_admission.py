@@ -19,7 +19,18 @@ from app.private_work.run_admission import AdmittedPrivateRun, PrivateRunAdmissi
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.capabilities import Capability
+from app.shared_assets.model_refs import ConfiguredModelRefResolver
 from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
+from deerflow.config.app_config import AppConfig
+
+
+def _model_config(*model_names: str) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "models": [{"name": name, "use": "pkg:Model", "model": f"provider/{name}"} for name in model_names],
+        }
+    )
 
 
 @pytest.mark.postgres
@@ -57,6 +68,91 @@ async def test_admission_persists_pending_snapshot_before_runtime_calls(migrated
         assert admitted.snapshot.assets[0].asset_kind == "agent"
         assert admitted.snapshot.catalog_generation >= 0
         assert calls == ["resolve"]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_admission_resolves_default_to_exact_configured_model_name(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"admit-default-model-{uuid.uuid4()}"
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await session.execute(
+                text(
+                    """UPDATE agent_versions SET model_ref='default'
+                    WHERE agent_id=:agent_id"""
+                ),
+                {"agent_id": seed.project_agent_id},
+            )
+
+        admitted = await PrivateRunAdmissionService(
+            seed.factory,
+            model_ref_resolver=ConfiguredModelRefResolver(_model_config("primary-logical", "secondary-logical")),
+        ).admit(seed.owner_a, thread_id, PrivateRunCreate())
+
+        assert admitted.run.model_name == "primary-logical"
+        async with seed.factory() as session:
+            persisted = await session.scalar(
+                text("SELECT model_name FROM runs WHERE run_id=:run_id"),
+                {"run_id": admitted.run.run_id},
+            )
+        assert persisted == "primary-logical"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_admission_rejects_unknown_model_ref_without_partial_run_or_job(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"admit-missing-model-{uuid.uuid4()}"
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await session.execute(
+                text(
+                    """UPDATE agent_versions SET model_ref='missing-logical'
+                    WHERE agent_id=:agent_id"""
+                ),
+                {"agent_id": seed.project_agent_id},
+            )
+
+        with pytest.raises(PrivateWorkAssetStale):
+            await PrivateRunAdmissionService(
+                seed.factory,
+                model_ref_resolver=ConfiguredModelRefResolver(_model_config("primary-logical")),
+            ).admit(seed.owner_a, thread_id, PrivateRunCreate())
+
+        async with seed.factory() as session:
+            counts = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM runs WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM jobs WHERE run_id IN
+                            (SELECT run_id FROM runs WHERE thread_id=:thread_id)),
+                        (SELECT count(*) FROM run_asset_versions
+                            WHERE thread_id=:thread_id)"""
+                    ),
+                    {"thread_id": thread_id},
+                )
+            ).one()
+        assert tuple(counts) == (0, 0, 0)
     finally:
         await seed.engine.dispose()
 

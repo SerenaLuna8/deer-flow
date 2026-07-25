@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.notifications.models import InvitationNotificationView, NotificationPage
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectForbidden, ProjectValidationFailed
 from app.projects.invitation_models import (
     InvitationView,
+    ProjectInvitationConflict,
     ProjectInvitationInvalid,
     RedeemedInvitation,
 )
@@ -195,11 +197,26 @@ async def test_redeem_passes_locked_pending_invitation_to_repository() -> None:
         role=ProjectRole.EDITOR,
     )
     repository.redeem_locked.return_value = expected
+    membership = SimpleNamespace(
+        id=expected.membership_id,
+        version=7,
+        activation_generation=3,
+    )
+    repository.lock_membership.return_value = membership
     claim = SimpleNamespace(invitation_id=row.id, token_hash="b" * 64)
     user_id = uuid.uuid4()
 
     retention = AsyncMock()
-    result = await InvitationService(repository, retention=retention).redeem(
+    retention_jobs = AsyncMock()
+    quota = AsyncMock()
+    notifications = AsyncMock()
+    result = await InvitationService(
+        repository,
+        retention=retention,
+        retention_jobs=retention_jobs,
+        quota=quota,
+        notifications=notifications,
+    ).redeem(
         user_id,
         " MEMBER@example.com ",
         claim,
@@ -208,12 +225,187 @@ async def test_redeem_passes_locked_pending_invitation_to_repository() -> None:
 
     assert result == expected
     repository.redeem_locked.assert_awaited_once_with(project, row, user_id=user_id, now=NOW)
+    quota.reserve_member.assert_awaited_once()
+    assert quota.reserve_member.await_args.kwargs == {
+        "membership_id": membership.id,
+        "activation_generation": 3,
+    }
+    assert quota.reserve_member.await_args.args[1].membership_version == 7
     retention.restore_owner.assert_awaited_once_with(
         repository.session,
         project_id=row.project_id,
         owner_user_id=str(user_id),
         now=NOW,
     )
+    retention_jobs.cancel_former_owner.assert_awaited_once_with(
+        repository.session,
+        project_id=row.project_id,
+        owner_user_id=str(user_id),
+        now=NOW,
+    )
+    notifications.mark_invitation_acted.assert_awaited_once_with(
+        user_id,
+        row.id,
+        NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_returns_only_current_recipient_notifications() -> None:
+    repository = _repository()
+    user_id = uuid.uuid4()
+    notification = InvitationNotificationView(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        project_slug="research-lab",
+        project_display_name="Research Lab",
+        inviter_email="owner@example.com",
+        role=ProjectRole.VIEWER,
+        status="pending",
+        is_read=False,
+        created_at=NOW,
+        expires_at=NOW + timedelta(days=7),
+        version=1,
+    )
+    notifications = AsyncMock()
+    notifications.list_for_recipient.return_value = NotificationPage(
+        items=(notification,),
+        unread_count=1,
+    )
+
+    result = await InvitationService(
+        repository,
+        notifications=notifications,
+    ).list_notifications(
+        user_id,
+        NOW,
+    )
+
+    assert result.items == (notification,)
+    assert result.unread_count == 1
+    notifications.list_for_recipient.assert_awaited_once_with(
+        user_id,
+        NOW,
+        cursor=None,
+        limit=50,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_notifications_rejects_invalid_cursor_before_query() -> None:
+    repository = _repository()
+    notifications = AsyncMock()
+
+    with pytest.raises(ProjectValidationFailed):
+        await InvitationService(
+            repository,
+            notifications=notifications,
+        ).list_notifications(
+            uuid.uuid4(),
+            NOW,
+            cursor="not-a-valid-cursor",
+            limit=10,
+        )
+
+    notifications.list_for_recipient.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_all_notifications_read_is_account_scoped() -> None:
+    repository = _repository()
+    notifications = AsyncMock()
+    notifications.mark_all_read.return_value = 4
+    user_id = uuid.uuid4()
+
+    marked_count = await InvitationService(
+        repository,
+        notifications=notifications,
+    ).mark_all_notifications_read(user_id, NOW)
+
+    assert marked_count == 4
+    notifications.mark_all_read.assert_awaited_once_with(user_id, NOW)
+
+
+@pytest.mark.asyncio
+async def test_accept_notification_redeems_recipient_invitation_without_token() -> None:
+    repository = _repository()
+    row = _invitation(invited_email="member@example.com")
+    project = SimpleNamespace(id=row.project_id, slug="example-project")
+    repository.lock_project.return_value = project
+    notifications = AsyncMock()
+    notifications.locate_project_for_accept.return_value = row.project_id
+    notifications.lock_invitation_for_accept.return_value = row
+    expected = RedeemedInvitation(
+        invitation_id=row.id,
+        project_id=row.project_id,
+        project_slug=project.slug,
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.EDITOR,
+    )
+    repository.redeem_locked.return_value = expected
+    repository.lock_membership.return_value = SimpleNamespace(
+        id=expected.membership_id,
+        version=2,
+        activation_generation=1,
+    )
+    user_id = uuid.uuid4()
+
+    result = await InvitationService(
+        repository,
+        retention=AsyncMock(),
+        retention_jobs=AsyncMock(),
+        quota=AsyncMock(),
+        notifications=notifications,
+    ).accept_notification(
+        user_id,
+        row.id,
+        expected_version=1,
+        now=NOW,
+    )
+
+    assert result == expected
+    notifications.locate_project_for_accept.assert_awaited_once_with(
+        user_id,
+        row.id,
+    )
+    notifications.lock_invitation_for_accept.assert_awaited_once_with(
+        user_id,
+        row.id,
+        row.project_id,
+    )
+    repository.redeem_locked.assert_awaited_once_with(
+        project,
+        row,
+        user_id=user_id,
+        now=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_accept_notification_rejects_stale_invitation_version() -> None:
+    repository = _repository()
+    row = _invitation()
+    row.version = 2
+    notifications = AsyncMock()
+    notifications.locate_project_for_accept.return_value = row.project_id
+    repository.lock_project.return_value = SimpleNamespace(
+        id=row.project_id,
+        slug="example-project",
+    )
+    notifications.lock_invitation_for_accept.return_value = row
+
+    with pytest.raises(ProjectInvitationConflict):
+        await InvitationService(
+            repository,
+            notifications=notifications,
+        ).accept_notification(
+            uuid.uuid4(),
+            row.id,
+            expected_version=1,
+            now=NOW,
+        )
+
+    repository.redeem_locked.assert_not_awaited()
 
 
 def test_hash_invitation_token_is_lowercase_sha256_hexdigest() -> None:

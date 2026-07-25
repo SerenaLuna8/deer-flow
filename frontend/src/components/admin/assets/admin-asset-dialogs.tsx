@@ -303,10 +303,15 @@ export function CreateAssetDialog({
             <Input
               name="slug"
               required
-              maxLength={120}
+              minLength={3}
+              maxLength={63}
               pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
               placeholder="lowercase-slug"
+              title="使用 3–63 位小写字母、数字和单个连字符"
             />
+            <span className="text-muted-foreground text-xs">
+              3–63 位小写字母、数字或连字符；创建后作为稳定标识使用。
+            </span>
           </label>
           {errorMessage && (
             <p role="alert" className="text-destructive text-sm">
@@ -324,7 +329,62 @@ export function CreateAssetDialog({
   );
 }
 
-export function AgentVersionFields() {
+export type AgentModelOption = {
+  name: string;
+  displayName: string;
+};
+
+export type AgentDependencyOption = {
+  id: string;
+  label: string;
+};
+
+function DependencyVersionPicker({
+  name,
+  label,
+  options,
+}: {
+  name: "skill_version_ids" | "mcp_version_ids";
+  label: string;
+  options: readonly AgentDependencyOption[];
+}) {
+  return (
+    <label className="grid gap-2 text-sm">
+      {label}
+      <select
+        name={name}
+        multiple
+        size={Math.min(Math.max(options.length, 2), 6)}
+        className="border-input bg-background min-h-20 rounded-md border px-3 py-2 text-sm"
+      >
+        {options.map((option) => (
+          <option key={option.id} value={option.id} title={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <span className="text-muted-foreground text-xs">
+        {options.length > 0
+          ? "按住 Command（macOS）或 Ctrl（Windows/Linux）可多选；保存时固定到所选精确版本。"
+          : "当前没有可选择的已发布版本。"}
+      </span>
+    </label>
+  );
+}
+
+export function AgentVersionFields({
+  modelOptions = [],
+  skillVersionOptions = [],
+  mcpVersionOptions = [],
+  modelsLoading = false,
+  modelsError = false,
+}: {
+  modelOptions?: readonly AgentModelOption[];
+  skillVersionOptions?: readonly AgentDependencyOption[];
+  mcpVersionOptions?: readonly AgentDependencyOption[];
+  modelsLoading?: boolean;
+  modelsError?: boolean;
+}) {
   return (
     <>
       <label className="grid gap-2 text-sm">
@@ -336,21 +396,45 @@ export function AgentVersionFields() {
         <Textarea name="soul" />
       </label>
       <label className="grid gap-2 text-sm">
-        模型引用
-        <Input name="model_ref" />
+        逻辑模型
+        <select
+          name="model_ref"
+          required
+          defaultValue=""
+          disabled={modelsLoading || modelsError || modelOptions.length === 0}
+          className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+        >
+          <option value="" disabled>
+            {modelsLoading
+              ? "正在加载模型…"
+              : modelsError
+                ? "模型配置暂不可用"
+                : "选择逻辑模型"}
+          </option>
+          {modelOptions.map((model) => (
+            <option key={model.name} value={model.name}>
+              {model.displayName}（{model.name}）
+            </option>
+          ))}
+        </select>
+        <span className="text-muted-foreground text-xs">
+          仅保存 /api/models 返回的逻辑名称，不保存 provider 或底层模型 ID。
+        </span>
       </label>
       <label className="grid gap-2 text-sm">
         工具组（逗号或换行分隔）
         <Textarea name="tool_groups" />
       </label>
-      <label className="grid gap-2 text-sm">
-        Skill 版本 ID（逗号或换行分隔）
-        <Textarea name="skill_version_ids" />
-      </label>
-      <label className="grid gap-2 text-sm">
-        MCP 版本 ID（逗号或换行分隔）
-        <Textarea name="mcp_version_ids" />
-      </label>
+      <DependencyVersionPicker
+        name="skill_version_ids"
+        label="Skill 依赖版本"
+        options={skillVersionOptions}
+      />
+      <DependencyVersionPicker
+        name="mcp_version_ids"
+        label="MCP 依赖版本"
+        options={mcpVersionOptions}
+      />
     </>
   );
 }
@@ -417,7 +501,16 @@ export function McpVersionFields() {
         </p>
         <label className="grid gap-2 text-sm">
           槽位名称
-          <Input name="slot_name" />
+          <Input
+            name="slot_name"
+            maxLength={63}
+            pattern="[a-z][a-z0-9._-]{0,62}"
+            placeholder="api-token"
+            title="以小写字母开头，只能使用小写字母、数字、点、下划线或连字符"
+          />
+          <span className="text-muted-foreground text-xs">
+            以小写字母开头，最多 63 位；可使用数字、点、下划线和连字符。
+          </span>
         </label>
         <label className="grid gap-2 text-sm">
           用途
@@ -437,7 +530,15 @@ export function McpVersionFields() {
         </label>
         <label className="grid gap-2 text-sm">
           必需字段（逗号或换行分隔）
-          <Textarea name="slot_fields" />
+          <Textarea
+            name="slot_fields"
+            placeholder="Authorization"
+            maxLength={2048}
+          />
+          <span className="text-muted-foreground text-xs">
+            填写所选分组中 Credential
+            必须包含的字段名；多个字段用逗号或换行分隔。
+          </span>
         </label>
       </div>
     </>
@@ -453,10 +554,14 @@ function versionInput(
     return {
       description: field(form, "description"),
       soul: field(form, "soul"),
-      model_ref: field(form, "model_ref"),
+      model_ref: field(form, "model_ref").trim(),
       tool_groups: list(form.get("tool_groups")),
-      skill_version_ids: list(form.get("skill_version_ids")),
-      mcp_version_ids: list(form.get("mcp_version_ids")),
+      skill_version_ids: form
+        .getAll("skill_version_ids")
+        .flatMap((value) => list(value)),
+      mcp_version_ids: form
+        .getAll("mcp_version_ids")
+        .flatMap((value) => list(value)),
       expected_asset_version: expectedAssetVersion,
     };
   }
@@ -511,6 +616,11 @@ export function CreateVersionDialog({
   open,
   pending,
   errorMessage,
+  modelOptions,
+  skillVersionOptions,
+  mcpVersionOptions,
+  modelsLoading = false,
+  modelsError = false,
   onOpenChange,
   onSubmit,
 }: {
@@ -519,6 +629,11 @@ export function CreateVersionDialog({
   open: boolean;
   pending: boolean;
   errorMessage: string | null;
+  modelOptions?: readonly AgentModelOption[];
+  skillVersionOptions?: readonly AgentDependencyOption[];
+  mcpVersionOptions?: readonly AgentDependencyOption[];
+  modelsLoading?: boolean;
+  modelsError?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: VersionAuthoringInput) => void;
 }) {
@@ -543,7 +658,13 @@ export function CreateVersionDialog({
           }}
         >
           {kind === "agents" ? (
-            <AgentVersionFields />
+            <AgentVersionFields
+              modelOptions={modelOptions}
+              skillVersionOptions={skillVersionOptions}
+              mcpVersionOptions={mcpVersionOptions}
+              modelsLoading={modelsLoading}
+              modelsError={modelsError}
+            />
           ) : kind === "skills" ? (
             <SkillVersionFields />
           ) : (
@@ -555,7 +676,14 @@ export function CreateVersionDialog({
             </p>
           )}
           <DialogFooter>
-            <Button type="submit" disabled={pending}>
+            <Button
+              type="submit"
+              disabled={
+                pending ||
+                (kind === "agents" &&
+                  (modelsLoading || modelsError || !modelOptions?.length))
+              }
+            >
               {pending ? "创建中…" : "创建版本"}
             </Button>
           </DialogFooter>
@@ -852,6 +980,96 @@ export function CredentialSecretDialog({
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function CredentialRevokeDialog({
+  open,
+  credentialName,
+  pending,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  credentialName: string;
+  pending: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>确认撤销 Credential</DialogTitle>
+          <DialogDescription>
+            此操作不可恢复。撤销“{credentialName}”后，Credential
+            的所有版本与相关 active Grant 将在同一事务中失效，MCP
+            详情不再显示为已授权。
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+          >
+            取消
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={pending}
+            onClick={onConfirm}
+          >
+            {pending ? "撤销中…" : "确认永久撤销"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function CredentialGrantMigrationDialog({
+  open,
+  credentialName,
+  pending,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  credentialName: string;
+  pending: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>迁移 Credential Grant</DialogTitle>
+          <DialogDescription>
+            替换 Credential 只会创建新版本，不会自动轮换既有
+            Grant。系统将仅在字段结构完全兼容时，把“
+            {credentialName}”仍固定到 retired version 的 active Grant
+            原子迁移到当前版本；任一 Grant 不兼容都会整体拒绝。
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+          >
+            取消
+          </Button>
+          <Button type="button" disabled={pending} onClick={onConfirm}>
+            {pending ? "迁移中…" : "确认迁移 Grant"}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

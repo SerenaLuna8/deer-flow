@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, InvalidRequestError
 
+from deerflow.config.quota_config import QuotaConfig
+
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-initialize-admin-min-32")
 
 from app.gateway.auth.config import AuthConfig, set_auth_config
@@ -27,8 +29,12 @@ _TEST_SECRET = "test-secret-key-initialize-admin-min-32"
 
 
 class _NoopQuota:
-    async def reserve_member(self, session, context, *, membership_id, membership_version):
-        del session, context, membership_id, membership_version
+    async def reserve_member(self, session, context, *, membership_id, activation_generation):
+        del session, context, membership_id, activation_generation
+
+
+class _NoopQuotaService:
+    config = QuotaConfig()
 
 
 @asynccontextmanager
@@ -65,6 +71,8 @@ def client(_setup_auth):
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.project_quota_service = _NoopQuotaService()
+    app.state.operational_audit_sink = AsyncMock()
 
     from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, init_engine
@@ -490,6 +498,8 @@ async def test_concurrent_initialize_creates_exactly_one_admin_and_default_proje
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.project_quota_service = _NoopQuotaService()
+    app.state.operational_audit_sink = AsyncMock()
     payloads = (
         {"email": "first-admin@example.com", "password": "Str0ng!First99"},
         {"email": "second-admin@example.com", "password": "Str0ng!Second99"},
@@ -565,6 +575,8 @@ async def test_failed_initialize_can_recover_through_real_setup_bootstrap(migrat
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     app.state.project_quota_enforcer = _NoopQuota()
+    app.state.project_quota_service = _NoopQuotaService()
+    app.state.operational_audit_sink = AsyncMock()
     payload = _init_payload()
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

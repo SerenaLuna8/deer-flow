@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import { describe, expect, test, rs } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -295,7 +292,7 @@ describe("ProjectAutomationsPage", () => {
     );
   });
 
-  test("uses the Next not-found boundary when project capabilities deny Automation read", () => {
+  test("shows a member-safe permission denial when capabilities deny Automation read", () => {
     prepare();
     const forbidden = {
       ...PROJECT,
@@ -305,35 +302,12 @@ describe("ProjectAutomationsPage", () => {
       ] as Project["capabilities"],
     };
 
-    expect(() =>
-      renderToStaticMarkup(<ProjectAutomationsPage project={forbidden} />),
-    ).toThrow("Not found");
+    const html = renderToStaticMarkup(
+      <ProjectAutomationsPage project={forbidden} />,
+    );
+    expect(html).toContain('data-error-status="403"');
+    expect(html).toContain("没有访问权限");
     expect(useProjectAutomationReadiness).toHaveBeenLastCalledWith(false);
     expect(useProjectAutomations).toHaveBeenLastCalledWith({}, false);
-  });
-
-  test("route consumes current project and does not resolve slug or use legacy APIs", () => {
-    const route = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/app/projects/[project_slug]/automations/page.tsx",
-      ),
-      "utf8",
-    );
-    const page = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/projects/automations/project-automations-page.tsx",
-      ),
-      "utf8",
-    );
-
-    expect(route).toContain("ProjectAutomationsRouteClient");
-    expect(route).not.toMatch(/useProjects|useProjectBySlug|useEnterProject/u);
-    expect(page).toContain("useCurrentProject");
-    expect(page).not.toMatch(
-      /core\/scheduled-tasks\/hooks|\/api\/scheduled-tasks/u,
-    );
-    expect(page).toContain("key={project.id}");
   });
 });

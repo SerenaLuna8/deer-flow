@@ -35,6 +35,7 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.feedback_service import PrivateFeedbackService
 from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -192,11 +193,15 @@ async def gateway_platform_runtime(
         from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
         from app.private_work.thread_service import PrivateThreadService
+        from app.shared_assets.model_refs import ConfiguredModelRefResolver
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
+
+        model_ref_resolver = ConfiguredModelRefResolver(config)
 
         app.state.private_file_service = PrivateFileService(
             sf,
             quota=project_quota_enforcer,
+            quota_config=quota_config,
         )
         app.state.private_thread_service = PrivateThreadService(
             sf,
@@ -205,6 +210,7 @@ async def gateway_platform_runtime(
         )
         app.state.private_run_admission_service = PrivateRunAdmissionService(
             sf,
+            model_ref_resolver=model_ref_resolver,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
         )
@@ -213,6 +219,7 @@ async def gateway_platform_runtime(
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
         )
+        app.state.private_feedback_service = PrivateFeedbackService(sf)
         app.state.private_file_streamer = PrivateFileStreamer(sf)
         app.state.project_memory_service = PrivateMemoryService(sf)
         app.state.channel_connection_repo = ChannelConnectionRepository(sf)
@@ -249,6 +256,7 @@ async def gateway_platform_runtime(
         app.state.automation_dispatcher = AutomationDispatcher(
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+            model_ref_resolver=model_ref_resolver,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
         )
@@ -461,6 +469,27 @@ async def get_current_user_from_request(request: Request):
         raise HTTPException(
             status_code=401,
             detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
+        )
+
+    from app.gateway.auth.sessions import AuthSessionUnavailable, validate_access_session
+
+    try:
+        session_is_active = await validate_access_session(payload)
+    except AuthSessionUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "DATABASE_UNAVAILABLE",
+                "message": "Authentication storage unavailable",
+            },
+        ) from None
+    if not session_is_active:
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.TOKEN_INVALID,
+                message="Token invalid or session ended",
+            ).model_dump(),
         )
 
     return user

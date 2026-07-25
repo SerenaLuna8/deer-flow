@@ -39,7 +39,7 @@ make dev
 
 - `/api/v1/auth/*`：登录、账户和认证状态。
 - `/api/projects/*`：项目、成员和项目资产。
-- `/api/projects/{project_id}/threads/*`：项目私有 Thread/Run/File/Artifact。
+- `/api/projects/{project_id}/private-work/*`：项目私有 Thread/Run/File/Artifact。
 - `/api/projects/{project_id}/memory/*`：项目 Memory。
 - `/api/projects/{project_id}/automations/*`：项目 Automation。
 - `/api/admin/*`：仅 system admin 可访问的平台资产与运维接口。

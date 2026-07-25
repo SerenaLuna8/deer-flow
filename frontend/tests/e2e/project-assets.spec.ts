@@ -23,6 +23,7 @@ const PROJECT_SKILL_ID = "20000000-0000-4000-8000-000000000003";
 const PROJECT_MCP_ID = "20000000-0000-4000-8000-000000000004";
 const CREDENTIAL_ID = "20000000-0000-4000-8000-000000000005";
 const SYSTEM_CREDENTIAL_ID = "20000000-0000-4000-8000-000000000006";
+const SYSTEM_SKILL_ID = "20000000-0000-4000-8000-000000000007";
 const SYSTEM_VERSION_1 = "30000000-0000-4000-8000-000000000001";
 const SYSTEM_VERSION_2 = "30000000-0000-4000-8000-000000000002";
 const CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000005";
@@ -120,7 +121,8 @@ function asset(
   name: string,
   capabilities: ProjectAssetItem["capabilities"],
 ): ProjectAssetItem {
-  const scope = id === SYSTEM_AGENT_ID ? "system" : "project";
+  const scope =
+    id === SYSTEM_AGENT_ID || id === SYSTEM_SKILL_ID ? "system" : "project";
   return {
     id,
     scope,
@@ -178,6 +180,16 @@ async function mockProjectAssets(
     "Review Skill",
     projectCapabilities,
   );
+  let systemSkill = {
+    ...asset(
+      SYSTEM_SKILL_ID,
+      "academic-paper-review",
+      "academic-paper-review",
+      systemCapabilities,
+    ),
+    description:
+      "Review, analyze, critique, and summarize academic papers with structured methodology assessment and constructive feedback.",
+  };
   let projectMcp = asset(
     PROJECT_MCP_ID,
     "github-mcp",
@@ -185,6 +197,7 @@ async function mockProjectAssets(
     mcpCapabilities,
   );
   let binding: ProjectAssetItem["binding"] = null;
+  let skillBinding: ProjectAssetItem["binding"] = null;
   let agentVersions: AgentVersion[] = [];
   const sourceSkillVersion: SkillVersion = {
     id: SKILL_SOURCE_VERSION_ID,
@@ -349,7 +362,7 @@ async function mockProjectAssets(
       method === "GET"
     ) {
       await json(route, {
-        system_items: [],
+        system_items: [{ ...systemSkill, binding: skillBinding }],
         project_items: [projectSkill],
         request_id: "request-skills",
       });
@@ -512,6 +525,59 @@ async function mockProjectAssets(
     }
 
     if (
+      path.endsWith(
+        `/api/projects/${PROJECT_ID}/system-agent-bindings/${SYSTEM_AGENT_ID}/disable`,
+      ) &&
+      method === "POST" &&
+      binding
+    ) {
+      const body = request.postDataJSON() as {
+        expected_binding_version: number;
+      };
+      if (body.expected_binding_version !== binding.version) {
+        staleConflicts += 1;
+        await json(route, { detail: { code: "asset_conflict" } }, 409);
+        return;
+      }
+      validatedMutations += 1;
+      binding = {
+        ...binding,
+        enabled: false,
+        version: binding.version + 1,
+        updated_at: now,
+      };
+      await json(route, { ...binding, request_id: "binding-disable" });
+      return;
+    }
+    if (
+      path.endsWith(
+        `/api/projects/${PROJECT_ID}/system-skill-bindings/${SYSTEM_SKILL_ID}/disable`,
+      ) &&
+      method === "POST" &&
+      skillBinding
+    ) {
+      const body = request.postDataJSON() as {
+        expected_binding_version: number;
+      };
+      if (body.expected_binding_version !== skillBinding.version) {
+        staleConflicts += 1;
+        await json(route, { detail: { code: "asset_conflict" } }, 409);
+        return;
+      }
+      validatedMutations += 1;
+      skillBinding = {
+        ...skillBinding,
+        enabled: false,
+        version: skillBinding.version + 1,
+        updated_at: now,
+      };
+      await json(route, {
+        ...skillBinding,
+        request_id: "skill-binding-disable",
+      });
+      return;
+    }
+    if (
       path.endsWith(`/api/projects/${PROJECT_ID}/system-agent-bindings`) &&
       method === "POST"
     ) {
@@ -543,6 +609,47 @@ async function mockProjectAssets(
         current_published_version_id: SYSTEM_VERSION_2,
       };
       await json(route, { ...binding, request_id: "binding-enable" }, 201);
+      return;
+    }
+    if (
+      path.endsWith(`/api/projects/${PROJECT_ID}/system-skill-bindings`) &&
+      method === "POST"
+    ) {
+      const body = request.postDataJSON() as {
+        asset_id: string;
+        version_id: string;
+        expected_binding_version?: number;
+      };
+      if (
+        body.asset_id !== SYSTEM_SKILL_ID ||
+        (skillBinding && body.expected_binding_version !== skillBinding.version)
+      ) {
+        staleConflicts += 1;
+        await json(route, { detail: { code: "asset_conflict" } }, 409);
+        return;
+      }
+      validatedMutations += 1;
+      skillBinding = {
+        project_id: PROJECT_ID,
+        kind: "skill",
+        asset_id: SYSTEM_SKILL_ID,
+        version_id: body.version_id,
+        enabled: true,
+        version: (skillBinding?.version ?? 0) + 1,
+        created_by_user_id: "user-1",
+        updated_by_user_id: "user-1",
+        created_at: now,
+        updated_at: now,
+      };
+      systemSkill = {
+        ...systemSkill,
+        current_published_version_id: body.version_id,
+      };
+      await json(
+        route,
+        { ...skillBinding, request_id: "skill-binding-enable" },
+        201,
+      );
       return;
     }
     const bindingMove = new RegExp(
@@ -787,6 +894,7 @@ async function mockProjectAssets(
       const selectedCredentialVersion =
         body.credential_versions["github-token"];
       if (
+        !selectedCredentialVersion ||
         !credential ||
         !credentialVersions.some(
           (version) =>
@@ -811,6 +919,16 @@ async function mockProjectAssets(
         workflow_status: "published",
         reviewed_at: now,
         reviewed_by_user_id: "user-1",
+        credential_grants: version.credential_slots.map((slot, index) => ({
+          id: `50000000-0000-4000-8000-00000000000${index + 1}`,
+          mcp_server_version_id: version.id,
+          credential_slot_id: slot.id,
+          credential_version_id: selectedCredentialVersion,
+          status: "active" as const,
+          version: 1,
+          created_by_user_id: "user-1",
+          created_at: now,
+        })),
       }));
       projectMcp = {
         ...projectMcp,
@@ -879,15 +997,75 @@ async function mockProjectAssets(
       ) {
         return;
       }
-      credential = { ...credential, version: 2, updated_at: now };
+      credential = {
+        ...credential,
+        current_version_id: "30000000-0000-4000-8000-000000000006",
+        version: 2,
+        updated_at: now,
+      };
       const version: CredentialVersion = {
         ...credentialVersions[0]!,
         id: "30000000-0000-4000-8000-000000000006",
         version_number: 2,
         supersedes_version_id: CREDENTIAL_VERSION_ID,
       };
-      credentialVersions = [version, credentialVersions[0]!];
+      credentialVersions = [
+        version,
+        { ...credentialVersions[0]!, status: "retired" },
+      ];
       await json(route, { data: version, request_id: "credential-replace" });
+      return;
+    }
+    if (
+      path.endsWith(`/${CREDENTIAL_ID}/migrate-grants`) &&
+      method === "POST" &&
+      credential
+    ) {
+      const body = request.postDataJSON() as {
+        expected_credential_version: number;
+      };
+      if (
+        !(await requireExpectedVersion(
+          route,
+          body.expected_credential_version,
+          credential.version,
+        ))
+      ) {
+        return;
+      }
+      const currentVersionId = credential.current_version_id!;
+      let migratedCount = 0;
+      mcpVersions = mcpVersions.map((version) => ({
+        ...version,
+        credential_grants: version.credential_grants.flatMap((grant) => {
+          if (
+            grant.status !== "active" ||
+            grant.credential_version_id === currentVersionId
+          ) {
+            return [grant];
+          }
+          migratedCount += 1;
+          return [
+            {
+              ...grant,
+              status: "revoked" as const,
+              version: grant.version + 1,
+            },
+            {
+              ...grant,
+              id: "50000000-0000-4000-8000-000000000099",
+              credential_version_id: currentVersionId,
+              version: 1,
+            },
+          ];
+        }),
+      }));
+      await json(route, {
+        credential_id: credential.id,
+        credential_version_id: currentVersionId,
+        migrated_count: migratedCount,
+        request_id: "credential-migration",
+      });
       return;
     }
     if (
@@ -908,6 +1086,19 @@ async function mockProjectAssets(
         return;
       }
       credential = { ...credential, status: "revoked", version: 3 };
+      credentialVersions = credentialVersions.map((version) => ({
+        ...version,
+        status: "revoked",
+      }));
+      mcpVersions = mcpVersions.map((version) => ({
+        ...version,
+        credential_grants: version.credential_grants.map((grant) => ({
+          ...grant,
+          status: "revoked" as const,
+          version:
+            grant.status === "active" ? grant.version + 1 : grant.version,
+        })),
+      }));
       const { capabilities: _capabilities, ...responseItem } = credential;
       void _capabilities;
       await json(route, {
@@ -932,37 +1123,79 @@ async function mockProjectAssets(
   };
 }
 
-test("binding remains pinned until explicit upgrade and supports rollback", async ({
+test("Agent menu hides system-provided Agents without deleting project Agents", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.route("**/api/models", async (route) => {
+    await json(route, {
+      models: [
+        {
+          id: "model-default",
+          name: "default",
+          model: "provider-model-id",
+          display_name: "Default logical model",
+          supports_thinking: false,
+          supports_reasoning_effort: false,
+        },
+      ],
+      token_usage: { enabled: false },
+    });
+  });
+  const mock = await mockProjectAssets(page);
+  await page.goto("/projects/research-lab/agents");
+
+  await expect(page.getByText("Analyst", { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("tab", { name: /系统提供/u })).toHaveCount(0);
+  await expect(page.getByRole("switch", { name: /Analyst/u })).toHaveCount(0);
+  await expect(
+    page.getByText("系统默认 Main 不在此列表中展示。"),
+  ).toBeVisible();
+  expect(mock.validatedMutations()).toBe(0);
+  expect(mock.staleConflicts()).toBe(0);
+});
+
+test("Skill list shows descriptions and keeps quick binding separate from details", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
   const mock = await mockProjectAssets(page);
-  await page.goto("/projects/research-lab/agents");
 
-  await expect(page.getByText("Analyst", { exact: true })).toHaveCount(2);
+  await page.goto("/projects/research-lab/skills");
+  await page.getByRole("tab", { name: /系统提供/u }).click();
+
+  await expect(
+    page.getByText(
+      "Review, analyze, critique, and summarize academic papers with structured methodology assessment and constructive feedback.",
+    ),
+  ).toBeVisible();
+
+  const toggle = page.getByRole("switch", {
+    name: "启用 academic-paper-review",
+  });
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await expect(
+    page.getByRole("switch", {
+      name: "停用 academic-paper-review",
+    }),
+  ).toBeChecked();
+
   await page
-    .getByTestId(`system-asset-${SYSTEM_AGENT_ID}`)
-    .getByRole("button", { name: "管理绑定" })
+    .getByRole("switch", { name: "停用 academic-paper-review" })
     .click();
-  await page.getByLabel("固定到已发布版本").selectOption(SYSTEM_VERSION_1);
-  await page.getByRole("button", { name: "启用并固定" }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("绑定修订版本");
-  await expect(page.getByTestId("binding-revision")).toHaveText("1");
-  await expect(page.getByTestId("binding-pinned-version")).toHaveText("版本 1");
-  const systemCard = page.getByTestId(`system-asset-${SYSTEM_AGENT_ID}`);
-  await expect(systemCard).toContainText("已启用并固定");
+  await expect(
+    page.getByRole("switch", { name: "启用 academic-paper-review" }),
+  ).not.toBeChecked();
 
-  await page.getByLabel("固定到已发布版本").selectOption(SYSTEM_VERSION_2);
-  await page.getByRole("button", { name: "升级固定版本" }).click();
-  await expect(page.getByTestId("binding-revision")).toHaveText("2");
-  await expect(page.getByTestId("binding-pinned-version")).toHaveText("版本 2");
+  await page
+    .getByRole("button", { name: "查看 academic-paper-review 详情" })
+    .click();
+  await expect(
+    page.getByRole("dialog", { name: "academic-paper-review", exact: true }),
+  ).toBeVisible();
 
-  await page.getByLabel("固定到已发布版本").selectOption(SYSTEM_VERSION_1);
-  await page.getByRole("button", { name: "回退固定版本" }).click();
-  await expect(page.getByTestId("binding-revision")).toHaveText("3");
-  await expect(page.getByTestId("binding-pinned-version")).toHaveText("版本 1");
-  expect(mock.validatedMutations()).toBe(3);
+  expect(mock.validatedMutations()).toBe(2);
   expect(mock.staleConflicts()).toBe(0);
 });
 
@@ -973,10 +1206,7 @@ test("Skill file preview and fork preserve immutable source version", async ({
   const mock = await mockProjectAssets(page, { skillFileWorkflow: true });
 
   await page.goto("/projects/research-lab/skills");
-  await page
-    .locator("button", { hasText: "Review Skill" })
-    .filter({ hasText: "review-skill" })
-    .click();
+  await page.getByRole("button", { name: "查看 Review Skill 详情" }).click();
 
   const detail = page.getByRole("dialog");
   const sourceView = detail.locator("pre").filter({
@@ -1056,45 +1286,143 @@ test("Skill file preview and fork preserve immutable source version", async ({
   expect(mock.staleConflicts()).toBe(0);
 });
 
+test("project Credential replace requires explicit grant migration and confirmed revoke", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectAssets(page);
+
+  await page.goto("/projects/research-lab/credentials");
+  await page.getByRole("tab", { name: /项目自建/u }).click();
+  await page.getByRole("button", { name: "创建 Credential" }).click();
+  const createDialog = page.getByRole("dialog", { name: "创建 Credential" });
+  await createDialog.getByLabel("名称").fill("GitHub");
+  await createDialog.getByLabel("Credential 标识").fill("github");
+  await createDialog.getByLabel("类型").fill("token");
+  await createDialog.getByLabel("字段名").fill("TOKEN");
+  await createDialog.getByLabel("凭据值").fill("project-secret-sentinel");
+  await createDialog.getByRole("button", { name: "加密写入" }).click();
+  await expect(page.locator("body")).not.toContainText(
+    "project-secret-sentinel",
+  );
+
+  await page.getByRole("button", { name: "替换凭据" }).click();
+  const replaceDialog = page.getByRole("dialog", { name: "替换凭据" });
+  await replaceDialog.getByLabel("凭据值").fill("rotated-project-secret");
+  await replaceDialog.getByRole("button", { name: "替换凭据" }).click();
+  await expect(page.locator("body")).not.toContainText(
+    "rotated-project-secret",
+  );
+  await expect(page.getByRole("note")).toContainText(
+    "既有 Grant 仍固定到 retired version",
+  );
+
+  await page.getByRole("button", { name: "迁移兼容 Grant" }).click();
+  const migrationDialog = page.getByRole("dialog", {
+    name: "迁移 Credential Grant",
+  });
+  await expect(migrationDialog).toContainText("字段结构完全兼容");
+  await migrationDialog.getByRole("button", { name: "确认迁移 Grant" }).click();
+  await expect(page.getByRole("status")).toContainText("已完成兼容 Grant 迁移");
+
+  await page.getByRole("button", { name: "撤销凭据" }).click();
+  const revokeDialog = page.getByRole("dialog", {
+    name: "确认撤销 Credential",
+  });
+  await expect(revokeDialog).toContainText("此操作不可恢复");
+  await revokeDialog.getByRole("button", { name: "取消" }).click();
+  await expect(page.getByText("已撤销", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "撤销凭据" }).click();
+  await page
+    .getByRole("dialog", { name: "确认撤销 Credential" })
+    .getByRole("button", { name: "确认永久撤销" })
+    .click();
+  await expect(page.getByText("已撤销", { exact: true })).toHaveCount(3);
+});
+
 test("project asset authoring, approval, Credential safety, and scope switch", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
+  await page.route("**/api/models", (route) =>
+    json(route, {
+      models: [
+        {
+          id: "model-default",
+          name: "default",
+          model: "provider-model-id",
+          display_name: "Default logical model",
+          supports_thinking: false,
+          supports_reasoning_effort: false,
+        },
+      ],
+      token_usage: { enabled: false },
+    }),
+  );
   const mock = await mockProjectAssets(page);
 
   await page.goto("/projects/research-lab/agents");
-  const agentCard = page.getByTestId(`project-asset-${PROJECT_AGENT_ID}`);
-  await agentCard.getByRole("button", { name: "创建新版本" }).click();
-  await page.getByLabel("描述").fill("Project agent v1");
-  await page.getByRole("button", { name: "创建版本" }).click();
-  await agentCard.getByRole("button", { name: "发布版本" }).click();
-  await expect(agentCard).toContainText("已发布");
+  await page.getByRole("button", { name: "查看 Analyst 详情" }).click();
+  const agentSheet = page.getByRole("dialog", {
+    name: "Analyst",
+    exact: true,
+  });
+  await agentSheet.getByRole("button", { name: "创建新版本" }).click();
+  const agentVersionDialog = page.getByRole("dialog", {
+    name: "创建 Agent 版本",
+  });
+  await agentVersionDialog.getByLabel("描述").fill("Project agent v1");
+  await agentVersionDialog.getByLabel("逻辑模型").selectOption("default");
+  await agentVersionDialog.getByRole("button", { name: "创建版本" }).click();
+  await expect(agentVersionDialog).toHaveCount(0);
+  await agentSheet.getByRole("button", { name: "发布版本" }).click();
+  await expect(agentSheet.getByText("已发布", { exact: true })).toBeVisible();
+  await agentSheet.getByRole("button", { name: "Close" }).click();
 
   await page.getByRole("link", { name: "Skill", exact: true }).first().click();
-  const skillCard = page.getByTestId(`project-asset-${PROJECT_SKILL_ID}`);
-  await skillCard.getByRole("button", { name: "创建新版本" }).click();
-  await page.getByLabel("文件内容").fill("# Review Skill");
-  await page.getByRole("button", { name: "创建版本" }).click();
-  await skillCard.getByRole("button", { name: "发布版本" }).click();
-  await expect(skillCard).toContainText("已发布");
+  await page.getByRole("button", { name: "查看 Review Skill 详情" }).click();
+  const skillSheet = page.getByRole("dialog", {
+    name: "Review Skill",
+    exact: true,
+  });
+  await skillSheet.getByRole("button", { name: "从空白创建" }).click();
+  const skillVersionDialog = page.getByRole("dialog", {
+    name: "创建 Skill 版本",
+  });
+  await skillVersionDialog.getByLabel("文件内容").fill("# Review Skill");
+  await skillVersionDialog.getByRole("button", { name: "创建版本" }).click();
+  await expect(skillVersionDialog).toHaveCount(0);
+  await skillSheet.getByRole("button", { name: "发布版本" }).click();
+  await expect(skillSheet.getByText("已发布", { exact: true })).toBeVisible();
+  await skillSheet.getByRole("button", { name: "Close" }).click();
 
   await page.getByRole("link", { name: "MCP", exact: true }).first().click();
-  const mcpCard = page.getByTestId(`project-asset-${PROJECT_MCP_ID}`);
-  await mcpCard.getByRole("button", { name: "创建新版本" }).click();
-  await page.getByLabel("描述").fill("GitHub MCP");
-  await page.getByLabel("槽位名称").fill("github-token");
-  await page.getByLabel("必需字段（逗号或换行分隔）").fill("TOKEN");
-  await page.getByRole("button", { name: "创建版本" }).click();
-  await expect(mcpCard.getByRole("button", { name: "发布版本" })).toHaveCount(
+  await page.getByRole("button", { name: "查看 GitHub MCP 详情" }).click();
+  let mcpSheet = page.getByRole("dialog", {
+    name: "GitHub MCP",
+    exact: true,
+  });
+  await mcpSheet.getByRole("button", { name: "创建新版本" }).click();
+  const mcpVersionDialog = page.getByRole("dialog", {
+    name: "创建 MCP 版本",
+  });
+  await mcpVersionDialog.getByLabel("描述").fill("GitHub MCP");
+  await mcpVersionDialog.getByLabel("槽位名称").fill("github-token");
+  await mcpVersionDialog.getByLabel("必需字段（逗号或换行分隔）").fill("TOKEN");
+  await mcpVersionDialog.getByRole("button", { name: "创建版本" }).click();
+  await expect(mcpVersionDialog).toHaveCount(0);
+  await expect(mcpSheet.getByRole("button", { name: "发布版本" })).toHaveCount(
     0,
   );
-  await mcpCard.getByRole("button", { name: "提交审批" }).click();
-  await expect(mcpCard).toContainText("待审批");
+  await mcpSheet.getByRole("button", { name: "提交审批" }).click();
+  await expect(mcpSheet.getByText("待审批", { exact: true })).toBeVisible();
+  await mcpSheet.getByRole("button", { name: "Close" }).click();
 
   await page
     .getByRole("link", { name: "Credential", exact: true })
     .first()
     .click();
+  await page.getByRole("tab", { name: /项目自建/u }).click();
   await page.getByRole("button", { name: "创建 Credential" }).click();
   await page.getByLabel("名称").fill("GitHub");
   await page.getByLabel("Credential 标识").fill("github");
@@ -1107,35 +1435,70 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   );
 
   await page.getByRole("link", { name: "MCP", exact: true }).first().click();
-  const pendingMcpCard = page.getByTestId(`project-asset-${PROJECT_MCP_ID}`);
-  await pendingMcpCard.getByRole("button", { name: "批准并发布" }).click();
-  await page
+  await page.getByRole("button", { name: "查看 GitHub MCP 详情" }).click();
+  mcpSheet = page.getByRole("dialog", {
+    name: "GitHub MCP",
+    exact: true,
+  });
+  await mcpSheet.getByRole("button", { name: "批准并发布" }).click();
+  const approvalDialog = page.getByRole("dialog", { name: "批准 MCP 版本" });
+  await approvalDialog
     .getByLabel("github-token Credential")
     .selectOption(CREDENTIAL_VERSION_ID);
-  await expect(page.getByLabel("github-token Credential")).toContainText(
-    "GitHub",
-  );
-  await expect(page.getByLabel("github-token Credential")).not.toContainText(
-    "System GitHub",
-  );
-  await page.getByRole("button", { name: "批准并发布" }).last().click();
-  await expect(pendingMcpCard).toContainText("已发布");
+  await expect(
+    approvalDialog.getByLabel("github-token Credential"),
+  ).toContainText("GitHub");
+  await expect(
+    approvalDialog.getByLabel("github-token Credential"),
+  ).not.toContainText("System GitHub");
+  await approvalDialog.getByRole("button", { name: "批准并发布" }).click();
+  await expect(approvalDialog).toHaveCount(0);
+  await expect(mcpSheet.getByText("已发布", { exact: true })).toBeVisible();
+  await mcpSheet.getByRole("button", { name: "Close" }).click();
 
   await page
     .getByRole("link", { name: "Credential", exact: true })
     .first()
     .click();
   const credentialCard = page
-    .getByText("GitHub", { exact: true })
-    .locator("..", { hasText: "github" })
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByText("GitHub", { exact: true }) })
+    .filter({ hasText: "github" })
     .first();
   await page.getByRole("button", { name: "替换凭据" }).click();
   await page.getByLabel("字段名").fill("TOKEN");
   await page.getByLabel("凭据值").fill("rotated-secret");
   await page.getByRole("button", { name: "替换凭据" }).last().click();
   await expect(page.locator("body")).not.toContainText("rotated-secret");
+  await expect(credentialCard).toContainText(
+    "既有 Grant 仍固定到 retired version",
+  );
+  await page.getByRole("button", { name: "迁移兼容 Grant" }).click();
+  const migrationDialog = page.getByRole("dialog", {
+    name: "迁移 Credential Grant",
+  });
+  await expect(migrationDialog).toContainText("字段结构完全兼容");
+  await migrationDialog.getByRole("button", { name: "确认迁移 Grant" }).click();
+  await expect(page.getByRole("status")).toContainText("已完成兼容 Grant 迁移");
+
   await page.getByRole("button", { name: "撤销凭据" }).click();
-  await expect(credentialCard).toBeVisible();
+  const revokeDialog = page.getByRole("dialog", {
+    name: "确认撤销 Credential",
+  });
+  await expect(revokeDialog).toContainText("此操作不可恢复");
+  await expect(revokeDialog).toContainText("相关 active Grant");
+  await revokeDialog.getByRole("button", { name: "取消" }).click();
+  await expect(credentialCard.getByText("已撤销", { exact: true })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: "撤销凭据" }).click();
+  await page
+    .getByRole("dialog", { name: "确认撤销 Credential" })
+    .getByRole("button", { name: "确认永久撤销" })
+    .click();
+  await expect(credentialCard.getByText("已撤销", { exact: true })).toHaveCount(
+    3,
+  );
 
   const staleStatus = await page.evaluate(
     async ({ projectId, assetId }) =>
@@ -1154,7 +1517,7 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   ).toBeVisible();
   await expect(page.getByText("Analyst", { exact: true })).toHaveCount(0);
   expect(mock.staleConflicts()).toBe(1);
-  expect(mock.validatedMutations()).toBe(9);
+  expect(mock.validatedMutations()).toBe(10);
   for (const forbidden of ["运行 Agent", "开始对话", "立即运行"]) {
     await expect(page.getByText(forbidden, { exact: true })).toHaveCount(0);
   }

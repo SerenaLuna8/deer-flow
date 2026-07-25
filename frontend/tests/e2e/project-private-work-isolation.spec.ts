@@ -1,6 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-import { workspaceLandingPath } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
@@ -149,6 +148,8 @@ async function installScopeFixture(page: Page): Promise<ScopeState> {
               updated_at: "2026-07-15T01:00:00Z",
             },
             version: 1,
+            created_at: "2026-07-15T00:00:00Z",
+            updated_at: "2026-07-15T01:00:00Z",
           },
         ],
       });
@@ -185,9 +186,4 @@ test("Link project switch drops a late previous-project Thread response", async 
     .toContain(`/api/projects/${PROJECT_ALPHA}/private-work/threads/search`);
   state.releaseHeldThreadResponse();
   await expect(page.getByText("Alpha Project conversation")).toHaveCount(0);
-});
-
-test("static demo landing path ignores stale thread hints", () => {
-  expect(workspaceLandingPath(true, null)).toBe("/workspace");
-  expect(workspaceLandingPath(true, "demo-thread")).toBe("/workspace");
 });

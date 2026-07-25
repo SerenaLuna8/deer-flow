@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
-from support.m4_private_threads import install_open_project_cutover_guard
 
 from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
@@ -24,7 +23,6 @@ def context() -> SimpleNamespace:
 @pytest.fixture()
 def app(context: SimpleNamespace) -> FastAPI:
     value = FastAPI()
-    install_open_project_cutover_guard(value)
     value.include_router(private_work_router.router)
     value.dependency_overrides[private_work_context] = lambda: context
     value.dependency_overrides[require_project_private_open] = lambda: None

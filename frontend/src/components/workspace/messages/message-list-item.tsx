@@ -1,10 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import {
-  FileIcon,
-  Loader2Icon,
-  ThumbsDownIcon,
-  ThumbsUpIcon,
-} from "lucide-react";
+import { FileIcon, Loader2Icon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -20,17 +15,8 @@ import {
   MessageContent as AIElementMessageContent,
   MessageToolbar,
 } from "@/components/ai-elements/message";
-import {
-  Reasoning,
-  ReasoningTrigger,
-} from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
-import {
-  deleteFeedback,
-  upsertFeedback,
-  type FeedbackData,
-} from "@/core/api/feedback";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -42,7 +28,6 @@ import {
   type FileInMessage,
 } from "@/core/messages/utils";
 import { useProjectArtifactReferenceURL } from "@/core/private-work/file-hooks";
-import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { useProjectSlashSkills } from "@/core/shared-assets";
 import { readReferenceMessageContexts } from "@/core/sidecar";
@@ -61,85 +46,12 @@ import { SlashSkillChip } from "../slash-skill-chip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
-
-function FeedbackButtons({
-  threadId,
-  runId,
-  initialFeedback,
-}: {
-  threadId: string;
-  runId: string;
-  initialFeedback: FeedbackData | null;
-}) {
-  const [feedback, setFeedback] = useState<FeedbackData | null>(
-    initialFeedback,
-  );
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const privateWork = useProjectPrivateWorkScope();
-
-  const handleClick = useCallback(
-    async (rating: number) => {
-      if (isSubmitting) return;
-      setIsSubmitting(true);
-      try {
-        if (feedback?.rating === rating) {
-          await deleteFeedback(privateWork, threadId, runId);
-          setFeedback(null);
-        } else {
-          const result = await upsertFeedback(
-            privateWork,
-            threadId,
-            runId,
-            rating,
-          );
-          setFeedback(result);
-        }
-      } catch {
-        // Revert on error — feedback state unchanged on catch
-      } finally {
-        setIsSubmitting(false);
-      }
-    },
-    [threadId, runId, feedback, isSubmitting, privateWork],
-  );
-
-  return (
-    <div className="flex gap-1">
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-          feedback?.rating === 1 && "text-foreground",
-        )}
-        onClick={() => handleClick(1)}
-        disabled={isSubmitting}
-      >
-        <ThumbsUpIcon
-          className={cn("size-4", feedback?.rating === 1 && "fill-current")}
-        />
-      </button>
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-          feedback?.rating === -1 && "text-foreground",
-        )}
-        onClick={() => handleClick(-1)}
-        disabled={isSubmitting}
-      >
-        <ThumbsDownIcon
-          className={cn("size-4", feedback?.rating === -1 && "fill-current")}
-        />
-      </button>
-    </div>
-  );
-}
+import { ThinkingDisclosure } from "./thinking-disclosure";
 
 export function MessageListItem({
   className,
   message,
   isLoading,
-  feedback,
   runId,
   threadId,
   showCopyButton = true,
@@ -149,7 +61,6 @@ export function MessageListItem({
   message: Message;
   isLoading?: boolean;
   threadId: string;
-  feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
   turnStartTime?: number | null;
@@ -179,13 +90,6 @@ export function MessageListItem({
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={getMessageCopyData(message)} />
-            {feedback !== undefined && runId && threadId && (
-              <FeedbackButtons
-                threadId={threadId}
-                runId={runId}
-                initialFeedback={feedback}
-              />
-            )}
           </div>
         </MessageToolbar>
       )}
@@ -397,15 +301,16 @@ function MessageContent_({
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning
+        <ThinkingDisclosure
           isStreaming={isLoading}
           startTimeProp={turnStartTime}
           duration={turnDuration}
           onTurnDurationChange={handleDurationChange}
         >
-          <ReasoningTrigger />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+          <SafeReasoningContent className="border-border/60 bg-muted/25 text-foreground/75 mt-0 border-t px-4 py-4 leading-6">
+            {reasoningContent}
+          </SafeReasoningContent>
+        </ThinkingDisclosure>
       </AIElementMessageContent>
     );
   }
@@ -444,17 +349,18 @@ function MessageContent_({
       {filesList}
       {!isHuman &&
         (!!reasoningContent || wasLoading || turnDuration !== undefined) && (
-          <Reasoning
+          <ThinkingDisclosure
             isStreaming={isLoading}
             startTimeProp={turnStartTime}
             duration={turnDuration}
             onTurnDurationChange={handleDurationChange}
           >
-            <ReasoningTrigger hasContent={!!reasoningContent} />
             {reasoningContent && (
-              <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
+              <SafeReasoningContent className="border-border/60 bg-muted/25 text-foreground/75 mt-0 border-t px-4 py-4 leading-6">
+                {reasoningContent}
+              </SafeReasoningContent>
             )}
-          </Reasoning>
+          </ThinkingDisclosure>
         )}
       <MarkdownContent
         content={contentToDisplay}

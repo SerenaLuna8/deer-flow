@@ -5,6 +5,7 @@ import type {
   ProjectInvitation,
   ProjectMembership,
 } from "@/core/projects/types";
+import type { SystemNotification } from "@/core/system-notifications/types";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
@@ -12,6 +13,9 @@ const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const RECOVERABLE_ID = "10000000-0000-4000-8000-000000000002";
 const MEMBER_ID = "20000000-0000-4000-8000-000000000001";
 const INVITATION_ID = "30000000-0000-4000-8000-000000000001";
+const NOTIFICATION_ID = "50000000-0000-4000-8000-000000000001";
+const SECOND_NOTIFICATION_ID = "50000000-0000-4000-8000-000000000002";
+const SECOND_PROJECT_ID = "10000000-0000-4000-8000-000000000003";
 
 const project: Project = {
   id: PROJECT_ID,
@@ -85,6 +89,34 @@ const invitation: ProjectInvitation = {
   created_at: "2026-07-12T08:00:00+00:00",
 };
 
+const projectInvitationNotification: SystemNotification = {
+  id: NOTIFICATION_ID,
+  kind: "project_invitation",
+  project: {
+    id: PROJECT_ID,
+    slug: "research-lab",
+    display_name: "Research Lab",
+  },
+  actor: { email: "owner@example.com" },
+  role: "viewer",
+  status: "pending",
+  is_read: false,
+  created_at: "2026-07-12T08:00:00+00:00",
+  expires_at: "2026-07-19T08:00:00+00:00",
+  version: 1,
+};
+
+const secondProjectInvitationNotification: SystemNotification = {
+  ...projectInvitationNotification,
+  id: SECOND_NOTIFICATION_ID,
+  project: {
+    id: SECOND_PROJECT_ID,
+    slug: "operations-lab",
+    display_name: "Operations Lab",
+  },
+  actor: { email: "second-owner@example.com" },
+};
+
 async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({
     status,
@@ -96,30 +128,104 @@ async function json(route: Route, body: unknown, status = 200) {
 type GovernanceMock = {
   claimBodies: unknown[];
   redeemBodies: Array<string | null>;
+  notificationAcceptBodies: unknown[];
+  notificationAcceptIds: string[];
+  notificationListQueries: string[];
+  completeNotificationAcceptance: () => void;
+  readAllCalls: () => number;
+  failNextRedemption: () => void;
+  exhaustMemberCapacityOnNextRedemption: () => void;
   failNextRevocation: () => void;
 };
 
 async function mockProjectGovernance(
   page: Page,
   currentProject: Project = project,
+  initialProjectVisible = true,
 ): Promise<GovernanceMock> {
   let currentMembers = structuredClone(members);
   let projectInvitations = [structuredClone(invitation)];
+  let notifications = [
+    structuredClone(projectInvitationNotification),
+    structuredClone(secondProjectInvitationNotification),
+  ];
   let projectState = structuredClone(currentProject);
-  let projectVisible = true;
+  let projectVisible = initialProjectVisible;
   let recoverableVisible = true;
   const claimBodies: unknown[] = [];
   const redeemBodies: Array<string | null> = [];
+  const notificationAcceptBodies: unknown[] = [];
+  const notificationAcceptIds: string[] = [];
+  const notificationListQueries: string[] = [];
+  let notificationReadAllCalls = 0;
+  let releaseNotificationAcceptance: (() => void) | null = null;
+  const notificationAcceptanceGate = new Promise<void>((resolve) => {
+    releaseNotificationAcceptance = resolve;
+  });
+  let redemptionFailure = false;
+  let memberCapacityExhausted = false;
   let revocationFailure = false;
 
   await page.route(
-    /\/api\/(?:projects|project-invitations)(?:\/.*)?(?:\?.*)?$/,
+    /\/api\/(?:projects|project-invitations|notifications)(?:\/.*)?(?:\?.*)?$/,
     async (route) => {
       const request = route.request();
       const url = new URL(request.url());
       const path = url.pathname;
       const method = request.method();
 
+      if (path.endsWith("/api/notifications") && method === "GET") {
+        notificationListQueries.push(url.search);
+        const cursor = url.searchParams.get("cursor");
+        const items =
+          cursor === "page-2"
+            ? notifications.slice(1)
+            : notifications.slice(0, 1);
+        await json(route, {
+          items,
+          next_cursor: cursor === "page-2" ? null : "page-2",
+          unread_count: notifications.filter((item) => !item.is_read).length,
+        });
+        return;
+      }
+      if (path.endsWith("/api/notifications/read-all") && method === "POST") {
+        const markedCount = notifications.filter(
+          (item) => !item.is_read,
+        ).length;
+        notificationReadAllCalls += 1;
+        notifications = notifications.map((item) => ({
+          ...item,
+          is_read: true,
+        }));
+        await json(route, { marked_count: markedCount });
+        return;
+      }
+      const notificationAcceptMatch =
+        /\/api\/notifications\/([^/]+)\/accept$/.exec(path);
+      if (notificationAcceptMatch && method === "POST") {
+        notificationAcceptIds.push(notificationAcceptMatch[1]!);
+        notificationAcceptBodies.push(request.postDataJSON());
+        await notificationAcceptanceGate;
+        projectVisible = true;
+        notifications = notifications.map((item) =>
+          item.id === notificationAcceptMatch[1]
+            ? {
+                ...item,
+                is_read: true,
+                status: "redeemed",
+                version: item.version + 1,
+              }
+            : item,
+        );
+        await json(route, {
+          invitation_id: INVITATION_ID,
+          project_id: PROJECT_ID,
+          project_slug: "research-lab",
+          membership_id: MEMBER_ID,
+          role: "viewer",
+        });
+        return;
+      }
       if (
         path.endsWith("/api/project-invitations/claim") &&
         method === "POST"
@@ -133,6 +239,36 @@ async function mockProjectGovernance(
         method === "POST"
       ) {
         redeemBodies.push(request.postData());
+        if (memberCapacityExhausted) {
+          memberCapacityExhausted = false;
+          await json(
+            route,
+            {
+              detail: {
+                code: "PROJECT_MEMBER_QUOTA_EXCEEDED",
+                message: "unsafe internal capacity detail",
+                request_id: "request-member-capacity",
+              },
+            },
+            429,
+          );
+          return;
+        }
+        if (redemptionFailure) {
+          redemptionFailure = false;
+          await json(
+            route,
+            {
+              detail: {
+                code: "PROJECT_INVITATION_CONFLICT",
+                message: "Invitation is no longer available",
+                request_id: "request-invitation-conflict",
+              },
+            },
+            409,
+          );
+          return;
+        }
         await json(route, {
           invitation_id: INVITATION_ID,
           project_id: PROJECT_ID,
@@ -306,6 +442,17 @@ async function mockProjectGovernance(
   return {
     claimBodies,
     redeemBodies,
+    notificationAcceptBodies,
+    notificationAcceptIds,
+    notificationListQueries,
+    completeNotificationAcceptance: () => releaseNotificationAcceptance?.(),
+    readAllCalls: () => notificationReadAllCalls,
+    failNextRedemption: () => {
+      redemptionFailure = true;
+    },
+    exhaustMemberCapacityOnNextRedemption: () => {
+      memberCapacityExhausted = true;
+    },
     failNextRevocation: () => {
       revocationFailure = true;
     },
@@ -334,6 +481,52 @@ test("claims a fragment secret once, clears the URL, and redeems without a body"
   );
   expect(api.claimBodies).toEqual([{ token: "plain-secret-token" }]);
   expect(api.redeemBodies).toEqual([null]);
+});
+
+test("reprocesses a replayed fragment and never reuses the previous success state", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectGovernance(page);
+
+  await page.goto("/invite#token=plain-secret-token");
+  await expect(page.getByRole("heading", { name: "邀请已接受" })).toBeVisible();
+
+  api.failNextRedemption();
+  await page.evaluate(() => {
+    window.location.hash = "token=plain-secret-token";
+  });
+
+  await expect.poll(() => page.url()).not.toContain("plain-secret-token");
+  await expect(
+    page.getByRole("heading", { name: "无法接受邀请" }),
+  ).toBeVisible();
+  expect(api.claimBodies).toEqual([
+    { token: "plain-secret-token" },
+    { token: "plain-secret-token" },
+  ]);
+  expect(api.redeemBodies).toEqual([null, null]);
+});
+
+test("explains member capacity exhaustion without exposing backend detail", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const api = await mockProjectGovernance(page);
+  api.exhaustMemberCapacityOnNextRedemption();
+
+  await page.goto("/invite#token=plain-secret-token");
+
+  await expect(
+    page.getByRole("heading", { name: "无法接受邀请" }),
+  ).toBeVisible();
+  const redemptionAlert = page.locator("main").getByRole("alert");
+  await expect(redemptionAlert).toContainText(
+    "项目成员容量已满，请联系项目管理员调整成员上限后，重新打开邀请链接。",
+  );
+  await expect(redemptionAlert).not.toContainText(
+    "unsafe internal capacity detail",
+  );
 });
 
 test("authenticated SSO callback executes before returning to invite redemption", async ({
@@ -385,15 +578,52 @@ test("local login and SSO callback reject escaping next paths but keep /invite",
   await expect(page).toHaveURL(/\/invite$/);
 });
 
-test("workspace separates invitations and recoverable projects from active projects", async ({
+test("workspace handles invitations in the notification center and keeps recoverable projects separate", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
-  await mockProjectGovernance(page);
+  const api = await mockProjectGovernance(page, project, false);
 
   await page.goto("/workspace");
 
-  await expect(page.getByText("Research Lab", { exact: true })).toBeVisible();
+  await expect(page.getByText("Research Lab", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "通知，2 条未读" }).click();
+  const notificationPanel = page.getByRole("dialog");
+  await expect(notificationPanel).toContainText("Research Lab");
+  await expect(notificationPanel).toContainText("owner@example.com");
+  await expect.poll(api.readAllCalls).toBe(1);
+  await notificationPanel.getByRole("button", { name: "加载更多" }).click();
+  await expect(notificationPanel).toContainText("Operations Lab");
+  expect(api.notificationListQueries[0]).toBe("?limit=50");
+  expect(api.notificationListQueries).toContain("?cursor=page-2&limit=50");
+
+  const acceptButtons = notificationPanel.getByRole("button", {
+    name: "同意加入项目",
+  });
+  await acceptButtons.first().click();
+  await expect(
+    notificationPanel.getByRole("button", { name: "正在加入…" }),
+  ).toBeDisabled();
+  await expect(acceptButtons.last()).toBeDisabled();
+  await acceptButtons.last().evaluate((element) => {
+    (element as HTMLButtonElement).click();
+  });
+  await expect.poll(() => api.notificationAcceptBodies.length).toBe(1);
+  expect(api.notificationAcceptBodies).toEqual([{ version: 1 }]);
+  expect(api.notificationAcceptIds).toEqual([NOTIFICATION_ID]);
+  expect(NOTIFICATION_ID).not.toBe(INVITATION_ID);
+  api.completeNotificationAcceptance();
+  const acceptedNotification = notificationPanel.getByTestId(
+    `notification-${NOTIFICATION_ID}`,
+  );
+  await expect(acceptedNotification).toContainText("已加入");
+  await expect(
+    acceptedNotification.getByRole("button", { name: "同意加入项目" }),
+  ).toHaveCount(0);
+  await expect(
+    notificationPanel.getByRole("button", { name: "同意加入项目" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Close" }).click();
   const activeGrid = page.getByTestId("project-grid");
   await expect(
     activeGrid.getByText("Research Lab", { exact: true }),
@@ -401,13 +631,10 @@ test("workspace separates invitations and recoverable projects from active proje
   await expect(activeGrid.getByText("待删除项目", { exact: true })).toHaveCount(
     0,
   );
-  await expect(page.getByRole("region", { name: "待接受邀请" })).toContainText(
-    "invitee@example.com",
-  );
   const recovery = page.getByRole("region", { name: "可恢复项目" });
   await expect(recovery).toContainText("待删除项目");
   await recovery.getByRole("button", { name: "恢复项目" }).click();
-  await expect(recovery).not.toContainText("待删除项目");
+  await expect(page.getByRole("region", { name: "可恢复项目" })).toHaveCount(0);
 });
 
 test("server capabilities expose governance actions even when the role label is viewer", async ({

@@ -56,7 +56,7 @@ export interface RunMessage {
   seq?: number;
   content: Message;
   metadata: {
-    caller: string;
+    caller?: string;
     [key: string]: unknown;
   };
   created_at: string;

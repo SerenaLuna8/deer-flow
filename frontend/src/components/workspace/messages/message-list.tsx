@@ -23,11 +23,8 @@ import {
   ConversationContent,
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
-import {
-  Reasoning,
-  ReasoningTrigger,
-} from "@/components/ai-elements/reasoning";
 import { Button } from "@/components/ui/button";
+import { extractWriteArtifactSelections } from "@/core/artifacts/preview";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   deriveHumanInputThreadState,
@@ -48,6 +45,7 @@ import {
   getAssistantTurnUsageMessages,
   getMessageGroups,
   getStreamingMessageLookup,
+  hasActiveAssistantReasoning,
   hasContent,
   hasPresentFiles,
   hasReasoning,
@@ -85,8 +83,10 @@ import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
 } from "./message-token-usage";
+import { RunFeedbackButtons } from "./run-feedback-buttons";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
+import { ThinkingDisclosure } from "./thinking-disclosure";
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
@@ -109,10 +109,14 @@ function LoadMoreHistoryIndicator({
   isLoading,
   hasMore,
   loadMore,
+  error,
+  retry,
 }: {
   isLoading?: boolean;
   hasMore?: boolean;
   loadMore?: () => void;
+  error?: Error | null;
+  retry?: () => void;
 }) {
   const { t } = useI18n();
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -180,6 +184,27 @@ function LoadMoreHistoryIndicator({
     };
   }, []);
 
+  if (error) {
+    return (
+      <div
+        role="alert"
+        data-testid="thread-history-error"
+        className="border-destructive/30 bg-destructive/5 text-destructive flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm"
+      >
+        <span>{t.common.historyLoadFailed}</span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={isLoading}
+          onClick={retry}
+        >
+          {isLoading ? t.common.loading : t.common.retry}
+        </Button>
+      </div>
+    );
+  }
+
   if (!hasMore && !isLoading) {
     return null;
   }
@@ -220,11 +245,15 @@ export function MessageList({
   hasMoreHistory,
   loadMoreHistory,
   isHistoryLoading,
+  historyError,
+  retryHistory,
   onRegenerateMessage,
   onSubmitHumanInput,
   onBranchTurn,
   canRegenerate = false,
   canBranch = false,
+  canSubmitFeedback = false,
+  canDeleteFiles = false,
   enableSidecarActions = true,
   sidecarSurface = false,
   initialScroll = "smooth",
@@ -239,6 +268,8 @@ export function MessageList({
   hasMoreHistory?: boolean;
   loadMoreHistory?: () => void;
   isHistoryLoading?: boolean;
+  historyError?: Error | null;
+  retryHistory?: () => void;
   onRegenerateMessage?: (
     messageId: string,
     supersededMessageIds: string[],
@@ -253,13 +284,22 @@ export function MessageList({
   ) => void | Promise<void>;
   canRegenerate?: boolean;
   canBranch?: boolean;
+  canSubmitFeedback?: boolean;
+  canDeleteFiles?: boolean;
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
 }) {
   const { t } = useI18n();
-  const { enabled: artifactsEnabled } = useArtifacts();
+  const {
+    enabled: artifactsEnabled,
+    autoOpen: autoOpenArtifacts,
+    autoSelect: autoSelectArtifacts,
+    selectedArtifact,
+    select: selectArtifact,
+    setOpen: setArtifactsOpen,
+  } = useArtifacts();
   const sidecar = useMaybeSidecar();
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
@@ -273,6 +313,64 @@ export function MessageList({
     prevIsLoading.current = thread.isLoading;
   }, [thread.isLoading]);
   const messages = thread.messages;
+  const writeArtifactSelections = useMemo(
+    () => extractWriteArtifactSelections(messages),
+    [messages],
+  );
+  const autoOpenInitializedRef = useRef(false);
+  const autoOpenThreadIdRef = useRef(threadId);
+  const runHasBeenLoadingRef = useRef(false);
+  const seenWriteArtifactsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const switchedThread = autoOpenThreadIdRef.current !== threadId;
+    if (!autoOpenInitializedRef.current || switchedThread) {
+      autoOpenInitializedRef.current = true;
+      autoOpenThreadIdRef.current = threadId;
+      seenWriteArtifactsRef.current = new Set(
+        writeArtifactSelections.map((selection) => selection.key),
+      );
+      runHasBeenLoadingRef.current = thread.isLoading;
+      return;
+    }
+
+    const runCanAutoOpen = thread.isLoading || runHasBeenLoadingRef.current;
+    if (thread.isLoading) {
+      runHasBeenLoadingRef.current = true;
+    }
+    const unseenSelections = writeArtifactSelections.filter(
+      (selection) => !seenWriteArtifactsRef.current.has(selection.key),
+    );
+    for (const selection of unseenSelections) {
+      seenWriteArtifactsRef.current.add(selection.key);
+    }
+    const latestSelection = unseenSelections.at(-1);
+    if (
+      !sidecarSurface &&
+      runCanAutoOpen &&
+      artifactsEnabled &&
+      autoOpenArtifacts &&
+      autoSelectArtifacts &&
+      latestSelection &&
+      selectedArtifact !== latestSelection.url
+    ) {
+      selectArtifact(latestSelection.url, true);
+      setArtifactsOpen(true);
+    }
+    if (!thread.isLoading) {
+      runHasBeenLoadingRef.current = false;
+    }
+  }, [
+    artifactsEnabled,
+    autoOpenArtifacts,
+    autoSelectArtifacts,
+    selectedArtifact,
+    selectArtifact,
+    setArtifactsOpen,
+    sidecarSurface,
+    thread.isLoading,
+    threadId,
+    writeArtifactSelections,
+  ]);
   const groupedMessages = getMessageGroups(messages);
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<
     string | null
@@ -296,6 +394,10 @@ export function MessageList({
       .slice(lastHumanIndex)
       .some((g) => g.type === "assistant");
   }, [groupedMessages]);
+  const hasActiveReasoning = useMemo(
+    () => hasActiveAssistantReasoning(groupedMessages),
+    [groupedMessages],
+  );
   const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
@@ -551,6 +653,13 @@ export function MessageList({
       const actionTarget = [...messages]
         .reverse()
         .find((message) => message.type === "ai" && message.id);
+      const runId = [...messages]
+        .reverse()
+        .map((message) => (message as { run_id?: unknown }).run_id)
+        .find(
+          (value): value is string =>
+            typeof value === "string" && value.length > 0,
+        );
       const assistantMessageIds = messages
         .filter((message) => message.type === "ai" && message.id)
         .map((message) => message.id)
@@ -560,8 +669,15 @@ export function MessageList({
       }
 
       return (
-        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-focus-within/assistant-turn:opacity-100 group-hover/assistant-turn:opacity-100">
           {clipboardData && <CopyButton clipboardData={clipboardData} />}
+          {canSubmitFeedback && !isStreaming && actionTarget?.id && runId && (
+            <RunFeedbackButtons
+              threadId={threadId}
+              runId={runId}
+              messageId={actionTarget.id}
+            />
+          )}
           {!isStreaming && actionTarget?.id && onBranchTurn && (
             <Tooltip content={t.common.branch}>
               <Button
@@ -634,11 +750,13 @@ export function MessageList({
       branchingMessageId,
       canBranch,
       canRegenerate,
+      canSubmitFeedback,
       onBranchTurn,
       onRegenerateMessage,
       regeneratingMessageId,
       t.common.branch,
       t.common.regenerate,
+      threadId,
     ],
   );
 
@@ -700,11 +818,16 @@ export function MessageList({
         initial={initialScroll}
         resize={resizeScroll}
       >
-        <ConversationContent className="mx-auto w-full max-w-(--container-width-md) gap-8 pt-8">
+        <ConversationContent
+          className="mx-auto w-full max-w-(--chat-content-width) gap-8 pt-8"
+          data-testid="chat-message-content"
+        >
           <LoadMoreHistoryIndicator
             isLoading={isHistoryLoading}
             hasMore={hasMoreHistory}
             loadMore={loadMoreHistory}
+            error={historyError}
+            retry={retryHistory}
           />
           {groupedMessages.map((group, groupIndex) => {
             const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
@@ -866,7 +989,11 @@ export function MessageList({
                     />
                   )}
                   {artifactsEnabled && (
-                    <ArtifactFileList files={files} threadId={threadId} />
+                    <ArtifactFileList
+                      files={files}
+                      threadId={threadId}
+                      canDelete={canDeleteFiles}
+                    />
                   )}
                   {renderTokenUsage({
                     messages: group.messages,
@@ -936,6 +1063,7 @@ export function MessageList({
                       key={"thinking-group-" + message.id}
                       messages={[message]}
                       isLoading={groupIsLoading}
+                      turnStartTime={groupIsLoading ? turnStartTime : null}
                       tokenDebugSteps={tokenDebugSteps.filter(
                         (step) => step.messageId === message.id,
                       )}
@@ -980,7 +1108,8 @@ export function MessageList({
               <div key={"group-" + group.id} className="w-full">
                 <MessageGroup
                   messages={group.messages}
-                  isLoading={thread.isLoading}
+                  isLoading={groupIsLoading}
+                  turnStartTime={groupIsLoading ? turnStartTime : null}
                   tokenDebugSteps={tokenDebugSteps.filter((step) =>
                     group.messages.some(
                       (message) => message.id === step.messageId,
@@ -998,13 +1127,16 @@ export function MessageList({
               </div>
             );
           })}
-          {thread.isLoading && !hasActiveAssistantText && (
-            <div className="w-full">
-              <Reasoning isStreaming={true} startTimeProp={turnStartTime}>
-                <ReasoningTrigger hasContent={false} />
-              </Reasoning>
-            </div>
-          )}
+          {thread.isLoading &&
+            !hasActiveAssistantText &&
+            !hasActiveReasoning && (
+              <div className="w-full">
+                <ThinkingDisclosure
+                  isStreaming={true}
+                  startTimeProp={turnStartTime}
+                />
+              </div>
+            )}
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
       </Conversation>

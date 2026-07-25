@@ -176,8 +176,13 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     await worker_app.run_worker(stop_event=stop_event)
 
     _factory, _registry, handlers, worker_config, repository_builder = captured["service"]
-    assert set(handlers) == {"private_run", "automation_run"}
+    assert set(handlers) == {
+        "private_run",
+        "automation_run",
+        "retention_purge",
+    }
     assert handlers["automation_run"] is handlers["private_run"]
+    assert handlers["retention_purge"] is not handlers["private_run"]
     assert worker_config is config.worker
     repository = repository_builder(object())
     assert repository._owner_ref(str(uuid.uuid4())).key_id == "test"

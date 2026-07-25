@@ -6,6 +6,7 @@ import {
   disposeProjectAPIClient,
   emptyProjectStreamCursorState,
   getProjectAPIClient,
+  projectStreamFrameForUI,
   projectStreamCursorStorageKey,
   shouldReconnectProjectStream,
 } from "@/core/private-work/api-client";
@@ -66,6 +67,32 @@ describe("M6 private stream reconnect", () => {
     }
   });
 
+  test("turns a durable failed terminal into the SDK error event", () => {
+    for (const status of ["error", "failed", "timeout"]) {
+      expect(
+        projectStreamFrameForUI({
+          id: "9",
+          event: "end",
+          data: { status },
+        }),
+      ).toEqual({
+        id: "9",
+        event: "error",
+        data: {
+          error: "PROJECT_RUN_TERMINAL_FAILURE",
+          message: "PROJECT_RUN_TERMINAL_FAILURE",
+        },
+      });
+    }
+
+    const completed = {
+      id: "10",
+      event: "end",
+      data: { status: "completed" },
+    };
+    expect(projectStreamFrameForUI(completed)).toBe(completed);
+  });
+
   test("persists the confirmed cursor, dedupes replay, and stops after terminal", async () => {
     const storage = makeSessionStorage();
     const fetcher = rs.fn(async (input: string | URL, init?: RequestInit) => {
@@ -120,5 +147,62 @@ describe("M6 private stream reconnect", () => {
       client.runs.joinStream("thread-1", "run-1").next(),
     ).resolves.toMatchObject({ done: true });
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  test("surfaces a durable terminal failure to the SDK stream consumer", async () => {
+    const storage = makeSessionStorage();
+    const fetcher = rs.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/runs/run-failed")) {
+        return new Response(JSON.stringify({ status: "running" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        [
+          "event: metadata",
+          'data: {"run_id":"run-failed","thread_id":"thread-1"}',
+          "id: 1",
+          "",
+          "event: end",
+          'data: {"status":"error"}',
+          "id: 2",
+          "",
+          "",
+        ].join("\n"),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+    rs.stubGlobal("fetch", fetcher);
+    const client = getProjectAPIClient(SCOPE);
+
+    const frames: unknown[] = [];
+    for await (const frame of client.runs.joinStream(
+      "thread-1",
+      "run-failed",
+    )) {
+      frames.push(frame);
+    }
+
+    expect(frames).toEqual([
+      {
+        id: "1",
+        event: "metadata",
+        data: { run_id: "run-failed", thread_id: "thread-1" },
+      },
+      {
+        id: "2",
+        event: "error",
+        data: {
+          error: "PROJECT_RUN_TERMINAL_FAILURE",
+          message: "PROJECT_RUN_TERMINAL_FAILURE",
+        },
+      },
+    ]);
   });
 });

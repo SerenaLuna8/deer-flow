@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,6 +200,114 @@ def test_resolve_model_name_raises_when_no_models_configured(monkeypatch):
         match="No chat models are configured",
     ):
         lead_agent_module._resolve_model_name("missing-model")
+
+
+def test_private_runtime_default_model_ref_uses_injected_exact_model(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app_config = AppConfig.model_validate(
+        {
+            "models": [
+                {
+                    "name": "deepseek-v4",
+                    "use": "tests.fake:Model",
+                    "model": "provider/deepseek-v4",
+                }
+            ],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+            "skills": {"deferred_discovery": False},
+            "tool_search": {"enabled": False},
+        }
+    )
+    private_runtime = SimpleNamespace(
+        model_ref="default",
+        soul="exact admitted soul",
+        tool_groups=("task",),
+        skills=(),
+        skill_root=tmp_path,
+        mcp_tools=(),
+    )
+
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+
+    def fake_tools(**kwargs):
+        captured["tool_kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(tools_module, "get_available_tools", fake_tools)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **_kwargs: "exact prompt")
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+
+    def fake_model(**kwargs):
+        captured["model"] = kwargs
+        return "exact model instance"
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", fake_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"context": {"model_name": "deepseek-v4"}},
+        app_config=app_config,
+        private_runtime=private_runtime,
+    )
+
+    assert captured["model"] == {
+        "name": "deepseek-v4",
+        "thinking_enabled": False,
+        "reasoning_effort": None,
+        "app_config": app_config,
+        "attach_tracing": False,
+    }
+    assert result["model"] == "exact model instance"
+    assert captured["tool_kwargs"]["subagent_enabled"] is True
+
+
+@pytest.mark.parametrize("injected_model_name", [None, "forged-model"])
+def test_private_runtime_default_model_ref_rejects_missing_or_unconfigured_injected_model(
+    injected_model_name: str | None,
+) -> None:
+    app_config = _make_app_config([_make_model("deepseek-v4", supports_thinking=False)])
+
+    with pytest.raises(ValueError, match="Exact project Agent model is not configured"):
+        lead_agent_module._resolve_private_runtime_model_name(
+            model_ref="default",
+            requested_model_name=injected_model_name,
+            app_config=app_config,
+        )
+
+
+def test_private_runtime_explicit_model_ref_ignores_configured_request_override() -> None:
+    app_config = _make_app_config(
+        [
+            _make_model("exact-agent-model", supports_thinking=False),
+            _make_model("forged-request-model", supports_thinking=False),
+        ]
+    )
+
+    resolved = lead_agent_module._resolve_private_runtime_model_name(
+        model_ref="exact-agent-model",
+        requested_model_name="forged-request-model",
+        app_config=app_config,
+    )
+
+    assert resolved == "exact-agent-model"
+
+
+def test_private_runtime_unconfigured_explicit_model_ref_does_not_fallback_to_request() -> None:
+    app_config = _make_app_config([_make_model("forged-request-model", supports_thinking=False)])
+
+    with pytest.raises(ValueError, match="Exact project Agent model is not configured"):
+        lead_agent_module._resolve_private_runtime_model_name(
+            model_ref="missing-agent-model",
+            requested_model_name="forged-request-model",
+            app_config=app_config,
+        )
 
 
 def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkeypatch):

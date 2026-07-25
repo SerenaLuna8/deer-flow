@@ -33,6 +33,45 @@ export type ProjectStreamFrameDecision = {
   state: ProjectStreamCursorState;
 };
 
+export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
+
+const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
+  "error",
+  "failed",
+  "timeout",
+]);
+
+export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
+  frame: T,
+): T {
+  if (frame.event !== "end" || typeof frame.data !== "object" || !frame.data) {
+    return frame;
+  }
+  const status = Reflect.get(frame.data, "status");
+  if (
+    typeof status !== "string" ||
+    !FAILED_PROJECT_RUN_TERMINAL_STATUSES.has(status)
+  ) {
+    return frame;
+  }
+  // LangGraph's stream consumer only enters its error state for `event:error`.
+  // DeerFlow's durable protocol closes every Run with `event:end` and carries
+  // the authoritative outcome in `data.status`, so translate only failed
+  // terminal outcomes while preserving the durable event ID/cursor.
+  return {
+    ...frame,
+    event: "error",
+    data: {
+      error: PROJECT_RUN_TERMINAL_FAILURE,
+      message: PROJECT_RUN_TERMINAL_FAILURE,
+    },
+  } as T;
+}
+
+export function isProjectRunTerminalFailure(error: unknown): boolean {
+  return error instanceof Error && error.name === PROJECT_RUN_TERMINAL_FAILURE;
+}
+
 export function emptyProjectStreamCursorState(): ProjectStreamCursorState {
   return { lastEventId: 0, terminalRunId: null };
 }
@@ -498,7 +537,7 @@ function installProjectStreamAdapter(
       if (state.terminalRunId !== null) {
         reconnectStorage.removeItem(`lg:stream:${threadId}`);
       }
-      yield frame;
+      yield projectStreamFrameForUI(frame);
     }
   } as typeof client.runs.stream;
 
@@ -530,7 +569,7 @@ function installProjectStreamAdapter(
       if (state.terminalRunId === runId) {
         reconnectStorage.removeItem(`lg:stream:${threadId}`);
       }
-      yield frame;
+      yield projectStreamFrameForUI(frame);
     }
   } as typeof client.runs.joinStream;
 }

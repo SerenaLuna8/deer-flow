@@ -66,7 +66,7 @@ Agent 定义、版本、发布状态和项目绑定存储在 PostgreSQL 中，�
 
 ### 线程持久化配置
 
-DeerFlow 在每次 Agent 轮次后自动保存线程状态。使用持久化后端时，这允许：
+DeerFlow 在每次 Agent 轮次后通过项目 scoped PostgreSQL checkpointer 保存线程状态。这允许：
 
 - 在服务器重启后恢复线程。
 - 在长时间间隔后继续对话。
@@ -77,9 +77,6 @@ DeerFlow 在每次 Agent 轮次后自动保存线程状态。使用持久化后�
 ```yaml
 database:
   url: $DATABASE_URL
-
-run_events:
-  backend: db
 ```
 
 PostgreSQL 驱动已是默认依赖；独立的 `checkpointer` 配置不再接受。
@@ -96,7 +93,7 @@ PostgreSQL 驱动已是默认依赖；独立的 `checkpointer` 配置不再接�
     workspace/   ← 会话工作文件
 ```
 
-删除线程会移除其检查点数据，但用户数据目录会单独管理（取决于删除配置）。
+该目录只包含 Sandbox 工作文件投影。Thread metadata、消息、Run 状态和资产权限仍以 PostgreSQL 为唯一权威。
 
 ### 恢复线程
 

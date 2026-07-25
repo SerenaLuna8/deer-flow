@@ -39,9 +39,18 @@ import {
 import {
   automationListFiltersSchema,
   type AutomationListFilters,
+  type AutomationRun,
   type CreateAutomationInput,
   type UpdateAutomationInput,
 } from "./types";
+
+export const AUTOMATION_RUN_REFRESH_INTERVAL_MS = 2_000;
+
+const ACTIVE_AUTOMATION_RUN_STATUSES = new Set<AutomationRun["status"]>([
+  "queued",
+  "launching",
+  "running",
+]);
 
 const DEFINITIVE_TRIGGER_ERROR_CODES = new Set<AutomationErrorCode>([
   "AUTOMATION_FORBIDDEN",
@@ -133,6 +142,12 @@ function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
 
 function normalizedFilters(filters: AutomationListFilters = {}) {
   return automationListFiltersSchema.parse(filters);
+}
+
+function hasActiveAutomationRun(runs: AutomationRun[] | undefined): boolean {
+  return Boolean(
+    runs?.some(({ status }) => ACTIVE_AUTOMATION_RUN_STATUSES.has(status)),
+  );
 }
 
 export function projectAutomationsQueryOptions(
@@ -262,15 +277,15 @@ export function useProjectAutomation(
   });
 }
 
-export function useProjectAutomationRuns(
+export function projectAutomationRunsQueryOptions(
+  access: PrivateWorkAccess,
   taskId: string | null | undefined,
   filters: AutomationListFilters = {},
   enabled = true,
 ) {
-  const access = usePrivateWorkAccess();
   const scope = access.scope;
   const parsed = normalizedFilters(filters);
-  return useQuery({
+  return {
     queryKey: automationQueryKey(
       scope,
       "task",
@@ -279,11 +294,27 @@ export function useProjectAutomationRuns(
       parsed.limit,
       parsed.offset,
     ),
-    queryFn: ({ signal }) =>
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
       listAutomationRuns(requiredScope(access), taskId ?? "", parsed, signal),
     enabled: enabled && Boolean(taskId),
     retry: false,
-  });
+    refetchInterval: (query: { state: { data?: AutomationRun[] } }) =>
+      hasActiveAutomationRun(query.state.data)
+        ? AUTOMATION_RUN_REFRESH_INTERVAL_MS
+        : false,
+    refetchIntervalInBackground: false,
+  };
+}
+
+export function useProjectAutomationRuns(
+  taskId: string | null | undefined,
+  filters: AutomationListFilters = {},
+  enabled = true,
+) {
+  const access = usePrivateWorkAccess();
+  return useQuery(
+    projectAutomationRunsQueryOptions(access, taskId, filters, enabled),
+  );
 }
 
 function useAutomationMutation<TData, TVariables>(

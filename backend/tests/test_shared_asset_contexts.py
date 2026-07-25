@@ -7,7 +7,9 @@ from typing import Any
 import pytest
 
 from app.gateway.auth.models import User
+from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_service import AgentService
 from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
 from app.shared_assets.errors import (
     AssetConflict,
@@ -17,6 +19,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
+from app.shared_assets.mcp_service import McpService
 from app.shared_assets.models import (
     AgentPayload,
     AssetKind,
@@ -28,6 +31,7 @@ from app.shared_assets.models import (
     SkillArchiveFile,
     WorkflowStatus,
 )
+from app.shared_assets.skill_service import SkillService
 
 PROJECT_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
 SYSTEM_ADMIN_ID = uuid.UUID("20000000-0000-0000-0000-000000000002")
@@ -112,6 +116,61 @@ def test_non_system_admin_cannot_construct_governance_context() -> None:
         resolve_asset_actor(user, project_id=PROJECT_ID, request_id="r2")
 
     assert exc_info.value.request_id == "r2"
+
+
+@pytest.mark.parametrize("service_type", [AgentService, SkillService])
+def test_runtime_system_catalog_context_has_read_only_definition_capability(service_type) -> None:
+    actor = SystemAssetGovernanceContext(
+        user_id=SYSTEM_ADMIN_ID,
+        request_id="r-bootstrap-only",
+    )
+
+    service_type._require_capability(actor, Capability.SHARED_ASSETS_READ)
+    for capability in (
+        Capability.SHARED_ASSETS_EDIT,
+        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+        Capability.MCP_CREDENTIALS_APPROVE,
+    ):
+        with pytest.raises(AssetForbidden) as exc_info:
+            service_type._require_capability(actor, capability)
+        assert exc_info.value.request_id == "r-bootstrap-only"
+
+
+def test_runtime_system_mcp_context_keeps_only_read_and_credential_grant_approval() -> None:
+    actor = SystemAssetGovernanceContext(
+        user_id=SYSTEM_ADMIN_ID,
+        request_id="r-system-mcp-grants",
+    )
+
+    for capability in (
+        Capability.SHARED_ASSETS_READ,
+        Capability.MCP_CREDENTIALS_APPROVE,
+    ):
+        McpService._require_capability(actor, capability)
+    for capability in (
+        Capability.SHARED_ASSETS_EDIT,
+        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+    ):
+        with pytest.raises(AssetForbidden) as exc_info:
+            McpService._require_capability(actor, capability)
+        assert exc_info.value.request_id == "r-system-mcp-grants"
+
+
+@pytest.mark.parametrize("service_type", [AgentService, SkillService, McpService])
+def test_system_admin_project_override_keeps_asset_write_capability(service_type) -> None:
+    actor = SystemAssetGovernanceContext(
+        user_id=SYSTEM_ADMIN_ID,
+        request_id="r-project-override",
+        project_id=PROJECT_ID,
+    )
+
+    for capability in (
+        Capability.SHARED_ASSETS_READ,
+        Capability.SHARED_ASSETS_EDIT,
+        Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+        Capability.MCP_CREDENTIALS_APPROVE,
+    ):
+        service_type._require_capability(actor, capability)
 
 
 @pytest.mark.parametrize(

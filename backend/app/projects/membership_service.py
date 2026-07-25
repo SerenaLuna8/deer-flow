@@ -12,6 +12,7 @@ from app.private_work.authorization import (
     PrivateRunAuthorizationService,
 )
 from app.private_work.retention import PrivateWorkRetentionService
+from app.private_work.retention_jobs import RetentionJobAdmission
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectMembershipVersionConflict, ProjectNotFound
@@ -28,7 +29,7 @@ class MembershipQuotaPort(Protocol):
         scope: PrivateResourceScope,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None: ...
 
 
@@ -58,9 +59,9 @@ class _NoopMembershipQuota:
         scope: PrivateResourceScope,
         *,
         membership_id: uuid.UUID,
-        membership_version: int,
+        activation_generation: int,
     ) -> None:
-        del session, scope, membership_id, membership_version
+        del session, scope, membership_id, activation_generation
 
 
 class _NoopMembershipAudit:
@@ -92,6 +93,7 @@ class MembershipService:
         clock: Callable[[], datetime] | None = None,
         authorization: object = PrivateRunAuthorizationService,
         retention: object = PrivateWorkRetentionService,
+        retention_jobs: object = RetentionJobAdmission,
         quota: MembershipQuotaPort | None = None,
         audit: MembershipAuditPort | None = None,
     ):
@@ -99,6 +101,7 @@ class MembershipService:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._authorization = authorization
         self._retention = retention
+        self._retention_jobs = retention_jobs
         self._quota = quota or _NoopMembershipQuota()
         self._audit = audit or _NoopMembershipAudit()
 
@@ -173,7 +176,9 @@ class MembershipService:
 
     async def _end(self, context: ProjectContext, project, target, *, status: str) -> MembershipView:
         ended_at = self._clock()
+        retention_until = ended_at + timedelta(days=30)
         active_version = target.version
+        activation_generation = target.activation_generation
         await self._retention.freeze_owner(
             self.repository.session,
             project_id=project.id,
@@ -192,8 +197,16 @@ class MembershipService:
             target,
             status=status,
             ended_at=ended_at,
-            retention_until=ended_at + timedelta(days=30),
+            retention_until=retention_until,
             ended_by_user_id=context.user_id,
+        )
+        await self._retention_jobs.admit_former_owner(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=target.user_id,
+            membership_id=target.id,
+            activation_generation=activation_generation,
+            retention_until=retention_until,
         )
         await self._quota.release_member(
             self.repository.session,
@@ -203,7 +216,7 @@ class MembershipService:
                 membership_version=active_version,
             ),
             membership_id=target.id,
-            membership_version=active_version,
+            activation_generation=activation_generation,
         )
         await self._audit.member_ended(
             self.repository.session,

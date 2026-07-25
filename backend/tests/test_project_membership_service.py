@@ -42,13 +42,19 @@ def _repository() -> AsyncMock:
     return repository
 
 
-def _member(*, role: ProjectRole = ProjectRole.ADMIN, version: int = 1):
+def _member(
+    *,
+    role: ProjectRole = ProjectRole.ADMIN,
+    version: int = 1,
+    activation_generation: int = 1,
+):
     return SimpleNamespace(
         id=uuid.uuid4(),
         user_id=str(uuid.uuid4()),
         role=role.value,
         status="active",
         version=version,
+        activation_generation=activation_generation,
         created_at=datetime(2026, 7, 12, tzinfo=UTC),
     )
 
@@ -172,10 +178,15 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
     context = _context()
     project = SimpleNamespace(id=context.project_id)
     repository = _repository()
-    target = _member(role=ProjectRole.VIEWER)
+    target = _member(
+        role=ProjectRole.VIEWER,
+        version=4,
+        activation_generation=2,
+    )
     repository.lock_project_and_member.return_value = (project, target)
     authorization = AsyncMock()
     retention = AsyncMock()
+    quota = AsyncMock()
 
     async def mark_revoked(*_args, **_kwargs):
         events.append("authorization-mark")
@@ -191,9 +202,10 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
         clock=lambda: now,
         authorization=authorization,
         retention=retention,
+        quota=quota,
     )
 
-    await service.remove(context, target.id, expected_version=1)
+    await service.remove(context, target.id, expected_version=4)
     assert events == ["retention-freeze", "authorization-mark"]
     retention.freeze_owner.assert_awaited_once_with(
         repository.session,
@@ -209,14 +221,25 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
         retention_until=now + timedelta(days=30),
         ended_by_user_id=context.user_id,
     )
+    quota.release_member.assert_awaited_once()
+    assert quota.release_member.await_args.kwargs == {
+        "membership_id": target.id,
+        "activation_generation": 2,
+    }
+    assert quota.release_member.await_args.args[1].membership_version == 4
 
     repository.reset_mock()
     retention.reset_mock()
+    quota.reset_mock()
     events.clear()
-    leaving = _member(role=ProjectRole.VIEWER)
+    leaving = _member(
+        role=ProjectRole.VIEWER,
+        version=9,
+        activation_generation=3,
+    )
     leaving.id = context.membership_id
     repository.lock_project_and_member.return_value = (project, leaving)
-    await service.leave(context, expected_version=1)
+    await service.leave(context, expected_version=9)
     assert events == ["retention-freeze", "authorization-mark"]
     retention.freeze_owner.assert_awaited_once_with(
         repository.session,
@@ -232,6 +255,12 @@ async def test_remove_and_leave_record_distinct_end_metadata() -> None:
         retention_until=now + timedelta(days=30),
         ended_by_user_id=context.user_id,
     )
+    quota.release_member.assert_awaited_once()
+    assert quota.release_member.await_args.kwargs == {
+        "membership_id": leaving.id,
+        "activation_generation": 3,
+    }
+    assert quota.release_member.await_args.args[1].membership_version == 9
 
 
 @pytest.mark.asyncio

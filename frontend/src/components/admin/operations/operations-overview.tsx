@@ -71,7 +71,7 @@ export function OperationsOverviewStateView({
       : states.unknown;
   };
   const readinessView = (
-    <section className="bg-card rounded-xl border p-4">
+    <section className="bg-card space-y-4 rounded-xl border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="font-medium">{labels.readiness.title}</h2>
         <span className="text-sm font-medium">
@@ -87,6 +87,39 @@ export function OperationsOverviewStateView({
             <dd>{readinessState(value)}</dd>
           </div>
         ))}
+      </dl>
+      <dl className="grid gap-3 border-t pt-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <dt className="text-muted-foreground">
+            {labels.readiness.workerCount}
+          </dt>
+          <dd className="tabular-nums">{readiness.worker_count}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">
+            {labels.readiness.workerCapacity}
+          </dt>
+          <dd className="tabular-nums">{readiness.worker_capacity}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">
+            {labels.readiness.oldestHeartbeat}
+          </dt>
+          <dd>
+            {readiness.worker_oldest_heartbeat_age_seconds === null
+              ? labels.readiness.notReported
+              : labels.readiness.secondsAgo.replace(
+                  "{seconds}",
+                  String(readiness.worker_oldest_heartbeat_age_seconds),
+                )}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">
+            {labels.readiness.schedulerOwnership}
+          </dt>
+          <dd>{readinessState(readiness.scheduler_ownership)}</dd>
+        </div>
       </dl>
     </section>
   );
@@ -146,6 +179,33 @@ export function OperationsOverviewStateView({
           </section>
         ))}
       </div>
+      <section className="bg-card rounded-xl border p-4">
+        <h2 className="font-medium">{labels.channels.title}</h2>
+        {state.data.channel_providers.length === 0 ? (
+          <p className="text-muted-foreground mt-2 text-sm">
+            {labels.channels.empty}
+          </p>
+        ) : (
+          <ul className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {state.data.channel_providers.map((provider) => (
+              <li key={provider.provider} className="rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-medium">{provider.provider}</span>
+                  <span className="text-sm">
+                    {readinessState(provider.status)}
+                  </span>
+                </div>
+                <p className="text-muted-foreground mt-1 text-xs">
+                  {labels.channels.checkedAt.replace(
+                    "{time}",
+                    new Date(provider.checked_at).toLocaleString(),
+                  )}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

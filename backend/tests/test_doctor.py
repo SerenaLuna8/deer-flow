@@ -71,6 +71,7 @@ class TestCheckPostgres:
             current_revision="0001_project_saas_baseline",
             head_revision="0001_project_saas_baseline",
             revision_matches=True,
+            schema_state="ready",
         )
         monkeypatch.setattr(check_postgres, "run_check", lambda _url: result)
 

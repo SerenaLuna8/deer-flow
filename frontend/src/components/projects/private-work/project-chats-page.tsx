@@ -1,7 +1,6 @@
 "use client";
 
 import { MessageSquarePlusIcon } from "lucide-react";
-import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,10 +11,10 @@ import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-import { ProjectAgentSelectorDialog } from "./agent-selector-dialog";
+import { useMainProjectChat } from "./use-main-project-chat";
 
 export function ProjectChatsPage({ project }: { project: Project }) {
-  const [selectorOpen, setSelectorOpen] = useState(false);
+  const mainChat = useMainProjectChat(project);
   const canCreate =
     project.capabilities.includes("private_work.create") &&
     project.capabilities.includes("shared_assets.execute");
@@ -38,18 +37,26 @@ export function ProjectChatsPage({ project }: { project: Project }) {
         </div>
         <h1 className="mt-5 text-2xl font-semibold">开始项目会话</h1>
         <p className="text-muted-foreground mt-2 text-sm leading-6">
-          从会话列表选择已有会话，或选择一个 Agent 开始新的对话。
+          从会话列表选择已有会话，或使用 Main 开始新的对话。
         </p>
         {canCreate ? (
           <Button
             type="button"
             className="mt-6"
-            disabled={!entryEnabled}
-            aria-disabled={!entryEnabled}
-            onClick={() => setSelectorOpen(true)}
+            disabled={
+              !entryEnabled || mainChat.isCreating || mainChat.isLoading
+            }
+            aria-disabled={
+              !entryEnabled || mainChat.isCreating || mainChat.isLoading
+            }
+            onClick={() => void mainChat.startMainChat()}
           >
             <MessageSquarePlusIcon aria-hidden className="size-4" />
-            新建对话
+            {mainChat.isLoading
+              ? "正在准备…"
+              : mainChat.isCreating
+                ? "正在创建…"
+                : "新建对话"}
           </Button>
         ) : (
           <p className="text-muted-foreground mt-6 text-sm">
@@ -57,13 +64,6 @@ export function ProjectChatsPage({ project }: { project: Project }) {
           </p>
         )}
       </div>
-      {selectorOpen && (
-        <ProjectAgentSelectorDialog
-          project={project}
-          open
-          onOpenChange={setSelectorOpen}
-        />
-      )}
     </main>
   );
 }

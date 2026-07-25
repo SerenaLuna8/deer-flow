@@ -97,6 +97,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: DEER_FLOW_INTERNAL_AUTH_TOKEN
+            - name: DEER_FLOW_PROXY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: DEER_FLOW_PROXY_AUTH_TOKEN
             {{- /* PostgreSQL DSN from the bundled StatefulSet, an external
                   databaseUrl, or an existing Secret. Public application
                   configuration requires DATABASE_URL via database.url. */ -}}

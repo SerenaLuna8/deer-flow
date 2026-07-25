@@ -6,6 +6,7 @@ import {
   deleteSkillFile,
   editSkillFile,
   listWorkingSkillFiles,
+  markdownPreviewContent,
   renameSkillFile,
 } from "@/components/projects/assets/skill-file-workbench-state";
 
@@ -94,5 +95,16 @@ describe("Skill file workbench state", () => {
     expect(() =>
       addSkillFile([], files, "../escape.md", "bad", "text/plain"),
     ).toThrow();
+  });
+
+  test("hides YAML frontmatter only in the rendered Markdown preview", () => {
+    const source =
+      "---\nname: paper-review\ndescription: Review papers\n---\n\n# Paper Review\n\nUse the checklist.";
+
+    expect(markdownPreviewContent(source)).toBe(
+      "# Paper Review\n\nUse the checklist.",
+    );
+    expect(markdownPreviewContent("# Plain Markdown")).toBe("# Plain Markdown");
+    expect(source).toContain("name: paper-review");
   });
 });

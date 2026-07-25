@@ -2,17 +2,31 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from deerflow.persistence import bootstrap
 from deerflow.persistence.final_schema_contract import ALEMBIC_INDEXES, FINAL_APP_SEQUENCES
 
+CURRENT_REVISION = "0001_project_saas_baseline"
+
 
 def _exact_app_only_objects() -> frozenset[str]:
     return frozenset({f"relation:r:{name}" for name in bootstrap._FINAL_APP_TABLES | {"alembic_version"}} | {f"sequence:{name}:{owner}" for name, owner in FINAL_APP_SEQUENCES} | {f"index:{name}:{owner}" for name, owner in ALEMBIC_INDEXES})
+
+
+def _engine_with_connection(connection: AsyncMock) -> MagicMock:
+    engine = MagicMock(spec=AsyncEngine)
+
+    @asynccontextmanager
+    async def connect():
+        yield connection
+
+    engine.connect.side_effect = connect
+    return engine
 
 
 @pytest.mark.asyncio
@@ -25,9 +39,9 @@ async def test_classify_database_accepts_only_truly_empty_schema(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_classify_database_accepts_exact_m7_schema(monkeypatch) -> None:
+async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> None:
     connection = AsyncMock()
-    connection.scalar.return_value = bootstrap.M7_FINAL_SCHEMA_REVISION
+    connection.scalar.return_value = CURRENT_REVISION
     monkeypatch.setattr(
         bootstrap,
         "inventory_user_schema_objects",
@@ -35,7 +49,7 @@ async def test_classify_database_accepts_exact_m7_schema(monkeypatch) -> None:
     )
     monkeypatch.setattr(bootstrap, "verify_m7_catalog", AsyncMock(return_value=True))
 
-    assert await bootstrap.classify_database(connection) == "m7"
+    assert await bootstrap.classify_database(connection) == "current"
 
 
 @pytest.mark.asyncio
@@ -46,7 +60,7 @@ async def test_classify_database_accepts_exact_m7_schema(monkeypatch) -> None:
         ({"relation:r:unknown_table"}, None),
         (
             set(_exact_app_only_objects()) | {"relation:r:unknown_table"},
-            bootstrap.M7_FINAL_SCHEMA_REVISION,
+            CURRENT_REVISION,
         ),
     ],
 )
@@ -68,8 +82,75 @@ async def test_classify_database_rejects_old_or_unknown_nonempty_schema_before_m
     assert captured.value.code == "M7_RECREATE_REQUIRED"
 
 
-def test_migration_graph_has_one_final_head() -> None:
-    assert bootstrap._get_head_revision() == "0001_project_saas_baseline"
+def test_migration_graph_has_single_merged_0001_head() -> None:
+    assert bootstrap._get_head_revision() == CURRENT_REVISION
+
+
+@pytest.mark.asyncio
+async def test_explicit_migrate_installs_empty_database_to_head(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    engine = _engine_with_connection(connection)
+    config = object()
+    classify = AsyncMock(side_effect=["empty", "current"])
+    offload = AsyncMock()
+
+    @asynccontextmanager
+    async def lock(_engine):
+        yield
+
+    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
+    monkeypatch.setattr(bootstrap, "classify_database", classify)
+    monkeypatch.setattr(bootstrap, "_get_alembic_config", lambda _engine: config)
+    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
+
+    await bootstrap.migrate_schema(engine)
+
+    offload.assert_awaited_once_with(bootstrap._upgrade, config, "head")
+    assert classify.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_migrate_is_noop_for_current_database(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    engine = _engine_with_connection(connection)
+    classify = AsyncMock(side_effect=["current", "current"])
+    offload = AsyncMock()
+
+    @asynccontextmanager
+    async def lock(_engine):
+        yield
+
+    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
+    monkeypatch.setattr(bootstrap, "classify_database", classify)
+    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
+
+    await bootstrap.migrate_schema(engine)
+
+    offload.assert_not_awaited()
+    assert classify.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_validation_rejects_empty_schema_without_running_alembic(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    engine = _engine_with_connection(connection)
+    classify = AsyncMock(return_value="empty")
+    offload = AsyncMock()
+
+    monkeypatch.setattr(bootstrap, "classify_database", classify)
+    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
+
+    with pytest.raises(bootstrap.SchemaSetupRequired) as captured:
+        await bootstrap.validate_schema(engine)
+
+    assert captured.value.code == "DATABASE_SETUP_REQUIRED"
+    offload.assert_not_awaited()
 
 
 @pytest.mark.asyncio

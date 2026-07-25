@@ -7,18 +7,14 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
-from support.m4_private_threads import (
-    M4ThreadSeed,
-    install_open_project_cutover_guard,
-    seed_m4_thread_database,
-)
+from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.gateway.deps import private_work_context
+from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
+from app.private_work.feedback_service import PrivateFeedbackService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
-from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
 
@@ -28,9 +24,13 @@ def test_private_work_router_exposes_project_chat_feed_matrix() -> None:
 
     prefix = "/api/projects/{project_id}/private-work/threads/{thread_id}"
     assert (f"{prefix}/messages", "GET") in routes
+    assert (f"{prefix}/runs/{{run_id}}/messages", "GET") in routes
     assert (f"{prefix}/runs/{{run_id}}/events", "GET") in routes
     assert (f"{prefix}/events", "GET") in routes
     assert (f"{prefix}/token-usage", "GET") in routes
+    assert (f"{prefix}/runs/{{run_id}}/feedback", "GET") in routes
+    assert (f"{prefix}/runs/{{run_id}}/feedback", "PUT") in routes
+    assert (f"{prefix}/runs/{{run_id}}/feedback", "DELETE") in routes
     assert (f"{prefix}/runs/{{run_id}}/feedback", "POST") in routes
 
 
@@ -74,14 +74,14 @@ class _Harness:
 @pytest_asyncio.fixture()
 async def harness(seed: M4ThreadSeed) -> _Harness:
     app = FastAPI()
-    install_open_project_cutover_guard(app)
     app.include_router(private_work_router.router)
     event_store = DbRunEventStore(seed.factory)
     run_store = RunRepository(seed.factory)
     app.state.private_run_service = PrivateRunService(seed.factory)
     app.state.private_run_event_store = event_store
     app.state.run_store = run_store
-    app.state.feedback_repo = FeedbackRepository(seed.factory)
+    app.state.private_feedback_service = PrivateFeedbackService(seed.factory)
+    app.dependency_overrides[require_project_private_open] = lambda: None
 
     async def context_override(project_id: uuid.UUID, request: Request):
         identity = request.headers.get("x-test-private-identity", "owner-a")
@@ -161,6 +161,22 @@ async def test_project_chat_feed_happy_path_and_cross_owner_404(
     assert messages.status_code == 200
     assert [item["content"] for item in messages.json()] == [{"type": "ai", "content": "hello"}]
 
+    run_messages_path = f"/threads/{thread_id}/runs/{run_id}/messages"
+    run_messages = await harness.request("GET", run_messages_path)
+    assert run_messages.status_code == 200
+    assert run_messages.json() == {
+        "data": [
+            {
+                "run_id": run_id,
+                "seq": 1,
+                "content": {"type": "ai", "content": "hello"},
+                "metadata": {"content_is_dict": True, "content_is_json": True},
+                "created_at": run_messages.json()["data"][0]["created_at"],
+            }
+        ],
+        "has_more": False,
+    }
+
     events_path = f"/threads/{thread_id}/runs/{run_id}/events"
     events = await harness.request("GET", events_path)
     assert events.status_code == 200
@@ -184,27 +200,70 @@ async def test_project_chat_feed_happy_path_and_cross_owner_404(
         "middleware": 0,
     }
 
+    feedback_path = f"/threads/{thread_id}/runs/{run_id}/feedback"
+    empty_feedback = await harness.request("GET", feedback_path)
+    assert empty_feedback.status_code == 200
+    assert empty_feedback.json() is None
+
     feedback = await harness.request(
-        "POST",
-        f"/threads/{thread_id}/runs/{run_id}/feedback",
+        "PUT",
+        feedback_path,
         json={"rating": 1, "comment": "useful", "message_id": "message-1"},
     )
-    assert feedback.status_code == 201
+    assert feedback.status_code == 200
+    feedback_id = feedback.json()["feedback_id"]
     assert feedback.json()["rating"] == 1
     assert feedback.json()["comment"] == "useful"
+    assert feedback.json()["message_id"] == "message-1"
     assert "project_id" not in feedback.json()
     assert "owner_user_id" not in feedback.json()
 
+    persisted = await harness.request("GET", feedback_path)
+    assert persisted.status_code == 200
+    assert persisted.json() == feedback.json()
+
+    updated = await harness.request(
+        "PUT",
+        feedback_path,
+        json={"rating": -1, "comment": None, "message_id": "message-2"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["feedback_id"] == feedback_id
+    assert updated.json()["rating"] == -1
+    assert updated.json()["message_id"] == "message-2"
+
+    compatibility = await harness.request(
+        "POST",
+        feedback_path,
+        json={"rating": 1, "comment": "legacy client"},
+    )
+    assert compatibility.status_code == 201
+    assert compatibility.json()["feedback_id"] == feedback_id
+    assert compatibility.json()["rating"] == 1
+
+    deleted_feedback = await harness.request("DELETE", feedback_path)
+    assert deleted_feedback.status_code == 204
+    assert deleted_feedback.content == b""
+    assert (await harness.request("GET", feedback_path)).json() is None
+
     for method, suffix, kwargs in (
         ("GET", f"/threads/{thread_id}/messages", {}),
+        ("GET", run_messages_path, {}),
         ("GET", events_path, {}),
         ("GET", f"/threads/{thread_id}/events?run_id={run_id}", {}),
         ("GET", f"/threads/{thread_id}/token-usage", {}),
         (
-            "POST",
-            f"/threads/{thread_id}/runs/{run_id}/feedback",
+            "GET",
+            feedback_path,
+            {},
+        ),
+        (
+            "PUT",
+            feedback_path,
             {"json": {"rating": -1}},
         ),
+        ("DELETE", feedback_path, {}),
+        ("POST", feedback_path, {"json": {"rating": -1}}),
     ):
         hidden = await harness.request(
             method,
@@ -214,3 +273,204 @@ async def test_project_chat_feed_happy_path_and_cross_owner_404(
         )
         assert hidden.status_code == 404
         assert hidden.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_failed_run_messages_recover_visible_admitted_prompt_before_graph_execution(
+    harness: _Harness,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    visible_prompt = {
+        "type": "human",
+        "content": [{"type": "text", "text": "只回复四个字：验收成功"}],
+        "additional_kwargs": {
+            "files": [
+                {
+                    "filename": "acceptance.txt",
+                    "path": "/uploads/acceptance.txt",
+                    "size": 42,
+                    "status": "uploaded",
+                }
+            ],
+            "credential_token": "must-not-be-returned",
+        },
+        "client_runtime_context": {"must_not": "be_returned"},
+    }
+    async with harness.seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=harness.seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(harness.seed.project_agent_id, "project"),
+        )
+        admitted = await PrivateRunRepository(session).create(
+            scope=harness.seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(
+                run_id=run_id,
+                status="error",
+                kwargs={
+                    "input": {
+                        "messages": [
+                            {
+                                "type": "human",
+                                "content": "private sidecar context",
+                                "additional_kwargs": {"hide_from_ui": True},
+                            },
+                            visible_prompt,
+                        ]
+                    }
+                },
+            ),
+        )
+
+    response = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "data": [
+            {
+                "run_id": run_id,
+                "seq": 0,
+                "content": {
+                    "type": "human",
+                    "id": f"run-admission-{run_id}",
+                    "content": visible_prompt["content"],
+                    "additional_kwargs": {
+                        "files": visible_prompt["additional_kwargs"]["files"],
+                    },
+                },
+                "metadata": {"source": "run_admission"},
+                "created_at": admitted.created_at.isoformat(),
+            }
+        ],
+        "has_more": False,
+    }
+
+    after_admission = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages?after_seq=0",
+    )
+    assert after_admission.status_code == 200
+    assert after_admission.json() == {"data": [], "has_more": False}
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_viewer_can_read_own_feedback_but_cannot_mutate_it(
+    harness: _Harness,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    async with harness.seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=harness.seed.viewer.resource_scope,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(harness.seed.project_agent_id, "project"),
+        )
+        await PrivateRunRepository(session).create(
+            scope=harness.seed.viewer.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(run_id=run_id, status="success"),
+        )
+
+    async def viewer_context_override(project_id: uuid.UUID, request: Request):
+        identity = request.headers.get("x-test-private-identity", "owner-a")
+        if identity == "viewer" and project_id == harness.seed.viewer.project_id:
+            return harness.seed.viewer
+        if identity == "owner-a" and project_id == harness.seed.owner_a.project_id:
+            return harness.seed.owner_a
+        raise HTTPException(status_code=404)
+
+    harness.app.dependency_overrides[private_work_context] = viewer_context_override
+    path = f"/threads/{thread_id}/runs/{run_id}/feedback"
+    readable = await harness.request("GET", path, identity="viewer")
+    assert readable.status_code == 200
+    assert readable.json() is None
+
+    for method, kwargs in (
+        ("PUT", {"json": {"rating": 1}}),
+        ("POST", {"json": {"rating": 1}}),
+        ("DELETE", {}),
+    ):
+        forbidden = await harness.request(
+            method,
+            path,
+            identity="viewer",
+            **kwargs,
+        )
+        assert forbidden.status_code == 403
+        assert forbidden.json()["detail"]["code"] == "PRIVATE_WORK_FORBIDDEN"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_project_run_messages_paginate_without_crossing_run_or_owner_boundaries(
+    harness: _Harness,
+) -> None:
+    thread_id, run_id = await _seed_thread_and_run(harness)
+    await harness.event_store.put_batch(
+        [
+            {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"type": "ai", "content": f"message-{index}"},
+                "metadata": {"caller": "lead_agent"},
+            }
+            for index in range(2, 6)
+        ],
+        scope=harness.seed.owner_a.resource_scope,
+    )
+
+    latest = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages?limit=2",
+    )
+    assert latest.status_code == 200
+    assert latest.json()["has_more"] is True
+    assert [item["seq"] for item in latest.json()["data"]] == [5, 6]
+
+    older = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages?limit=2&before_seq=5",
+    )
+    assert older.status_code == 200
+    assert older.json()["has_more"] is True
+    assert [item["seq"] for item in older.json()["data"]] == [3, 4]
+
+    newer = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages?limit=2&after_seq=3",
+    )
+    assert newer.status_code == 200
+    assert newer.json()["has_more"] is True
+    assert [item["seq"] for item in newer.json()["data"]] == [4, 5]
+
+    both_cursors = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages?before_seq=5&after_seq=3",
+    )
+    assert both_cursors.status_code == 422
+    assert both_cursors.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
+
+    other_thread_id, other_run_id = await _seed_thread_and_run(harness)
+    mismatched = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{other_run_id}/messages",
+    )
+    assert mismatched.status_code == 404
+    assert mismatched.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+
+    other_owner = await harness.request(
+        "GET",
+        f"/threads/{other_thread_id}/runs/{other_run_id}/messages",
+        identity="owner-b",
+    )
+    assert other_owner.status_code == 404
+    assert other_owner.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"

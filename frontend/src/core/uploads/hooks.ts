@@ -7,7 +7,11 @@ import { useCallback } from "react";
 
 import { usePrivateWorkAccess } from "../private-work/provider";
 import { privateWorkQueryKey } from "../private-work/query-keys";
-import type { ProjectPrivateWorkScope } from "../private-work/types";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+  type ProjectPrivateWorkScope,
+} from "../private-work/types";
 
 import {
   deleteUploadedFile,
@@ -21,7 +25,8 @@ import {
 
 /**
  * Hook to load the gateway-enforced upload limits.
- * Callers intentionally degrade to server-side validation if this request fails.
+ * Submission performs a second fail-closed preflight immediately before the
+ * first sequential POST; the server remains authoritative for 413/429 races.
  */
 export function useUploadLimits(
   threadId: string,
@@ -35,7 +40,7 @@ export function useUploadLimits(
       "limits",
       threadId,
     ),
-    queryFn: () => getUploadLimits(threadId, privateWork),
+    queryFn: ({ signal }) => getUploadLimits(threadId, privateWork, signal),
     enabled: !!threadId && supportsUploadLimits(privateWork),
     retry: false,
     staleTime: 60_000,
@@ -59,8 +64,12 @@ export function useUploadFiles(
       "create",
       threadId,
     ),
-    mutationFn: (files: File[]) => uploadFiles(threadId, files, privateWork),
+    mutationFn: (files: File[]) =>
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        uploadFiles(threadId, files, privateWork, signal),
+      ),
     onSuccess: () => {
+      if (!isPrivateWorkAccessActive(privateWork)) return;
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
         queryKey: privateWorkQueryKey(
@@ -90,7 +99,7 @@ export function useUploadedFiles(
       "list",
       threadId,
     ),
-    queryFn: () => listUploadedFiles(threadId, privateWork),
+    queryFn: ({ signal }) => listUploadedFiles(threadId, privateWork, signal),
     enabled: !!threadId && enabled,
   });
 }
@@ -113,8 +122,11 @@ export function useDeleteUploadedFile(
       threadId,
     ),
     mutationFn: (filename: string) =>
-      deleteUploadedFile(threadId, filename, privateWork),
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        deleteUploadedFile(threadId, filename, privateWork, signal),
+      ),
     onSuccess: () => {
+      if (!isPrivateWorkAccessActive(privateWork)) return;
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
         queryKey: privateWorkQueryKey(

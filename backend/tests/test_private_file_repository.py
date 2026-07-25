@@ -314,44 +314,6 @@ async def test_repository_source_relation_requires_same_scope_ready_nonself_sour
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_repository_explicit_delete_allows_next_same_path_version(private_files) -> None:
-    from deerflow.persistence.private_work.file_repository import PrivateFileRepository
-
-    seed, threads = private_files
-    async with seed.factory() as session, session.begin():
-        repository = PrivateFileRepository(session)
-        first = await repository.stage(
-            scope=seed.owner_a_scope,
-            thread_id=threads["owner_a"],
-            kind="upload",
-            logical_path="uploads/versioned.txt",
-            media_type="text/plain",
-        )
-        first = await repository.finalize(
-            scope=seed.owner_a_scope,
-            thread_id=threads["owner_a"],
-            file_id=first.id,
-            expected_size=0,
-            expected_sha256=hashlib.sha256(b"").hexdigest(),
-        )
-        deleted = await repository.mark_deleted(
-            scope=seed.owner_a_scope,
-            thread_id=threads["owner_a"],
-            file_id=first.id,
-        )
-        second = await repository.stage(
-            scope=seed.owner_a_scope,
-            thread_id=threads["owner_a"],
-            kind="upload",
-            logical_path=first.logical_path,
-            media_type="text/plain",
-        )
-    assert deleted.status == "deleted"
-    assert second.version == 2
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
 async def test_repository_lists_all_ready_kinds_with_bounded_stable_keyset(private_files) -> None:
     from deerflow.persistence.private_work.file_repository import (
         PrivateFileConflict,

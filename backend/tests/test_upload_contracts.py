@@ -22,3 +22,36 @@ def test_private_upload_defaults_are_the_only_application_contract() -> None:
     assert PRIVATE_UPLOAD_DEFAULTS.max_files == 10
     assert PRIVATE_UPLOAD_DEFAULTS.max_file_size == 100 * MIB
     assert PRIVATE_UPLOAD_DEFAULTS.max_total_size == 100 * MIB
+
+
+def test_private_upload_limits_response_exposes_only_remaining_project_storage() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from app.gateway.routers.private_work import PrivateUploadLimitsResponse
+
+    payload = {
+        "max_files": 10,
+        "max_file_size": 100 * MIB,
+        "max_total_size": 100 * MIB,
+        "project_storage": {
+            "policy": "project_quota",
+            "remaining_bytes": 500,
+        },
+        "request_id": "upload-limits",
+    }
+
+    assert PrivateUploadLimitsResponse.model_validate(payload).model_dump() == payload
+
+    with pytest.raises(ValidationError):
+        PrivateUploadLimitsResponse.model_validate({**payload, "unexpected": True})
+
+    leaking_storage = {
+        **payload,
+        "project_storage": {
+            **payload["project_storage"],
+            "used_bytes": 300,
+        },
+    }
+    with pytest.raises(ValidationError):
+        PrivateUploadLimitsResponse.model_validate(leaking_storage)

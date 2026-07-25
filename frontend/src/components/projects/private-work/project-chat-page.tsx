@@ -38,6 +38,7 @@ export function projectChatRouteScope(
     canRun,
     canUpload: canRun,
     canDelete: canRead,
+    canDeleteFiles: canRead,
     automationVisible: projectAutomationEntryEnabled(
       automationFeatureEnabled,
       staticWebsiteOnly,
@@ -73,7 +74,7 @@ export function projectThreadAvailability(
   return "available";
 }
 
-export function ProjectChatNotFound() {
+export function ProjectChatNotFound({ chatsPath }: { chatsPath: string }) {
   return (
     <main className="flex min-h-[50vh] flex-col items-center justify-center px-6 text-center">
       <h1 className="text-2xl font-semibold">找不到这个对话</h1>
@@ -81,7 +82,7 @@ export function ProjectChatNotFound() {
         该对话不存在，或你没有访问权限。
       </p>
       <Button asChild className="mt-6">
-        <a href="../">返回对话列表</a>
+        <a href={chatsPath}>返回对话列表</a>
       </Button>
     </main>
   );
@@ -117,7 +118,11 @@ export function ProjectChatPage({ project }: { project: Project }) {
     <div className="h-[calc(100vh-3.5rem)] min-h-0 md:h-screen">
       <ScopedChatPage
         scope={scope}
-        missingThreadFallback={<ProjectChatNotFound />}
+        missingThreadFallback={
+          <ProjectChatNotFound
+            chatsPath={`/projects/${encodeURIComponent(project.slug)}/chats`}
+          />
+        }
       />
     </div>
   );

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import {
+  createProjectMemoryFact,
   exportProjectMemory,
   importProjectMemory,
   loadProjectMemory,
@@ -189,16 +190,22 @@ describe("project memory adapter", () => {
       canExport: true,
       canReload: false,
       canImport: false,
+      canAdd: false,
       canModify: false,
       canDelete: true,
     });
   });
 
-  test("reloads, updates, and deletes with optimistic versions", async () => {
+  test("creates, reloads, updates, and deletes with optimistic versions", async () => {
     mockedFetch.mockImplementation(async () =>
       jsonResponse({ namespace: "default", version: 4, memory }),
     );
 
+    await createProjectMemoryFact(access, 2, {
+      content: "New fact",
+      category: "context",
+      confidence: 0.8,
+    });
     await reloadProjectMemory(access);
     await updateProjectMemoryFact(access, "fact/1", 3, {
       content: "Updated",
@@ -207,11 +214,21 @@ describe("project memory adapter", () => {
     await deleteProjectMemoryFact(access, "fact/1", 4);
 
     expect(mockedFetch.mock.calls.map(([url]) => url)).toEqual([
+      `/api/projects/${scope.projectId}/memory/facts?namespace=default`,
       `/api/projects/${scope.projectId}/memory/reload?namespace=default`,
       `/api/projects/${scope.projectId}/memory/facts/fact%2F1?namespace=default`,
       `/api/projects/${scope.projectId}/memory/facts/fact%2F1?namespace=default`,
     ]);
-    expect(mockedFetch.mock.calls[1]![1]).toMatchObject({
+    expect(mockedFetch.mock.calls[0]![1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        expected_version: 2,
+        content: "New fact",
+        category: "context",
+        confidence: 0.8,
+      }),
+    });
+    expect(mockedFetch.mock.calls[2]![1]).toMatchObject({
       method: "PATCH",
       body: JSON.stringify({
         expected_version: 3,
@@ -219,7 +236,7 @@ describe("project memory adapter", () => {
         confidence: 0.95,
       }),
     });
-    expect(mockedFetch.mock.calls[2]![1]).toMatchObject({
+    expect(mockedFetch.mock.calls[3]![1]).toMatchObject({
       method: "DELETE",
       body: JSON.stringify({ expected_version: 4 }),
     });

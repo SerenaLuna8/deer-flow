@@ -30,8 +30,15 @@ export const zhCN: Translations = {
     more: "更多",
     search: "搜索",
     loadMore: "加载更多",
+    reload: "重新加载",
+    retry: "重试",
+    historyLoadFailed: "无法安全加载对话历史。",
     download: "下载",
     thinking: "思考",
+    thinkingInProgress: (seconds?: number) =>
+      seconds === undefined ? "思考中…" : `思考中…（${seconds} 秒）`,
+    thoughtFor: (seconds?: number) =>
+      seconds === undefined ? "思考了几秒" : `思考了 ${seconds} 秒`,
     artifacts: "文件",
     public: "公共",
     custom: "自定义",
@@ -53,6 +60,9 @@ export const zhCN: Translations = {
     regenerate: "重新生成",
     branch: "分叉",
     showArtifacts: "查看此对话的文件",
+    feedbackHelpful: "回答有帮助",
+    feedbackNotHelpful: "回答没有帮助",
+    feedbackSaveFailed: "保存反馈失败",
   },
 
   // Home
@@ -121,6 +131,7 @@ export const zhCN: Translations = {
     inputPolishFailed: "优化输入失败。",
     inputPolishUndo: "撤销优化",
     inputPolishCancel: "取消优化",
+    model: "模型",
     mode: "模式",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
@@ -288,6 +299,12 @@ export const zhCN: Translations = {
       unavailableDescription: "无法加载平台运维数据。",
       readiness: {
         title: "就绪状态",
+        workerCount: "Worker 进程数",
+        workerCapacity: "Worker 容量",
+        oldestHeartbeat: "最早 Worker 心跳",
+        schedulerOwnership: "Scheduler 所有权",
+        secondsAgo: "{seconds} 秒前",
+        notReported: "未上报",
         states: {
           ready: "就绪",
           degraded: "降级",
@@ -306,6 +323,11 @@ export const zhCN: Translations = {
           quota: "配额",
           audit: "审计",
         },
+      },
+      channels: {
+        title: "渠道提供方",
+        empty: "当前没有已配置或正在上报健康状态的渠道提供方。",
+        checkedAt: "检查于 {time}",
       },
       counts: {
         projects: "项目",
@@ -333,6 +355,40 @@ export const zhCN: Translations = {
       emptyDescription: "当前视图下没有匹配的项目。",
       older: "更早的项目",
       suspended: "已暂停",
+      active: "活跃",
+      pendingDeletion: "待删除",
+      details: "治理详情",
+      fields: {
+        projectId: "项目 ID",
+        slug: "项目标识",
+        createdAt: "创建时间",
+        updatedAt: "更新时间",
+        deletionAt: "删除生效时间",
+      },
+      filters: {
+        query: "搜索",
+        queryPlaceholder: "按项目名称或标识搜索",
+        status: "生命周期状态",
+        suspension: "平台暂停状态",
+        all: "全部",
+        apply: "应用筛选",
+        clear: "清除",
+        invalid: "搜索内容长度必须为 1 到 120 个字符。",
+      },
+      actions: {
+        suspend: "平台暂停",
+        resume: "恢复运行",
+        pending: "正在更新…",
+        error: "无法更新项目的平台暂停状态。请刷新后重试。",
+        confirmSuspendTitle: "确认暂停此项目？",
+        confirmSuspendDescription:
+          "平台暂停会立即冻结成员的私有工作区、阻止新运行并撤销进行中运行的授权，但不会改变项目生命周期或删除数据。",
+        confirmResumeTitle: "确认恢复此项目？",
+        confirmResumeDescription:
+          "恢复后成员可重新进入私有工作区；已被暂停的自动化不会自动启用。",
+        cancel: "取消",
+        confirm: "确认",
+      },
     },
     jobs: {
       title: "任务",
@@ -346,6 +402,16 @@ export const zhCN: Translations = {
       requeue: "重新排队安全任务",
       requeueing: "正在重新排队",
       requeueError: "无法完成安全重新排队。",
+      filters: {
+        project: "项目 ID",
+        status: "状态",
+        type: "任务类型",
+        allStatuses: "全部状态",
+        allTypes: "全部任务类型",
+        apply: "应用筛选",
+        clear: "清除",
+        invalidProject: "请输入有效的项目 UUID。",
+      },
     },
     audit: {
       title: "审计",
@@ -366,6 +432,11 @@ export const zhCN: Translations = {
     migrationRequired: "需要完成自动化迁移",
     retry: "重试",
     history: "运行历史",
+    fields: {
+      title: "标题",
+      prompt: "提示词",
+      schedule: "调度",
+    },
   },
 
   // 定时任务
@@ -588,6 +659,9 @@ export const zhCN: Translations = {
     startConversation: "开始新的对话以查看消息",
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
+    runFailedTitle: "运行未完成",
+    runFailedDescription:
+      "Agent 未能生成回复。请检查所选模型、依赖资产和凭据后，修改或重新发送消息。",
   },
 
   // Chats
@@ -692,9 +766,11 @@ export const zhCN: Translations = {
     answered: "已回答",
     pending: "发送中...",
     readOnly: "只读",
+    attentionCount: (count: number) => `${count} 项需要处理`,
+    changeBeforeSubmit: "你可以在提交前随时修改选择。",
     otherLabel: "其他回答",
     otherPlaceholder: "输入其他回答...",
-    submit: "提交",
+    submit: "提交回答",
     emptyError: "请输入回答后再提交。",
     answeredValue: (value: string) => `已回答：${value}`,
   },
@@ -710,6 +786,13 @@ export const zhCN: Translations = {
       `有 ${count} 个文件未被添加；一次最多添加 ${maxFiles} 个文件。`,
     totalSizeTooLarge: (count: number, maxTotalSize: string) =>
       `有 ${count} 个文件未被添加；附件总大小不能超过 ${maxTotalSize}。`,
+    projectStorageTooSmall: (count: number, remainingSize: string) =>
+      `有 ${count} 个文件未被添加；项目当前只剩 ${remainingSize} 存储空间。`,
+    serverTooLarge: "服务端拒绝了超出上传上限的文件，请调整后重试。",
+    storageQuotaExceeded:
+      "项目存储配额已被其他操作占用或耗尽，请删除文件或联系项目管理员。",
+    preflightRejected: "上传前校验未通过，请根据附件限制调整文件。",
+    uploadFailed: "文件上传失败，请稍后重试。",
   },
 
   subtasks: {
@@ -876,6 +959,13 @@ export const zhCN: Translations = {
       systemDescription: "自动跟随系统主题。",
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
+      chatWidthTitle: "聊天内容宽度",
+      chatWidthDescription:
+        "调整消息区和输入框的最大宽度，从而控制聊天界面两侧留白。",
+      chatWidthNarrow: "集中",
+      chatWidthStandard: "标准",
+      chatWidthWide: "宽屏",
+      chatWidthFull: "全宽",
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
     },
@@ -984,5 +1074,29 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
     },
+  },
+  setup: {
+    loading: "加载中…",
+    initAdminTitle: "创建管理员账号",
+    initAdminDescription: "设置管理员账号后即可开始使用 DeerFlow。",
+    email: "邮箱",
+    emailPlaceholder: "you@example.com",
+    password: "密码",
+    passwordPlaceholder: "密码（至少 8 个字符）",
+    confirmPassword: "确认密码",
+    confirmPasswordPlaceholder: "再次输入密码",
+    passwordMismatch: "两次输入的密码不一致",
+    passwordTooShort: "密码长度至少为 8 个字符",
+    networkError: "网络错误，请重试。",
+    creatingAccount: "正在创建账号…",
+    createAdminAccount: "创建管理员账号",
+    completeAdminTitle: "完成管理员账号设置",
+    completeAdminDescription: "设置真实邮箱和新密码。",
+    yourEmailPlaceholder: "你的邮箱",
+    currentPassword: "当前密码",
+    newPassword: "新密码",
+    confirmNewPassword: "确认新密码",
+    settingUp: "正在设置…",
+    completeSetup: "完成设置",
   },
 };

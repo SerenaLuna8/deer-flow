@@ -77,10 +77,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
                       type="button"
                       onClick={() => setActiveSection(id)}
                       className={cn(
-                        "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                        "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors before:pointer-events-none before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full",
                         active
-                          ? "bg-primary text-primary-foreground shadow-sm"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                          ? "bg-selection-subtle text-foreground before:bg-selection"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground before:bg-transparent",
                       )}
                     >
                       <Icon className="size-4" />
@@ -91,7 +91,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               })}
             </ul>
           </nav>
-          <ScrollArea className="h-full min-h-0 rounded-lg border">
+          <ScrollArea className="bg-background h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}

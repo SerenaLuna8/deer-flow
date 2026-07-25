@@ -1,7 +1,97 @@
+import { z } from "zod";
+
+import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 
-import type { ThreadTokenUsageResponse } from "./types";
+import type { RunMessage, ThreadTokenUsageResponse } from "./types";
+
+const projectPrivateWorkURLPattern =
+  /\/api\/projects\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/private-work$/iu;
+
+const persistedMessageSchema = z
+  .object({
+    type: z.string().min(1),
+    content: z.union([z.string(), z.array(z.unknown())]),
+  })
+  // LangChain messages are an extensible third-party union. The DeerFlow
+  // wrapper below stays strict while this nested payload preserves supported
+  // provider/tool-specific fields.
+  .passthrough();
+
+const runMessageSchema = z
+  .object({
+    run_id: z.string().min(1),
+    seq: z.number().int().nonnegative(),
+    content: persistedMessageSchema,
+    metadata: z.record(z.unknown()),
+    created_at: z.string().min(1),
+  })
+  .strict();
+
+const runMessagesPageSchema = z
+  .object({
+    data: z.array(runMessageSchema),
+    has_more: z.boolean(),
+  })
+  .strict()
+  .superRefine((page, context) => {
+    if (page.has_more && page.data.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A paginated run message page cannot advance without data",
+        path: ["data"],
+      });
+    }
+  });
+
+export type RunMessagesPageResponse = {
+  data: RunMessage[];
+  has_more: boolean;
+};
+
+function requireProjectPrivateWorkURL(apiBaseURL: string): string {
+  const value = apiBaseURL.replace(/\/$/u, "");
+  if (!projectPrivateWorkURLPattern.test(value)) {
+    throw new Error("Run messages require a project private-work URL");
+  }
+  return value;
+}
+
+export function buildRunMessagesUrl(
+  apiBaseURL: string,
+  threadId: string,
+  runId: string,
+  beforeSeq?: number,
+) {
+  const baseURL = requireProjectPrivateWorkURL(apiBaseURL);
+  const path = `${baseURL}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
+  if (beforeSeq === undefined) return path;
+  const parsedBeforeSeq = z.number().int().nonnegative().parse(beforeSeq);
+  return `${path}?before_seq=${parsedBeforeSeq}`;
+}
+
+export async function fetchRunMessagesPage(
+  apiBaseURL: string,
+  threadId: string,
+  runId: string,
+  beforeSeq?: number,
+  signal?: AbortSignal,
+): Promise<RunMessagesPageResponse> {
+  const response = await fetchWithAuth(
+    buildRunMessagesUrl(apiBaseURL, threadId, runId, beforeSeq),
+    {
+      method: "GET",
+      signal,
+    },
+  );
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to load thread history.");
+  }
+  return runMessagesPageSchema.parse(
+    await response.json(),
+  ) as RunMessagesPageResponse;
+}
 
 export type ThreadCompactResponse = {
   thread_id: string;

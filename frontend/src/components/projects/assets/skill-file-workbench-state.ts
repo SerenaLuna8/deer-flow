@@ -14,6 +14,17 @@ export type WorkingSkillFile = SkillFileMetadata & {
   state: "unchanged" | "modified" | "added";
 };
 
+export function markdownPreviewContent(source: string): string {
+  const normalized = source.replace(/^\uFEFF/, "");
+  if (!normalized.startsWith("---\n") && !normalized.startsWith("---\r\n")) {
+    return source;
+  }
+  const match = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(normalized);
+  return match
+    ? normalized.slice(match[0].length).replace(/^\r?\n/, "")
+    : source;
+}
+
 function comparePaths(left: string, right: string): number {
   if (left === "SKILL.md") return -1;
   if (right === "SKILL.md") return 1;

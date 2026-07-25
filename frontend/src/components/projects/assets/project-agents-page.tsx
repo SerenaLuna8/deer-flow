@@ -16,7 +16,7 @@ export function ProjectAgentsPage({
     <ProjectAssetPageShell
       kind="agents"
       title="Agent"
-      description="选择项目可用的 Agent，查看角色设定、依赖与版本，并决定系统 Agent 是否在当前项目启用。"
+      description="创建和维护当前项目自建 Agent 的角色设定、依赖与版本。系统默认 Main 不在此列表中展示。"
       renderLead={({ project, data }) => (
         <ProjectAgentStartContinuation
           project={project}

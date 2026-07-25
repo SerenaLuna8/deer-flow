@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import pytest
+from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import ToolRuntime
-from langchain_core.messages import ToolMessage
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import Runnable
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import ThreadState, merge_sandbox
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
@@ -102,6 +106,14 @@ class _AsyncOnlyProvider(SandboxProvider):
     def release(self, sandbox_id: str) -> None:
         self.released_ids.append(sandbox_id)
         return None
+
+
+class _DeterministicChatModel(FakeMessagesListChatModel):
+    """Minimal chat model that supports the binding required by create_agent."""
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Runnable:  # type: ignore[override]
+        del tools, tool_choice, kwargs
+        return self
 
 
 def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
@@ -261,6 +273,7 @@ async def test_project_mode_reuses_authority_lease_and_never_releases_it() -> No
     runtime = Runtime(
         context={
             "thread_id": "thread-private",
+            "run_id": "run-private",
             "private_scope": object(),
             "__file_authority": authority,
         }
@@ -269,23 +282,168 @@ async def test_project_mode_reuses_authority_lease_and_never_releases_it() -> No
     try:
         before = await middleware.abefore_agent({}, runtime)
         after = await middleware.aafter_agent(
-            {"sandbox": {"sandbox_id": "private-authority-sandbox"}},
+            {
+                "sandbox": {
+                    "sandbox_id": "private-authority-sandbox",
+                    "run_id": "run-private",
+                }
+            },
             runtime,
         )
     finally:
         reset_sandbox_provider()
 
-    assert before == {"sandbox": {"sandbox_id": "private-authority-sandbox"}}
+    assert before == {
+        "sandbox": {
+            "sandbox_id": "private-authority-sandbox",
+            "run_id": "run-private",
+        }
+    }
     assert after is None
     assert provider.thread_ids == []
     assert provider.released_ids == []
 
 
 @pytest.mark.anyio
+async def test_project_mode_replaces_previous_run_sandbox_with_current_authority() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    authority = SimpleNamespace(sandbox_id="current-run-sandbox")
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-private",
+            "run_id": "run-current",
+            "private_scope": object(),
+            "__file_authority": authority,
+        }
+    )
+    middleware = SandboxMiddleware(lazy_init=True)
+    try:
+        before = await middleware.abefore_agent(
+            {"sandbox": {"sandbox_id": "previous-run-sandbox"}},
+            runtime,
+        )
+        merged = merge_sandbox(
+            {"sandbox_id": "previous-run-sandbox"},
+            before["sandbox"],
+        )
+        after = await middleware.aafter_agent(
+            {"sandbox": merged},
+            runtime,
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert before == {
+        "sandbox": {
+            "sandbox_id": "current-run-sandbox",
+            "run_id": "run-current",
+        }
+    }
+    assert after is None
+    assert provider.thread_ids == []
+    assert provider.released_ids == []
+
+
+@pytest.mark.anyio
+async def test_project_mode_rotates_checkpointed_sandbox_across_real_agent_turns() -> None:
+    saver = InMemorySaver()
+    agent = create_agent(
+        model=_DeterministicChatModel(
+            responses=[
+                AIMessage(content="turn-1-complete", id="assistant-1"),
+                AIMessage(content="turn-2-complete", id="assistant-2"),
+            ]
+        ),
+        tools=[],
+        middleware=[SandboxMiddleware(lazy_init=True)],
+        context_schema=dict,
+        checkpointer=saver,
+    )
+    thread_config = {
+        "configurable": {
+            "thread_id": "thread-private-checkpoint",
+            "checkpoint_ns": "",
+        }
+    }
+
+    first = await agent.ainvoke(
+        {"messages": [HumanMessage(content="turn-1", id="human-1")]},
+        config=thread_config,
+        context={
+            "thread_id": "thread-private-checkpoint",
+            "run_id": "run-1",
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(sandbox_id="run-1-sandbox"),
+        },
+    )
+    assert first["sandbox"] == {
+        "sandbox_id": "run-1-sandbox",
+        "run_id": "run-1",
+    }
+
+    first_checkpoint = await saver.aget_tuple(thread_config)
+    assert first_checkpoint is not None
+    assert first_checkpoint.checkpoint["channel_values"]["sandbox"] == {
+        "sandbox_id": "run-1-sandbox",
+        "run_id": "run-1",
+    }
+    first_checkpoint_id = first_checkpoint.config["configurable"]["checkpoint_id"]
+
+    second = await agent.ainvoke(
+        {"messages": [HumanMessage(content="turn-2", id="human-2")]},
+        config={
+            "configurable": {
+                "thread_id": "thread-private-checkpoint",
+                "checkpoint_ns": "",
+                "checkpoint_id": first_checkpoint_id,
+            }
+        },
+        context={
+            "thread_id": "thread-private-checkpoint",
+            "run_id": "run-2",
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(sandbox_id="run-2-sandbox"),
+        },
+    )
+    assert second["sandbox"] == {
+        "sandbox_id": "run-2-sandbox",
+        "run_id": "run-2",
+    }
+
+    latest_checkpoint = await saver.aget_tuple(thread_config)
+    assert latest_checkpoint is not None
+    assert latest_checkpoint.checkpoint["channel_values"]["sandbox"] == {
+        "sandbox_id": "run-2-sandbox",
+        "run_id": "run-2",
+    }
+
+
+@pytest.mark.anyio
 async def test_project_mode_missing_authority_lease_fails_closed() -> None:
-    runtime = Runtime(context={"thread_id": "thread-private", "private_scope": object()})
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-private",
+            "run_id": "run-private",
+            "private_scope": object(),
+        }
+    )
 
     with pytest.raises(RuntimeError, match="Private file authority"):
+        await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+
+
+@pytest.mark.anyio
+async def test_project_mode_missing_run_id_fails_closed() -> None:
+    runtime = Runtime(
+        context={
+            "thread_id": "thread-private",
+            "private_scope": object(),
+            "__file_authority": SimpleNamespace(sandbox_id="private-sandbox"),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Private Run identity"):
         await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
 
 

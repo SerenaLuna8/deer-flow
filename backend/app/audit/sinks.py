@@ -638,6 +638,64 @@ class SystemJobAuditSink:
         )
 
 
+class SystemProjectLifecycleAuditSink:
+    """System-admin-bound project pause/resume audit port."""
+
+    def __init__(
+        self,
+        service: AuditService,
+        context: SystemAuditContext,
+    ) -> None:
+        self._service = service
+        self._actor = AuditActor.system_admin(context)
+        self._request_id = context.request_id
+
+    async def project_suspended(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+    ) -> None:
+        await self._project_event(
+            session,
+            project_id=project_id,
+            action=AuditAction.PROJECT_SUSPENDED,
+        )
+
+    async def project_resumed(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+    ) -> None:
+        await self._project_event(
+            session,
+            project_id=project_id,
+            action=AuditAction.PROJECT_RESUMED,
+        )
+
+    async def _project_event(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        action: AuditAction,
+    ) -> None:
+        await self._service.append(
+            session,
+            self._actor,
+            action,
+            AuditTarget(
+                AuditTargetKind.PROJECT,
+                _uuid(project_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {},
+            request_id=self._request_id,
+        )
+
+
 class TrustedOperationAuditSink:
     """Process-bound contract for Worker-owned retention purge."""
 
@@ -670,7 +728,12 @@ class TrustedOperationAuditSink:
         purged_count: int,
         request_id: str,
     ) -> None:
-        if resource_kind not in {"account", "project", "file"}:
+        if resource_kind not in {
+            "account",
+            "project",
+            "file",
+            "former_owner",
+        }:
             raise TypeError("purge audit resource kind is invalid")
         self._require_process(AuditProcess.WORKER)
         await self._service.append(
@@ -693,6 +756,7 @@ class TrustedOperationAuditSink:
 
 __all__ = [
     "OperationalAuditSink",
+    "SystemProjectLifecycleAuditSink",
     "SystemJobAuditSink",
     "TrustedOperationAuditSink",
 ]

@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
+_PRIVATE_RUNTIME_DEFAULT_MODEL_REF = "default"
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -82,6 +83,27 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     if requested_model_name and requested_model_name != default_model_name:
         logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
     return default_model_name
+
+
+def _resolve_private_runtime_model_name(
+    *,
+    model_ref: object,
+    requested_model_name: str | None,
+    app_config: AppConfig,
+) -> str:
+    """Resolve the exact model authorized for a private Agent runtime.
+
+    An explicit admitted ``model_ref`` is authoritative and cannot be
+    overridden by request metadata.  The reserved ``default`` alias is the
+    sole exception: admission has already resolved it to the exact logical
+    model persisted on the Run and injects that value as ``model_name``.
+    Both paths still fail closed against the Worker process's AppConfig.
+    """
+
+    model_name = requested_model_name if model_ref == _PRIVATE_RUNTIME_DEFAULT_MODEL_REF else model_ref
+    if not isinstance(model_name, str) or not model_name or app_config.get_model_config(model_name) is None:
+        raise ValueError("Exact project Agent model is not configured")
+    return model_name
 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
@@ -435,7 +457,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     agent_name = None if private_runtime is not None else validate_agent_name(cfg.get("agent_name"))
     if private_runtime is not None:
         is_plan_mode = False
-        subagent_enabled = False
+        subagent_enabled = "task" in tuple(getattr(private_runtime, "tool_groups", ()))
         max_concurrent_subagents = 3
         is_bootstrap = False
 
@@ -443,13 +465,15 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     runtime_skills = tuple(getattr(private_runtime, "skills", ())) if private_runtime is not None else None
     available_skills = {skill.name for skill in runtime_skills} if runtime_skills is not None else _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
-    agent_model_name = str(getattr(private_runtime, "model_ref")) if private_runtime is not None else agent_config.model if agent_config and agent_config.model else None
+    agent_model_name = getattr(private_runtime, "model_ref", None) if private_runtime is not None else agent_config.model if agent_config and agent_config.model else None
 
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
     if private_runtime is not None:
-        model_name = agent_model_name
-        if not model_name or resolved_app_config.get_model_config(model_name) is None:
-            raise ValueError("Exact project Agent model is not configured")
+        model_name = _resolve_private_runtime_model_name(
+            model_ref=agent_model_name,
+            requested_model_name=requested_model_name,
+            app_config=resolved_app_config,
+        )
     else:
         model_name = _resolve_model_name(
             requested_model_name or agent_model_name,

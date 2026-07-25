@@ -16,7 +16,8 @@ reminder lands in history) — so memory is stubbed on, deterministically.
 Why here and not e2e replay: replay disables memory, uses a single-turn golden,
 and replays recorded model output by input-hash while asserting SSE *shape* — so
 it cannot reproduce or detect this class. This runs at unit speed in ``make test``
-(the ``backend-unit-tests`` workflow) with no gateway, SSE, fixtures, or API key.
+(the consolidated deterministic release workflow) with no gateway, SSE, fixtures,
+or API key.
 
 To widen the net, add more state-touching middlewares (input sanitization,
 summarization, uploads) to ``_STREAM_MIDDLEWARES`` and keep the invariants.

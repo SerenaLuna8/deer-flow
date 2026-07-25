@@ -271,6 +271,42 @@ describe("project governance api", () => {
     });
   });
 
+  test("accepts quota state conflicts without exposing backend details", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {
+        detail: {
+          code: "PROJECT_QUOTA_STATE_CONFLICT",
+          message: "private quota ledger detail",
+          request_id: "request-safe-2",
+        },
+      }),
+    );
+
+    await expect(leaveProject(PROJECT_ID, 1)).rejects.toMatchObject({
+      status: 409,
+      code: "PROJECT_QUOTA_STATE_CONFLICT",
+      message: "Project quota state conflict",
+    });
+  });
+
+  test("preserves the safe member-capacity error for invitation redemption", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(429, {
+        detail: {
+          code: "PROJECT_MEMBER_QUOTA_EXCEEDED",
+          message: "unsafe internal capacity detail",
+          request_id: "request-member-capacity",
+        },
+      }),
+    );
+
+    await expect(redeemProjectInvitation()).rejects.toMatchObject({
+      status: 429,
+      code: "PROJECT_MEMBER_QUOTA_EXCEEDED",
+      message: "Project member quota was exceeded",
+    });
+  });
+
   test("strictly rejects token material in ordinary invitation responses", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, [{ ...invitation, token_hash: "should-not-arrive" }]),

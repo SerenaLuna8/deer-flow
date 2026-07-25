@@ -7,12 +7,9 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 
-import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 
-import { RecentPrivateWork } from "./private-work/recent-private-work";
 import { ProjectHeader } from "./project-header";
-import { ProjectPrivateWorkCta } from "./project-private-work-cta";
 
 const assets = [
   {
@@ -56,17 +53,6 @@ export function ProjectHome({ project }: { project: Project }) {
             返回工作空间
           </Link>
         </div>
-        <ProjectPrivateWorkCta project={project} />
-        {PROJECT_PRIVATE_WORKSPACE &&
-          project.capabilities.includes("private_work.read_own") && (
-            <RecentPrivateWork project={project} />
-          )}
-        <section className="border-primary/20 bg-primary/5 rounded-2xl border p-5">
-          <h2 className="font-semibold">项目隐私边界</h2>
-          <p className="text-muted-foreground mt-2 text-sm">
-            对话和记忆私有，Agent、Skill 和 MCP 共享。
-          </p>
-        </section>
         {project.capabilities.includes("shared_assets.read") && (
           <section>
             <div className="mb-4">

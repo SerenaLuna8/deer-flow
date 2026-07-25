@@ -48,12 +48,21 @@ def test_credential_service_exposes_only_frozen_api_safe_views() -> None:
         service_module.CredentialView,
         service_module.CredentialVersionView,
         service_module.CredentialGrantView,
+        service_module.CredentialGrantMigrationView,
     ):
         assert dataclasses.is_dataclass(view_type)
         assert view_type.__dataclass_params__.frozen is True
         fields = {field.name for field in dataclasses.fields(view_type)}
         assert fields.isdisjoint({"ciphertext", "nonce", "key_id", "secret_hash", "plaintext", "payload"})
         assert all("hash" not in field_name.lower() for field_name in fields)
+
+    from app.audit.models import AuditAction
+    from app.shared_assets.audit import _ACTIONS
+
+    assert _ACTIONS["credential.create"] is AuditAction.ASSET_CREDENTIAL_CREATED
+    assert _ACTIONS["credential.replace"] is AuditAction.ASSET_CREDENTIAL_REPLACED
+    assert _ACTIONS["credential.revoke"] is AuditAction.ASSET_CREDENTIAL_REVOKED
+    assert _ACTIONS["credential.grants.migrate"] is AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED
 
     public_methods = inspect.getmembers(repository_module.CredentialRepository, predicate=inspect.isfunction)
     for name, method in public_methods:

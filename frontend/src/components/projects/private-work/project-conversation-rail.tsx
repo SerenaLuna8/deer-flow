@@ -4,6 +4,7 @@ import {
   Loader2Icon,
   MenuIcon,
   MessageSquarePlusIcon,
+  PencilLineIcon,
   Trash2Icon,
 } from "lucide-react";
 import Link from "next/link";
@@ -29,17 +30,22 @@ import {
 import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
-import { useDeleteThread, useInfiniteThreads } from "@/core/threads/hooks";
+import {
+  useDeleteThread,
+  useInfiniteThreads,
+  useRenameThread,
+} from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 import { titleOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
 
-import { ProjectAgentSelectorDialog } from "./agent-selector-dialog";
 import {
   ProjectThreadDeleteDialog,
   projectThreadDeleteLandingPath,
 } from "./project-thread-delete-dialog";
+import { ProjectThreadRenameDialog } from "./project-thread-rename-dialog";
+import { useMainProjectChat } from "./use-main-project-chat";
 
 export function filterProjectConversationThreads(
   threads: AgentThread[],
@@ -62,6 +68,7 @@ export function projectConversationPermissions(project: Project) {
       project.capabilities.includes("private_work.create") &&
       project.capabilities.includes("shared_assets.execute"),
     canDelete: project.capabilities.includes("private_work.read_own"),
+    canRename: project.capabilities.includes("private_work.create"),
   };
 }
 
@@ -69,7 +76,9 @@ function ConversationRailContent({
   activeThreadId,
   canCreate,
   canDelete,
+  canRename,
   entryEnabled,
+  isCreating,
   filteredThreads,
   project,
   search,
@@ -78,12 +87,15 @@ function ConversationRailContent({
   onDelete,
   onNavigate,
   onNewConversation,
+  onRename,
   onSearchChange,
 }: {
   activeThreadId?: string;
   canCreate: boolean;
   canDelete: boolean;
+  canRename: boolean;
   entryEnabled: boolean;
+  isCreating: boolean;
   filteredThreads: AgentThread[];
   project: Project;
   search: string;
@@ -92,6 +104,7 @@ function ConversationRailContent({
   onDelete: (thread: AgentThread) => void;
   onNavigate?: () => void;
   onNewConversation: () => void;
+  onRename: (thread: AgentThread) => void;
   onSearchChange: (value: string) => void;
 }) {
   return (
@@ -111,8 +124,8 @@ function ConversationRailContent({
             <Button
               type="button"
               size="sm"
-              disabled={!entryEnabled}
-              aria-disabled={!entryEnabled}
+              disabled={!entryEnabled || isCreating}
+              aria-disabled={!entryEnabled || isCreating}
               onClick={onNewConversation}
             >
               <MessageSquarePlusIcon aria-hidden className="size-4" />
@@ -184,6 +197,19 @@ function ConversationRailContent({
                       </span>
                     )}
                   </Link>
+                  {canRename && (
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      className="text-muted-foreground shrink-0 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+                      aria-label={`重命名 ${title}`}
+                      title="重命名"
+                      onClick={() => onRename(thread)}
+                    >
+                      <PencilLineIcon aria-hidden className="size-4" />
+                    </Button>
+                  )}
                   {canDelete && (
                     <Button
                       type="button"
@@ -228,10 +254,13 @@ export function ProjectConversationRail({ project }: { project: Project }) {
   const privateWork = usePrivateWorkAccess();
   const threadsQuery = useInfiniteThreads();
   const deleteThread = useDeleteThread(privateWork);
+  const renameThread = useRenameThread(privateWork);
+  const mainChat = useMainProjectChat(project);
   const [search, setSearch] = useState("");
-  const [selectorOpen, setSelectorOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentThread | null>(null);
+  const [renameTarget, setRenameTarget] = useState<AgentThread | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const threads = useMemo(
     () => threadsQuery.data?.pages.flat() ?? [],
     [threadsQuery.data],
@@ -240,7 +269,8 @@ export function ProjectConversationRail({ project }: { project: Project }) {
     () => filterProjectConversationThreads(threads, search),
     [search, threads],
   );
-  const { canCreate, canDelete } = projectConversationPermissions(project);
+  const { canCreate, canDelete, canRename } =
+    projectConversationPermissions(project);
   const staticWebsiteOnly = isStaticWebsiteOnly();
   const readiness = useProjectPrivateWorkReadiness(
     canCreate && !staticWebsiteOnly,
@@ -255,7 +285,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
 
   const openNewConversation = () => {
     setMobileOpen(false);
-    setSelectorOpen(true);
+    void mainChat.startMainChat();
   };
 
   const confirmDelete = async () => {
@@ -285,12 +315,38 @@ export function ProjectConversationRail({ project }: { project: Project }) {
     }
   };
 
+  const openRename = (thread: AgentThread) => {
+    setRenameTarget(thread);
+    setRenameValue(projectConversationTitle(thread));
+  };
+
+  const confirmRename = async (title: string) => {
+    const target = renameTarget;
+    if (!target || renameThread.isPending) return;
+    if (title === projectConversationTitle(target)) {
+      setRenameTarget(null);
+      return;
+    }
+    try {
+      await renameThread.mutateAsync({
+        threadId: target.thread_id,
+        title,
+      });
+      setRenameTarget(null);
+      toast.success("会话标题已更新");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法重命名会话");
+    }
+  };
+
   const rail = (onNavigate?: () => void) => (
     <ConversationRailContent
       activeThreadId={activeThreadId}
       canCreate={canCreate}
       canDelete={canDelete}
+      canRename={canRename}
       entryEnabled={entryEnabled}
+      isCreating={mainChat.isCreating || mainChat.isLoading}
       filteredThreads={filteredThreads}
       project={project}
       search={search}
@@ -299,6 +355,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
       onDelete={setDeleteTarget}
       onNavigate={onNavigate}
       onNewConversation={openNewConversation}
+      onRename={openRename}
       onSearchChange={setSearch}
     />
   );
@@ -335,14 +392,6 @@ export function ProjectConversationRail({ project }: { project: Project }) {
         </SheetContent>
       </Sheet>
 
-      {selectorOpen && (
-        <ProjectAgentSelectorDialog
-          project={project}
-          open
-          onOpenChange={setSelectorOpen}
-        />
-      )}
-
       <ProjectThreadDeleteDialog
         open={deleteTarget !== null}
         title={deleteTarget ? titleOfThread(deleteTarget) : ""}
@@ -351,6 +400,17 @@ export function ProjectConversationRail({ project }: { project: Project }) {
           if (!open) setDeleteTarget(null);
         }}
         onConfirm={() => void confirmDelete()}
+      />
+
+      <ProjectThreadRenameDialog
+        open={renameTarget !== null}
+        value={renameValue}
+        pending={renameThread.isPending}
+        onValueChange={setRenameValue}
+        onOpenChange={(open) => {
+          if (!open) setRenameTarget(null);
+        }}
+        onConfirm={(title) => void confirmRename(title)}
       />
     </>
   );

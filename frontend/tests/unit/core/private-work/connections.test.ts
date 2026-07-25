@@ -57,7 +57,10 @@ describe("project connection adapter", () => {
 
     const providers = await listProjectConnectionProviders(access);
 
-    expect(providers.map((provider) => provider.provider)).toEqual(["slack"]);
+    expect(providers.enabled).toBe(true);
+    expect(providers.providers.map((provider) => provider.provider)).toEqual([
+      "slack",
+    ]);
     expect(mockedFetch).toHaveBeenCalledWith(
       `/api/projects/${scope.projectId}/connections/providers`,
       { signal: undefined },
