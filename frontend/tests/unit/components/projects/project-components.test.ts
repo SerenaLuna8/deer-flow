@@ -39,7 +39,41 @@ const project: Project = {
 };
 
 describe("project presentation contracts", () => {
-  test("card shows public project fields and capability-gated edit only", () => {
+  test("workspace hides the redundant project section title", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-workbench.tsx"),
+      "utf8",
+    );
+    expect(source).not.toContain("你的项目");
+  });
+
+  test("project editing keeps the existing icon without exposing a text field", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/projects/edit-project-dialog.tsx"),
+      "utf8",
+    );
+    expect(source).not.toMatch(/\bicon\b/u);
+    expect(source).not.toContain("图标");
+  });
+
+  test("project creation explains and enforces the slug rule in Chinese", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/create-project-dialog.tsx",
+      ),
+      "utf8",
+    );
+    expect(source).toContain("PROJECT_SLUG_HELP");
+    expect(source).toContain("projectSlugError");
+    expect(source).toContain("aria-describedby={");
+    expect(source).toContain('"project-slug-help project-slug-error"');
+    expect(source).toContain('id="project-slug-help"');
+    expect(source).toContain('id="project-slug-error"');
+    expect(source).toContain('role="alert"');
+  });
+
+  test("card keeps project identity and actions without metadata summaries", () => {
     const html = renderToStaticMarkup(
       createElement(ProjectCard, {
         project,
@@ -49,16 +83,19 @@ describe("project presentation contracts", () => {
     );
     expect(html).toContain("Alpha Project");
     expect(html).toContain("Shared research");
-    expect(html).toContain("3 位成员");
-    expect(html).toContain("Agent 0");
-    expect(html).toContain("Skill 0");
-    expect(html).toContain("MCP 0");
-    expect(html).toContain("项目配额摘要");
-    expect(html).toContain("成员 3 / 20");
-    expect(html).toContain("存储 1 GiB / 5 GiB");
-    expect(html).toContain("运行 1 / 3");
-    expect(html).toContain("MCP 25 / 10,000");
     expect(html).toContain("编辑项目");
+    expect(html).toContain("进入项目");
+    expect(html).not.toContain("Admin");
+    expect(html).not.toContain("active");
+    expect(html).not.toContain("3 位成员");
+    expect(html).not.toContain("Agent 0");
+    expect(html).not.toContain("Skill 0");
+    expect(html).not.toContain("MCP 0");
+    expect(html).not.toContain("项目配额摘要");
+    expect(html).not.toContain("成员 3 / 20");
+    expect(html).not.toContain("存储 1 GiB / 5 GiB");
+    expect(html).not.toContain("运行 1 / 3");
+    expect(html).not.toContain("MCP 25 / 10,000");
     expect(html).not.toContain("private_activity");
 
     const viewer = { ...project, capabilities: ["project.read" as const] };

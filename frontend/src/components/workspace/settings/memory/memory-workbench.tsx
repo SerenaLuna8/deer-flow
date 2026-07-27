@@ -6,17 +6,18 @@ import {
   BriefcaseBusinessIcon,
   ChevronDownIcon,
   Clock3Icon,
+  DatabaseIcon,
   DownloadIcon,
   FileTextIcon,
   FolderGit2Icon,
   HeartIcon,
   Layers3Icon,
+  MoreHorizontalIcon,
   NotebookTextIcon,
   PenLineIcon,
   PlusIcon,
   RefreshCwIcon,
   SearchIcon,
-  Settings2Icon,
   SparklesIcon,
   StarIcon,
   Trash2Icon,
@@ -45,6 +46,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   confidenceToLevelKey,
   getMemoryCategoryVisual,
+  getMemorySummaryPreviews,
   type MemoryFact,
   type MemorySectionGroup,
   type MemoryViewFilter,
@@ -101,7 +103,7 @@ export function MemoryHeaderActions(props: {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline">
-              <Settings2Icon aria-hidden="true" />
+              <DatabaseIcon aria-hidden="true" />
               {t.settings.memory.manageMemory}
             </Button>
           </DropdownMenuTrigger>
@@ -150,87 +152,151 @@ export function MemoryHeaderActions(props: {
   );
 }
 
-export function MemoryOverview(props: {
+export function MemoryStatusBar(props: {
   t: Translations;
   factCount: number;
   summaryCount: number;
   lastUpdated: string;
-  recentFocus: string;
-  onViewSummaries: () => void;
 }): React.ReactNode {
-  const {
-    t,
-    factCount,
-    summaryCount,
-    lastUpdated,
-    recentFocus,
-    onViewSummaries,
-  } = props;
+  const { t, factCount, summaryCount, lastUpdated } = props;
 
   return (
     <section
-      data-testid="memory-overview"
-      className="bg-card rounded-xl border"
+      data-testid="memory-status-bar"
+      aria-label={t.settings.memory.markdown.overview}
+      className="text-muted-foreground flex flex-wrap items-center gap-x-5 gap-y-2 text-sm"
     >
-      <div className="grid grid-cols-2 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,2fr)]">
-        <div className="border-border/70 flex items-start gap-3 border-r border-b p-4 lg:border-b-0">
-          <FileTextIcon
-            aria-hidden="true"
-            className="text-muted-foreground mt-0.5 size-4"
-          />
-          <p className="text-sm font-medium">
+      <dl className="flex flex-wrap items-center gap-x-5 gap-y-2">
+        <div className="flex items-center gap-2">
+          <FileTextIcon aria-hidden="true" className="size-4" />
+          <dt className="sr-only">{t.settings.memory.markdown.facts}</dt>
+          <dd className="text-foreground font-medium tabular-nums">
             {t.settings.memory.factCount(factCount)}
-          </p>
+          </dd>
         </div>
 
-        <div className="border-border/70 flex items-start gap-3 border-b p-4 lg:border-r lg:border-b-0">
-          <Layers3Icon
-            aria-hidden="true"
-            className="text-muted-foreground mt-0.5 size-4"
-          />
-          <p className="text-sm font-medium">
+        <div className="border-border flex items-center gap-2 border-l pl-5">
+          <Layers3Icon aria-hidden="true" className="size-4" />
+          <dt className="sr-only">{t.settings.memory.smartSummaries}</dt>
+          <dd className="text-foreground font-medium tabular-nums">
             {t.settings.memory.summaryCount(summaryCount)}
-          </p>
+          </dd>
         </div>
 
-        <div className="border-border/70 flex min-w-0 items-start gap-3 border-r p-4">
-          <Clock3Icon
-            aria-hidden="true"
-            className="text-muted-foreground mt-0.5 size-4"
-          />
-          <div className="min-w-0">
-            <p className="text-muted-foreground text-xs">
-              {t.common.lastUpdated}
-            </p>
-            <p className="truncate text-sm font-medium">{lastUpdated}</p>
-          </div>
+        <div className="border-border flex min-w-0 items-center gap-2 border-l pl-5">
+          <Clock3Icon aria-hidden="true" className="size-4" />
+          <dt>{t.common.lastUpdated}</dt>
+          <dd className="text-foreground truncate font-medium">
+            {lastUpdated}
+          </dd>
         </div>
+      </dl>
+    </section>
+  );
+}
 
-        <div className="flex min-w-0 items-start gap-3 p-4">
+export function MemoryContextSidecar(props: {
+  t: Translations;
+  recentFocus: string;
+  groups: MemorySectionGroup[];
+  summaryCount: number;
+  onViewSummaries: () => void;
+}): React.ReactNode {
+  const { t, recentFocus, groups, summaryCount, onViewSummaries } = props;
+  const previews = getMemorySummaryPreviews(
+    groups,
+    t.settings.memory.markdown.topOfMind,
+  );
+
+  return (
+    <aside
+      data-testid="memory-context-sidecar"
+      aria-labelledby="memory-context-sidecar-heading"
+      className="bg-card min-w-0 rounded-xl border p-5 lg:p-6"
+    >
+      <section className="min-w-0">
+        <div className="flex items-center gap-3">
           <StarIcon
             aria-hidden="true"
-            className="text-muted-foreground mt-0.5 size-4"
+            className="text-muted-foreground size-5"
           />
-          <div className="min-w-0 flex-1">
-            <p className="text-muted-foreground text-xs">
-              {t.settings.memory.recentFocus}
-            </p>
-            <p className="line-clamp-2 text-sm font-medium [overflow-wrap:anywhere]">
-              {recentFocus}
-            </p>
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              className="h-auto px-0 py-0 text-xs"
-              onClick={onViewSummaries}
-            >
-              {t.settings.memory.viewSummaries}
-            </Button>
-          </div>
+          <h2
+            id="memory-context-sidecar-heading"
+            className="text-base font-semibold"
+          >
+            {t.settings.memory.recentFocus}
+          </h2>
         </div>
-      </div>
-    </section>
+        <SafeStreamdown
+          className="text-foreground/90 mt-5 min-w-0 text-sm leading-7 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+          {...streamdownPlugins}
+        >
+          {recentFocus}
+        </SafeStreamdown>
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="text-primary mt-3 h-auto px-0 py-0 text-sm"
+          onClick={onViewSummaries}
+        >
+          {t.settings.memory.viewSummaries}
+        </Button>
+      </section>
+
+      <section
+        aria-labelledby="memory-sidecar-summaries-heading"
+        className="border-border mt-6 min-w-0 border-t pt-6"
+      >
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <SparklesIcon
+              aria-hidden="true"
+              className="text-muted-foreground size-5 shrink-0"
+            />
+            <div className="min-w-0">
+              <h2
+                id="memory-sidecar-summaries-heading"
+                className="text-base font-semibold"
+              >
+                {t.settings.memory.smartSummaries}
+              </h2>
+              <p className="text-muted-foreground mt-1 text-xs tabular-nums">
+                {t.settings.memory.summaryCount(summaryCount)}
+              </p>
+            </div>
+          </div>
+          <span className="bg-muted text-muted-foreground rounded-md px-2 py-1 text-xs">
+            {t.humanInput.readOnly}
+          </span>
+        </div>
+
+        <div className="mt-6 space-y-6">
+          {previews.length > 0 ? (
+            previews.map((section) => (
+              <article key={`${section.groupTitle}:${section.title}`}>
+                <h3 className="text-sm font-semibold">{section.title}</h3>
+                <SafeStreamdown
+                  className="text-foreground/85 mt-2 min-w-0 text-sm leading-6 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                  {...streamdownPlugins}
+                >
+                  {section.summary}
+                </SafeStreamdown>
+                {section.updatedAt ? (
+                  <p className="text-muted-foreground mt-2 text-xs">
+                    {formatTimeAgo(section.updatedAt)}
+                  </p>
+                ) : null}
+              </article>
+            ))
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              {t.settings.memory.markdown.empty}
+            </p>
+          )}
+        </div>
+      </section>
+    </aside>
   );
 }
 
@@ -238,14 +304,81 @@ export function MemoryToolbar(props: {
   t: Translations;
   query: string;
   filter: MemoryViewFilter;
+  factCount?: number;
+  summaryCount?: number;
+  embedded?: boolean;
   onQueryChange: (query: string) => void;
   onFilterChange: (filter: MemoryViewFilter) => void;
 }): React.ReactNode {
-  const { t, query, filter, onQueryChange, onFilterChange } = props;
+  const {
+    t,
+    query,
+    filter,
+    factCount,
+    summaryCount,
+    embedded = false,
+    onQueryChange,
+    onFilterChange,
+  } = props;
+  const toggleItemClassName = cn(
+    "whitespace-nowrap",
+    embedded &&
+      "data-[state=on]:border-selection h-10 rounded-none border-x-0 border-t-0 border-b-2 border-transparent bg-transparent px-3 shadow-none data-[state=on]:bg-transparent data-[state=on]:text-foreground",
+  );
 
   return (
-    <div className="bg-muted/25 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center">
-      <div className="relative min-w-0 flex-1 sm:max-w-md">
+    <div
+      className={cn(
+        "flex flex-col gap-3 sm:flex-row sm:items-center",
+        embedded
+          ? "border-border border-b px-4 py-4 sm:px-5"
+          : "bg-muted/25 rounded-xl border p-3",
+      )}
+    >
+      <ToggleGroup
+        type="single"
+        value={filter}
+        onValueChange={(value) => {
+          if (value) onFilterChange(value as MemoryViewFilter);
+        }}
+        variant={embedded ? "default" : "outline"}
+        aria-label={t.settings.memory.title}
+        className={cn("max-w-full shrink-0 self-start", embedded && "gap-1")}
+      >
+        <ToggleGroupItem
+          data-testid="memory-filter-all"
+          value="all"
+          className={toggleItemClassName}
+        >
+          {t.settings.memory.filterAll}
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          data-testid="memory-filter-facts"
+          value="facts"
+          className={toggleItemClassName}
+        >
+          {t.settings.memory.filterFacts}
+          {typeof factCount === "number" ? (
+            <span className="text-muted-foreground tabular-nums">
+              {factCount}
+            </span>
+          ) : null}
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          data-testid="memory-filter-summaries"
+          value="summaries"
+          className={toggleItemClassName}
+        >
+          {t.settings.memory.filterSummaries}
+          {typeof summaryCount === "number" ? (
+            <span className="text-muted-foreground tabular-nums">
+              {summaryCount}
+            </span>
+          ) : null}
+        </ToggleGroupItem>
+      </ToggleGroup>
+
+      <div className="relative min-w-0 flex-1 sm:ml-auto sm:max-w-sm">
         <SearchIcon
           aria-hidden="true"
           className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
@@ -254,40 +387,10 @@ export function MemoryToolbar(props: {
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder={t.settings.memory.searchPlaceholder}
+          aria-label={t.settings.memory.searchPlaceholder}
           className="pl-9"
         />
       </div>
-      <ToggleGroup
-        type="single"
-        value={filter}
-        onValueChange={(value) => {
-          if (value) onFilterChange(value as MemoryViewFilter);
-        }}
-        variant="outline"
-        className="max-w-full shrink-0 self-start sm:ml-auto sm:self-auto"
-      >
-        <ToggleGroupItem
-          data-testid="memory-filter-all"
-          value="all"
-          className="whitespace-nowrap"
-        >
-          {t.settings.memory.filterAll}
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          data-testid="memory-filter-facts"
-          value="facts"
-          className="whitespace-nowrap"
-        >
-          {t.settings.memory.filterFacts}
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          data-testid="memory-filter-summaries"
-          value="summaries"
-          className="whitespace-nowrap"
-        >
-          {t.settings.memory.filterSummaries}
-        </ToggleGroupItem>
-      </ToggleGroup>
     </div>
   );
 }
@@ -315,18 +418,20 @@ function MemoryFactRow(props: {
   return (
     <article
       data-testid={`memory-fact-row-${fact.id}`}
-      className="hover:bg-muted/30 flex min-w-0 items-start gap-3 px-4 py-4 [overflow-wrap:anywhere] transition-colors sm:px-5"
+      className="hover:bg-muted/25 flex min-w-0 items-start gap-4 px-4 py-5 [overflow-wrap:anywhere] transition-colors sm:px-5 lg:py-11"
     >
-      <div className="bg-muted/50 text-muted-foreground mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border">
-        <CategoryIcon aria-hidden="true" className="size-4" />
+      <div className="bg-muted/35 text-muted-foreground mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg border">
+        <CategoryIcon aria-hidden="true" className="size-[18px]" />
       </div>
-      <div className="min-w-0 flex-1 space-y-2">
-        <p className="text-sm font-medium [overflow-wrap:anywhere]">
+      <div className="max-w-3xl min-w-0 flex-1 space-y-2">
+        <p className="text-sm leading-6 font-semibold [overflow-wrap:anywhere]">
           {fact.content}
         </p>
-        <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <div className="text-muted-foreground flex flex-wrap gap-x-2.5 gap-y-1 text-xs">
           <span>{upperFirst(fact.category)}</span>
-          <span>{confidenceText}</span>
+          <span>
+            {t.settings.memory.factConfidenceLabel} {confidenceText}
+          </span>
           <span>{formatTimeAgo(fact.createdAt)}</span>
           <span>
             {fact.source === "manual" ? (
@@ -334,7 +439,7 @@ function MemoryFactRow(props: {
             ) : (
               <Link
                 href={sourceThreadHref(fact)}
-                className="text-primary font-medium underline-offset-4 hover:underline"
+                className="text-selection font-medium underline-offset-4 hover:underline"
               >
                 {t.settings.memory.markdown.table.view}
               </Link>
@@ -359,18 +464,33 @@ function MemoryFactRow(props: {
             </Button>
           ) : null}
           {onDelete ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="text-destructive hover:text-destructive shrink-0"
-              onClick={onDelete}
-              disabled={disabled}
-              title={t.common.delete}
-              aria-label={t.common.delete}
-            >
-              <Trash2Icon aria-hidden="true" className="size-4" />
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0"
+                  disabled={disabled}
+                  title={t.common.more}
+                  aria-label={t.common.more}
+                >
+                  <MoreHorizontalIcon aria-hidden="true" className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={disabled}
+                  onSelect={() => {
+                    window.setTimeout(onDelete, 0);
+                  }}
+                >
+                  <Trash2Icon aria-hidden="true" />
+                  {t.common.delete}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           ) : null}
         </div>
       ) : null}
@@ -385,23 +505,43 @@ export function MemoryFactList(props: {
   onEdit?: (fact: MemoryFact) => void;
   onDelete?: (fact: MemoryFact) => void;
   sourceThreadHref: MemorySourceThreadHref;
+  embedded?: boolean;
+  showHeading?: boolean;
 }): React.ReactNode {
-  const { facts, t, isDeleting, onEdit, onDelete, sourceThreadHref } = props;
+  const {
+    facts,
+    t,
+    isDeleting,
+    onEdit,
+    onDelete,
+    sourceThreadHref,
+    embedded = false,
+    showHeading = true,
+  } = props;
 
   return (
     <section
       data-testid="memory-facts-panel"
       aria-labelledby="memory-facts-heading"
-      className="bg-card min-w-0 overflow-hidden rounded-xl border"
+      className={cn(
+        "bg-card min-w-0 overflow-hidden",
+        embedded ? "rounded-none border-0" : "rounded-xl border",
+      )}
     >
-      <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
-        <h2 id="memory-facts-heading" className="text-sm font-medium">
+      {showHeading ? (
+        <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
+          <h2 id="memory-facts-heading" className="text-sm font-medium">
+            {t.settings.memory.markdown.facts}
+          </h2>
+          <span className="text-muted-foreground text-xs">
+            {t.settings.memory.factCount(facts.length)}
+          </span>
+        </div>
+      ) : (
+        <h2 id="memory-facts-heading" className="sr-only">
           {t.settings.memory.markdown.facts}
         </h2>
-        <span className="text-muted-foreground text-xs">
-          {t.settings.memory.factCount(facts.length)}
-        </span>
-      </div>
+      )}
       <div className="divide-y">
         {facts.length > 0 ? (
           facts.map((fact) => (
@@ -432,15 +572,27 @@ export function MemorySummaryDisclosure(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   triggerRef: React.Ref<HTMLButtonElement>;
+  embedded?: boolean;
 }): React.ReactNode {
-  const { t, groups, summaryCount, open, onOpenChange, triggerRef } = props;
+  const {
+    t,
+    groups,
+    summaryCount,
+    open,
+    onOpenChange,
+    triggerRef,
+    embedded = false,
+  } = props;
 
   return (
     <Collapsible
       open={open}
       onOpenChange={onOpenChange}
       data-testid="memory-summary-disclosure"
-      className="bg-card min-w-0 overflow-hidden rounded-xl border"
+      className={cn(
+        "bg-card min-w-0 overflow-hidden",
+        embedded ? "rounded-none border-0" : "rounded-xl border",
+      )}
     >
       <CollapsibleTrigger asChild>
         <Button

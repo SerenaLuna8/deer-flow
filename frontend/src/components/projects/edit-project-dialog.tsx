@@ -32,13 +32,11 @@ export function EditProjectDialog({
 }) {
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
-  const [icon, setIcon] = useState("folder");
 
   useEffect(() => {
     if (!project || !open) return;
     setDisplayName(project.display_name);
     setDescription(project.description);
-    setIcon(project.icon);
   }, [project, open]);
 
   return (
@@ -55,7 +53,6 @@ export function EditProjectDialog({
             onSubmit({
               display_name: displayName,
               description,
-              icon,
             });
           }}
         >
@@ -66,15 +63,6 @@ export function EditProjectDialog({
               maxLength={120}
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
-            />
-          </label>
-          <label className="grid gap-2 text-sm">
-            图标
-            <Input
-              required
-              maxLength={32}
-              value={icon}
-              onChange={(event) => setIcon(event.target.value)}
             />
           </label>
           <label className="grid gap-2 text-sm">

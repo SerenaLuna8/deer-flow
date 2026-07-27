@@ -80,6 +80,30 @@ function renderCollapsedDesktopNav(project: Project) {
 }
 
 describe("project shell navigation", () => {
+  test("keeps overview standalone, groups Memory under capabilities, and names project members", () => {
+    const items = projectNavigationItems(
+      adminProject,
+      true,
+      true,
+      false,
+      false,
+    );
+
+    expect(items.find((item) => item.label === "项目概览")?.section).toBeNull();
+    expect(items.find((item) => item.label === "Memory")?.section).toBe(
+      "capabilities",
+    );
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          href: "/projects/alpha/members",
+          label: "项目成员",
+          section: "management",
+        }),
+      ]),
+    );
+  });
+
   test("gates project Memory with private-work readiness and hides Connections", () => {
     const readyItems = projectNavigationItems(
       adminProject,
@@ -114,7 +138,7 @@ describe("project shell navigation", () => {
 
     for (const label of [
       "项目概览",
-      "成员与邀请",
+      "项目成员",
       "项目设置",
       "Agent",
       "Skill",
@@ -136,7 +160,7 @@ describe("project shell navigation", () => {
 
     expect(html).toContain("DeerFlow");
     expect(html).toContain("Alpha Project");
-    expect(html).toContain("工作");
+    expect(html).not.toMatch(/>工作<\/p>/u);
     expect(html).toContain("能力");
     expect(html).toContain("项目管理");
     expect(html).toContain('aria-label="收起菜单栏"');
@@ -161,7 +185,7 @@ describe("project shell navigation", () => {
       "Skill",
       "MCP",
       "Credential",
-      "成员与邀请",
+      "项目成员",
       "项目设置",
       "返回工作空间",
     ]) {
@@ -228,14 +252,14 @@ describe("project shell navigation", () => {
       ] as Project["capabilities"],
     };
 
-    expect(renderShell(roleOnlyAdmin)).not.toContain("成员与邀请");
+    expect(renderShell(roleOnlyAdmin)).not.toContain("项目成员");
     expect(renderShell(roleOnlyAdmin)).not.toContain("项目设置");
     expect(renderShell(capabilityViewer)).toContain("项目设置");
     expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
     expect(renderShell(sharedAssetReader)).toContain("Agent");
     expect(renderShell(sharedAssetReader)).not.toContain("Credential");
-    expect(renderShell(memberManager)).toContain("成员与邀请");
+    expect(renderShell(memberManager)).toContain("项目成员");
     expect(renderShell(credentialApprover)).toContain("Credential");
   });
 });

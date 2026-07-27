@@ -1,12 +1,19 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { BotIcon, MessageSquareIcon } from "lucide-react";
+import {
+  BotIcon,
+  Loader2Icon,
+  MessageSquareIcon,
+  PowerIcon,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 
+import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
+import { AgentBuilderResumeBanner } from "@/components/projects/agents/agent-builder-resume-banner";
 import {
   createProjectChatForAgent,
   type ExecutableProjectAgent,
@@ -19,12 +26,20 @@ import {
   CardFooter,
   CardHeader,
 } from "@/components/ui/card";
+import {
+  agentBuilderCanAuthor,
+  useAgentBuilderSessions,
+} from "@/core/agent-builder";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Capability, Project } from "@/core/projects/types";
-import type { ProjectAssetItem } from "@/core/shared-assets";
+import {
+  useChangeProjectAssetStatus,
+  type ProjectAssetItem,
+} from "@/core/shared-assets";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 
-import { AgentAssetDetail } from "./agent-asset-detail";
+import { AgentInstructionsWorkbench } from "./agent-instructions-workbench";
 import { ProjectAssetPageShell } from "./project-asset-page-shell";
 import { useAgentMcpDependencyRuntime } from "./use-mcp-dependency-runtime";
 
@@ -53,13 +68,22 @@ export function projectAgentChatAvailability(
   if (!item.current_published_version_id) {
     return { enabled: false, reason: "请先完成 Agent 配置并发布" };
   }
-  if (item.scope === "system" && item.binding?.enabled !== true) {
-    return { enabled: false, reason: "请先在详情中启用该 System Agent" };
-  }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };
   }
   return { enabled: true, reason: null };
+}
+
+export function projectAgentCanActivate(
+  item: ProjectAssetItem,
+  projectCapabilities: readonly Capability[],
+): boolean {
+  return (
+    item.status === "suspended" &&
+    projectCapabilities.includes("shared_assets.manage_bindings") &&
+    item.capabilities.includes("shared_assets.manage_bindings") &&
+    item.current_published_version_id !== null
+  );
 }
 
 export function ProjectAgentCardGridView({
@@ -67,19 +91,23 @@ export function ProjectAgentCardGridView({
   projectCapabilities,
   selectedAssetId,
   creatingChatForAgentId,
+  activatingAgentId = null,
   mcpDependencyReasons = new Map(),
   mcpDependencyError = false,
   onSelect,
   onStartChat,
+  onActivate,
 }: {
   items: ProjectAssetItem[];
   projectCapabilities: readonly Capability[];
   selectedAssetId: string | null;
   creatingChatForAgentId: string | null;
+  activatingAgentId?: string | null;
   mcpDependencyReasons?: ReadonlyMap<string, string>;
   mcpDependencyError?: boolean;
   onSelect: (item: ProjectAssetItem) => void;
   onStartChat: (item: ExecutableProjectAgent) => void;
+  onActivate?: (item: ProjectAssetItem) => void;
 }) {
   if (items.length === 0) {
     return (
@@ -104,6 +132,10 @@ export function ProjectAgentCardGridView({
             mcpDependencyReasons.get(item.id) ?? null,
           );
           const creating = creatingChatForAgentId === item.id;
+          const activating = activatingAgentId === item.id;
+          const canActivate =
+            projectAgentCanActivate(item, projectCapabilities) &&
+            Boolean(onActivate);
           const description = item.description?.trim();
           return (
             <Card
@@ -131,7 +163,12 @@ export function ProjectAgentCardGridView({
                       {item.display_name}
                     </span>
                     {item.status !== "active" ? (
-                      <AssetStatusBadge status={item.status} />
+                      <AssetStatusBadge
+                        status={item.status}
+                        label={
+                          item.status === "suspended" ? "已停用" : undefined
+                        }
+                      />
                     ) : null}
                   </span>
                 </CardHeader>
@@ -144,6 +181,26 @@ export function ProjectAgentCardGridView({
                 </CardContent>
               </button>
               <CardFooter className="gap-2 px-6 pb-6">
+                {canActivate ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="min-h-11"
+                    disabled={activating}
+                    aria-label={`启用 ${item.display_name}`}
+                    onClick={() => onActivate?.(item)}
+                  >
+                    {activating ? (
+                      <Loader2Icon
+                        aria-hidden
+                        className="size-4 animate-spin"
+                      />
+                    ) : (
+                      <PowerIcon aria-hidden className="size-4" />
+                    )}
+                    {activating ? "启用中…" : "启用"}
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   className="min-h-11 flex-1"
@@ -185,6 +242,11 @@ function ProjectAgentCardGrid({
   const [creatingChatForAgentId, setCreatingChatForAgentId] = useState<
     string | null
   >(null);
+  const changeStatus = useChangeProjectAssetStatus(
+    privateWork.scope.accountId,
+    project.id,
+    "agents",
+  );
   const mcpDependencyRuntime = useAgentMcpDependencyRuntime({
     accountId: privateWork.scope.accountId,
     projectId: project.id,
@@ -232,38 +294,105 @@ function ProjectAgentCardGrid({
     }
   }
 
+  function activate(agent: ProjectAssetItem) {
+    if (
+      !projectAgentCanActivate(agent, project.capabilities) ||
+      changeStatus.isPending
+    ) {
+      return;
+    }
+    changeStatus.mutate(
+      {
+        assetId: agent.id,
+        action: "activate",
+        input: { expected_asset_version: agent.version },
+      },
+      {
+        onSuccess: () => toast.success(`${agent.display_name} 已启用`),
+        onError: (error) => toast.error(adminAssetErrorMessage(error)),
+      },
+    );
+  }
+
   return (
     <ProjectAgentCardGridView
       items={items}
       projectCapabilities={project.capabilities}
       selectedAssetId={selectedAssetId}
       creatingChatForAgentId={creatingChatForAgentId}
+      activatingAgentId={
+        changeStatus.isPending
+          ? (changeStatus.variables?.assetId ?? null)
+          : null
+      }
       mcpDependencyReasons={mcpDependencyReasons}
       mcpDependencyError={Boolean(mcpDependencyRuntime.error)}
       onSelect={onSelect}
       onStartChat={(agent) => void startChat(agent)}
+      onActivate={activate}
     />
+  );
+}
+
+function ProjectAgentBuilderLead({
+  project,
+  data,
+  startChatIntent,
+  startChatIntentId,
+}: {
+  project: Project;
+  data: Parameters<typeof ProjectAgentStartContinuation>[0]["catalog"];
+  startChatIntent: boolean;
+  startChatIntentId: string | null;
+}) {
+  const { user } = useAuth();
+  const canCreate = agentBuilderCanAuthor(project.capabilities);
+  const sessions = useAgentBuilderSessions(
+    user?.id ?? "",
+    project.id,
+    Boolean(user && canCreate),
+  );
+
+  return (
+    <>
+      {canCreate ? (
+        <AgentBuilderResumeBanner
+          projectSlug={project.slug}
+          sessions={sessions.data ?? []}
+        />
+      ) : null}
+      <ProjectAgentStartContinuation
+        project={project}
+        catalog={data}
+        requested={startChatIntent}
+        intentId={startChatIntentId}
+      />
+    </>
   );
 }
 
 export function ProjectAgentsPage({
   startChatIntent = false,
   startChatIntentId = null,
+  selectedAssetId = null,
 }: {
   startChatIntent?: boolean;
   startChatIntentId?: string | null;
+  selectedAssetId?: string | null;
 }) {
   return (
     <ProjectAssetPageShell
       kind="agents"
       title="Agent"
-      description="创建和维护当前项目自建 Agent 的角色设定、依赖与版本。系统默认 Main 不在此列表中展示。"
+      description="创建和管理具有专属 Prompt 与能力的自定义 Agent。系统默认 Main 不在此列表中展示。"
+      layout="agent-cards"
+      initialSelectedAssetId={selectedAssetId}
       renderLead={({ project, data }) => (
-        <ProjectAgentStartContinuation
+        <ProjectAgentBuilderLead
           project={project}
-          catalog={data}
-          requested={startChatIntent}
-          intentId={startChatIntentId}
+          data={data}
+          startChatIntent={startChatIntent}
+          startChatIntentId={startChatIntentId}
         />
       )}
       renderList={({ project, items, selectedAssetId, onSelect }) => (
@@ -274,15 +403,19 @@ export function ProjectAgentsPage({
           onSelect={onSelect}
         />
       )}
-      renderVersion={(version) =>
-        "agent_id" in version ? (
-          <AgentAssetDetail version={version} />
-        ) : (
-          <p role="alert" className="text-destructive text-sm">
-            Agent 版本数据无效。
-          </p>
-        )
-      }
+      renderAssetEditor={(version, context) => (
+        <AgentInstructionsWorkbench
+          accountId={context.accountId}
+          projectId={context.projectId}
+          item={context.item}
+          version={version && "agent_id" in version ? version : null}
+          canAuthor={context.canAuthor}
+          editing={context.editing}
+          onEditingChange={context.onEditingChange}
+          onDirtyChange={context.onDirtyChange}
+          onVersionCreated={context.onVersionCreated}
+        />
+      )}
     />
   );
 }

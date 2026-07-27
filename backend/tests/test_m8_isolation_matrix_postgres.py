@@ -88,6 +88,36 @@ def test_project_skill_delete_surfaces_keep_skill_authority() -> None:
         assert (surface.resource_family, surface.operation, surface.layer) == classification
 
 
+def test_project_agent_delete_surfaces_keep_agent_authority() -> None:
+    discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
+    expected = {
+        "frontend:frontend/src/core/shared-assets/api.ts:deleteProjectAgent": ("agent", "delete", "frontend"),
+        "repository:backend/app/shared_assets/agent_repository.py:AgentRepository.delete_project_asset": ("agent", "delete", "repository"),
+    }
+    for surface_id, classification in expected.items():
+        surface = discovered[surface_id]
+        assert (surface.resource_family, surface.operation, surface.layer) == classification
+
+
+def test_agent_builder_surfaces_keep_agent_authority() -> None:
+    discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
+    expected = {
+        "frontend:frontend/src/core/agent-builder/api.ts:createAgentBuilderSession": ("agent", "create", "frontend"),
+        "frontend:frontend/src/core/agent-builder/api.ts:submitAgentBuilderTurn": ("agent", "create", "frontend"),
+        "frontend:frontend/src/core/agent-builder/api.ts:finalizeAgentBuilderSession": ("agent", "create", "frontend"),
+        "frontend:frontend/src/core/agent-builder/api.ts:getAgentBuilderSession": ("agent", "get", "frontend"),
+        "frontend:frontend/src/core/agent-builder/api.ts:cancelAgentBuilderSession": ("agent", "stop", "frontend"),
+        "route:backend/app/gateway/routers/project_agent_builder.py:create_agent_design_session": ("agent", "create", "api"),
+        "route:backend/app/gateway/routers/project_agent_builder.py:submit_agent_design_turn": ("agent", "create", "api"),
+        "route:backend/app/gateway/routers/project_agent_builder.py:commit_agent_design_session": ("agent", "create", "api"),
+        "route:backend/app/gateway/routers/project_agent_builder.py:get_agent_design_session": ("agent", "get", "api"),
+        "route:backend/app/gateway/routers/project_agent_builder.py:cancel_agent_design_session": ("agent", "stop", "api"),
+    }
+    for surface_id, classification in expected.items():
+        surface = discovered[surface_id]
+        assert (surface.resource_family, surface.operation, surface.layer) == classification
+
+
 def test_asset_names_do_not_turn_list_get_or_create_into_updates() -> None:
     discovered = {surface.surface_id: surface for surface in discover_scoped_surface(_REPO_ROOT)}
     expected = {

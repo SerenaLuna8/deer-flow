@@ -159,6 +159,37 @@ async def test_project_skill_storage_release_groups_exact_version_bytes() -> Non
 
 
 @pytest.mark.anyio
+async def test_private_purge_deletes_exact_owner_agent_design_sessions_first() -> None:
+    from app.private_work.retention_purge import purge_private_scope
+
+    project_id = uuid.uuid4()
+    owner_user_id = str(uuid.uuid4())
+    captured = []
+
+    class StopAfterFirstDelete(RuntimeError):
+        pass
+
+    class Session:
+        async def execute(self, statement):
+            captured.append(statement)
+            raise StopAfterFirstDelete
+
+    with pytest.raises(StopAfterFirstDelete):
+        await purge_private_scope(
+            Session(),  # type: ignore[arg-type]
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+        )
+
+    assert len(captured) == 1
+    statement = captured[0]
+    assert statement.table.name == "agent_design_sessions"
+    sql = str(statement)
+    assert "agent_design_sessions.project_id" in sql
+    assert "agent_design_sessions.owner_user_id" in sql
+
+
+@pytest.mark.anyio
 async def test_private_work_retention_service_exposes_transactional_purge_boundary() -> None:
     candidate = RetentionCandidate.project(
         project_id=uuid.uuid4(),

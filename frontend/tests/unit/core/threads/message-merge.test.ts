@@ -16,6 +16,8 @@ import {
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
   mergeRunMessageRows,
+  rememberActiveRun,
+  resolveActiveRunIdForMessages,
   pruneConfirmedArchivedMessages,
   removeSetItems,
   resolvePreservedHistory,
@@ -52,6 +54,97 @@ function orderedRunMessage(
     created_at: "2026-07-23T00:00:00Z",
   };
 }
+
+function threadRun(
+  runId: string,
+  status: Run["status"] = "success",
+): Run {
+  return {
+    run_id: runId,
+    thread_id: "thread-1",
+    assistant_id: "lead_agent",
+    created_at: "2026-07-27T00:00:00Z",
+    updated_at: "2026-07-27T00:00:00Z",
+    status,
+    metadata: {},
+    multitask_strategy: null,
+  };
+}
+
+test("rememberActiveRun exposes a newly admitted run before the list refetch completes", () => {
+  const previous = [threadRun("run-old")];
+
+  expect(
+    rememberActiveRun(previous, {
+      threadId: "thread-1",
+      runId: "run-current",
+      createdAt: "2026-07-27T01:00:00Z",
+    }),
+  ).toEqual([
+    {
+      ...threadRun("run-current", "running"),
+      created_at: "2026-07-27T01:00:00Z",
+      updated_at: "2026-07-27T01:00:00Z",
+    },
+    threadRun("run-old"),
+  ]);
+});
+
+test("rememberActiveRun keeps an authoritative existing run while moving it to the newest position", () => {
+  const current = {
+    ...threadRun("run-current", "pending"),
+    metadata: { admitted_by: "gateway" },
+  };
+
+  expect(
+    rememberActiveRun([threadRun("run-old"), current], {
+      threadId: "thread-1",
+      runId: "run-current",
+      createdAt: "2026-07-27T01:00:00Z",
+    }),
+  ).toEqual([current, threadRun("run-old")]);
+});
+
+test("reconnect infers the active run from the latest admission Human message", () => {
+  const checkpointMessages = [
+    {
+      id: "human-old",
+      type: "human",
+      content: "old prompt",
+      additional_kwargs: { run_id: "run-old" },
+    },
+    {
+      id: "ai-old",
+      type: "ai",
+      content: "old answer",
+    },
+    {
+      id: "human-current",
+      type: "human",
+      content: "current prompt",
+      additional_kwargs: { run_id: "run-current" },
+    },
+    {
+      id: "ai-task-current",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "task-current",
+          name: "task",
+          args: { description: "research" },
+        },
+      ],
+    },
+  ] as unknown as Message[];
+
+  expect(
+    resolveActiveRunIdForMessages(checkpointMessages, true, null),
+  ).toBe("run-current");
+  expect(
+    resolveActiveRunIdForMessages(checkpointMessages, false, null),
+  ).toBeNull();
+});
 
 test("mergeMessages removes duplicate messages already present in history", () => {
   const human = {
@@ -153,6 +246,28 @@ test("mergeMessages deduplicates tool messages by tool_call_id", () => {
   } as Message;
 
   expect(mergeMessages([oldTool], [liveTool], [])).toEqual([liveTool]);
+});
+
+test("mergeMessages keeps repeated tool_call_id values from different runs", () => {
+  const firstRunTool = {
+    id: "tool-message-run-a",
+    type: "tool",
+    tool_call_id: "call-1",
+    run_id: "run-a",
+    content: "run-a output",
+  } as unknown as Message;
+  const secondRunTool = {
+    id: "tool-message-run-b",
+    type: "tool",
+    tool_call_id: "call-1",
+    additional_kwargs: { run_id: "run-b" },
+    content: "run-b output",
+  } as Message;
+
+  expect(mergeMessages([firstRunTool, secondRunTool], [], [])).toEqual([
+    firstRunTool,
+    secondRunTool,
+  ]);
 });
 
 test("mergeMessages keeps a visible history message when a hidden live message reuses its id", () => {
@@ -697,6 +812,293 @@ test("buildVisibleHistoryMessages attaches run_id to each content message (#3779
   const result = buildVisibleHistoryMessages(rows, new Set(), []);
 
   expect((result[0] as { run_id?: string }).run_id).toBe("run-1");
+});
+
+test("buildVisibleHistoryMessages hides subagent and middleware AI messages with their tool results", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "human-1",
+        type: "human",
+        content: "research agents",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:00Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "lead-ai",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call-task", name: "task", args: {} }],
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 3,
+      content: {
+        id: "subagent-ai",
+        type: "ai",
+        content: "private subagent reasoning",
+        tool_calls: [{ id: "call-search", name: "web_search", args: {} }],
+      } as Message,
+      metadata: { caller: "subagent:research" },
+      created_at: "2026-07-26T00:00:02Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 4,
+      content: {
+        id: "subagent-tool",
+        type: "tool",
+        tool_call_id: "call-search",
+        content: "large raw search result",
+      } as Message,
+      metadata: { caller: "subagent:research" },
+      created_at: "2026-07-26T00:00:03Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 5,
+      content: {
+        id: "middleware-ai",
+        type: "ai",
+        content: "middleware detail",
+        additional_kwargs: {
+          tool_calls: [{ id: "call-middleware", type: "function" }],
+        },
+      } as Message,
+      metadata: { caller: "middleware:summarization" },
+      created_at: "2026-07-26T00:00:04Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 6,
+      content: {
+        id: "middleware-tool",
+        type: "tool",
+        tool_call_id: "call-middleware",
+        content: "middleware tool result",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:05Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 7,
+      content: {
+        id: "lead-tool",
+        type: "tool",
+        tool_call_id: "call-task",
+        content: "subtask completed",
+      } as Message,
+      metadata: { caller: "subagent:research" },
+      created_at: "2026-07-26T00:00:06Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 8,
+      content: {
+        id: "lead-final",
+        type: "ai",
+        content: "final answer",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:07Z",
+    },
+  ];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["human-1", "lead-ai", "lead-tool", "lead-final"]);
+});
+
+test("buildVisibleHistoryMessages keeps human run admission messages regardless of caller", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "run-admission-run-1",
+        type: "human",
+        content: "user prompt",
+      } as Message,
+      metadata: {
+        caller: "middleware:run-admission",
+        source: "run_admission",
+      },
+      created_at: "2026-07-26T00:00:00Z",
+    },
+  ];
+
+  expect(buildVisibleHistoryMessages(rows, new Set(), [])).toEqual([
+    {
+      ...rows[0]!.content,
+      run_id: "run-1",
+      run_message_source: "run_admission",
+    },
+  ]);
+});
+
+test("buildVisibleHistoryMessages hides internal human messages except run admission", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      seq: 1,
+      content: {
+        id: "lead-human",
+        type: "human",
+        content: "visible user prompt",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:00Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 2,
+      content: {
+        id: "subagent-human",
+        type: "human",
+        content: "private subagent input",
+      } as Message,
+      metadata: { caller: "subagent:research" },
+      created_at: "2026-07-26T00:00:01Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 3,
+      content: {
+        id: "middleware-human",
+        type: "human",
+        content: "private middleware input",
+      } as Message,
+      metadata: { caller: "middleware:summarization" },
+      created_at: "2026-07-26T00:00:02Z",
+    },
+    {
+      run_id: "run-1",
+      seq: 4,
+      content: {
+        id: "run-admission-run-1",
+        type: "human",
+        content: "admitted user prompt",
+      } as Message,
+      metadata: {
+        caller: "middleware:run-admission",
+        source: "run_admission",
+      },
+      created_at: "2026-07-26T00:00:03Z",
+    },
+  ];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["lead-human", "run-admission-run-1"]);
+});
+
+test("buildVisibleHistoryMessages defers an orphan tool result until its lead parent page loads", () => {
+  const toolResult: RunMessage = {
+    run_id: "run-1",
+    seq: 20,
+    content: {
+      id: "tool-1",
+      type: "tool",
+      tool_call_id: "call-1",
+      content: "lead tool result",
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-07-26T00:00:01Z",
+  };
+  const leadParent: RunMessage = {
+    run_id: "run-1",
+    seq: 10,
+    content: {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "task", args: {} }],
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-07-26T00:00:00Z",
+  };
+
+  expect(buildVisibleHistoryMessages([toolResult], new Set(), [])).toEqual([]);
+  expect(
+    buildVisibleHistoryMessages(
+      [leadParent, toolResult],
+      new Set(),
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["ai-1", "tool-1"]);
+});
+
+test("buildVisibleHistoryMessages scopes tool-call ownership to its run", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-subagent",
+      seq: 1,
+      content: {
+        id: "subagent-ai",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "shared-call", name: "search", args: {} }],
+      } as Message,
+      metadata: { caller: "subagent:research" },
+      created_at: "2026-07-26T00:00:00Z",
+    },
+    {
+      run_id: "run-subagent",
+      seq: 2,
+      content: {
+        id: "subagent-tool",
+        type: "tool",
+        tool_call_id: "shared-call",
+        content: "hidden",
+      } as Message,
+      metadata: { caller: "subagent:research" },
+      created_at: "2026-07-26T00:00:01Z",
+    },
+    {
+      run_id: "run-lead",
+      seq: 1,
+      content: {
+        id: "lead-ai",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "shared-call", name: "task", args: {} }],
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:02Z",
+    },
+    {
+      run_id: "run-lead",
+      seq: 2,
+      content: {
+        id: "lead-tool",
+        type: "tool",
+        tool_call_id: "shared-call",
+        content: "visible",
+      } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-07-26T00:00:03Z",
+    },
+  ];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set(), []).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["lead-ai", "lead-tool"]);
 });
 
 test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {

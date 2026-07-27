@@ -211,20 +211,14 @@ export function ProjectWorkbench({
             </select>
           </div>
 
-          <section aria-labelledby="workspace-projects-title">
-            <div className="mb-4 flex items-center justify-between gap-4">
-              <h2
-                id="workspace-projects-title"
-                className="text-xl font-semibold"
-              >
-                你的项目
-              </h2>
-              {!projectsQuery.isLoading && !projectsQuery.error && (
+          <section aria-label="项目列表">
+            {!projectsQuery.isLoading && !projectsQuery.error && (
+              <div className="mb-4 flex justify-end">
                 <span className="text-muted-foreground text-sm">
                   {projects.length} 个项目
                 </span>
-              )}
-            </div>
+              </div>
+            )}
 
             {projectsQuery.isLoading ? (
               <div

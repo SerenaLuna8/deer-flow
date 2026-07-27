@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,6 +16,7 @@ from app.shared_assets.models import (
     ResolvedSkillSnapshot,
     SkillArchiveFile,
 )
+from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
 
 def _must_not_open_session():
@@ -64,6 +66,79 @@ def test_materialized_secrets_never_render_plaintext_in_repr() -> None:
 
     assert "do-not-render" not in repr(materialized)
     assert materialized.by_slot["primary"]["env"]["API_TOKEN"] == "do-not-render"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_schema_version", [1, 2])
+async def test_agent_snapshot_carries_exact_prompt_fields(
+    payload_schema_version: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.shared_assets import resolver as resolver_module
+
+    context = _context()
+    agent_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = AgentRow(
+        id=agent_id,
+        scope="project",
+        project_id=context.project_id,
+        slug="exact-agent",
+        display_name="Exact Agent",
+        status="active",
+        created_by_user_id=str(context.user_id),
+    )
+    version = AgentVersionRow(
+        id=version_id,
+        agent_id=agent_id,
+        version_number=1,
+        workflow_status="published",
+        description="exact description",
+        payload_schema_version=payload_schema_version,
+        agents_instructions="exact agents instructions",
+        soul="exact soul",
+        identity="exact identity",
+        user_context="exact user context",
+        model_ref="test-model",
+        tool_groups=["task"],
+        payload_checksum="a" * 64,
+        created_by_user_id=str(context.user_id),
+    )
+
+    class EmptyResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class Session:
+        async def execute(self, _statement):
+            return EmptyResult()
+
+    resolver = resolver_module.ProjectAssetResolver(_must_not_open_session)
+    monkeypatch.setattr(
+        resolver,
+        "_lock_credential_closures",
+        AsyncMock(return_value={}),
+    )
+
+    snapshot = await resolver._agent_snapshot(  # noqa: SLF001 - exact runtime contract
+        Session(),  # type: ignore[arg-type]
+        context,
+        resolver_module._ResolvedRecord(  # noqa: SLF001 - exact runtime contract
+            AssetScope.PROJECT,
+            asset,
+            version,
+        ),
+        3,
+    )
+
+    assert snapshot.payload.payload_schema_version == payload_schema_version
+    assert snapshot.payload.agents_instructions == "exact agents instructions"
+    assert snapshot.payload.soul == "exact soul"
+    assert snapshot.payload.identity == "exact identity"
+    assert snapshot.payload.user_context == "exact user context"
 
 
 @pytest.mark.asyncio

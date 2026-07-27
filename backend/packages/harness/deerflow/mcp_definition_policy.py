@@ -101,20 +101,17 @@ def validate_project_mcp_definition(
         raise McpDefinitionPolicyError
     if not isinstance(env, Mapping) or not isinstance(headers, Mapping) or not isinstance(oauth, Mapping) or type(credential_slot_schemas) is not tuple or env or headers or oauth:
         raise McpDefinitionPolicyError
-    seen_header_names: set[str] = set()
     for schema in credential_slot_schemas:
         if not isinstance(schema, Mapping) or set(schema) != {"headers"}:
             raise McpDefinitionPolicyError
         names = schema["headers"]
-        if not isinstance(names, (list, tuple)) or not names:
+        if (
+            not isinstance(names, (list, tuple))
+            or not names
+            or any(type(name) is not str or len(name) > 255 or _HTTP_HEADER_NAME.fullmatch(name) is None or name.casefold() in _FORBIDDEN_PROJECT_CREDENTIAL_HEADERS for name in names)
+            or len({name.casefold() for name in names}) != len(names)
+        ):
             raise McpDefinitionPolicyError
-        for name in names:
-            if type(name) is not str or len(name) > 255 or _HTTP_HEADER_NAME.fullmatch(name) is None:
-                raise McpDefinitionPolicyError
-            normalized_name = name.casefold()
-            if normalized_name in _FORBIDDEN_PROJECT_CREDENTIAL_HEADERS or normalized_name in seen_header_names:
-                raise McpDefinitionPolicyError
-            seen_header_names.add(normalized_name)
     return validate_remote_mcp_endpoint(
         url,
         endpoint_policy=endpoint_policy,

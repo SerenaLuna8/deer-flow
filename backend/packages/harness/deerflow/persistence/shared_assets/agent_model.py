@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -58,6 +59,7 @@ class AgentRow(Base):
         CheckConstraint("status IN ('active', 'archived', 'suspended')", name="ck_agents_status"),
         CheckConstraint("version >= 1", name="ck_agents_version"),
         UniqueConstraint("id", "scope", name="uq_agents_id_scope"),
+        UniqueConstraint("project_id", "id", name="uq_agents_project_id_id"),
         UniqueConstraint("source_key", name="uq_agents_source_key"),
         ForeignKeyConstraint(
             ["id", "current_published_version_id"],
@@ -100,12 +102,22 @@ class AgentVersionRow(Base):
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    # These fields were introduced after the original payload columns. Keep
+    # their declaration order aligned with the consolidated physical catalog.
+    agents_instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    identity: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    user_context: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    payload_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
 
     __table_args__ = (
         CheckConstraint("version_number >= 1", name="ck_agent_versions_number"),
         CheckConstraint(
             "workflow_status IN ('draft', 'pending_approval', 'published', 'rejected')",
             name="ck_agent_versions_workflow_status",
+        ),
+        CheckConstraint(
+            "payload_schema_version IN (1, 2)",
+            name="ck_agent_versions_payload_schema_version",
         ),
         CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_agent_versions_checksum"),
         UniqueConstraint("agent_id", "version_number", name="uq_agent_versions_asset_number"),

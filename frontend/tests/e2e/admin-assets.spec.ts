@@ -201,7 +201,10 @@ async function mockAdminAssets(
     ) {
       const input = request.postDataJSON() as {
         description: string;
+        agents_instructions: string;
         soul: string;
+        identity: string;
+        user_context: string;
         model_ref: string;
         tool_groups: string[];
         skill_version_ids: string[];
@@ -213,7 +216,11 @@ async function mockAdminAssets(
         version_number: 1,
         workflow_status: "draft",
         description: input.description,
+        agents_instructions: input.agents_instructions,
         soul: input.soul,
+        identity: input.identity,
+        user_context: input.user_context,
+        payload_schema_version: 2,
         model_ref: input.model_ref,
         tool_groups: input.tool_groups,
         skill_version_ids: input.skill_version_ids,

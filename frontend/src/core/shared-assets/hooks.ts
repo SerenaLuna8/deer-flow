@@ -22,6 +22,7 @@ import {
   createAdminProjectAssetVersion,
   createProjectAsset,
   createProjectAssetVersion,
+  deleteProjectAgent,
   deleteProjectSkill,
   disableAdminProjectSystemBinding,
   disableProjectSystemBinding,
@@ -46,6 +47,7 @@ import {
   rollbackAdminProjectSystemBinding,
   submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
+  updateProjectAgentInstructions,
   upgradeAdminProjectSystemBinding,
   upgradeProjectSystemBinding,
   type ProjectAssetStatusAction,
@@ -65,7 +67,7 @@ import {
 import type {
   AdminAssetList,
   AdminCredentialList,
-  AgentVersionInput,
+  AgentInstructionsInput,
   ApproveMcpInput,
   AssetKind,
   AssetListKind,
@@ -87,10 +89,8 @@ import type {
 } from "./types";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-type VersionAuthoringInput =
-  | AgentVersionInput
-  | SkillVersionInput
-  | McpVersionInput;
+type VersionedAssetKind = Exclude<MutableAssetKind, "agents">;
+type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
 
 const BINDING_LIST_KIND: Record<AssetKind, MutableAssetKind> = {
   agent: "agents",
@@ -394,12 +394,6 @@ export function useCreateAdminProjectAsset(
   });
 }
 
-function isAgentVersionInput(
-  input: VersionAuthoringInput,
-): input is AgentVersionInput {
-  return "soul" in input && "model_ref" in input;
-}
-
 function isSkillVersionInput(
   input: VersionAuthoringInput,
 ): input is SkillVersionInput {
@@ -414,14 +408,11 @@ function isMcpVersionInput(
 
 function createProjectVersionForKind(
   projectId: string,
-  kind: MutableAssetKind,
+  kind: VersionedAssetKind,
   assetId: string,
   input: VersionAuthoringInput,
   signal?: AbortSignal,
 ) {
-  if (kind === "agents" && isAgentVersionInput(input)) {
-    return createProjectAssetVersion(projectId, kind, assetId, input, signal);
-  }
   if (kind === "skills" && isSkillVersionInput(input)) {
     return createProjectAssetVersion(projectId, kind, assetId, input, signal);
   }
@@ -433,13 +424,10 @@ function createProjectVersionForKind(
 
 function createAdminProjectVersionForKind(
   projectId: string,
-  kind: MutableAssetKind,
+  kind: VersionedAssetKind,
   assetId: string,
   input: VersionAuthoringInput,
 ) {
-  if (kind === "agents" && isAgentVersionInput(input)) {
-    return createAdminProjectAssetVersion(projectId, kind, assetId, input);
-  }
   if (kind === "skills" && isSkillVersionInput(input)) {
     return createAdminProjectAssetVersion(projectId, kind, assetId, input);
   }
@@ -452,9 +440,10 @@ function createAdminProjectVersionForKind(
 export function useCreateProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: MutableAssetKind,
+  kind: VersionedAssetKind | null,
 ) {
-  const invalidate = useProjectInvalidation(accountId, projectId, kind);
+  const queryKind = kind ?? "agents";
+  const invalidate = useProjectInvalidation(accountId, projectId, queryKind);
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -463,7 +452,7 @@ export function useCreateProjectAssetVersion(
     mutationKey: projectAssetMutationKey(
       accountId,
       projectId,
-      kind,
+      queryKind,
       "create-version",
     ),
     mutationFn: ({
@@ -472,9 +461,45 @@ export function useCreateProjectAssetVersion(
     }: {
       assetId: string;
       input: VersionAuthoringInput;
+    }) => {
+      if (kind === null) {
+        return Promise.reject(
+          new TypeError("Agent revisions are managed internally"),
+        );
+      }
+      return runMutation((signal) =>
+        createProjectVersionForKind(projectId, kind, assetId, input, signal),
+      );
+    },
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useUpdateProjectAgentInstructions(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "agents",
+      "update-instructions",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: AgentInstructionsInput;
     }) =>
       runMutation((signal) =>
-        createProjectVersionForKind(projectId, kind, assetId, input, signal),
+        updateProjectAgentInstructions(projectId, assetId, input, signal),
       ),
     onSuccess: whenActive(invalidate),
   });
@@ -483,9 +508,14 @@ export function useCreateProjectAssetVersion(
 export function useCreateAdminProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: MutableAssetKind,
+  kind: VersionedAssetKind | null,
 ) {
-  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
+  const queryKind = kind ?? "agents";
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    queryKind,
+  );
   return useMutation({
     mutationFn: ({
       assetId,
@@ -493,7 +523,14 @@ export function useCreateAdminProjectAssetVersion(
     }: {
       assetId: string;
       input: VersionAuthoringInput;
-    }) => createAdminProjectVersionForKind(projectId, kind, assetId, input),
+    }) => {
+      if (kind === null) {
+        return Promise.reject(
+          new TypeError("Agent revisions are managed internally"),
+        );
+      }
+      return createAdminProjectVersionForKind(projectId, kind, assetId, input);
+    },
     onSuccess: invalidate,
   });
 }
@@ -638,6 +675,64 @@ export function useDeleteProjectSkill(accountId: string, projectId: string) {
   });
 }
 
+export function useDeleteProjectAgent(accountId: string, projectId: string) {
+  const queryClient = useQueryClient();
+  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "agents",
+      "delete",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: ExpectedAssetVersionInput;
+    }) =>
+      runMutation((signal) =>
+        deleteProjectAgent(projectId, assetId, input, signal),
+      ),
+    onSuccess: whenActive(
+      (
+        _data: void,
+        variables: {
+          assetId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) => {
+        queryClient.setQueryData<ProjectAssetList>(
+          projectAssetKey(accountId, projectId, "agents"),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  project_items: current.project_items.filter(
+                    (item) => item.id !== variables.assetId,
+                  ),
+                }
+              : current,
+        );
+        queryClient.removeQueries({
+          queryKey: projectAssetVersionsKey(
+            accountId,
+            projectId,
+            "agents",
+            variables.assetId,
+          ),
+        });
+        void invalidate();
+      },
+    ),
+  });
+}
+
 export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
   accountId: string,
   projectId: string,
@@ -662,9 +757,10 @@ export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
 export function usePublishProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: MutableAssetKind,
+  kind: VersionedAssetKind | null,
 ) {
-  const invalidate = useProjectInvalidation(accountId, projectId, kind);
+  const queryKind = kind ?? "agents";
+  const invalidate = useProjectInvalidation(accountId, projectId, queryKind);
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -673,7 +769,7 @@ export function usePublishProjectAssetVersion(
     mutationKey: projectAssetMutationKey(
       accountId,
       projectId,
-      kind,
+      queryKind,
       "publish-version",
     ),
     mutationFn: ({
@@ -684,8 +780,13 @@ export function usePublishProjectAssetVersion(
       assetId: string;
       versionId: string;
       input: ExpectedAssetVersionInput;
-    }) =>
-      runMutation((signal) =>
+    }) => {
+      if (kind === null) {
+        return Promise.reject(
+          new TypeError("Agent revisions are managed internally"),
+        );
+      }
+      return runMutation((signal) =>
         publishProjectAssetVersion(
           projectId,
           kind,
@@ -694,7 +795,8 @@ export function usePublishProjectAssetVersion(
           input,
           signal,
         ),
-      ),
+      );
+    },
     onSuccess: whenActive(invalidate),
   });
 }
@@ -702,9 +804,14 @@ export function usePublishProjectAssetVersion(
 export function usePublishAdminProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: MutableAssetKind,
+  kind: VersionedAssetKind | null,
 ) {
-  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
+  const queryKind = kind ?? "agents";
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    queryKind,
+  );
   return useMutation({
     mutationFn: ({
       assetId,
@@ -714,14 +821,20 @@ export function usePublishAdminProjectAssetVersion(
       assetId: string;
       versionId: string;
       input: ExpectedAssetVersionInput;
-    }) =>
-      publishAdminProjectAssetVersion(
+    }) => {
+      if (kind === null) {
+        return Promise.reject(
+          new TypeError("Agent revisions are managed internally"),
+        );
+      }
+      return publishAdminProjectAssetVersion(
         projectId,
         kind,
         assetId,
         versionId,
         input,
-      ),
+      );
+    },
     onSuccess: invalidate,
   });
 }

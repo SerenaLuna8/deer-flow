@@ -39,6 +39,10 @@ class AgentPayload:
     tool_groups: tuple[str, ...]
     skill_version_ids: tuple[uuid.UUID, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
+    agents_instructions: str = ""
+    identity: str = ""
+    user_context: str = ""
+    payload_schema_version: int = 1
 
 
 @dataclass(frozen=True)

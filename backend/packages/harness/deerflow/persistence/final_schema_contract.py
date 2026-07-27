@@ -72,50 +72,33 @@ class CatalogInvariant:
     digest: str
 
 
-# Frozen 0001 ancestor signature. It remains necessary to distinguish an exact
-# safely migratable predecessor from an unknown or drifted nonempty schema.
-BASELINE_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+# The consolidated 0001 baseline is the one current application schema.
+FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=51,
-        digest="a63041054a602b144a85042934cd56404a4ba7c5d91058aab5a66a89bab226ea",
+        count=53,
+        digest="9050577c4197d4610159fb435e432287f54711b5c1d62082b67c26777fb3313f",
     ),
     "columns": CatalogInvariant(
-        count=601,
-        digest="f4b4eca37555fa347c83e5cc232d59af1b22dafb0978f6d72b7257ff93e57fb9",
+        count=639,
+        digest="513fc2f546cd3aa37d42803be4765eae6af31a0387f76d408ccc6a4a67dcc869",
     ),
     "constraints": CatalogInvariant(
-        count=387,
-        digest="ed80444286ad9c5dc32311de07d64f8f6ac94370d00aee6229e933d7c6690b0a",
+        count=414,
+        digest="4bb1f09fdd1a191f1bc879ef1ab34b818fcfa64b8daa4b4515bb27326bd88992",
     ),
     "indexes": CatalogInvariant(
-        count=161,
-        digest="8f912785d06ac98690754a3794eab8236c5cf1a624f0becc4c4470824782fbe1",
+        count=171,
+        digest="4fd79ed36802f4500a378985446b603473d25584787327e850abd4c6df4ac772",
     ),
     "functions": CatalogInvariant(
         count=10,
-        digest="01f24e30255e0e337369614c857dbc347b2ebe4377b3bbbf805de7a9c4449d94",
+        digest="0fbb322b08fe552383069830ffbf733692eb6a76a71f1340cbbb43ad2328d8d7",
     ),
     "triggers": CatalogInvariant(
-        count=64,
-        digest="71201311a82c867e46fb8e1d9728588f7ceb87b46064f2a0e4317d52b4999c2c",
+        count=66,
+        digest="6db64420327e2f35e1af2b8e79d10c580edea423f63fce85f1f5fedf525d32fa",
     ),
 }
-
-# Revision 0002 changes only one stored function body.
-PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = dict(BASELINE_M7_CATALOG_SIGNATURE)
-PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE["functions"] = CatalogInvariant(
-    count=10,
-    digest="7615014bca82a5dd868f6793c6bb613d338f19a8c312fb04b018066811502acd",
-)
-
-# Revision 0003 adds one project-scoped, case-insensitive Skill display-name
-# unique index. The digest is captured from a migrated disposable PostgreSQL
-# database by the schema contract tests.
-FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = dict(PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE)
-FINAL_M7_CATALOG_SIGNATURE["indexes"] = CatalogInvariant(
-    count=162,
-    digest="785267fcc0d0b4c7dbf2bdcbcf7092df82a02b954cd3d44baf66ed176c61cbd3",
-)
 
 
 def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
@@ -493,13 +476,11 @@ def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
 
 
 __all__ = [
-    "BASELINE_M7_CATALOG_SIGNATURE",
     "CatalogInvariant",
     "ALEMBIC_INDEXES",
     "FINAL_APP_TABLES",
     "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
-    "PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE",
     "M7_CANONICAL_SCHEMA_DIGEST",
     "LANGGRAPH_INDEXES",
     "LANGGRAPH_ROOT_OBJECTS",

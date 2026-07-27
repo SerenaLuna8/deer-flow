@@ -63,6 +63,40 @@ async def _invoke_on_owner_loop(
     return await asyncio.wrap_future(future)
 
 
+class _OwnerLoopAuthorityProxy:
+    """Marshal opaque authorization-boundary methods back to their owner loop."""
+
+    def __init__(self, target: object, owner_loop: asyncio.AbstractEventLoop):
+        self._target = target
+        self._owner_loop = owner_loop
+
+    def __getattr__(self, name: str):
+        target = getattr(self._target, name)
+        if not callable(target):
+            return target
+
+        async def invoke(*args, **kwargs):
+            return await _invoke_on_owner_loop(
+                self._owner_loop,
+                target,
+                *args,
+                **kwargs,
+            )
+
+        return invoke
+
+
+class _OwnerLoopCheckerProxy:
+    """Marshal a trusted callable authorization fallback to its owner loop."""
+
+    def __init__(self, target, owner_loop: asyncio.AbstractEventLoop):
+        self._target = target
+        self._owner_loop = owner_loop
+
+    async def __call__(self):
+        return await _invoke_on_owner_loop(self._owner_loop, self._target)
+
+
 def _trusted_private_mcp_tools(
     parent_context: dict[str, Any],
 ) -> tuple[BaseTool, ...]:
@@ -129,6 +163,27 @@ def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
     return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+
+
+def _trusted_agent_prompt_bundle(parent_context: dict[str, Any]) -> object | None:
+    """Accept only the Worker-installed opaque immutable bundle shape.
+
+    JSON request bodies cannot manufacture an object with these attributes, so
+    client context dictionaries/strings fail closed without importing the lead
+    prompt module here (which would reintroduce the task/subagent import cycle).
+    """
+
+    bundle = parent_context.get("__agent_prompt_bundle")
+    required = (
+        "payload_schema_version",
+        "agents_instructions",
+        "soul",
+        "identity",
+        "user_context",
+    )
+    if bundle is None or not all(hasattr(bundle, name) for name in required):
+        return None
+    return bundle
 
 
 async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
@@ -471,6 +526,36 @@ async def task_tool(
         "channel_user_id": channel_user_id,
         "deerflow_trace_id": deerflow_trace_id,
     }
+    # Preserve the server-issued private Run boundary across delegation.
+    # Passing only sandbox/thread_data state is insufficient: the subagent's
+    # own ThreadDataMiddleware and SandboxMiddleware need the opaque authority
+    # objects to keep the parent's projected workspace and must not release the
+    # parent's private sandbox when delegated execution finishes.
+    if "private_scope" in parent_context:
+        executor_kwargs["private_scope"] = parent_context["private_scope"]
+        executor_kwargs["file_authority"] = parent_context.get("__file_authority")
+        owner_loop = asyncio.get_running_loop()
+        authorization_boundary = parent_context.get("__authorization_boundary")
+        if authorization_boundary is not None:
+            executor_kwargs["authorization_boundary"] = _OwnerLoopAuthorityProxy(
+                authorization_boundary,
+                owner_loop,
+            )
+        authorization_checker = parent_context.get("__authorization_checker")
+        if callable(authorization_checker):
+            executor_kwargs["authorization_checker"] = _OwnerLoopCheckerProxy(
+                authorization_checker,
+                owner_loop,
+            )
+    run_read_only_mounts = parent_context.get("__run_read_only_mounts")
+    if isinstance(run_read_only_mounts, tuple):
+        executor_kwargs["run_read_only_mounts"] = run_read_only_mounts
+    agent_prompt_bundle = _trusted_agent_prompt_bundle(parent_context)
+    if agent_prompt_bundle is not None:
+        executor_kwargs["agent_prompt_bundle"] = agent_prompt_bundle
+    runtime_skills = parent_context.get("__runtime_skills")
+    if isinstance(runtime_skills, tuple):
+        executor_kwargs["runtime_skills"] = runtime_skills
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     executor = SubagentExecutor(**executor_kwargs)

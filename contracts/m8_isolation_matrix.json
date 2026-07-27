@@ -128,8 +128,8 @@
     ]
   },
   "surface_manifest": {
-    "count": 535,
-    "sha256": "0f3f5b7c840a9c77f381e9f0307d0532678f6249775076465566a26819b9d07b"
+    "count": 563,
+    "sha256": "6a38e2e54567fa22c99c682ca722e99a58c5d97625b968da572625f97b0ef2ac"
   },
   "cases": [
     {
@@ -1046,13 +1046,15 @@
       "expected_db_delta": 1,
       "layers": [
         "frontend",
+        "api",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
         "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
-        "playwright::tests/e2e/project-assets.spec.ts::project asset authoring, approval, Credential safety, and scope switch"
+        "pytest::tests/test_project_agent_builder_router.py::test_agent_builder_create_list_and_get_use_strict_envelopes",
+        "playwright::tests/e2e/agent-builder.spec.ts::Agent Builder creates a suspended Agent from four generated documents"
       ]
     },
     {
@@ -1070,12 +1072,67 @@
       "expected_code": null,
       "expected_db_delta": 0,
       "layers": [
+        "frontend",
+        "api",
         "service",
         "repository",
         "database"
       ],
       "evidence_selectors": [
-        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance"
+        "pytest::tests/integration/test_m3_shared_assets_postgres.py::test_m3_end_to_end_shared_asset_governance",
+        "pytest::tests/test_project_agent_builder_router.py::test_agent_builder_create_list_and_get_use_strict_envelopes",
+        "playwright::tests/e2e/agent-builder.spec.ts::Agent Builder creates a suspended Agent from four generated documents"
+      ]
+    },
+    {
+      "case_id": "surface.agent.delete",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "agent",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "delete",
+      "expected_status": 204,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "api",
+        "service",
+        "repository",
+        "database"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/integration/test_m3_agent_assets_postgres.py::test_project_agent_hard_delete_removes_the_package_and_preserves_private_builder_history",
+        "pytest::tests/test_project_assets_router.py::test_project_agent_delete_returns_204_and_forwards_expected_revision",
+        "pytest::tests/test_shared_asset_agent_service.py::test_project_agent_delete_removes_the_complete_locked_package",
+        "playwright::tests/e2e/project-assets.spec.ts::project Skill delete waits five seconds and removes the whole package"
+      ]
+    },
+    {
+      "case_id": "surface.agent.stop",
+      "actor": "editor",
+      "account_relationship": "same_account",
+      "project_relationship": "same_project",
+      "membership_state": "active_editor",
+      "platform_role": "user",
+      "resource_family": "agent",
+      "scope": "project_shared",
+      "ownership": "not_applicable",
+      "operation": "stop",
+      "expected_status": 200,
+      "expected_code": null,
+      "expected_db_delta": 1,
+      "layers": [
+        "frontend",
+        "api"
+      ],
+      "evidence_selectors": [
+        "pytest::tests/test_project_agent_builder_router.py::test_agent_builder_commit_and_cancel_match_frontend_contract",
+        "playwright::tests/e2e/agent-builder.spec.ts::Agent Builder cancellation stays scoped and removes the resumable draft"
       ]
     },
     {

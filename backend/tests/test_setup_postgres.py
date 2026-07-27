@@ -696,7 +696,7 @@ async def test_setup_validates_explicit_database_and_always_closes_engine(monkey
 
 @pytest.mark.asyncio
 async def test_migrate_uses_existing_database_only_path(monkeypatch) -> None:
-    bootstrap = AsyncMock(return_value="0003_project_skill_unique_name")
+    bootstrap = AsyncMock(return_value="0001_project_saas_baseline")
     monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
 
     result = await setup_postgres.migrate_postgres(
@@ -704,7 +704,7 @@ async def test_migrate_uses_existing_database_only_path(monkeypatch) -> None:
     )
 
     assert result.created is False
-    assert result.revision == "0003_project_skill_unique_name"
+    assert result.revision == "0001_project_saas_baseline"
     bootstrap.assert_awaited_once()
     assert bootstrap.await_args.kwargs == {"migrate_only": True}
 

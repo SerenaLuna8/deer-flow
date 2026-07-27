@@ -9,7 +9,7 @@
 
 ## 1. 文档目的
 
-本文档是 DeerFlow 项目优先、多用户 SaaS V1 的唯一设计基线。当前实现事实以代码、已提交的 PostgreSQL Alembic history/current head 和自动化发布门禁为准。
+本文档是 DeerFlow 项目优先、多用户 SaaS V1 的唯一设计基线。当前实现事实以代码、已提交的 PostgreSQL Alembic 单一当前 head 和自动化发布门禁为准。
 
 M1–M8 已正式完成。M7 已收敛为 PostgreSQL schema 基线、project/admin API、project-scoped
 frontend、独立 Worker/Scheduler、durable SSE/quota/audit 和运行时只读 schema 边界；M8 进一步完成完整
@@ -243,7 +243,7 @@ authenticated user
 仓库提供：
 
 - `make setup-db`：检查 PostgreSQL、创建空的 `deerflow` 目标库、安装当前 Alembic head、初始化基础数据；
-- `make migrate-db`：对处于精确已知祖先 revision 的存量库只执行 pending Alembic migrations 到 head，不执行 catalog、LangGraph 或默认项目 bootstrap；
+- `make migrate-db`：保留给未来已提交 revision，只执行 pending Alembic migrations 到 head，不执行 catalog、LangGraph 或默认项目 bootstrap；
 - `make check-db`：只读检查连接、current/head revision、扩展、必需对象和 migration 状态。
 
 脚本必须幂等、脱敏错误，并且不提供删除数据库或清空数据功能。Gateway、Worker 和 Scheduler 启动不得执行 DDL、Alembic upgrade、stamp 或 schema repair。
@@ -308,7 +308,7 @@ authenticated user
 ## 10. 共享资产与凭据
 
 - Agent、Skill、MCP 同时支持 `system` 和 `project` scope；项目 Skill 显示名称在同一项目内大小写不敏感且不可重复，不同项目仍可同名；所有引用使用 UUID 和 scope。
-- 系统 Agent、Skill、MCP 由 packaged bootstrap catalog 管理，运行期只向 `system_admin` 提供 catalog 治理元数据；`skills/public/` 中的 21 个完整多文件 Skill 在开发期生成 digest 校验的 system Skill archives，并只在全新数据库 setup 时写入 catalog。项目绑定仍显式固定 system version，catalog 更新不自动升级既有绑定。项目 Agent 页面隐藏系统 Agent，新会话直接使用已绑定的系统 Main Agent。
+- 系统 Agent、Skill、MCP 由 packaged bootstrap catalog 管理，运行期只向 `system_admin` 提供 catalog 治理元数据；`skills/public/` 中的 21 个完整多文件 Skill 在开发期生成 digest 校验的 system Skill archives，并只在全新数据库 setup 时写入 catalog。项目绑定仍显式固定 system version，catalog 更新不自动升级既有绑定。项目 Agent 页面隐藏系统 Agent，以卡片展示项目自建 Agent；卡片可进入详情或为可执行的已发布 Agent 创建绑定对话。Agent 不暴露归档 mutation，生命周期在界面统一显示为启用/停用。列表不提供删除入口；详情页经过二次确认和 5 秒等待后可永久删除未被引用的项目 Agent 及全部版本。任何 Thread、Automation 或 Run snapshot 引用都返回冲突，不级联删除私有历史；系统 Agent 不可删除。
 - 项目资产由当前项目 Admin、Editor 按 capability 创建和发布；使用 credential 的项目 MCP 必须由项目 Admin 审批。
 - 项目 Skill 的 manifest name 必须等于资产 slug；每个 archive 及一次批量导入合计最多 100 MiB、16384 个文件。项目创建支持 multipart `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 和 `.tgz`，安全解析后剥离单一外层目录，并在一个事务中创建默认停用的资产和已发布首版。Gateway 与统一 Nginx 入口仅对 archive 创建路由开放 160 MiB JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。所有不可变项目 Skill 版本文件均计入项目 `storage_bytes`，Gateway 与显式导入 CLI 共用部署配额配置。项目 Skill 不提供归档；详情页经过二次确认和 5 秒等待后永久删除整个包及全部版本，并在同一事务释放逐版本配额。系统 Skill 或仍被 Agent/Run snapshot 引用的项目 Skill 拒绝删除。
 - Agent、Skill 和 MCP 每次执行记录准确版本 ID。
@@ -386,22 +386,20 @@ V1 初始默认值：
 
 ## 16. 向前迁移策略
 
-`0001_project_saas_baseline` 是冻结且不可改写的合并基线；
-`0003_project_skill_unique_name` 是当前线性 head。后续 schema 变化继续新增线性 Alembic revision，
-已经可能进入数据库的 migration 不得修改、压缩或重新 stamp。
-`0003` 对旧 revision 已存在的同项目大小写重复 Skill 显示名称执行确定性、保留行的迁移：
-每组按 `(created_at, id)` 保留最早名称，其余名称追加不冲突的数字后缀，并保持 slug、ID 和版本不变。
+`0001_project_saas_baseline` 是冻结且不可改写的合并基线，也是单一当前 head。它已经包含项目
+Skill 整包硬删除与项目内大小写不敏感名字唯一所需的 schema 和约束、Agent 的 `AGENTS.md`、
+`SOUL.md`、`IDENTITY.md`、`USER.md` 四个逻辑文档，以及私有 Agent Builder 会话和幂等操作表。
+未来第一次 schema 变化从 `0002` 起新增线性 Alembic revision；后续继续沿同一 forward-only
+chain 追加，已经提交的 migration 不得修改、压缩或重新 stamp。
 
 新安装顺序是：创建空数据库 → `make setup-db` → `make check-db` → `make start`。Setup 从空库执行
-完整的 `0001 → 0002 → 0003` chain，然后初始化 packaged system asset catalog、LangGraph schema 和 default
-project。
+单一当前 baseline，然后初始化 packaged system asset catalog、LangGraph schema 和 default project。
 
-存量库顺序是：停止应用进程 → `make migrate-db` → `make check-db` → `make start`。只有当前 revision
-是 migration graph 中已知的 head 祖先且其 catalog 满足对应 revision 合同时，`migrate-db` 才执行
-pending migrations，且不执行 setup bootstrap side effects。运行时启动和 `check-db` 始终只读：
-已知旧 revision 报告 migration required；
-未知 revision、未纳管非空 schema 或 catalog drift 拒绝自动处理。系统不执行隐式 upgrade、manual
-stamp、自动 repair、清空、删除或 downgrade。
+当前版本的已有数据库必须精确匹配 `0001_project_saas_baseline` catalog。`make migrate-db` 保留给未来
+已提交的 revision；届时仅从迁移图中已验证且 catalog 匹配的旧 head 执行 pending migrations，
+且不执行 setup bootstrap side effects。运行时启动和 `check-db` 始终只读；未知 revision、未纳管
+非空 schema 或 catalog drift 拒绝自动处理。系统不执行隐式 upgrade、manual stamp、自动 repair、
+清空、删除或 downgrade。
 
 ## 17. 安全和错误语义
 
@@ -434,7 +432,7 @@ stamp、自动 repair、清空、删除或 downgrade。
 - SSE 断线或进程重启后的游标续传；
 - 凭据加密、轮换和脱敏；
 - 项目删除、撤销删除、成员退出、重新加入和数据清除；
-- 空库安装完整 `0001 → 0002 → 0003` chain 幂等、精确 `0001` 或 `0002` 祖先升级后数据保留，以及未知结构 fail-before-DDL；
+- 空库安装单一当前 baseline 幂等、精确当前 head 只读校验，以及未知结构 fail-before-DDL；
 - 前端账户、项目切换和退出登录后的缓存隔离。
 
 除非隔离、隐私、schema 初始化、凭据和项目生命周期测试全部通过，否则不得发布。
@@ -452,7 +450,7 @@ stamp、自动 repair、清空、删除或 downgrade。
 | M7 | 最终 legacy source/API 清理、schema 基线与运行时只读校验收口 | 已完成 |
 | M8 | 完整隔离矩阵、安全审查、宿主机验证和发布验收 | 已完成 |
 
-里程碑完成状态以当前代码、已提交 migration history/current head 和自动化门禁证据为准。
+里程碑完成状态以当前代码、已提交 migration 单一当前 head 和自动化门禁证据为准。
 
 ## 20. 关键权衡
 

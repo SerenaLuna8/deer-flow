@@ -15,8 +15,7 @@ from deerflow.persistence.final_schema_contract import (
 )
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-INTERMEDIATE_REVISION = "0002_project_skill_hard_delete"
-CURRENT_REVISION = "0003_project_skill_unique_name"
+CURRENT_REVISION = BASELINE_REVISION
 
 
 def _exact_app_only_objects() -> frozenset[str]:
@@ -59,43 +58,10 @@ async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("revision", "signature_name"),
-    [
-        (BASELINE_REVISION, "BASELINE_M7_CATALOG_SIGNATURE"),
-        (
-            INTERMEDIATE_REVISION,
-            "PROJECT_SKILL_HARD_DELETE_CATALOG_SIGNATURE",
-        ),
-    ],
-)
-async def test_classify_database_accepts_only_exact_known_ancestor_as_upgradeable(
-    monkeypatch,
-    revision: str,
-    signature_name: str,
-) -> None:
-    connection = AsyncMock()
-    connection.scalar.return_value = revision
-    monkeypatch.setattr(
-        bootstrap,
-        "inventory_user_schema_objects",
-        AsyncMock(return_value=_exact_app_only_objects()),
-    )
-    expected_signature = getattr(bootstrap, signature_name)
-    read_signature = AsyncMock(return_value=expected_signature)
-    monkeypatch.setattr(bootstrap, "read_m7_catalog_signature", read_signature)
-
-    assert await bootstrap.classify_database(connection) == "upgradeable"
-
-    read_signature.return_value = {}
-    with pytest.raises(bootstrap.M7RecreateRequired):
-        await bootstrap.classify_database(connection)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
     "objects,revision",
     [
         ({"relation:r:alembic_version"}, "0015_project_reliability_finalize"),
+        ({"relation:r:alembic_version"}, "0005_agent_design_sessions"),
         ({"relation:r:unknown_table"}, None),
         (
             set(_exact_app_only_objects()) | {"relation:r:unknown_table"},

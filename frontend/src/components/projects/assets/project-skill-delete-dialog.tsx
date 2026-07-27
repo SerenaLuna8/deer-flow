@@ -39,15 +39,74 @@ export function ProjectSkillDeleteConfirmation({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  return (
+    <ProjectAssetDeleteConfirmation
+      assetKind="Skill"
+      assetName={skillName}
+      remainingSeconds={remainingSeconds}
+      pending={pending}
+      errorMessage={errorMessage}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+export function ProjectAgentDeleteConfirmation({
+  agentName,
+  remainingSeconds,
+  pending,
+  errorMessage,
+  onCancel,
+  onConfirm,
+}: {
+  agentName: string;
+  remainingSeconds: number;
+  pending: boolean;
+  errorMessage: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <ProjectAssetDeleteConfirmation
+      assetKind="Agent"
+      assetName={agentName}
+      remainingSeconds={remainingSeconds}
+      pending={pending}
+      errorMessage={errorMessage}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+function ProjectAssetDeleteConfirmation({
+  assetKind,
+  assetName,
+  remainingSeconds,
+  pending,
+  errorMessage,
+  onCancel,
+  onConfirm,
+}: {
+  assetKind: "Skill" | "Agent";
+  assetName: string;
+  remainingSeconds: number;
+  pending: boolean;
+  errorMessage: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
   const waiting = remainingSeconds > 0;
 
   return (
     <>
       <DialogHeader>
-        <DialogTitle>永久删除 Skill？</DialogTitle>
+        <DialogTitle>永久删除 {assetKind}？</DialogTitle>
         <DialogDescription>
-          将永久删除整个 Skill 包“{skillName}”，包括包内所有版本与文件。
-          此操作不可恢复。
+          {assetKind === "Skill"
+            ? `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复。`
+            : `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`}
         </DialogDescription>
       </DialogHeader>
       {errorMessage ? (
@@ -124,6 +183,62 @@ export function ProjectSkillDeleteDialog({
       >
         <ProjectSkillDeleteConfirmation
           skillName={skillName}
+          remainingSeconds={remainingSeconds}
+          pending={pending}
+          errorMessage={errorMessage}
+          onCancel={() => onOpenChange(false)}
+          onConfirm={() => {
+            if (!pending && remainingSeconds === 0) onConfirm();
+          }}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function ProjectAgentDeleteDialog({
+  agentName,
+  startedAt,
+  pending,
+  errorMessage,
+  onOpenChange,
+  onConfirm,
+}: {
+  agentName: string;
+  startedAt: number;
+  pending: boolean;
+  errorMessage: string | null;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const remainingSeconds = skillDeleteSecondsRemaining(startedAt, now);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= startedAt + SKILL_DELETE_DELAY_MS) {
+        window.clearInterval(interval);
+      }
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !pending) onOpenChange(false);
+      }}
+    >
+      <DialogContent
+        showCloseButton={!pending}
+        onEscapeKeyDown={(event) => pending && event.preventDefault()}
+        onInteractOutside={(event) => pending && event.preventDefault()}
+      >
+        <ProjectAgentDeleteConfirmation
+          agentName={agentName}
           remainingSeconds={remainingSeconds}
           pending={pending}
           errorMessage={errorMessage}

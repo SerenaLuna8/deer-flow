@@ -87,6 +87,12 @@ include retries, failed requests, cached input tokens, reasoning tokens,
 provider-specific billing rules, and internal calls that do not appear as normal
 chat messages.
 
+Project administrators with usage access can also see a project-wide Token usage
+line chart on the **project overview**. It groups settled Runs from all project
+members into the latest 24 consecutive UTC hourly buckets by final job settlement
+time, zero-filling hours without usage; the current hour is a partial bucket. This
+is a different scope from the thread ledger shown in a conversation header.
+
 ## Switching agents
 
 If you have created custom agents, use the **Agent** selector in the input bar to switch to a different agent. The selected agent persists for the duration of the thread.

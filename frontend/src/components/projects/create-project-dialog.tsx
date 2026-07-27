@@ -13,6 +13,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  normalizeProjectSlug,
+  PROJECT_SLUG_HELP,
+  projectSlugError,
+} from "@/core/projects/slug";
 import type { CreateProjectInput } from "@/core/projects/types";
 
 export function CreateProjectDialog({
@@ -30,12 +35,16 @@ export function CreateProjectDialog({
 }) {
   const [displayName, setDisplayName] = useState("");
   const [slug, setSlug] = useState("");
+  const [slugTouched, setSlugTouched] = useState(false);
   const [description, setDescription] = useState("");
+  const slugValidationError = projectSlugError(slug);
+  const showSlugError = slugTouched && slugValidationError !== null;
 
   useEffect(() => {
     if (!open) {
       setDisplayName("");
       setSlug("");
+      setSlugTouched(false);
       setDescription("");
     }
   }, [open]);
@@ -53,8 +62,15 @@ export function CreateProjectDialog({
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
+            const normalizedSlug = normalizeProjectSlug(slug);
+            const validationError = projectSlugError(normalizedSlug);
+            setSlug(normalizedSlug);
+            if (validationError) {
+              setSlugTouched(true);
+              return;
+            }
             onSubmit({
-              slug,
+              slug: normalizedSlug,
               display_name: displayName,
               description,
               icon: "folder",
@@ -74,14 +90,37 @@ export function CreateProjectDialog({
           <label className="grid gap-2 text-sm">
             项目标识
             <Input
-              required
-              minLength={3}
               maxLength={63}
-              pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
               placeholder="research-lab"
               value={slug}
+              aria-required="true"
+              aria-describedby={
+                showSlugError
+                  ? "project-slug-help project-slug-error"
+                  : "project-slug-help"
+              }
+              aria-invalid={showSlugError}
               onChange={(event) => setSlug(event.target.value.toLowerCase())}
+              onBlur={() => {
+                setSlug(normalizeProjectSlug(slug));
+                setSlugTouched(true);
+              }}
             />
+            <span
+              id="project-slug-help"
+              className="text-muted-foreground text-xs"
+            >
+              {PROJECT_SLUG_HELP}
+            </span>
+            {showSlugError && (
+              <span
+                id="project-slug-error"
+                role="alert"
+                className="text-destructive text-xs"
+              >
+                {slugValidationError}
+              </span>
+            )}
           </label>
           <label className="grid gap-2 text-sm">
             描述

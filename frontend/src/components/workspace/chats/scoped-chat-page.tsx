@@ -45,6 +45,7 @@ import {
   useThreadSettings,
 } from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
+import type { AgentThread } from "@/core/threads";
 import {
   useBranchThread,
   useThreadMetadata,
@@ -65,8 +66,6 @@ export interface ChatRouteScope {
   canRun: boolean;
   canUpload: boolean;
   canDelete: boolean;
-  automationVisible: boolean;
-  automationHref: (threadId: string) => string;
 }
 
 export type ScopedChatRouteScope = ChatRouteScope & {
@@ -114,9 +113,13 @@ function OptionalSidecarProvider({
 export function ScopedChatPage({
   scope,
   missingThreadFallback = null,
+  renderHeaderAccessory,
 }: {
   scope: ScopedChatRouteScope;
   missingThreadFallback?: React.ReactNode;
+  renderHeaderAccessory?: (
+    thread: AgentThread | null | undefined,
+  ) => React.ReactNode;
 }) {
   const { t } = useI18n();
   const router = useRouter();
@@ -402,17 +405,11 @@ export function ScopedChatPage({
                   : "bg-background/80 shadow-xs backdrop-blur",
               )}
             >
-              <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
                 <ThreadTitle threadId={threadId} thread={thread} />
+                {renderHeaderAccessory?.(threadMetadata.data)}
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {!isNewThread && scope.automationVisible && (
-                  <Button asChild size="sm" variant="ghost">
-                    <a href={scope.automationHref(threadId)}>
-                      {t.project.automations}
-                    </a>
-                  </Button>
-                )}
                 <TokenUsageIndicator
                   threadId={isNewThread ? undefined : threadId}
                   backendUsage={backendTokenUsage}
@@ -489,12 +486,9 @@ export function ScopedChatPage({
               >
                 <div
                   className={cn(
-                    "relative w-full",
+                    "relative w-full max-w-(--chat-content-width)",
                     isWelcomeMode &&
                       "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
-                    isWelcomeMode
-                      ? "max-w-(--container-width-sm)"
-                      : "max-w-(--chat-content-width)",
                   )}
                   data-testid="chat-composer-width"
                 >

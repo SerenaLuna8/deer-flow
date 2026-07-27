@@ -468,7 +468,8 @@ class RunRepository(RunStore):
         """
         if scope is None:
             raise ValueError("private run scope is required")
-        statuses = ("success", "error", "running") if include_active else ("success", "error")
+        terminal_statuses = ("success", "error", "timeout", "interrupted")
+        statuses = (*terminal_statuses, "running") if include_active else terminal_statuses
         _completed = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
 

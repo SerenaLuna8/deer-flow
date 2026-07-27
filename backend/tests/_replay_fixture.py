@@ -19,7 +19,13 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
+
+from support.project_agent_factory import create_project_agent_from_design
+
+from app.shared_assets.models import AgentPayload
+from deerflow.persistence.engine import get_session_factory
 
 # mode -> (thinking_enabled, is_plan_mode, subagent_enabled). Mirrors the
 # frontend mapping in core/threads/hooks.ts.
@@ -195,8 +201,10 @@ def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
 def _drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
     """Register -> create project Agent/thread -> stream a private run.
 
-    This is the final M4 project-private wire path, driven in-process via
-    Starlette's TestClient with the real auth and asset-authoring flows.
+    Auth, project creation, activation, Thread creation, and Run admission use
+    the real Gateway wire path. Deterministic setup creates the complete Agent
+    through the same atomic service seam as Builder commit, avoiding both the
+    removed manual-version API and an extra model call that would alter replay.
     """
     from starlette.testclient import TestClient
 
@@ -219,34 +227,33 @@ def _drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
         assert project.status_code == 201, project.text
         project_id = project.json()["id"]
 
-        asset = client.post(
-            f"/api/projects/{project_id}/agents",
-            json={"slug": f"replay-agent-{suffix}", "display_name": "Replay Agent"},
+        assert client.portal is not None
+        created = client.portal.call(
+            partial(
+                create_project_agent_from_design,
+                get_session_factory(),
+                user_id=uuid.UUID(reg.json()["id"]),
+                project_id=uuid.UUID(project_id),
+                slug=f"replay-agent-{suffix}",
+                display_name="Replay Agent",
+                payload=AgentPayload(
+                    description="Deterministic gateway replay",
+                    soul="Use the exact project tools to complete the request.",
+                    model_ref="scenario-model",
+                    tool_groups=("file:read", "file:write"),
+                    skill_version_ids=(),
+                    mcp_version_ids=(),
+                ),
+                request_id="replay-agent-setup",
+            ),
+        )
+        asset_id = str(created.asset.id)
+        activated = client.post(
+            f"/api/projects/{project_id}/agents/{asset_id}/activate",
+            json={"expected_asset_version": created.asset.version},
             headers=headers,
         )
-        assert asset.status_code == 201, asset.text
-        asset_id = asset.json()["item"]["id"]
-        version = client.post(
-            f"/api/projects/{project_id}/agents/{asset_id}/versions",
-            json={
-                "description": "Deterministic gateway replay",
-                "soul": "Use the exact project tools to complete the request.",
-                "model_ref": "scenario-model",
-                "tool_groups": ["file:read", "file:write"],
-                "skill_version_ids": [],
-                "mcp_version_ids": [],
-                "expected_asset_version": 1,
-            },
-            headers=headers,
-        )
-        assert version.status_code == 201, version.text
-        version_id = version.json()["data"]["id"]
-        published = client.post(
-            f"/api/projects/{project_id}/agents/{asset_id}/versions/{version_id}/publish",
-            json={"expected_asset_version": 2},
-            headers=headers,
-        )
-        assert published.status_code == 200, published.text
+        assert activated.status_code == 200, activated.text
 
         thread_id = str(uuid.uuid4())
         created = client.post(

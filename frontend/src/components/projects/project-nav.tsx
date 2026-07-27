@@ -49,7 +49,7 @@ type ProjectNavigationItem = {
   icon: typeof FolderKanbanIcon;
   i18nKey?: "audit" | "automations" | "usage";
   label: string;
-  section: ProjectNavigationSection;
+  section: ProjectNavigationSection | null;
 };
 
 type ProjectNavigationSection = "capabilities" | "management" | "work";
@@ -89,7 +89,7 @@ export function projectNavigationItems(
       href: base,
       icon: FolderKanbanIcon,
       label: "项目概览",
-      section: "work",
+      section: null,
     },
   ];
   if (
@@ -111,7 +111,7 @@ export function projectNavigationItems(
         href: `${base}/memory`,
         icon: BrainCircuitIcon,
         label: "Memory",
-        section: "work",
+        section: "capabilities",
       },
     );
   }
@@ -165,7 +165,7 @@ export function projectNavigationItems(
     items.push({
       href: `${base}/members`,
       icon: UsersIcon,
-      label: "成员与邀请",
+      label: "项目成员",
       section: "management",
     });
   }
@@ -295,6 +295,7 @@ function ProjectNavigationLinksContent({
     PROJECT_AUTOMATION,
     staticWebsiteOnly,
   );
+  const standaloneLinks = links.filter((item) => item.section === null);
   const renderLink = ({
     href,
     icon: Icon,
@@ -356,6 +357,9 @@ function ProjectNavigationLinksContent({
       aria-label="项目导航"
       className={cn("flex flex-col", collapsed ? "gap-2" : "gap-5")}
     >
+      {standaloneLinks.length > 0 && (
+        <div className="grid gap-1">{standaloneLinks.map(renderLink)}</div>
+      )}
       {PROJECT_NAVIGATION_SECTIONS.map((section) => {
         const sectionLinks = links.filter(
           (item) => item.section === section.id,

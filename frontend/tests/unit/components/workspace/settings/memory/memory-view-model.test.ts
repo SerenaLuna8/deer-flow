@@ -5,6 +5,7 @@ import {
   confidenceToLevelKey,
   countPopulatedSummaries,
   getMemoryCategoryVisual,
+  getMemorySummaryPreviews,
   isMemorySummaryEmpty,
   truncateFactPreview,
   upperFirst,
@@ -70,5 +71,16 @@ describe("memory view model", () => {
     expect(truncateFactPreview("  a   b  ", 20)).toBe("a b");
     expect(truncateFactPreview("abcdefgh", 6)).toBe("abc...");
     expect(upperFirst("context")).toBe("Context");
+  });
+
+  it("builds two non-empty sidecar previews without repeating top of mind", () => {
+    const groups = buildMemorySectionGroups(memory, enUS);
+
+    expect(
+      getMemorySummaryPreviews(
+        groups,
+        enUS.settings.memory.markdown.topOfMind,
+      ).map((section) => section.title),
+    ).toEqual(["Work", "Recent months"]);
   });
 });

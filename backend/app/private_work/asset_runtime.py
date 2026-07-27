@@ -49,6 +49,7 @@ from app.shared_assets.models import (
     ResolvedSkillSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.agents.lead_agent.prompt import AgentPromptBundle
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
@@ -544,18 +545,36 @@ class PrivateMcpManifest:
     definition: dict[str, object]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class PrivateAgentManifest:
     agent_asset_id: uuid.UUID
     agent_version_id: uuid.UUID
     checksum: str
     catalog_generation: int
     description: str
+    payload_schema_version: int
+    agents_instructions: str
     soul: str
+    identity: str
+    user_context: str
     model_ref: str
     tool_groups: tuple[str, ...]
     skills: tuple[PrivateSkillManifest, ...]
     mcps: tuple[PrivateMcpManifest, ...]
+
+    def __repr__(self) -> str:
+        return (
+            "PrivateAgentManifest("
+            f"agent_asset_id={self.agent_asset_id!r}, "
+            f"agent_version_id={self.agent_version_id!r}, "
+            f"checksum={self.checksum!r}, "
+            f"catalog_generation={self.catalog_generation!r}, "
+            f"payload_schema_version={self.payload_schema_version!r}, "
+            f"model_ref={self.model_ref!r}, "
+            f"tool_groups={self.tool_groups!r}, "
+            f"skill_count={len(self.skills)!r}, "
+            f"mcp_count={len(self.mcps)!r})"
+        )
 
 
 class _EmptyMcpArgs(BaseModel):
@@ -721,6 +740,16 @@ class PrivateAgentRuntime:
     @property
     def soul(self) -> str:
         return self.safe_manifest.soul
+
+    @property
+    def prompt_bundle(self) -> AgentPromptBundle:
+        return AgentPromptBundle(
+            payload_schema_version=self.safe_manifest.payload_schema_version,
+            agents_instructions=self.safe_manifest.agents_instructions,
+            soul=self.safe_manifest.soul,
+            identity=self.safe_manifest.identity,
+            user_context=self.safe_manifest.user_context,
+        )
 
     @property
     def tool_groups(self) -> tuple[str, ...]:
@@ -1517,7 +1546,11 @@ class PrivateAssetRuntime:
                 checksum=agent.checksum,
                 catalog_generation=agent.catalog_generation,
                 description=agent.payload.description,
+                payload_schema_version=agent.payload.payload_schema_version,
+                agents_instructions=agent.payload.agents_instructions,
                 soul=agent.payload.soul,
+                identity=agent.payload.identity,
+                user_context=agent.payload.user_context,
                 model_ref=agent.payload.model_ref,
                 tool_groups=agent.payload.tool_groups,
                 skills=skill_manifests,

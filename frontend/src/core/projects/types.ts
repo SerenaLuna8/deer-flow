@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { normalizeProjectSlug, PROJECT_SLUG_PATTERN } from "./slug";
+
 export const PROJECT_ROLES = ["admin", "editor", "runner", "viewer"] as const;
 export const INVITABLE_PROJECT_ROLES = ["editor", "runner", "viewer"] as const;
 
@@ -103,7 +105,10 @@ export const projectPageSchema = z
 
 export const createProjectSchema = z
   .object({
-    slug: z.string().min(1),
+    slug: z
+      .string()
+      .transform(normalizeProjectSlug)
+      .pipe(z.string().min(3).max(63).regex(PROJECT_SLUG_PATTERN)),
     display_name: z.string().min(1).max(120),
     description: z.string().max(500).optional(),
     icon: z.string().min(1).max(32).optional(),

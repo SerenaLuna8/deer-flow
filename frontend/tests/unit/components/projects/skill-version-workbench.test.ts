@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, test } from "@rstest/core";
 
 import {
@@ -6,6 +9,20 @@ import {
 } from "@/components/projects/assets/skill-version-workbench";
 
 describe("Skill version workbench expansion", () => {
+  test("leaves version creation to the detail-level action bar", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/assets/skill-version-workbench.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(source).not.toContain("编辑为新版本");
+    expect(source).not.toContain("PencilIcon");
+    expect(source).toContain("const isEditing = canAuthor && editing;");
+  });
+
   test("keeps a large version folded when the default selection is root SKILL.md", () => {
     const files = [
       { path: "SKILL.md" },

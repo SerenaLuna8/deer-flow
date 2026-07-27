@@ -22,6 +22,7 @@ from deerflow.persistence.private_work.model import (
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
+    AgentDesignSessionRow,
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
@@ -407,6 +408,18 @@ async def purge_private_scope(
 
     def owner_for(alias: str) -> str:
         return "" if owner_user_id is None else f" AND {alias}.owner_user_id = :owner_user_id"
+
+    # Agent Builder sessions contain private conversation and generated
+    # blueprint bodies.  Delete the exact project/owner scope before shared
+    # Agent versions are purged; operations cascade from the session row and
+    # completed sessions otherwise retain RESTRICT references to their created
+    # Agent/version.
+    await session.execute(
+        delete(AgentDesignSessionRow).where(
+            AgentDesignSessionRow.project_id == project_id,
+            *(() if owner_user_id is None else (AgentDesignSessionRow.owner_user_id == owner_user_id,)),
+        )
+    )
 
     # Connection credentials/conversations cascade from exact connection rows.
     await session.execute(

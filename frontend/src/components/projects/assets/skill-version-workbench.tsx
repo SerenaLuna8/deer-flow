@@ -7,7 +7,6 @@ import {
   FileWarningIcon,
   FolderPlusIcon,
   Loader2Icon,
-  PencilIcon,
   RotateCcwIcon,
   SaveIcon,
   Trash2Icon,
@@ -138,6 +137,8 @@ export function SkillVersionWorkbench({
   item,
   version,
   canAuthor,
+  editing,
+  onEditingChange,
   onDirtyChange,
   onVersionCreated,
 }: {
@@ -146,6 +147,8 @@ export function SkillVersionWorkbench({
   item: ProjectAssetItem;
   version: SkillAssetVersion;
   canAuthor: boolean;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 }) {
@@ -153,7 +156,6 @@ export function SkillVersionWorkbench({
   const [selection, setSelection] = useState<SkillFileTreeSelection | null>(
     initialPath ? { kind: "file", path: initialPath } : null,
   );
-  const [editing, setEditing] = useState(false);
   const [changes, setChanges] = useState<SkillFileChange[]>([]);
   const [explicitFolders, setExplicitFolders] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
@@ -221,6 +223,7 @@ export function SkillVersionWorkbench({
     selectedFile && isMarkdown(selectedFile.path, selectedFile.media_type),
   );
   const dirty = changes.length > 0;
+  const isEditing = canAuthor && editing;
   const emptyExplicitFolders = explicitFolders.filter(
     (folder) =>
       !workingFiles.some((file) => file.path.startsWith(`${folder}/`)),
@@ -239,6 +242,19 @@ export function SkillVersionWorkbench({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (canAuthor || !editing) return;
+    setChanges([]);
+    setExplicitFolders([]);
+    setLoadedSources({});
+    setDiscardOpen(false);
+    setLocalError(null);
+    setSelection(initialPath ? { kind: "file", path: initialPath } : null);
+    setDisplayMode("source");
+    onDirtyChange(false);
+    onEditingChange(false);
+  }, [canAuthor, editing, initialPath, onDirtyChange, onEditingChange]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -443,7 +459,7 @@ export function SkillVersionWorkbench({
     setChanges([]);
     setExplicitFolders([]);
     setLoadedSources({});
-    setEditing(false);
+    onEditingChange(false);
     setDiscardOpen(false);
     setLocalError(null);
     setSelection(initialPath ? { kind: "file", path: initialPath } : null);
@@ -470,7 +486,7 @@ export function SkillVersionWorkbench({
       setChanges([]);
       setExplicitFolders([]);
       setLoadedSources({});
-      setEditing(false);
+      onEditingChange(false);
       onDirtyChange(false);
       onVersionCreated(result.data.id);
     } catch (error) {
@@ -489,23 +505,15 @@ export function SkillVersionWorkbench({
 
   return (
     <section className="space-y-4" aria-label="Skill 版本文件">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h3 className="text-sm font-semibold">版本文件</h3>
-          <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-            文件来自版本 {version.version_number}{" "}
-            的不可变快照。修改会另存为新的草稿版本，当前版本不会被覆盖。
-          </p>
-        </div>
-        {canAuthor && !editing && (
-          <Button type="button" size="sm" onClick={() => setEditing(true)}>
-            <PencilIcon aria-hidden className="size-4" />
-            编辑为新版本
-          </Button>
-        )}
+      <div>
+        <h3 className="text-sm font-semibold">版本文件</h3>
+        <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
+          文件来自版本 {version.version_number}{" "}
+          的不可变快照。修改会另存为新的草稿版本，当前版本不会被覆盖。
+        </p>
       </div>
 
-      {editing && (
+      {isEditing && (
         <div className="border-primary/20 bg-primary/5 rounded-xl border px-4 py-3">
           <div>
             <p className="text-sm font-medium">
@@ -539,7 +547,7 @@ export function SkillVersionWorkbench({
                 </span>
               </p>
             </div>
-            {editing && (
+            {isEditing && (
               <div className="mb-3 grid grid-cols-2 gap-2">
                 <Button
                   type="button"
@@ -571,7 +579,7 @@ export function SkillVersionWorkbench({
               onSelectFolder={selectFolder}
               onToggleFolder={toggleFolder}
             />
-            {editing && emptyExplicitFolders.length > 0 && (
+            {isEditing && emptyExplicitFolders.length > 0 && (
               <p
                 role="status"
                 className="text-muted-foreground mt-3 border-t px-1 pt-3 text-[11px] leading-4"
@@ -632,7 +640,7 @@ export function SkillVersionWorkbench({
                         </Button>
                       </div>
                     )}
-                    {editing && selectedFile.path !== "SKILL.md" && (
+                    {isEditing && selectedFile.path !== "SKILL.md" && (
                       <>
                         <Button
                           type="button"
@@ -719,7 +727,7 @@ export function SkillVersionWorkbench({
                         {markdownPreviewContent(sourceContent)}
                       </SafeStreamdown>
                     </div>
-                  ) : editing ? (
+                  ) : isEditing ? (
                     <Textarea
                       aria-label={`编辑 ${selectedFile.path}`}
                       value={sourceContent}
@@ -768,7 +776,7 @@ export function SkillVersionWorkbench({
         </p>
       )}
 
-      {editing && (
+      {isEditing && (
         <div className="bg-background/95 sticky bottom-0 z-10 -mx-1 flex flex-col gap-3 rounded-xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground text-xs">
             保存后创建新的 Draft；发布仍需单独确认。

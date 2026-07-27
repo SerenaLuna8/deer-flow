@@ -20,12 +20,10 @@ import {
   ProjectAssetHistoryView,
   ProjectCredentialCatalogView,
   credentialPayloadFieldsFromVersions,
-  dependencyVersionOptions,
 } from "@/components/projects/assets/project-assets-page";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { useModels } from "@/core/models/hooks";
 import {
   adminProjectAssetKey,
   createAdminProjectCredential,
@@ -53,13 +51,14 @@ import {
 import { AdminProjectSystemBindingDialog } from "./admin-project-system-binding-dialog";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
+type VersionedKind = Exclude<MutableKind, "agents">;
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
 
 const PAGE_META: Record<AssetListKind, { title: string; description: string }> =
   {
     agents: {
       title: "项目 Agent 代管",
-      description: "维护所选项目的 Agent 定义和版本；系统 Agent 仅可绑定。",
+      description: "查看所选项目的 Agent；系统 Agent 仅可绑定。",
     },
     skills: {
       title: "项目 Skill 代管",
@@ -94,7 +93,7 @@ function AdminProjectAssetHistory({
 }: {
   accountId: string;
   projectId: string;
-  kind: MutableKind;
+  kind: VersionedKind;
   item: ProjectAssetItem;
 }) {
   const history = useAdminProjectAssetVersions(
@@ -194,24 +193,11 @@ function MutableAdminProjectAssets({
   kind: MutableKind;
 }) {
   const query = useAdminProjectAssets(accountId, projectId, kind);
-  const modelCatalog = useModels({ enabled: kind === "agents" });
-  const skillDependencies = useAdminProjectAssets(
-    accountId,
-    projectId,
-    "skills",
-    kind === "agents",
-  );
-  const mcpDependencies = useAdminProjectAssets(
-    accountId,
-    projectId,
-    "mcp-servers",
-    kind === "agents",
-  );
   const createAsset = useCreateAdminProjectAsset(accountId, projectId, kind);
   const createVersion = useCreateAdminProjectAssetVersion(
     accountId,
     projectId,
-    kind,
+    kind === "agents" ? null : kind,
   );
   const [createOpen, setCreateOpen] = useState(false);
   const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
@@ -248,38 +234,48 @@ function MutableAdminProjectAssets({
     data.system_items.find((item) => item.id === bindingAssetId) ?? null;
   return (
     <>
-      <div className="mb-6 flex justify-end">
-        <Button type="button" onClick={() => setCreateOpen(true)}>
-          <PlusIcon aria-hidden className="size-4" />
-          创建项目资产
-        </Button>
-      </div>
+      {kind !== "agents" ? (
+        <div className="mb-6 flex justify-end">
+          <Button type="button" onClick={() => setCreateOpen(true)}>
+            <PlusIcon aria-hidden className="size-4" />
+            创建项目资产
+          </Button>
+        </div>
+      ) : null}
       <ProjectAssetCatalogView
         kind={kind}
         data={data}
         onManageBinding={(item) => setBindingAssetId(item.id)}
-        onCreateVersion={setVersionAsset}
-        renderProjectDetails={(item) => (
-          <AdminProjectAssetHistory
-            accountId={accountId}
-            projectId={projectId}
-            kind={kind}
-            item={item}
-          />
-        )}
-      />
-      <CreateAssetDialog
-        kind={kind}
-        scope="project"
-        open={createOpen}
-        pending={createAsset.isPending}
-        errorMessage={
-          createAsset.error ? adminAssetErrorMessage(createAsset.error) : null
+        onCreateVersion={
+          kind === "agents" ? undefined : (item) => setVersionAsset(item)
         }
-        onOpenChange={setCreateOpen}
-        onSubmit={(input) => createAsset.mutate(input)}
+        renderProjectDetails={
+          kind === "agents"
+            ? undefined
+            : (item) => (
+                <AdminProjectAssetHistory
+                  accountId={accountId}
+                  projectId={projectId}
+                  kind={kind}
+                  item={item}
+                />
+              )
+        }
       />
-      {versionAsset ? (
+      {kind !== "agents" ? (
+        <CreateAssetDialog
+          kind={kind}
+          scope="project"
+          open={createOpen}
+          pending={createAsset.isPending}
+          errorMessage={
+            createAsset.error ? adminAssetErrorMessage(createAsset.error) : null
+          }
+          onOpenChange={setCreateOpen}
+          onSubmit={(input) => createAsset.mutate(input)}
+        />
+      ) : null}
+      {versionAsset && kind !== "agents" ? (
         <CreateVersionDialog
           kind={kind}
           asset={versionAsset}
@@ -290,18 +286,6 @@ function MutableAdminProjectAssets({
               ? adminAssetErrorMessage(createVersion.error)
               : null
           }
-          modelOptions={modelCatalog.models.map((model) => ({
-            name: model.name,
-            displayName: model.display_name,
-          }))}
-          skillVersionOptions={dependencyVersionOptions(
-            skillDependencies.data as ProjectAssetList | undefined,
-          )}
-          mcpVersionOptions={dependencyVersionOptions(
-            mcpDependencies.data as ProjectAssetList | undefined,
-          )}
-          modelsLoading={modelCatalog.isLoading}
-          modelsError={Boolean(modelCatalog.error)}
           onOpenChange={(open) => !open && setVersionAsset(null)}
           onSubmit={(input: VersionAuthoringInput) =>
             createVersion.mutate({ assetId: versionAsset.id, input })

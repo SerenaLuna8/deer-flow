@@ -8,6 +8,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   filterProjectConversationThreads,
@@ -21,6 +22,10 @@ import {
 import { ProjectThreadRenameDialog } from "@/components/projects/private-work/project-thread-rename-dialog";
 import { resolveChatRightPanel } from "@/components/workspace/chats/chat-box";
 import { shouldShowThreadWelcome } from "@/components/workspace/chats/scoped-chat-page";
+import {
+  resolveThreadAgentIdentity,
+  ThreadAgentIndicator,
+} from "@/components/workspace/thread-agent-indicator";
 import type { Project } from "@/core/projects/types";
 import type { AgentThread } from "@/core/threads";
 
@@ -217,6 +222,78 @@ describe("project chat workspace", () => {
     ).toBe(false);
   });
 
+  test("resolves the exact Agent identity for existing conversations", () => {
+    const catalog = {
+      project_items: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          display_name: "Research Agent",
+          status: "suspended",
+        },
+      ],
+      system_items: [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          display_name: "Main",
+          binding: { enabled: false },
+        },
+      ],
+    };
+
+    expect(
+      resolveThreadAgentIdentity(
+        {
+          metadata: {
+            agent_asset_id: "22222222-2222-4222-8222-222222222222",
+            agent_scope: "project",
+          },
+        },
+        catalog,
+        true,
+      ),
+    ).toEqual({ displayName: "Research Agent", available: true });
+    expect(
+      resolveThreadAgentIdentity(
+        {
+          metadata: {
+            agent_asset_id: "33333333-3333-4333-8333-333333333333",
+            agent_scope: "system",
+          },
+        },
+        catalog,
+        true,
+      ),
+    ).toEqual({ displayName: "Main", available: true });
+    expect(
+      resolveThreadAgentIdentity(
+        {
+          metadata: {
+            agent_asset_id: "22222222-2222-4222-8222-222222222222",
+            agent_scope: "system",
+          },
+        },
+        catalog,
+        true,
+      ),
+    ).toEqual({ displayName: null, available: false });
+  });
+
+  test("renders a safe Agent indicator without exposing an unavailable asset id", () => {
+    const indicator = ThreadAgentIndicator({
+      identity: { displayName: null, available: false },
+    });
+    const elements = descendants(indicator);
+    const root = elements.find(
+      (element) =>
+        element.props["data-testid"] === "thread-agent-indicator",
+    );
+
+    expect(root?.props["aria-label"]).toBe("当前 Agent：不可用");
+    expect(renderToStaticMarkup(indicator)).not.toContain(
+      "22222222-2222-4222-8222-222222222222",
+    );
+  });
+
   test("keeps Files and Sidecar in one mutually exclusive right-panel slot", () => {
     expect(
       resolveChatRightPanel({
@@ -272,5 +349,38 @@ describe("project chat workspace", () => {
     expect(mainMessageList).toBeDefined();
     expect(mainMessageList).toContain("key={threadId}");
     expect(mainMessageList).toContain('initialScroll="instant"');
+  });
+
+  test("uses the appearance width for the empty conversation composer", () => {
+    const scopedChat = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/workspace/chats/scoped-chat-page.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(scopedChat).toContain('data-testid="chat-composer-width"');
+    expect(scopedChat).not.toContain('"max-w-(--container-width-sm)"');
+    expect(scopedChat).toContain("max-w-(--chat-content-width)");
+  });
+
+  test("keeps welcome quick actions visually attached to the composer", () => {
+    const inputBox = readFileSync(
+      resolve(process.cwd(), "src/components/workspace/input-box.tsx"),
+      "utf8",
+    );
+
+    expect(inputBox).toContain('data-testid="welcome-quick-actions"');
+    expect(inputBox).toContain(
+      '<Suggestions className="w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">',
+    );
+    expect(inputBox).not.toContain(
+      '<Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">',
+    );
+    expect(inputBox).not.toContain('isWelcomeMode ? "gap-4" : "gap-2"');
+    expect(inputBox).toContain(
+      'className="relative flex min-w-0 flex-col gap-2"',
+    );
   });
 });

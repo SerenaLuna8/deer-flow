@@ -688,17 +688,104 @@ describe("multi-part content with bare-string continuations", () => {
   });
 });
 
-describe("orphan tool messages", () => {
-  // LangGraph stream-mode "messages-tuple" can emit tool-result events out of order or
-  // replayed from subagent state (e.g. bash subagent under LocalSandboxProvider with
-  // allow_host_bash). When that happens, the tool message arrives after a terminal
-  // assistant/human group, so getMessageGroups' lastOpenGroup() returns null.
-  //
-  // The previous behaviour was console.error + drop, which silently hid the tool
-  // result from the UI. The fix falls back to attaching the orphan tool to the most
-  // recent group so the user can still see what the agent did.
+describe("tool result association", () => {
+  test("scopes repeated tool call ids to their owning run", () => {
+    const messages = [
+      { id: "h-a", type: "human", content: "first", run_id: "run-a" },
+      {
+        id: "ai-a",
+        type: "ai",
+        content: "",
+        run_id: "run-a",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      { id: "h-b", type: "human", content: "second", run_id: "run-b" },
+      {
+        id: "ai-b",
+        type: "ai",
+        content: "",
+        additional_kwargs: { run_id: "run-b" },
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-b",
+        type: "tool",
+        name: "bash",
+        additional_kwargs: { run_id: "run-b" },
+        tool_call_id: "call-1",
+        content: "run-b output",
+      },
+      {
+        id: "t-a-late",
+        type: "tool",
+        name: "bash",
+        run_id: "run-a",
+        tool_call_id: "call-1",
+        content: "run-a output",
+      },
+    ] as unknown as Message[];
 
-  test("attaches orphan tool message to the most recent group instead of dropping it", () => {
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "human",
+      "assistant:processing",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-a",
+      "t-a-late",
+    ]);
+    expect(groups[3]?.messages.map((message) => message.id)).toEqual([
+      "ai-b",
+      "t-b",
+    ]);
+  });
+
+  test("does not guess across an explicit run when a legacy message lacks run_id", () => {
+    const messages = [
+      { id: "h-a", type: "human", content: "legacy first turn" },
+      {
+        id: "ai-a",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "h-b",
+        type: "human",
+        content: "scoped second turn",
+        run_id: "run-b",
+      },
+      {
+        id: "ai-b",
+        type: "ai",
+        content: "",
+        run_id: "run-b",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-ambiguous",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "missing owner",
+      },
+    ] as unknown as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-a"]);
+    expect(groups[3]?.messages.map((message) => message.id)).toEqual(["ai-b"]);
+    expect(
+      groups
+        .flatMap((group) => group.messages)
+        .some((message) => message.id === "t-ambiguous"),
+    ).toBe(false);
+  });
+
+  test("attaches a late tool result to the AI group that issued its tool call", () => {
     const messages = [
       { id: "h-1", type: "human", content: "Run something" },
       {
@@ -715,73 +802,102 @@ describe("orphan tool messages", () => {
         content: "output-1",
       },
       { id: "ai-2", type: "ai", content: "Done." }, // terminal assistant group
-      // Orphan tool: arrives after a terminal group, no preceding processing group
+      // Replayed result arrives after the terminal answer. It still belongs to
+      // call-1's processing group, never to the visible answer bubble.
       {
-        id: "t-2",
+        id: "t-1-replay",
         type: "tool",
         name: "bash",
-        tool_call_id: "call-2",
-        content: "output-2",
+        tool_call_id: "call-1",
+        content: "output-1 replay",
       },
     ] as Message[];
 
     const groups = getMessageGroups(messages);
 
-    // Expect groups: human, assistant:processing (ai-1 + t-1), assistant (ai-2), and
-    // t-2 should be attached to the last group (assistant), not dropped.
-    const types = groups.map((g) => g.type);
-    expect(types).toEqual(["human", "assistant:processing", "assistant"]);
-
-    // t-2 must be retrievable from one of the groups — must NOT be silently dropped
-    const allMessages = groups.flatMap((g) => g.messages);
-    const t2 = allMessages.find((m) => m.id === "t-2");
-    expect(t2).toBeDefined();
-    expect(t2?.type).toBe("tool");
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+      "t-1",
+      "t-1-replay",
+    ]);
+    expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
   });
 
-  test("replayed tool with same tool_call_id is not lost (duplicate stream events)", () => {
-    // LangGraph subagent state restoration can replay tool-result events. The
-    // frontend log shows the same tool_call_id arriving twice. Both occurrences
-    // should be visible in the UI, not just the first.
+  test("holds an early tool result until its issuing AI tool call arrives", () => {
     const messages = [
       { id: "h-1", type: "human", content: "q" },
+      {
+        id: "t-early",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "call-x",
+        content: "early delivery",
+      },
       {
         id: "ai-1",
         type: "ai",
         content: "",
-        tool_calls: [{ id: "call-x", name: "bash", args: {} }],
+        tool_calls: [{ id: "call-x", name: "web_search", args: {} }],
       },
-      {
-        id: "t-1a",
-        type: "tool",
-        name: "bash",
-        tool_call_id: "call-x",
-        content: "first delivery",
-      },
-      // Terminal assistant group ends the turn and closes the processing group.
-      // Without this interleave the replayed t-1b would still take the
-      // unchanged happy path; with it, t-1b arrives when lastOpenGroup()
-      // returns null and must take the new fallback branch to be visible.
       { id: "ai-2", type: "ai", content: "Done." },
-      // Replayed tool-result for the original tool_call — must reach the new
-      // else-if (groups.length > 0) branch instead of being dropped.
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+      "t-early",
+    ]);
+    expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
+  });
+
+  test("does not attach an unknown orphan tool result to a terminal group", () => {
+    const messages = [
+      { id: "h-1", type: "human", content: "q" },
+      { id: "ai-1", type: "ai", content: "Done." },
       {
-        id: "t-1b",
+        id: "t-unknown",
         type: "tool",
         name: "bash",
-        tool_call_id: "call-x",
-        content: "first delivery",
+        tool_call_id: "never-issued",
+        content: "must not appear in the answer bubble",
       },
     ] as Message[];
 
     const groups = getMessageGroups(messages);
-    const allMessages = groups.flatMap((g) => g.messages);
 
-    // Strict assertion: the replayed tool message must be reachable from a
-    // group (i.e. attached via the new fallback). Before the fix this was
-    // silently dropped by console.error.
-    const t1b = allMessages.find((m) => m.id === "t-1b");
-    expect(t1b).toBeDefined();
-    expect(t1b?.type).toBe("tool");
+    expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+    expect(
+      groups.flatMap((group) => group.messages.map((message) => message.id)),
+    ).toEqual(["h-1", "ai-1"]);
+  });
+
+  test("gives groups unique non-empty ids when source messages have null ids", () => {
+    const messages = [
+      { id: null, type: "human", content: "q" },
+      { id: null, type: "ai", content: "first answer" },
+      { id: null, type: "human", content: "follow-up" },
+      { id: null, type: "ai", content: "second answer" },
+    ] as unknown as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.id)).toEqual([
+      "human-0",
+      "assistant-1",
+      "human-2",
+      "assistant-3",
+    ]);
+    expect(new Set(groups.map((group) => group.id)).size).toBe(groups.length);
   });
 });

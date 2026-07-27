@@ -15,6 +15,7 @@ DeerFlow 是一个面向多账户、多项目协作的开源 super agent 系统�
 ## 核心能力
 
 - 项目工作区：账户、成员、角色、邀请、配额、审计和项目生命周期。
+- 项目用量：具备用量权限的项目管理员可在概览查看全项目最近 24 个小时的 Token 消耗趋势。
 - 系统通知：工作区顶部铃铛集中展示账号级通知和未读数量；已注册用户收到项目邀请后可直接在通知中接受，未注册邮箱仍使用一次性邀请链接。
 - Agent 运行：持久化 Thread/Run、durable SSE、断线重连、取消、重试和 Worker lease。
 - 会话管理：新会话固定使用系统 Main Agent，不再弹出 Agent 选择框；会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
@@ -85,7 +86,7 @@ make config
 
 ### 3. 初始化 PostgreSQL
 
-`0001_project_saas_baseline` 是不可改写的冻结基线，当前 head 为线性的 `0003_project_skill_unique_name`。系统支持初始化全新 PostgreSQL 目标库，也支持把精确匹配 `0001` 或 `0002` catalog 的存量库显式向前迁移到 `0003`。运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
+`0001_project_saas_baseline` 是不可改写的冻结基线和单一当前 head。它已包含项目 Skill 整包硬删除与项目内大小写不敏感名字唯一、Agent 的 `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md` 四个逻辑文档，以及私有 Agent Builder 会话和幂等操作表。系统支持在全新 PostgreSQL 目标库中安装这份当前基线；运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 全新数据库
@@ -93,16 +94,9 @@ export POSTGRES_ADMIN_URL='<连接 postgres maintenance database 的管理员 UR
 export DATABASE_URL='<DeerFlow 目标库 URL>'
 make setup-db
 make check-db
-
-# 已存在且处于精确 0001 或 0002 祖先 revision 的数据库
-export DATABASE_URL='<现有 DeerFlow 数据库 URL>'
-make migrate-db
-make check-db
 ```
 
-`make setup-db` 从空库安装完整的 `0001 → 0002 → 0003` migration chain，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make migrate-db` 只对已验证的已知旧 revision 执行 pending migrations，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化；`make check-db` 只读校验 current/head revision 与必需对象。已知祖先 revision 会提示显式迁移，未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
-
-从 `0001` 或 `0002` 升级时，`0003` 会保留全部项目 Skill，并在同一项目内按 `created_at`、`id` 确定性保留最早的显示名称；旧数据中的大小写重复名称会依次追加 ` (2)`、` (3)` 等后缀，遇到已有名称继续递增，且不会改动 Skill 的 slug、ID 或版本。
+`make setup-db` 从空库安装单一当前 baseline，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make check-db` 只读校验 current/head revision 与必需对象。当前版本的已有数据库必须已经精确匹配 `0001_project_saas_baseline` catalog。`make migrate-db` 保留给未来从 `0002` 起追加的已提交 forward-only revision，只执行 pending migrations，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化。未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 
@@ -155,7 +149,11 @@ System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 p
 
 项目 MCP 采用默认拒绝的执行策略：项目不能直接启动 `stdio` 子进程，只能使用平台运维在 `mcp_security.project_remote_allowed_endpoints` 中批准的精确 HTTPS `http`/`sse` 地址。任意环境变量、静态请求头和 OAuth 配置不会作为普通版本字段保存，认证值必须通过加密 Credential 的 header slot 提供。Worker 对工具发现和每次调用重新校验快照与端点、禁用重定向和环境代理，并执行平台级硬超时；生产环境还应配置 `mcp_security.egress_proxy_url`，由受控出口独立阻断私网、链路本地和云元数据地址。历史不兼容版本仍可审计读取，但 Project API 只返回远程 HTTPS origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。
 
-项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。新建后默认停用，但停用状态仍可编辑和发布，只有已发布版本才能通过列表或详情开关启用。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
+项目 Agent 页面使用项目自建 Agent 卡片：卡片主体进入详情，已配置、启用且具备执行权限的 Agent 可从卡片直接创建绑定到该 Agent 的私有对话。新建入口会先创建一个仅绑定当前项目与当前账号的可恢复设计会话，再通过对话和澄清让模型生成 `AGENTS.md`、`SOUL.md`、`IDENTITY.md` 与 `USER.md` 四项候选设定；模型不能直接写库、发布或启用资产。用户预览、修改并最终确认后，后端才在一个事务里创建默认停用的 Agent、写入首份完整内部配置并结束设计会话；确认响应只返回设计会话和 Agent，不暴露内部 revision。同一项目的 Agent slug 不可重复，中断的生成可重试，设计消息和候选稿随精确项目/账号隐私范围清理。详情顶部只显示名称与最近更新时间，不提供 Agent 归档；卡片与详情为具备权限的停用态 Agent 提供启用动作，启用态详情提供停用动作。列表不提供删除入口；项目自建 Agent 仅在详情页经过二次确认和 5 秒等待后才可永久删除整个 Agent 及全部设置。已有对话、自动化或 Run snapshot 引用时返回 `409`，不会级联删除私有历史；系统 Agent 永远不可删除。四个名称只是映射到 Agent 内部配置字段的固定逻辑文档，不创建物理文件或独立文件版本。保存会在同一事务中复制当前运行配置、写入新的内部 revision 并移动当前指针；停用状态不会阻止继续编辑。后续新准入 Run 会立即使用新设置，无需重启服务；已经物化的运行持有当次精确 bundle，尚未物化的旧准入或后续副作用仍会重验当前 Agent 指针与权限，并在漂移时按既有安全边界 fail closed。四项内容位于其他项目可配置提示之后，是最高的项目可配置提示层，并紧邻最终平台关键提醒之前；平台安全、授权与隔离规则无论位于模板何处都始终优先，子 Agent 继承相同的准入快照。
+
+Agent 不向用户提供创建版本、选择版本或发布版本的操作。项目与管理员代管项目 API 只保留内部 revision 历史的只读查询；Builder 确认和四项指令保存由后端内部原子维护不可变 revision，Run snapshot 仍固定实际使用的精确配置。
+
+项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。从列表新建 Skill 时，后端会在同一事务中创建默认停用的资产、版本 1 草稿以及根目录 `SKILL.md` 基础模板，不会留下没有版本文件的半成品，也不会自动发布；只有已发布版本才能通过列表或详情开关启用。详情不再提供空白版本入口，后续版本统一从当前选中版本点击“创建新版本”，修改并另存为新的不可变草稿。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时也可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
 
 ## 项目结构
 
@@ -192,7 +190,7 @@ deer-flow/
 | `make dev` / `make start` | 启动本地全栈 |
 | `make gateway` / `make worker` / `make scheduler` | 单独启动后端进程 |
 | `make setup-db` | 在空库安装当前 head 并初始化 PostgreSQL |
-| `make migrate-db` | 将精确匹配已知祖先 catalog 的存量库显式向前迁移到 head |
+| `make migrate-db` | 未来新增 revision 后显式执行已提交的 pending migrations |
 | `make check-db` | 只读检查 PostgreSQL revision 与必需对象 |
 | `cd backend && make lint && make test` | 后端格式、静态检查与测试 |
 | `cd frontend && pnpm check && pnpm test` | 前端 lint、类型检查与单元测试 |

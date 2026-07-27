@@ -14,10 +14,21 @@ import pytest_asyncio
 from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 
-from app.private_work.errors import PrivateWorkInvalid, PrivateWorkUnavailable
+from app.private_work.errors import PrivateWorkInvalid, PrivateWorkTooLarge, PrivateWorkUnavailable
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 
 MIB = 1024 * 1024
+
+
+def test_finalization_file_limit_is_independent_from_upload_batch_limit() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits
+    from app.private_work.file_service import PrivateFileLimits
+    from deerflow.workspace_changes.types import WorkspaceChangeLimits
+
+    assert PrivateFileLimits().max_files == 10
+    assert PrivateFileFinalizationLimits().max_scanned_files == 2000
+    assert PrivateFileFinalizationLimits().max_scanned_files == WorkspaceChangeLimits().max_scanned_files
+    assert PrivateFileFinalizationLimits().max_scanned_files != WorkspaceChangeLimits().max_files
 
 
 async def _chunks(payload: bytes) -> AsyncIterator[bytes]:
@@ -27,9 +38,10 @@ async def _chunks(payload: bytes) -> AsyncIterator[bytes]:
 
 
 class MemorySecureSandbox:
-    def __init__(self, files: dict[str, bytes], *, symlinks: tuple[str, ...] = ()) -> None:
+    def __init__(self, files: dict[str, bytes], *, symlinks: tuple[str, ...] = (), directories: tuple[str, ...] = ()) -> None:
         self.files = dict(files)
         self.symlinks = symlinks
+        self.directories = directories
         self._reads: dict[str, tuple[bytes, int]] = {}
         self.max_read = 0
         self.closed: list[str] = []
@@ -41,6 +53,7 @@ class MemorySecureSandbox:
         self.order.append("scan")
         entries = [SandboxFileInfo(path=path, size=len(payload), file_type="regular") for path, payload in self.files.items() if path.startswith(root.rstrip("/") + "/")]
         entries.extend(SandboxFileInfo(path=path, size=0, file_type="symlink") for path in self.symlinks if path.startswith(root.rstrip("/") + "/"))
+        entries.extend(SandboxFileInfo(path=path, size=0, file_type="directory") for path in self.directories if path.startswith(root.rstrip("/") + "/"))
         if len(entries) > max_entries:
             raise OSError(errno.EFBIG, "secure scan limit exceeded")
         return tuple(sorted(entries, key=lambda item: item.path))
@@ -63,6 +76,134 @@ class MemorySecureSandbox:
     def close_regular_file(self, handle: str) -> None:
         self._reads.pop(handle, None)
         self.closed.append(handle)
+
+
+def test_finalizer_default_scan_accepts_more_files_than_one_upload_batch() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizer
+
+    files = {f"/mnt/user-data/workspace/file-{index}.txt": b"x" for index in range(11)}
+    finalizer = PrivateFileFinalizer(SimpleNamespace())
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-limit-test"))
+
+    scanned = finalizer._scan(run_scope, MemorySecureSandbox(files))
+
+    assert len(scanned) == 11
+
+
+def test_finalizer_default_scan_accepts_exact_scan_limit() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits, PrivateFileFinalizer
+
+    limit = PrivateFileFinalizationLimits().max_scanned_files
+    files = {f"/mnt/user-data/workspace/file-{index:04d}.txt": b"x" for index in range(limit)}
+    finalizer = PrivateFileFinalizer(SimpleNamespace())
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-exact-scan-limit-test"))
+
+    scanned = finalizer._scan(run_scope, MemorySecureSandbox(files))
+
+    assert len(scanned) == limit
+
+
+def test_finalizer_file_limit_does_not_count_directory_entries() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits, PrivateFileFinalizer
+
+    limit = PrivateFileFinalizationLimits().max_scanned_files
+    files = {f"/mnt/user-data/workspace/dir-{index % 5}/file-{index:04d}.txt": b"x" for index in range(limit)}
+    directories = tuple(f"/mnt/user-data/workspace/dir-{index}" for index in range(5))
+    finalizer = PrivateFileFinalizer(SimpleNamespace())
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-directory-entry-test"))
+
+    scanned = finalizer._scan(run_scope, MemorySecureSandbox(files, directories=directories))
+
+    assert len(scanned) == limit
+
+
+def test_finalizer_scan_entry_limit_is_global_across_roots() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits, PrivateFileFinalizer
+
+    finalizer = PrivateFileFinalizer(
+        SimpleNamespace(),
+        limits=PrivateFileFinalizationLimits(
+            max_scanned_files=1,
+            max_scan_entries=2,
+        ),
+    )
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-global-entry-limit-test"))
+    sandbox = MemorySecureSandbox(
+        {"/mnt/user-data/workspace/file.txt": b"x"},
+        directories=(
+            "/mnt/user-data/workspace/dir",
+            "/mnt/user-data/outputs/dir",
+        ),
+    )
+
+    with pytest.raises(PrivateWorkTooLarge):
+        finalizer._scan(run_scope, sandbox)
+
+
+def test_finalizer_default_scan_rejects_one_file_beyond_scan_limit() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits, PrivateFileFinalizer
+
+    limit = PrivateFileFinalizationLimits().max_scanned_files
+    files = {f"/mnt/user-data/workspace/file-{index:04d}.txt": b"x" for index in range(limit + 1)}
+    finalizer = PrivateFileFinalizer(SimpleNamespace())
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-over-scan-limit-test"))
+
+    with pytest.raises(PrivateWorkTooLarge):
+        finalizer._scan(run_scope, MemorySecureSandbox(files))
+
+
+def test_finalizer_scan_does_not_apply_changed_byte_budget_to_restored_tree() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits, PrivateFileFinalizer
+
+    finalizer = PrivateFileFinalizer(
+        SimpleNamespace(),
+        limits=PrivateFileFinalizationLimits(
+            max_scanned_files=2,
+            max_scan_entries=2,
+            max_changed_file_size=1,
+            max_changed_total_size=1,
+        ),
+    )
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-restored-tree-budget-test"))
+
+    scanned = finalizer._scan(
+        run_scope,
+        MemorySecureSandbox(
+            {
+                "/mnt/user-data/workspace/existing-a.txt": b"x",
+                "/mnt/user-data/workspace/existing-b.txt": b"y",
+            }
+        ),
+    )
+
+    assert len(scanned) == 2
+
+
+def test_finalizer_changed_byte_budget_accepts_exact_limit_and_rejects_over_limit() -> None:
+    from app.private_work.file_finalizer import PrivateFileFinalizationLimits, PrivateFileFinalizer, _AfterFile
+
+    finalizer = PrivateFileFinalizer(
+        SimpleNamespace(),
+        limits=PrivateFileFinalizationLimits(
+            max_scanned_files=2,
+            max_scan_entries=2,
+            max_changed_file_size=2,
+            max_changed_total_size=2,
+        ),
+    )
+    run_scope = SimpleNamespace(context=SimpleNamespace(request_id="finalization-changed-budget-test"))
+    first = _AfterFile("workspace/a.txt", "/mnt/user-data/workspace/a.txt", "workspace", 1, "text/plain")
+    second = _AfterFile("workspace/b.txt", "/mnt/user-data/workspace/b.txt", "workspace", 1, "text/plain")
+
+    finalizer._validate_changed_files(run_scope, (first, second))
+
+    over_total = _AfterFile("workspace/c.txt", "/mnt/user-data/workspace/c.txt", "workspace", 1, "text/plain")
+    with pytest.raises(PrivateWorkTooLarge):
+        finalizer._validate_changed_files(run_scope, (first, second, over_total))
+
+    over_single_file = _AfterFile("workspace/large.txt", "/mnt/user-data/workspace/large.txt", "workspace", 3, "text/plain")
+    with pytest.raises(PrivateWorkTooLarge):
+        finalizer._validate_changed_files(run_scope, (over_single_file,))
 
 
 class FailingReadSandbox(MemorySecureSandbox):

@@ -6,6 +6,7 @@ import {
   disposeProjectAPIClient,
   emptyProjectStreamCursorState,
   getProjectAPIClient,
+  projectReconnectStorage,
   projectStreamFrameForUI,
   projectStreamCursorStorageKey,
   shouldReconnectProjectStream,
@@ -15,6 +16,7 @@ const SCOPE = {
   accountId: "11111111-1111-4111-8111-111111111111",
   projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 };
+const THREAD_ID = "22222222-2222-4222-8222-222222222222";
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -36,6 +38,124 @@ afterEach(() => {
 });
 
 describe("M6 private stream reconnect", () => {
+  test("hydrates the latest thread state before replaying the durable tail", async () => {
+    const storage = makeSessionStorage();
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+    projectReconnectStorage(SCOPE).setItem(
+      `lg:stream:${THREAD_ID}`,
+      "run-1",
+    );
+    storage.setItem(
+      projectStreamCursorStorageKey(SCOPE, THREAD_ID),
+      JSON.stringify({ lastEventId: 7, terminalRunId: null }),
+    );
+    const fetcher = rs.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith(`/threads/${THREAD_ID}/state`)) {
+        return new Response(
+          JSON.stringify({
+            values: {
+              messages: [
+                {
+                  id: "human-current",
+                  type: "human",
+                  content: "current prompt",
+                  additional_kwargs: { run_id: "run-1" },
+                },
+                {
+                  id: "ai-task-current",
+                  type: "ai",
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "task-1",
+                      name: "task",
+                      args: { description: "research" },
+                    },
+                  ],
+                },
+              ],
+            },
+            next: [],
+            metadata: {},
+            checkpoint: {},
+            checkpoint_id: "checkpoint-1",
+            parent_checkpoint_id: null,
+            created_at: "2026-07-27T00:00:00Z",
+            tasks: [],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (url.endsWith("/runs/run-1")) {
+        return new Response(JSON.stringify({ status: "running" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      expect(new Headers(init?.headers).get("Last-Event-ID")).toBe("7");
+      return new Response(
+        [
+          "event: custom",
+          'data: {"type":"task_running","task_id":"task-1"}',
+          "id: 8",
+          "",
+          "",
+        ].join("\n"),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    rs.stubGlobal("fetch", fetcher);
+    const client = getProjectAPIClient(SCOPE);
+
+    const frames: Array<{ id?: string; event: string; data: unknown }> = [];
+    for await (const frame of client.runs.joinStream(
+      THREAD_ID,
+      "run-1",
+    )) {
+      frames.push(frame);
+    }
+
+    expect(frames).toEqual([
+      {
+        event: "values",
+        data: {
+          messages: [
+            {
+              id: "human-current",
+              type: "human",
+              content: "current prompt",
+              additional_kwargs: { run_id: "run-1" },
+            },
+            {
+              id: "ai-task-current",
+              type: "ai",
+              content: "",
+              tool_calls: [
+                {
+                  id: "task-1",
+                  name: "task",
+                  args: { description: "research" },
+                },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        id: "8",
+        event: "custom",
+        data: { type: "task_running", task_id: "task-1" },
+      },
+    ]);
+  });
+
   test("dedupes a replayed terminal frame", () => {
     const first = acceptProjectStreamFrame(
       emptyProjectStreamCursorState(),

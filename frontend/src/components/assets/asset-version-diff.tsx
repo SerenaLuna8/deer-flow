@@ -25,7 +25,6 @@ function describe(version: AssetVersion): Record<string, string> {
     return {
       ...common,
       描述: value(version.description),
-      "角色设定（Soul）": value(version.soul),
       模型: value(version.model_ref),
       工具组: list(version.tool_groups),
       "Skill 版本": list(version.skill_version_ids),

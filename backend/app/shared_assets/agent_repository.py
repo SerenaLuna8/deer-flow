@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
-from app.shared_assets.errors import AssetForbidden, AssetNotFound
+from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
+from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.shared_assets import (
+    AgentDesignSessionRow,
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
@@ -24,6 +28,7 @@ from deerflow.persistence.shared_assets import (
     SkillRow,
     SkillVersionRow,
 )
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
 class AgentCreateCommand(Protocol):
@@ -135,6 +140,25 @@ class AgentRepository:
         await self.session.flush()
         return row
 
+    async def current_published_descriptions(
+        self,
+        asset_ids: Sequence[uuid.UUID],
+    ) -> Mapping[uuid.UUID, str]:
+        """Load current descriptions in one query for already-authorized rows."""
+
+        ids = tuple(asset_ids)
+        if not ids:
+            return {}
+        statement = (
+            select(AgentRow.id, AgentVersionRow.description)
+            .join(
+                AgentVersionRow,
+                AgentVersionRow.id == AgentRow.current_published_version_id,
+            )
+            .where(AgentRow.id.in_(ids))
+        )
+        return {asset_id: description for asset_id, description in (await self.session.execute(statement))}
+
     async def create_system_asset(
         self,
         context: SystemAssetGovernanceContext,
@@ -193,6 +217,129 @@ class AgentRepository:
         if row is None:
             raise AssetNotFound(context.request_id)
         return row
+
+    async def plan_project_asset_deletion(
+        self,
+        context: ProjectContext,
+        asset: AgentRow,
+    ) -> tuple[uuid.UUID, ...]:
+        """Lock one project Agent package and reject retained external uses."""
+
+        self._require_project_actor(context)
+        if asset.scope != "project" or asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        version_ids = tuple((await self.session.execute(select(AgentVersionRow.id).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number).with_for_update(of=AgentVersionRow))).scalars().all())
+        retained_reference_exists = bool(
+            await self.session.scalar(
+                select(
+                    or_(
+                        exists().where(
+                            ThreadMetaRow.project_id == context.project_id,
+                            ThreadMetaRow.agent_asset_id == asset.id,
+                            ThreadMetaRow.agent_scope == "project",
+                        ),
+                        exists().where(
+                            ScheduledTaskRow.project_id == context.project_id,
+                            ScheduledTaskRow.agent_asset_id == asset.id,
+                            ScheduledTaskRow.agent_scope == "project",
+                        ),
+                        exists().where(
+                            RunAssetVersionRow.project_id == context.project_id,
+                            RunAssetVersionRow.asset_kind == "agent",
+                            RunAssetVersionRow.asset_scope == "project",
+                            RunAssetVersionRow.asset_id == asset.id,
+                        ),
+                    )
+                )
+            )
+        )
+        if retained_reference_exists:
+            raise AssetConflict(context.request_id)
+        return version_ids
+
+    async def delete_project_asset(
+        self,
+        context: ProjectContext,
+        asset: AgentRow,
+        version_ids: Sequence[uuid.UUID],
+    ) -> None:
+        """Physically remove one locked Agent package without private work."""
+
+        self._require_project_actor(context)
+        selected_version_ids = tuple(version_ids)
+        if asset.scope != "project" or asset.project_id != context.project_id or len(set(selected_version_ids)) != len(selected_version_ids):
+            raise AssetNotFound(context.request_id)
+
+        # Preserve owner-private Builder content while severing the deleted
+        # shared-asset reference. Completed retries then fail with 409.
+        await self.session.execute(
+            update(AgentDesignSessionRow)
+            .where(
+                AgentDesignSessionRow.project_id == context.project_id,
+                AgentDesignSessionRow.created_agent_id == asset.id,
+            )
+            .values(
+                created_agent_id=None,
+                created_agent_version_id=None,
+                created_agent_deleted=True,
+            )
+        )
+
+        # This transient state is never committed. Together with the
+        # transaction-local exact asset id it authorizes deleting immutable
+        # dependency refs for this package only.
+        asset.current_published_version_id = None
+        asset.status = "archived"
+        await self.session.flush()
+        await self.session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.agent_hard_delete_asset_id",
+                    str(asset.id),
+                    True,
+                )
+            )
+        )
+
+        if selected_version_ids:
+            await self.session.execute(
+                delete(AgentVersionSkillRefRow).where(
+                    AgentVersionSkillRefRow.agent_version_id.in_(
+                        selected_version_ids,
+                    )
+                )
+            )
+            await self.session.execute(
+                delete(AgentVersionMcpRefRow).where(
+                    AgentVersionMcpRefRow.agent_version_id.in_(
+                        selected_version_ids,
+                    )
+                )
+            )
+            child = aliased(AgentVersionRow)
+            remaining = set(selected_version_ids)
+            while remaining:
+                deleted_ids = set(
+                    (
+                        await self.session.execute(
+                            delete(AgentVersionRow)
+                            .where(
+                                AgentVersionRow.id.in_(remaining),
+                                AgentVersionRow.agent_id == asset.id,
+                                ~exists().where(child.supersedes_version_id == AgentVersionRow.id),
+                            )
+                            .returning(AgentVersionRow.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not deleted_ids:
+                    raise AssetConflict(context.request_id)
+                remaining.difference_update(deleted_ids)
+
+        await self.session.delete(asset)
+        await self.session.flush()
 
     async def get_system_asset(
         self,
@@ -451,6 +598,93 @@ class AgentRepository:
         row = (await self.session.execute(statement)).scalar_one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
+        skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
+        return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
+
+    async def get_latest_project_version(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentVersionRecord | None:
+        self._require_project_actor(context)
+        statement = (
+            select(AgentVersionRow)
+            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            .where(
+                AgentVersionRow.agent_id == asset_id,
+                AgentRow.scope == "project",
+                AgentRow.project_id == context.project_id,
+                self._project_context_exists(context),
+            )
+            .order_by(AgentVersionRow.version_number.desc())
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AgentVersionRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            return None
+        skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
+        return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
+
+    async def get_latest_system_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentVersionRecord | None:
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
+        statement = (
+            select(AgentVersionRow)
+            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            .where(
+                AgentVersionRow.agent_id == asset_id,
+                AgentRow.scope == "system",
+                AgentRow.project_id.is_(None),
+            )
+            .order_by(AgentVersionRow.version_number.desc())
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AgentVersionRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            return None
+        skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
+        return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
+
+    async def get_latest_override_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> AgentVersionRecord | None:
+        self._require_system_actor(context)
+        if context.project_id is None:
+            raise AssetNotFound(context.request_id)
+        await self._lock_override_project(context)
+        statement = (
+            select(AgentVersionRow)
+            .join(AgentRow, AgentRow.id == AgentVersionRow.agent_id)
+            .where(
+                AgentVersionRow.agent_id == asset_id,
+                AgentRow.scope == "project",
+                AgentRow.project_id == context.project_id,
+            )
+            .order_by(AgentVersionRow.version_number.desc())
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AgentVersionRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            return None
         skill_ids, mcp_ids = await self._load_refs((row.id,), for_update=for_update)
         return AgentVersionRecord(row, skill_ids.get(row.id, ()), mcp_ids.get(row.id, ()))
 

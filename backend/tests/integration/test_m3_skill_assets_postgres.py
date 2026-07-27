@@ -141,14 +141,78 @@ def _service(
     )
 
 
+@pytest.mark.asyncio
+async def test_project_skill_template_create_persists_one_suspended_draft_snapshot(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-template-create",
+    )
+    service = _service(service_module, factory)
+    try:
+        created = await service.create_project_with_template(
+            editor,
+            service_module.CreateSkill(
+                slug="meeting-brief",
+                display_name="Meeting Brief",
+            ),
+        )
+
+        assert created.status == "suspended"
+        assert created.current_published_version_id is None
+        assert created.version == 2
+
+        async with factory() as session:
+            version = (
+                await session.execute(
+                    select(SkillVersionRow).where(
+                        SkillVersionRow.skill_id == created.id,
+                    )
+                )
+            ).scalar_one()
+            file = (
+                await session.execute(
+                    select(SkillVersionFileRow).where(
+                        SkillVersionFileRow.skill_version_id == version.id,
+                    )
+                )
+            ).scalar_one()
+            reserved = await session.scalar(
+                text(
+                    """SELECT reserved FROM project_usage_counters
+                       WHERE project_id=:project_id
+                         AND dimension='storage_bytes'
+                         AND period_key='lifetime'"""
+                ),
+                {"project_id": editor.project_id},
+            )
+
+        assert version.version_number == 1
+        assert version.workflow_status == WorkflowStatus.DRAFT.value
+        assert version.supersedes_version_id is None
+        assert file.path == "SKILL.md"
+        assert file.media_type == "text/markdown"
+        assert file.content.decode() == ("---\nname: meeting-brief\ndescription: Describe when and how to use this skill.\n---\n\n# meeting-brief\n\nAdd instructions for this skill here.\n")
+        assert file.size_bytes == len(file.content)
+        assert file.sha256 == hashlib.sha256(file.content).hexdigest()
+        assert reserved == len(file.content)
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_counter_reserved", [0, 37])
-async def test_0001_project_skill_delete_after_current_migration_settles_legacy_storage_once(
+async def test_project_skill_delete_settles_unattributed_storage_once(
     postgres_database_url: str,
     legacy_counter_reserved: int,
 ) -> None:
-    """A baseline Skill has no per-version reservation but remains deletable."""
+    """A Skill with pre-attribution storage remains deletable exactly once."""
 
     service_module = importlib.import_module("app.shared_assets.skill_service")
     engine = create_async_engine(postgres_database_url)

@@ -36,6 +36,7 @@ import type { Capability } from "@/core/projects/types";
 import {
   useApproveProjectMcpVersion,
   useChangeProjectAssetStatus,
+  useDeleteProjectAgent,
   useDeleteProjectSkill,
   useProjectAssets,
   useProjectAssetVersions,
@@ -50,15 +51,52 @@ import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 import { McpApprovalDialog } from "./mcp-approval-dialog";
 import {
+  projectAssetCanCreateVersion,
+  projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
   projectSkillStatusToggleState,
-  projectSkillCanDelete,
 } from "./project-asset-view-model";
-import { ProjectSkillDeleteDialog } from "./project-skill-delete-dialog";
+import {
+  ProjectAgentDeleteDialog,
+  ProjectSkillDeleteDialog,
+} from "./project-skill-delete-dialog";
 import { SystemBindingDialog } from "./system-binding-dialog";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
+
+export function projectAssetDetailCanManageSystemBinding(
+  kind: MutableAssetKind,
+  item: ProjectAssetItem,
+): boolean {
+  return (
+    kind === "mcp-servers" &&
+    item.scope === "system" &&
+    item.capabilities.includes("shared_assets.manage_bindings") &&
+    (item.status === "active" || Boolean(item.binding?.enabled))
+  );
+}
+
+export function projectAssetDetailShowsVersionHistory(
+  kind: MutableAssetKind,
+): boolean {
+  return kind !== "agents";
+}
+
+export function effectiveAssetVersion(
+  scope: ProjectAssetItem["scope"],
+  bindingEnabled: boolean,
+  pinnedVersion: AssetVersion | undefined,
+  currentPublished: AssetVersion | undefined,
+  latestVersion: AssetVersion | undefined,
+): AssetVersion | null {
+  return (
+    (scope === "system" && bindingEnabled ? pinnedVersion : null) ??
+    currentPublished ??
+    latestVersion ??
+    null
+  );
+}
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
 type VersionStatus = ReturnType<typeof workflowStatus>;
 
@@ -81,11 +119,32 @@ export function createProjectSkillDeleteSnapshot(
   });
 }
 
+export type ProjectAgentDeleteSnapshot = Readonly<{
+  assetId: string;
+  agentName: string;
+  expectedAssetVersion: number;
+  startedAt: number;
+}>;
+
+export function createProjectAgentDeleteSnapshot(
+  item: Pick<ProjectAssetItem, "id" | "display_name" | "version">,
+  startedAt: number,
+): ProjectAgentDeleteSnapshot {
+  return Object.freeze({
+    assetId: item.id,
+    agentName: item.display_name,
+    expectedAssetVersion: item.version,
+    startedAt,
+  });
+}
+
 export type ProjectAssetVersionRenderContext = {
   accountId: string;
   projectId: string;
   item: ProjectAssetItem;
   canAuthor: boolean;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 };
@@ -159,7 +218,20 @@ export function ProjectAssetDetailHeader({
   optimisticSkillStatus?: boolean;
   onToggleProjectSkillStatus: (checked: boolean) => void;
 }) {
-  if (kind !== "skills") {
+  if (kind === "agents") {
+    return (
+      <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
+        <SheetTitle className="text-xl">{item.display_name}</SheetTitle>
+        <SheetDescription>
+          <time dateTime={item.updated_at}>
+            {new Date(item.updated_at).toLocaleString("zh-CN")}
+          </time>
+        </SheetDescription>
+      </SheetHeader>
+    );
+  }
+
+  if (kind === "mcp-servers") {
     return (
       <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
         <div className="flex flex-wrap items-center gap-2">
@@ -209,6 +281,59 @@ export function ProjectAssetDetailHeader({
   );
 }
 
+export function ProjectSkillDetailActions({
+  actionPending,
+  canAuthor,
+  canDelete,
+  editing,
+  hasSelectedVersion,
+  versionDirty,
+  versionSelectionPending,
+  onCreateVersion,
+  onDelete,
+}: {
+  actionPending: boolean;
+  canAuthor: boolean;
+  canDelete: boolean;
+  editing: boolean;
+  hasSelectedVersion: boolean;
+  versionDirty: boolean;
+  versionSelectionPending: boolean;
+  onCreateVersion: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <>
+      {canAuthor && hasSelectedVersion && !editing ? (
+        <Button
+          type="button"
+          disabled={versionDirty || versionSelectionPending}
+          title={
+            versionDirty
+              ? "请先保存或放弃当前未保存修改"
+              : versionSelectionPending
+                ? "正在加载新版本，请稍候"
+                : undefined
+          }
+          onClick={onCreateVersion}
+        >
+          创建新版本
+        </Button>
+      ) : null}
+      {canDelete ? (
+        <Button
+          type="button"
+          variant="destructive"
+          disabled={actionPending}
+          onClick={onDelete}
+        >
+          删除 Skill
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
 export function ProjectAssetDetailSheet({
   accountId,
   projectId,
@@ -222,6 +347,7 @@ export function ProjectAssetDetailSheet({
   onDeleted,
   onVersionCreated,
   onRequestedVersionHandled,
+  renderAssetEditor,
   renderVersion,
 }: {
   accountId: string;
@@ -232,29 +358,45 @@ export function ProjectAssetDetailSheet({
   open: boolean;
   requestedVersionId: string | null;
   onOpenChange: (open: boolean) => void;
-  onCreateVersion: (item: ProjectAssetItem) => void;
+  onCreateVersion: (
+    item: ProjectAssetItem,
+    selectedVersion: AssetVersion | null,
+  ) => void;
   onDeleted: (assetId: string) => void;
   onVersionCreated: (assetId: string, versionId: string) => void;
   onRequestedVersionHandled: (assetId: string, versionId: string) => void;
-  renderVersion: (
+  renderAssetEditor?: (
+    effectiveVersion: AssetVersion | null,
+    context: ProjectAssetVersionRenderContext,
+  ) => ReactNode;
+  renderVersion?: (
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
 }) {
   const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
-  const publish = usePublishProjectAssetVersion(accountId, projectId, kind);
+  const showsVersionHistory = projectAssetDetailShowsVersionHistory(kind);
+  const publish = usePublishProjectAssetVersion(
+    accountId,
+    projectId,
+    kind === "agents" ? null : kind,
+  );
   const submit = useSubmitProjectMcpVersion(accountId, projectId);
   const approve = useApproveProjectMcpVersion(accountId, projectId);
   const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
   const deleteSkill = useDeleteProjectSkill(accountId, projectId);
+  const deleteAgent = useDeleteProjectAgent(accountId, projectId);
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [bindingOpen, setBindingOpen] = useState(false);
   const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
     null,
   );
   const [versionDirty, setVersionDirty] = useState(false);
-  const [deleteSnapshot, setDeleteSnapshot] =
+  const [versionEditing, setVersionEditing] = useState(false);
+  const [skillDeleteSnapshot, setSkillDeleteSnapshot] =
     useState<ProjectSkillDeleteSnapshot | null>(null);
+  const [agentDeleteSnapshot, setAgentDeleteSnapshot] =
+    useState<ProjectAgentDeleteSnapshot | null>(null);
   const [discardAction, setDiscardAction] = useState<
     { type: "close" } | { type: "version"; versionId: string } | null
   >(null);
@@ -271,6 +413,13 @@ export function ProjectAssetDetailSheet({
   );
   const pinnedVersion = versions.find(
     (version) => version.id === item.binding?.version_id,
+  );
+  const effectiveVersion = effectiveAssetVersion(
+    item.scope,
+    item.binding?.enabled === true,
+    pinnedVersion,
+    currentPublished,
+    versions[0],
   );
 
   useEffect(() => {
@@ -307,9 +456,15 @@ export function ProjectAssetDetailSheet({
     setBindingOpen(false);
     setApprovalVersion(null);
     setVersionDirty(false);
-    setDeleteSnapshot(null);
+    setVersionEditing(false);
+    setSkillDeleteSnapshot(null);
+    setAgentDeleteSnapshot(null);
     setDiscardAction(null);
   }, [open]);
+
+  useEffect(() => {
+    if (kind !== "agents") setVersionEditing(false);
+  }, [kind, selectedVersionId]);
 
   const canAuthor =
     item.scope === "project" && projectAssetCanAuthor(item, kind);
@@ -317,17 +472,15 @@ export function ProjectAssetDetailSheet({
     item.scope === "project" &&
     item.status === "active" &&
     item.capabilities.includes("mcp.credentials.approve");
-  const canManageBinding =
-    item.scope === "system" &&
-    item.capabilities.includes("shared_assets.manage_bindings") &&
-    (item.status === "active" || Boolean(item.binding?.enabled));
+  const canManageBinding = projectAssetDetailCanManageSystemBinding(kind, item);
   const lifecycleActions =
     item.scope === "project"
       ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
       : [];
-  const canDeleteSkill = projectSkillCanDelete(kind, item);
+  const canDeleteAsset = projectAssetCanDelete(kind, item);
   const versionActions = useMemo(() => {
     if (
+      !showsVersionHistory ||
       item.scope !== "project" ||
       !selectedVersion ||
       !("workflow_status" in selectedVersion)
@@ -340,7 +493,7 @@ export function ProjectAssetDetailSheet({
       isMcpVersion(selectedVersion) &&
         selectedVersion.credential_slots.length > 0,
     );
-  }, [item.scope, kind, selectedVersion]);
+  }, [item.scope, kind, selectedVersion, showsVersionHistory]);
 
   const credentialCatalog = useProjectAssets(
     accountId,
@@ -356,7 +509,8 @@ export function ProjectAssetDetailSheet({
     submit.isPending ||
     approve.isPending ||
     changeStatus.isPending ||
-    deleteSkill.isPending;
+    deleteSkill.isPending ||
+    deleteAgent.isPending;
   const versionSelectionPending = requestedVersionId !== null;
   const actionError =
     publish.error ?? submit.error ?? approve.error ?? changeStatus.error;
@@ -368,6 +522,7 @@ export function ProjectAssetDetailSheet({
   const handleWorkbenchVersionCreated = useCallback(
     (versionId: string) => {
       setVersionDirty(false);
+      setVersionEditing(false);
       onVersionCreated(item.id, versionId);
       void history.refetch();
     },
@@ -401,6 +556,7 @@ export function ProjectAssetDetailSheet({
       setDiscardAction({ type: "close" });
       return;
     }
+    if (!next) setVersionEditing(false);
     onOpenChange(next);
   }
 
@@ -410,6 +566,7 @@ export function ProjectAssetDetailSheet({
       setDiscardAction({ type: "version", versionId });
       return;
     }
+    setVersionEditing(false);
     setSelectedVersionId(versionId);
   }
 
@@ -417,6 +574,7 @@ export function ProjectAssetDetailSheet({
     const action = discardAction;
     setDiscardAction(null);
     setVersionDirty(false);
+    setVersionEditing(false);
     if (action?.type === "close") {
       onOpenChange(false);
     } else if (action?.type === "version") {
@@ -445,7 +603,7 @@ export function ProjectAssetDetailSheet({
   }
 
   async function confirmSkillDelete() {
-    const snapshot = deleteSnapshot;
+    const snapshot = skillDeleteSnapshot;
     if (!snapshot) return;
     try {
       await deleteSkill.mutateAsync({
@@ -454,7 +612,24 @@ export function ProjectAssetDetailSheet({
           expected_asset_version: snapshot.expectedAssetVersion,
         },
       });
-      setDeleteSnapshot(null);
+      setSkillDeleteSnapshot(null);
+      onDeleted(snapshot.assetId);
+    } catch {
+      // The mutation exposes only its mapped public error inside the dialog.
+    }
+  }
+
+  async function confirmAgentDelete() {
+    const snapshot = agentDeleteSnapshot;
+    if (!snapshot) return;
+    try {
+      await deleteAgent.mutateAsync({
+        assetId: snapshot.assetId,
+        input: {
+          expected_asset_version: snapshot.expectedAssetVersion,
+        },
+      });
+      setAgentDeleteSnapshot(null);
       onDeleted(snapshot.assetId);
     } catch {
       // The mutation exposes only its mapped public error inside the dialog.
@@ -476,7 +651,7 @@ export function ProjectAssetDetailSheet({
     <>
       <Sheet open={open} onOpenChange={requestOpenChange}>
         <SheetContent
-          className={`w-full gap-0 p-0 ${kind === "skills" ? "sm:max-w-[1080px]" : "sm:max-w-[640px]"}`}
+          className={`w-full gap-0 p-0 ${kind === "skills" || kind === "agents" ? "sm:max-w-[1080px]" : "sm:max-w-[640px]"}`}
         >
           <ProjectAssetDetailHeader
             kind={kind}
@@ -488,45 +663,47 @@ export function ProjectAssetDetailSheet({
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="space-y-6 px-6 py-5">
-              <section className="grid gap-3 sm:grid-cols-2">
-                <div className="bg-muted/35 rounded-xl p-4">
-                  <p className="text-muted-foreground text-xs">
-                    {item.scope === "system" ? "系统最新发布" : "当前发布"}
-                  </p>
-                  <p className="mt-2 text-sm font-medium">
-                    {currentPublished
-                      ? `版本 ${currentPublished.version_number}`
-                      : item.current_published_version_id
-                        ? "已有发布版本"
-                        : "尚未发布"}
-                  </p>
-                </div>
-                {item.scope === "system" && (
+              {showsVersionHistory ? (
+                <section className="grid gap-3 sm:grid-cols-2">
                   <div className="bg-muted/35 rounded-xl p-4">
-                    <p className="text-muted-foreground text-xs">项目使用</p>
+                    <p className="text-muted-foreground text-xs">
+                      {item.scope === "system" ? "系统最新发布" : "当前发布"}
+                    </p>
                     <p className="mt-2 text-sm font-medium">
-                      {!item.binding
-                        ? "未启用"
-                        : !item.binding.enabled
-                          ? "已从项目停用"
-                          : pinnedVersion
-                            ? `版本 ${pinnedVersion.version_number}${
-                                item.current_published_version_id !==
-                                pinnedVersion.id
-                                  ? " · 有新版本"
-                                  : ""
-                              }`
-                            : "已固定版本"}
+                      {currentPublished
+                        ? `版本 ${currentPublished.version_number}`
+                        : item.current_published_version_id
+                          ? "已有发布版本"
+                          : "尚未发布"}
                     </p>
                   </div>
-                )}
-                <div className="bg-muted/35 rounded-xl p-4">
-                  <p className="text-muted-foreground text-xs">最近更新</p>
-                  <time className="mt-2 block text-sm">
-                    {new Date(item.updated_at).toLocaleString("zh-CN")}
-                  </time>
-                </div>
-              </section>
+                  {item.scope === "system" ? (
+                    <div className="bg-muted/35 rounded-xl p-4">
+                      <p className="text-muted-foreground text-xs">项目使用</p>
+                      <p className="mt-2 text-sm font-medium">
+                        {!item.binding
+                          ? "未启用"
+                          : !item.binding.enabled
+                            ? "已从项目停用"
+                            : pinnedVersion
+                              ? `版本 ${pinnedVersion.version_number}${
+                                  item.current_published_version_id !==
+                                  pinnedVersion.id
+                                    ? " · 有新版本"
+                                    : ""
+                                }`
+                              : "已固定版本"}
+                      </p>
+                    </div>
+                  ) : null}
+                  <div className="bg-muted/35 rounded-xl p-4">
+                    <p className="text-muted-foreground text-xs">最近更新</p>
+                    <time className="mt-2 block text-sm">
+                      {new Date(item.updated_at).toLocaleString("zh-CN")}
+                    </time>
+                  </div>
+                </section>
+              ) : null}
 
               <div className="flex flex-wrap gap-2">
                 {canManageBinding && (
@@ -538,7 +715,7 @@ export function ProjectAssetDetailSheet({
                     {item.binding?.enabled ? "切换版本" : "启用到项目"}
                   </Button>
                 )}
-                {canAuthor && (
+                {projectAssetCanCreateVersion(kind, canAuthor) && (
                   <Button
                     type="button"
                     disabled={versionDirty || versionSelectionPending}
@@ -549,16 +726,16 @@ export function ProjectAssetDetailSheet({
                           ? "正在加载新版本，请稍候"
                           : undefined
                     }
-                    onClick={() => onCreateVersion(item)}
+                    onClick={() => onCreateVersion(item, selectedVersion)}
                   >
-                    {kind === "skills" ? "从空白创建" : "创建新版本"}
+                    创建新版本
                   </Button>
                 )}
                 {lifecycleActions.map((action) => (
                   <Button
                     key={action}
                     type="button"
-                    variant={action === "archive" ? "outline" : "destructive"}
+                    variant="outline"
                     disabled={actionPending}
                     onClick={() =>
                       changeStatus.mutate({
@@ -568,54 +745,56 @@ export function ProjectAssetDetailSheet({
                       })
                     }
                   >
-                    {action === "archive" ? "归档" : "暂停"}
+                    {action === "archive"
+                      ? "归档"
+                      : action === "activate"
+                        ? "启用"
+                        : kind === "agents"
+                          ? "停用"
+                          : "暂停"}
                   </Button>
                 ))}
-                {canDeleteSkill && (
+                {kind === "skills" ? (
+                  <ProjectSkillDetailActions
+                    actionPending={actionPending}
+                    canAuthor={canAuthor}
+                    canDelete={canDeleteAsset}
+                    editing={versionEditing}
+                    hasSelectedVersion={selectedVersion !== null}
+                    versionDirty={versionDirty}
+                    versionSelectionPending={versionSelectionPending}
+                    onCreateVersion={() => setVersionEditing(true)}
+                    onDelete={() => {
+                      deleteSkill.reset();
+                      setSkillDeleteSnapshot(
+                        createProjectSkillDeleteSnapshot(item, Date.now()),
+                      );
+                    }}
+                  />
+                ) : null}
+                {kind === "agents" && canDeleteAsset ? (
                   <Button
                     type="button"
                     variant="destructive"
                     disabled={actionPending}
                     onClick={() => {
-                      deleteSkill.reset();
-                      setDeleteSnapshot(
-                        createProjectSkillDeleteSnapshot(item, Date.now()),
+                      deleteAgent.reset();
+                      setAgentDeleteSnapshot(
+                        createProjectAgentDeleteSnapshot(item, Date.now()),
                       );
                     }}
                   >
-                    删除 Skill
+                    删除
                   </Button>
-                )}
+                ) : null}
               </div>
 
-              <section className="space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-sm font-semibold">版本</h2>
-                  {versions.length > 0 && (
-                    <label className="text-muted-foreground flex items-center gap-2 text-xs">
-                      查看
-                      <select
-                        aria-label="查看版本"
-                        value={selectedVersionId}
-                        disabled={versionSelectionPending}
-                        onChange={(event) =>
-                          requestVersionChange(event.target.value)
-                        }
-                        className="border-input bg-background h-8 rounded-md border px-2 text-xs"
-                      >
-                        {versions.map((version) => (
-                          <option key={version.id} value={version.id}>
-                            版本 {version.version_number} ·{" "}
-                            {VERSION_STATUS_LABEL[workflowStatus(version)]}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                </div>
-
-                {history.isLoading ? (
-                  <div className="space-y-3" aria-label="正在加载版本">
+              {renderAssetEditor ? (
+                history.isLoading ? (
+                  <div
+                    className="border-border/70 space-y-3 border-t pt-5"
+                    aria-label="正在加载 Agent 设置"
+                  >
                     <Skeleton className="h-8 w-40" />
                     <Skeleton className="h-40 w-full rounded-xl" />
                   </div>
@@ -632,166 +811,231 @@ export function ProjectAssetDetailSheet({
                       {history.isFetching ? "重试中…" : "重试"}
                     </Button>
                   </div>
-                ) : !selectedVersion ? (
-                  <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
-                    尚未创建版本。
-                  </p>
                 ) : (
-                  <div className="space-y-5">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-lg font-semibold">
-                        版本 {selectedVersion.version_number}
-                      </span>
-                      <AssetStatusBadge
-                        status={workflowStatus(selectedVersion)}
-                      />
-                      <time className="text-muted-foreground ml-auto text-xs">
-                        {new Date(selectedVersion.created_at).toLocaleString(
-                          "zh-CN",
-                        )}
-                      </time>
-                    </div>
+                  <div className="border-border/70 border-t pt-5">
+                    {renderAssetEditor(effectiveVersion, {
+                      accountId,
+                      projectId,
+                      item,
+                      canAuthor: canAuthor && !versionSelectionPending,
+                      editing: versionEditing,
+                      onEditingChange: setVersionEditing,
+                      onDirtyChange: setVersionDirty,
+                      onVersionCreated: handleWorkbenchVersionCreated,
+                    })}
+                  </div>
+                )
+              ) : null}
 
-                    {item.scope === "project" &&
-                      versionActions.length > 0 && (
-                        <div className="flex flex-wrap gap-2">
-                          {versionActions.includes("publish") &&
-                            canAuthor && (
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={versionPublishDisabled(
-                                  actionPending ||
-                                    Boolean(selectedRuntimeBlockReason),
-                                  versionDirty,
-                                  versionSelectionPending,
-                                )}
-                                title={
-                                  selectedRuntimeBlockReason ??
-                                  (versionDirty
-                                    ? "请先保存或放弃当前未保存修改"
-                                    : versionSelectionPending
+              {showsVersionHistory ? (
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-sm font-semibold">版本</h2>
+                    {versions.length > 0 && (
+                      <label className="text-muted-foreground flex items-center gap-2 text-xs">
+                        查看
+                        <select
+                          aria-label="查看版本"
+                          value={selectedVersionId}
+                          disabled={versionSelectionPending}
+                          onChange={(event) =>
+                            requestVersionChange(event.target.value)
+                          }
+                          className="border-input bg-background h-8 rounded-md border px-2 text-xs"
+                        >
+                          {versions.map((version) => (
+                            <option key={version.id} value={version.id}>
+                              版本 {version.version_number} ·{" "}
+                              {VERSION_STATUS_LABEL[workflowStatus(version)]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  </div>
+
+                  {history.isLoading ? (
+                    <div className="space-y-3" aria-label="正在加载版本">
+                      <Skeleton className="h-8 w-40" />
+                      <Skeleton className="h-40 w-full rounded-xl" />
+                    </div>
+                  ) : history.error ? (
+                    <div className="border-destructive/30 space-y-3 rounded-xl border p-4">
+                      <ErrorNotice error={history.error} />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={history.isFetching}
+                        onClick={() => void history.refetch()}
+                      >
+                        {history.isFetching ? "重试中…" : "重试"}
+                      </Button>
+                    </div>
+                  ) : !selectedVersion ? (
+                    <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
+                      尚未创建版本。
+                    </p>
+                  ) : (
+                    <div className="space-y-5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-lg font-semibold">
+                          版本 {selectedVersion.version_number}
+                        </span>
+                        <AssetStatusBadge
+                          status={workflowStatus(selectedVersion)}
+                        />
+                        <time className="text-muted-foreground ml-auto text-xs">
+                          {new Date(selectedVersion.created_at).toLocaleString(
+                            "zh-CN",
+                          )}
+                        </time>
+                      </div>
+
+                      {item.scope === "project" &&
+                        versionActions.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            {versionActions.includes("publish") &&
+                              canAuthor && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  disabled={versionPublishDisabled(
+                                    actionPending ||
+                                      Boolean(selectedRuntimeBlockReason),
+                                    versionDirty,
+                                    versionSelectionPending,
+                                  )}
+                                  title={
+                                    selectedRuntimeBlockReason ??
+                                    (versionDirty
+                                      ? "请先保存或放弃当前未保存修改"
+                                      : versionSelectionPending
+                                        ? "正在加载新版本，请稍候"
+                                        : undefined)
+                                  }
+                                  onClick={() =>
+                                    publishSelectedVersion(selectedVersion)
+                                  }
+                                >
+                                  发布版本
+                                </Button>
+                              )}
+                            {versionActions.includes("submit") &&
+                              canAuthor &&
+                              isMcpVersion(selectedVersion) && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  disabled={versionActionDisabled(
+                                    actionPending ||
+                                      Boolean(selectedRuntimeBlockReason),
+                                    versionSelectionPending,
+                                  )}
+                                  title={
+                                    selectedRuntimeBlockReason ??
+                                    (versionSelectionPending
                                       ? "正在加载新版本，请稍候"
                                       : undefined)
-                                }
-                                onClick={() =>
-                                  publishSelectedVersion(selectedVersion)
-                                }
-                              >
-                                发布版本
-                              </Button>
-                            )}
-                          {versionActions.includes("submit") &&
-                            canAuthor &&
-                            isMcpVersion(selectedVersion) && (
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={versionActionDisabled(
-                                  actionPending ||
-                                    Boolean(selectedRuntimeBlockReason),
-                                  versionSelectionPending,
-                                )}
-                                title={
-                                  selectedRuntimeBlockReason ??
-                                  (versionSelectionPending
-                                    ? "正在加载新版本，请稍候"
-                                    : undefined)
-                                }
-                                onClick={() =>
-                                  submit.mutate({
-                                    assetId: item.id,
-                                    versionId: selectedVersion.id,
-                                    input: {
-                                      expected_asset_version: item.version,
-                                    },
-                                  })
-                                }
-                              >
-                                提交审批
-                              </Button>
-                            )}
-                          {versionActions.includes("approve") &&
-                            canApprove &&
-                            isMcpVersion(selectedVersion) && (
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={versionActionDisabled(
-                                  actionPending ||
-                                    Boolean(selectedRuntimeBlockReason),
-                                  versionSelectionPending,
-                                )}
-                                title={
-                                  selectedRuntimeBlockReason ??
-                                  (versionSelectionPending
-                                    ? "正在加载新版本，请稍候"
-                                    : undefined)
-                                }
-                                onClick={() =>
-                                  setApprovalVersion(selectedVersion)
-                                }
-                              >
-                                批准并发布
-                              </Button>
-                            )}
-                        </div>
-                      )}
-
-                    {selectedRuntimeBlockReason ? (
-                      <p role="alert" className="text-destructive text-sm">
-                        {selectedRuntimeBlockReason}
-                      </p>
-                    ) : null}
-
-                    {isMcpVersion(selectedVersion) &&
-                      selectedVersion.workflow_status === "pending_approval" &&
-                      !canApprove && (
-                        <p className="text-muted-foreground rounded-xl border p-4 text-sm">
-                          已提交，正在等待项目 Admin 审批。
-                        </p>
-                      )}
-
-                    <div
-                      key={selectedVersion.id}
-                      className="border-border/70 border-t pt-5"
-                    >
-                      {renderVersion(selectedVersion, {
-                        accountId,
-                        projectId,
-                        item,
-                        canAuthor: canAuthor && !versionSelectionPending,
-                        onDirtyChange: setVersionDirty,
-                        onVersionCreated: handleWorkbenchVersionCreated,
-                      })}
-                    </div>
-
-                    <details className="border-border/70 rounded-xl border px-4 py-3">
-                      <summary className="cursor-pointer text-sm font-medium">
-                        版本技术信息
-                      </summary>
-                      <dl className="mt-3 grid gap-3 text-xs">
-                        {"payload_checksum" in selectedVersion && (
-                          <div>
-                            <dt className="text-muted-foreground">
-                              载荷校验和
-                            </dt>
-                            <dd className="mt-1 font-mono break-all">
-                              {selectedVersion.payload_checksum}
-                            </dd>
+                                  }
+                                  onClick={() =>
+                                    submit.mutate({
+                                      assetId: item.id,
+                                      versionId: selectedVersion.id,
+                                      input: {
+                                        expected_asset_version: item.version,
+                                      },
+                                    })
+                                  }
+                                >
+                                  提交审批
+                                </Button>
+                              )}
+                            {versionActions.includes("approve") &&
+                              canApprove &&
+                              isMcpVersion(selectedVersion) && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  disabled={versionActionDisabled(
+                                    actionPending ||
+                                      Boolean(selectedRuntimeBlockReason),
+                                    versionSelectionPending,
+                                  )}
+                                  title={
+                                    selectedRuntimeBlockReason ??
+                                    (versionSelectionPending
+                                      ? "正在加载新版本，请稍候"
+                                      : undefined)
+                                  }
+                                  onClick={() =>
+                                    setApprovalVersion(selectedVersion)
+                                  }
+                                >
+                                  批准并发布
+                                </Button>
+                              )}
                           </div>
                         )}
-                        <div>
-                          <dt className="text-muted-foreground">创建者</dt>
-                          <dd className="mt-1 font-mono break-all">
-                            {selectedVersion.created_by_user_id}
-                          </dd>
-                        </div>
-                      </dl>
-                    </details>
-                  </div>
-                )}
-              </section>
+
+                      {selectedRuntimeBlockReason ? (
+                        <p role="alert" className="text-destructive text-sm">
+                          {selectedRuntimeBlockReason}
+                        </p>
+                      ) : null}
+
+                      {isMcpVersion(selectedVersion) &&
+                        selectedVersion.workflow_status ===
+                          "pending_approval" &&
+                        !canApprove && (
+                          <p className="text-muted-foreground rounded-xl border p-4 text-sm">
+                            已提交，正在等待项目 Admin 审批。
+                          </p>
+                        )}
+
+                      <div
+                        key={selectedVersion.id}
+                        className="border-border/70 border-t pt-5"
+                      >
+                        {renderVersion?.(selectedVersion, {
+                          accountId,
+                          projectId,
+                          item,
+                          canAuthor: canAuthor && !versionSelectionPending,
+                          editing: versionEditing,
+                          onEditingChange: setVersionEditing,
+                          onDirtyChange: setVersionDirty,
+                          onVersionCreated: handleWorkbenchVersionCreated,
+                        })}
+                      </div>
+
+                      <details className="border-border/70 rounded-xl border px-4 py-3">
+                        <summary className="cursor-pointer text-sm font-medium">
+                          版本技术信息
+                        </summary>
+                        <dl className="mt-3 grid gap-3 text-xs">
+                          {"payload_checksum" in selectedVersion && (
+                            <div>
+                              <dt className="text-muted-foreground">
+                                载荷校验和
+                              </dt>
+                              <dd className="mt-1 font-mono break-all">
+                                {selectedVersion.payload_checksum}
+                              </dd>
+                            </div>
+                          )}
+                          <div>
+                            <dt className="text-muted-foreground">创建者</dt>
+                            <dd className="mt-1 font-mono break-all">
+                              {selectedVersion.created_by_user_id}
+                            </dd>
+                          </div>
+                        </dl>
+                      </details>
+                    </div>
+                  )}
+                </section>
+              ) : null}
 
               <ErrorNotice error={actionError} />
             </div>
@@ -828,21 +1072,39 @@ export function ProjectAssetDetailSheet({
         onApprove={approveVersion}
       />
 
-      {deleteSnapshot !== null && (
+      {skillDeleteSnapshot !== null && (
         <ProjectSkillDeleteDialog
-          key={`${deleteSnapshot.assetId}:${deleteSnapshot.startedAt}`}
-          skillName={deleteSnapshot.skillName}
-          startedAt={deleteSnapshot.startedAt}
+          key={`${skillDeleteSnapshot.assetId}:${skillDeleteSnapshot.startedAt}`}
+          skillName={skillDeleteSnapshot.skillName}
+          startedAt={skillDeleteSnapshot.startedAt}
           pending={deleteSkill.isPending}
           errorMessage={
             deleteSkill.error ? adminAssetErrorMessage(deleteSkill.error) : null
           }
           onOpenChange={(next) => {
             if (next) return;
-            setDeleteSnapshot(null);
+            setSkillDeleteSnapshot(null);
             deleteSkill.reset();
           }}
           onConfirm={() => void confirmSkillDelete()}
+        />
+      )}
+
+      {agentDeleteSnapshot !== null && (
+        <ProjectAgentDeleteDialog
+          key={`${agentDeleteSnapshot.assetId}:${agentDeleteSnapshot.startedAt}`}
+          agentName={agentDeleteSnapshot.agentName}
+          startedAt={agentDeleteSnapshot.startedAt}
+          pending={deleteAgent.isPending}
+          errorMessage={
+            deleteAgent.error ? adminAssetErrorMessage(deleteAgent.error) : null
+          }
+          onOpenChange={(next) => {
+            if (next) return;
+            setAgentDeleteSnapshot(null);
+            deleteAgent.reset();
+          }}
+          onConfirm={() => void confirmAgentDelete()}
         />
       )}
 
@@ -852,10 +1114,15 @@ export function ProjectAssetDetailSheet({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>放弃未保存的文件修改？</DialogTitle>
+            <DialogTitle>
+              {kind === "agents"
+                ? "放弃未保存的 Agent 设置？"
+                : "放弃未保存的文件修改？"}
+            </DialogTitle>
             <DialogDescription>
-              切换版本或关闭详情会清除当前编辑副本，已保存的 Skill
-              版本不会受影响。
+              {kind === "agents"
+                ? "关闭详情会清除四项 Agent 设置的本地修改，已保存设置不会受影响。"
+                : "切换版本或关闭详情会清除当前编辑副本，已保存的 Skill 版本不会受影响。"}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

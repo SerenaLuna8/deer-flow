@@ -6,7 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { AssetListKind, ProjectAssetList } from "@/core/shared-assets";
 
-import { projectAssetCanAuthor } from "./project-asset-view-model";
+import {
+  projectAssetCanAuthor,
+  projectAssetCanCreateVersion,
+} from "./project-asset-view-model";
 
 type ProjectAssetItem = ProjectAssetList["project_items"][number];
 
@@ -28,7 +31,9 @@ export function ProjectAssetSection({
           项目资产
         </h2>
         <p className="text-muted-foreground mt-1 text-sm">
-          只属于当前项目；内容变更通过不可变新版本完成。
+          {kind === "agents"
+            ? "只属于当前项目；Agent 设定在项目 Agent 页面维护，保存后立即生效。"
+            : "只属于当前项目；内容变更通过不可变新版本完成。"}
         </p>
       </div>
       {items.length === 0 ? (
@@ -56,21 +61,26 @@ export function ProjectAssetSection({
                 </div>
               </CardHeader>
               <CardContent className="space-y-4 text-sm">
-                <dl className="grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <dt className="text-muted-foreground text-xs">资产版本</dt>
-                    <dd>{item.version}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground text-xs">发布状态</dt>
-                    <dd>
-                      {item.current_published_version_id
-                        ? "已有发布版本"
-                        : "尚未发布"}
-                    </dd>
-                  </div>
-                </dl>
-                {projectAssetCanAuthor(item, kind) && (
+                {kind !== "agents" ? (
+                  <dl className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <dt className="text-muted-foreground text-xs">资产版本</dt>
+                      <dd>{item.version}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground text-xs">发布状态</dt>
+                      <dd>
+                        {item.current_published_version_id
+                          ? "已有发布版本"
+                          : "尚未发布"}
+                      </dd>
+                    </div>
+                  </dl>
+                ) : null}
+                {projectAssetCanCreateVersion(
+                  kind,
+                  projectAssetCanAuthor(item, kind),
+                ) && (
                   <Button
                     type="button"
                     size="sm"

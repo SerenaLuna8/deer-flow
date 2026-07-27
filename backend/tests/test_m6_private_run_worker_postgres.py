@@ -18,6 +18,7 @@ from app.private_work.run_repository import (
     PrivateRunRecord,
     PrivateRunRepository,
     PrivateRunSettlement,
+    PrivateRunUsageSnapshot,
 )
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.reliability.execution import (
@@ -36,6 +37,7 @@ from deerflow.persistence.jobs.sql import JobOwnerRef, JobRepository
 from deerflow.persistence.private_work.file_repository import (
     PrivateFileRepository,
 )
+from deerflow.persistence.run.sql import RunRepository as TokenRunRepository
 from deerflow.runtime import RunStatus
 from deerflow.runtime.events.models import (
     StreamLeaseProof,
@@ -264,7 +266,24 @@ async def test_stale_job_lease_cannot_publish_private_run_terminal(
 
     class Executor:
         async def execute(self, _execution, _authority):
-            return AgentExecutionResult.succeeded()
+            return AgentExecutionResult.succeeded(
+                attempt_usage=PrivateRunUsageSnapshot(
+                    total_input_tokens=12,
+                    total_output_tokens=3,
+                    total_tokens=15,
+                    llm_call_count=1,
+                    lead_agent_tokens=10,
+                    subagent_tokens=4,
+                    middleware_tokens=1,
+                    token_usage_by_model={
+                        "stale-model": {
+                            "input_tokens": 12,
+                            "output_tokens": 3,
+                            "total_tokens": 15,
+                        }
+                    },
+                ),
+            )
 
     try:
         admitted, claim = await _admit_and_claim(
@@ -294,14 +313,14 @@ async def test_stale_job_lease_cannot_publish_private_run_terminal(
             states = (
                 await session.execute(
                     text(
-                        """SELECT r.status,j.status
+                        """SELECT r.status,j.status,r.total_tokens
                         FROM runs r JOIN jobs j ON j.id=r.job_id
                         WHERE r.run_id=:run_id"""
                     ),
                     {"run_id": admitted.run.run_id},
                 )
             ).one()
-        assert tuple(states) == ("running", "running")
+        assert tuple(states) == ("running", "running", 0)
     finally:
         await seed.engine.dispose()
 
@@ -315,7 +334,23 @@ async def test_transient_failure_requeues_same_run_and_retains_snapshot(
 
     class Executor:
         async def execute(self, _execution, _authority):
-            raise TransientExecutionError("MODEL_INITIALIZATION_FAILED")
+            raise TransientExecutionError(
+                "MODEL_INITIALIZATION_FAILED",
+                attempt_usage=PrivateRunUsageSnapshot(
+                    total_input_tokens=13,
+                    total_output_tokens=2,
+                    total_tokens=15,
+                    llm_call_count=1,
+                    lead_agent_tokens=15,
+                    token_usage_by_model={
+                        "transient-model": {
+                            "input_tokens": 13,
+                            "output_tokens": 2,
+                            "total_tokens": 15,
+                        }
+                    },
+                ),
+            )
 
     try:
         admitted, claim = await _admit_and_claim(
@@ -339,6 +374,7 @@ async def test_transient_failure_requeues_same_run_and_retains_snapshot(
                     text(
                         """SELECT r.run_id,r.status AS run_status,
                         j.status AS job_status,j.public_error_code,
+                        r.total_tokens,r.token_usage_by_model,
                         (SELECT count(*) FROM run_asset_versions a
                          WHERE a.run_id=r.run_id) AS snapshot_count
                         FROM runs r JOIN jobs j ON j.id=r.job_id
@@ -351,6 +387,14 @@ async def test_transient_failure_requeues_same_run_and_retains_snapshot(
         assert row.run_status == "pending"
         assert row.job_status == "retry_wait"
         assert row.public_error_code == "MODEL_INITIALIZATION_FAILED"
+        assert row.total_tokens == 15
+        assert row.token_usage_by_model == {
+            "transient-model": {
+                "input_tokens": 13,
+                "output_tokens": 2,
+                "total_tokens": 15,
+            }
+        }
         assert row.snapshot_count == len(admitted.snapshot.assets)
     finally:
         await seed.engine.dispose()
@@ -452,8 +496,43 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
             executions.append(execution)
             if len(executions) == 1:
                 checkpointer.current = "checkpoint-after-progress"
-                raise TransientExecutionError("MODEL_TEMPORARILY_UNAVAILABLE")
-            return AgentExecutionResult.succeeded()
+                return AgentExecutionResult.failed(
+                    "MODEL_TEMPORARILY_UNAVAILABLE",
+                    attempt_usage=PrivateRunUsageSnapshot(
+                        total_input_tokens=10,
+                        total_output_tokens=2,
+                        total_tokens=12,
+                        llm_call_count=1,
+                        lead_agent_tokens=8,
+                        subagent_tokens=3,
+                        middleware_tokens=1,
+                        token_usage_by_model={
+                            "retry-model": {
+                                "input_tokens": 10,
+                                "output_tokens": 2,
+                                "total_tokens": 12,
+                            }
+                        },
+                    ),
+                )
+            return AgentExecutionResult.succeeded(
+                attempt_usage=PrivateRunUsageSnapshot(
+                    total_input_tokens=20,
+                    total_output_tokens=5,
+                    total_tokens=25,
+                    llm_call_count=2,
+                    lead_agent_tokens=20,
+                    subagent_tokens=4,
+                    middleware_tokens=1,
+                    token_usage_by_model={
+                        "retry-model": {
+                            "input_tokens": 20,
+                            "output_tokens": 5,
+                            "total_tokens": 25,
+                        }
+                    },
+                ),
+            )
 
     try:
         admitted, first_claim = await _admit_and_claim(
@@ -527,6 +606,26 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
         assert configurable["checkpoint_ns"] == ""
         assert "checkpoint_id" not in configurable
         assert "checkpoint_map" not in configurable
+        async with seed.factory() as session:
+            usage = (
+                await session.execute(
+                    text(
+                        """SELECT total_input_tokens,total_output_tokens,
+                        total_tokens,llm_call_count,lead_agent_tokens,
+                        subagent_tokens,middleware_tokens,token_usage_by_model
+                        FROM runs WHERE run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+        assert tuple(usage[:-1]) == (30, 7, 37, 3, 28, 7, 2)
+        assert usage.token_usage_by_model == {
+            "retry-model": {
+                "input_tokens": 30,
+                "output_tokens": 7,
+                "total_tokens": 37,
+            }
+        }
     finally:
         await seed.engine.dispose()
 
@@ -900,7 +999,22 @@ async def test_ambiguous_side_effect_is_dead_and_never_retried(
 
     class Executor:
         async def execute(self, _execution, _authority):
-            raise AmbiguousExternalSideEffect
+            raise AmbiguousExternalSideEffect(
+                attempt_usage=PrivateRunUsageSnapshot(
+                    total_input_tokens=21,
+                    total_output_tokens=4,
+                    total_tokens=25,
+                    llm_call_count=1,
+                    lead_agent_tokens=25,
+                    token_usage_by_model={
+                        "ambiguous-model": {
+                            "input_tokens": 21,
+                            "output_tokens": 4,
+                            "total_tokens": 25,
+                        }
+                    },
+                )
+            )
 
     def jobs(session):
         return JobRepository(
@@ -939,21 +1053,30 @@ async def test_ambiguous_side_effect_is_dead_and_never_retried(
                         r.error AS run_error,j.status AS job_status,
                         j.retry_safety,j.public_error_code,
                         (SELECT count(*) FROM dead_jobs d
-                         WHERE d.job_id=j.id) AS dead_count
+                         WHERE d.job_id=j.id) AS dead_count,
+                        r.total_tokens,r.token_usage_by_model
                         FROM runs r JOIN jobs j ON j.id=r.job_id
                         WHERE r.run_id=:run_id"""
                     ),
                     {"run_id": admitted.run.run_id},
                 )
             ).one()
-        assert tuple(row) == (
+        assert tuple(row[:-1]) == (
             "error",
             "SIDE_EFFECT_STATE_UNKNOWN",
             "dead",
             "unknown",
             "SIDE_EFFECT_STATE_UNKNOWN",
             1,
+            25,
         )
+        assert row.token_usage_by_model == {
+            "ambiguous-model": {
+                "input_tokens": 21,
+                "output_tokens": 4,
+                "total_tokens": 25,
+            }
+        }
     finally:
         await seed.engine.dispose()
 
@@ -984,6 +1107,24 @@ async def test_production_executor_materializes_running_snapshot_and_calls_runne
         captured["record"] = record
         captured.update(kwargs)
         assert isinstance(kwargs["graph_input"]["messages"][0], BaseMessage)
+        await run_manager.update_run_completion(
+            record.run_id,
+            status=RunStatus.success.value,
+            total_input_tokens=120,
+            total_output_tokens=30,
+            total_tokens=150,
+            llm_call_count=2,
+            lead_agent_tokens=100,
+            subagent_tokens=40,
+            middleware_tokens=10,
+            token_usage_by_model={
+                "test-model": {
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "total_tokens": 150,
+                },
+            },
+        )
         await run_manager.set_status(record.run_id, RunStatus.success)
 
     try:
@@ -992,7 +1133,7 @@ async def test_production_executor_materializes_running_snapshot_and_calls_runne
             thread_id=f"m6-production-executor-{uuid.uuid4()}",
         )
         app_config = SimpleNamespace(
-            get_model_config=lambda name: object() if name == "test-model" else None,
+            get_model_config=lambda name: SimpleNamespace(name=name) if name == "test-model" else None,
             skills=SimpleNamespace(container_path="/mnt/skills"),
             run_events=SimpleNamespace(track_token_usage=True),
         )
@@ -1014,23 +1155,73 @@ async def test_production_executor_materializes_running_snapshot_and_calls_runne
             JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
         )
         await settlement.commit()
+        await settlement.commit()
 
         assert captured["checkpoint_context"].resource_scope == seed.owner_a.resource_scope
         assert captured["checkpoint_boundary"].execution_job_id == admitted.job.job_id
         assert captured["interrupt_before"] == "*"
         assert captured["record"].run_id == admitted.run.run_id
         async with seed.factory() as session:
-            statuses = (
+            persisted = (
                 await session.execute(
                     text(
-                        """SELECT r.status,j.status
+                        """SELECT r.status,j.status,
+                        r.total_input_tokens,r.total_output_tokens,r.total_tokens,
+                        r.llm_call_count,r.lead_agent_tokens,r.subagent_tokens,
+                        r.middleware_tokens,r.token_usage_by_model
                         FROM runs r JOIN jobs j ON j.id=r.job_id
                         WHERE r.run_id=:run_id"""
                     ),
                     {"run_id": admitted.run.run_id},
                 )
             ).one()
-        assert tuple(statuses) == ("success", "succeeded")
+        assert tuple(persisted[:-1]) == (
+            "success",
+            "succeeded",
+            120,
+            30,
+            150,
+            2,
+            100,
+            40,
+            10,
+        )
+        assert persisted.token_usage_by_model == {
+            "test-model": {
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "total_tokens": 150,
+            },
+        }
+        token_store = TokenRunRepository(seed.factory)
+        project_owner_totals = await token_store.aggregate_tokens_by_thread(
+            admitted.run.thread_id,
+            scope=seed.owner_a_scope,
+        )
+        assert project_owner_totals == {
+            "total_tokens": 150,
+            "total_input_tokens": 120,
+            "total_output_tokens": 30,
+            "total_runs": 1,
+            "by_model": {"test-model": {"tokens": 150, "runs": 1}},
+            "by_caller": {
+                "lead_agent": 100,
+                "subagent": 40,
+                "middleware": 10,
+            },
+        }
+        assert (
+            await token_store.aggregate_tokens_by_thread(
+                admitted.run.thread_id,
+                scope=seed.owner_b_scope,
+            )
+        )["total_tokens"] == 0
+        assert (
+            await token_store.aggregate_tokens_by_thread(
+                admitted.run.thread_id,
+                scope=seed.project_b_owner_a_scope,
+            )
+        )["total_tokens"] == 0
     finally:
         await seed.engine.dispose()
 

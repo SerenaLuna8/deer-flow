@@ -119,13 +119,19 @@ def test_system_asset_admin_routes_are_read_only_while_credentials_remain_mutabl
     assert "POST" in methods_by_path["/api/admin/assets/credentials/{credential_id}/revoke"]
 
 
-def test_admin_project_skill_routes_do_not_expose_delete_or_archive() -> None:
+def test_admin_project_asset_lifecycle_routes_keep_kind_specific_boundaries() -> None:
     methods_by_path = {route.path: set(route.methods or ()) for route in admin_assets.admin_project_router.routes}
-    detail = "/api/admin/projects/{project_id}/assets/skills/{asset_id}"
+    skill_detail = "/api/admin/projects/{project_id}/assets/skills/{asset_id}"
+    agent_detail = "/api/admin/projects/{project_id}/assets/agents/{asset_id}"
+    mcp_detail = "/api/admin/projects/{project_id}/assets/mcp-servers/{asset_id}"
 
-    assert methods_by_path[detail] == {"GET"}
-    assert f"{detail}/archive" not in methods_by_path
-    assert methods_by_path[f"{detail}/suspend"] == {"POST"}
+    assert methods_by_path[skill_detail] == {"GET"}
+    assert f"{skill_detail}/archive" not in methods_by_path
+    assert methods_by_path[f"{skill_detail}/suspend"] == {"POST"}
+    assert f"{agent_detail}/archive" not in methods_by_path
+    assert methods_by_path[f"{agent_detail}/suspend"] == {"POST"}
+    assert methods_by_path[f"{mcp_detail}/archive"] == {"POST"}
+    assert methods_by_path[f"{mcp_detail}/suspend"] == {"POST"}
 
 
 def test_system_mcp_grant_route_only_configures_published_packaged_version() -> None:

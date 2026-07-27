@@ -15,7 +15,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { CREDENTIAL_PAYLOAD_GROUPS } from "@/core/shared-assets";
 import type {
-  AgentVersionInput,
   AssetListKind,
   AssetSummary,
   CreateCredentialInput,
@@ -28,10 +27,8 @@ import type {
 import { isMcpRuntimeTransport } from "@/core/shared-assets/mcp-runtime";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
-export type VersionAuthoringInput =
-  | AgentVersionInput
-  | SkillVersionInput
-  | McpVersionInput;
+type VersionedKind = Exclude<MutableKind, "agents">;
+export type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
 
 export type CredentialSecretInitialField = {
   group: CredentialPayloadGroup;
@@ -292,8 +289,9 @@ export function CreateAssetDialog({
         <DialogHeader>
           <DialogTitle>创建 {label}</DialogTitle>
           <DialogDescription>
-            先创建{scope === "system" ? "系统级" : "项目级"}
-            资产，再在资产中创建并发布版本。
+            {scope === "project" && kind === "skills"
+              ? "创建后会自动生成 SKILL.md 草稿版本（已填入基础模板），Skill 默认停用。"
+              : `先创建${scope === "system" ? "系统级" : "项目级"}资产，再在资产中创建并发布版本。`}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -339,116 +337,6 @@ export function CreateAssetDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-export type AgentModelOption = {
-  name: string;
-  displayName: string;
-};
-
-export type AgentDependencyOption = {
-  id: string;
-  label: string;
-};
-
-function DependencyVersionPicker({
-  name,
-  label,
-  options,
-}: {
-  name: "skill_version_ids" | "mcp_version_ids";
-  label: string;
-  options: readonly AgentDependencyOption[];
-}) {
-  return (
-    <label className="grid gap-2 text-sm">
-      {label}
-      <select
-        name={name}
-        multiple
-        size={Math.min(Math.max(options.length, 2), 6)}
-        className="border-input bg-background min-h-20 rounded-md border px-3 py-2 text-sm"
-      >
-        {options.map((option) => (
-          <option key={option.id} value={option.id} title={option.id}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-      <span className="text-muted-foreground text-xs">
-        {options.length > 0
-          ? "按住 Command（macOS）或 Ctrl（Windows/Linux）可多选；保存时固定到所选精确版本。"
-          : "当前没有可选择的已发布版本。"}
-      </span>
-    </label>
-  );
-}
-
-export function AgentVersionFields({
-  modelOptions = [],
-  skillVersionOptions = [],
-  mcpVersionOptions = [],
-  modelsLoading = false,
-  modelsError = false,
-}: {
-  modelOptions?: readonly AgentModelOption[];
-  skillVersionOptions?: readonly AgentDependencyOption[];
-  mcpVersionOptions?: readonly AgentDependencyOption[];
-  modelsLoading?: boolean;
-  modelsError?: boolean;
-}) {
-  return (
-    <>
-      <label className="grid gap-2 text-sm">
-        描述
-        <Textarea name="description" />
-      </label>
-      <label className="grid gap-2 text-sm">
-        角色设定（Soul）
-        <Textarea name="soul" />
-      </label>
-      <label className="grid gap-2 text-sm">
-        逻辑模型
-        <select
-          name="model_ref"
-          required
-          defaultValue=""
-          disabled={modelsLoading || modelsError || modelOptions.length === 0}
-          className="border-input bg-background h-9 rounded-md border px-3 text-sm"
-        >
-          <option value="" disabled>
-            {modelsLoading
-              ? "正在加载模型…"
-              : modelsError
-                ? "模型配置暂不可用"
-                : "选择逻辑模型"}
-          </option>
-          {modelOptions.map((model) => (
-            <option key={model.name} value={model.name}>
-              {model.displayName}（{model.name}）
-            </option>
-          ))}
-        </select>
-        <span className="text-muted-foreground text-xs">
-          仅保存 /api/models 返回的逻辑名称，不保存 provider 或底层模型 ID。
-        </span>
-      </label>
-      <label className="grid gap-2 text-sm">
-        工具组（逗号或换行分隔）
-        <Textarea name="tool_groups" />
-      </label>
-      <DependencyVersionPicker
-        name="skill_version_ids"
-        label="Skill 依赖版本"
-        options={skillVersionOptions}
-      />
-      <DependencyVersionPicker
-        name="mcp_version_ids"
-        label="MCP 依赖版本"
-        options={mcpVersionOptions}
-      />
-    </>
   );
 }
 
@@ -552,25 +440,10 @@ export function McpVersionFields() {
 }
 
 export function versionInput(
-  kind: MutableKind,
+  kind: VersionedKind,
   form: FormData,
   expectedAssetVersion: number,
 ): VersionAuthoringInput {
-  if (kind === "agents") {
-    return {
-      description: field(form, "description"),
-      soul: field(form, "soul"),
-      model_ref: field(form, "model_ref").trim(),
-      tool_groups: list(form.get("tool_groups")),
-      skill_version_ids: form
-        .getAll("skill_version_ids")
-        .flatMap((value) => list(value)),
-      mcp_version_ids: form
-        .getAll("mcp_version_ids")
-        .flatMap((value) => list(value)),
-      expected_asset_version: expectedAssetVersion,
-    };
-  }
   if (kind === "skills") {
     return {
       files: [
@@ -625,24 +498,14 @@ export function CreateVersionDialog({
   open,
   pending,
   errorMessage,
-  modelOptions,
-  skillVersionOptions,
-  mcpVersionOptions,
-  modelsLoading = false,
-  modelsError = false,
   onOpenChange,
   onSubmit,
 }: {
-  kind: MutableKind;
+  kind: VersionedKind;
   asset: AssetSummary;
   open: boolean;
   pending: boolean;
   errorMessage: string | null;
-  modelOptions?: readonly AgentModelOption[];
-  skillVersionOptions?: readonly AgentDependencyOption[];
-  mcpVersionOptions?: readonly AgentDependencyOption[];
-  modelsLoading?: boolean;
-  modelsError?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: VersionAuthoringInput) => void;
 }) {
@@ -666,15 +529,7 @@ export function CreateVersionDialog({
             );
           }}
         >
-          {kind === "agents" ? (
-            <AgentVersionFields
-              modelOptions={modelOptions}
-              skillVersionOptions={skillVersionOptions}
-              mcpVersionOptions={mcpVersionOptions}
-              modelsLoading={modelsLoading}
-              modelsError={modelsError}
-            />
-          ) : kind === "skills" ? (
+          {kind === "skills" ? (
             <SkillVersionFields assetSlug={asset.slug} />
           ) : (
             <McpVersionFields />
@@ -685,14 +540,7 @@ export function CreateVersionDialog({
             </p>
           )}
           <DialogFooter>
-            <Button
-              type="submit"
-              disabled={
-                pending ||
-                (kind === "agents" &&
-                  (modelsLoading || modelsError || !modelOptions?.length))
-              }
-            >
+            <Button type="submit" disabled={pending}>
               {pending ? "创建中…" : "创建版本"}
             </Button>
           </DialogFooter>

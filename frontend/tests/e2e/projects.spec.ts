@@ -6,6 +6,7 @@ import { mockLangGraphAPI } from "./utils/mock-api";
 
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const SECOND_PROJECT_ID = "10000000-0000-4000-8000-000000000002";
+const TOKEN_SERIES_START = Date.parse("2026-07-26T13:00:00.000Z");
 
 const baseProject: Project = {
   id: PROJECT_ID,
@@ -37,6 +38,30 @@ const baseProject: Project = {
   membership_version: 1,
   request_id: "request-initial",
 };
+
+function makeTokenUsageSeries() {
+  const points = Array.from({ length: 24 }, (_, index) => ({
+    bucket_start: new Date(
+      TOKEN_SERIES_START + index * 60 * 60 * 1000,
+    ).toISOString(),
+    input_tokens: index === 22 ? 120 : index === 23 ? 80 : 0,
+    output_tokens: index === 22 ? 30 : index === 23 ? 20 : 0,
+    total_tokens: index === 22 ? 170 : index === 23 ? 130 : 0,
+  }));
+  return {
+    window_start: points[0]!.bucket_start,
+    window_end: new Date(
+      TOKEN_SERIES_START + (23 * 60 + 30) * 60 * 1000,
+    ).toISOString(),
+    bucket_minutes: 60,
+    totals: {
+      input_tokens: 200,
+      output_tokens: 50,
+      total_tokens: 300,
+    },
+    points,
+  };
+}
 
 type ProjectMock = {
   projects: () => Project[];
@@ -316,6 +341,103 @@ test("desktop project menu collapses to icon navigation and expands again", asyn
   );
 });
 
+test("project token trend shows the hourly breakdown on hover and keyboard focus", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await mockProjectsAPI(page, [
+    {
+      ...baseProject,
+      capabilities: [...baseProject.capabilities, "project.usage.read"],
+    },
+  ]);
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/usage/token-series`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeTokenUsageSeries()),
+      }),
+  );
+
+  await page.goto("/projects/research-lab");
+  const chart = page.getByTestId("project-token-usage");
+  await expect(chart).toBeVisible();
+
+  const latestPoint = chart.locator('[data-token-usage-index="23"]');
+  await latestPoint.hover();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText(/(?:总计|Total)\s*130/u);
+  await expect(tooltip).toContainText(/(?:输入|Input)\s*80/u);
+  await expect(tooltip).toContainText(/(?:输出|Output)\s*20/u);
+
+  await page.mouse.move(0, 0);
+  await expect(tooltip).toBeHidden();
+
+  await latestPoint.focus();
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText(/(?:总计|Total)\s*130/u);
+  await expect(tooltip).toContainText(/(?:输入|Input)\s*80/u);
+  await expect(tooltip).toContainText(/(?:输出|Output)\s*20/u);
+});
+
+test("desktop project menu stays fixed while long project content scrolls", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  mockLangGraphAPI(page);
+  await mockProjectsAPI(page, [
+    {
+      ...baseProject,
+      capabilities: [...baseProject.capabilities, "project.usage.read"],
+    },
+  ]);
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/usage/token-series`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeTokenUsageSeries()),
+      }),
+  );
+
+  await page.goto("/projects/research-lab");
+  const projectHome = page.getByTestId("project-home");
+  await expect(projectHome).toBeVisible();
+  await expect(page.getByTestId("project-token-usage")).toBeVisible();
+
+  const menu = page.getByRole("complementary", { name: "项目菜单栏" });
+  const account = menu.getByRole("button", { name: "账户" });
+  const menuBefore = await menu.boundingBox();
+  const accountBefore = await account.boundingBox();
+
+  expect(menuBefore).not.toBeNull();
+  expect(accountBefore).not.toBeNull();
+  await page.evaluate(() =>
+    window.scrollTo(0, document.documentElement.scrollHeight),
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY))
+    .toBeGreaterThan(100);
+
+  const menuAfter = await menu.boundingBox();
+  const accountAfter = await account.boundingBox();
+  expect(menuAfter).not.toBeNull();
+  expect(accountAfter).not.toBeNull();
+  expect(Math.abs(menuAfter!.y - menuBefore!.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(menuAfter!.y + menuAfter!.height - 720)).toBeLessThanOrEqual(
+    1,
+  );
+  expect(Math.abs(accountAfter!.y - accountBefore!.y)).toBeLessThanOrEqual(1);
+  expect(accountAfter!.y + accountAfter!.height).toBeLessThanOrEqual(720);
+
+  await account.click();
+  await expect(page.getByRole("menuitem", { name: "系统设置" })).toBeVisible();
+});
+
 test("project workbench supports create, search, pin, edit, enter, and return", async ({
   page,
 }) => {
@@ -372,7 +494,7 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
   await expect(page).toHaveURL(/\/projects\/research-lab$/);
   await expect(page.getByTestId("project-home")).toBeVisible();
   await expect(page.getByRole("link", { name: "项目概览" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "成员与邀请" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "项目成员" })).toBeVisible();
   await expect(page.getByRole("link", { name: "项目设置" })).toBeVisible();
   await page.getByRole("button", { name: "账户" }).click();
   await expect(
@@ -390,7 +512,7 @@ test("project workbench supports create, search, pin, edit, enter, and return", 
     "research-lab",
   );
 
-  await page.getByRole("link", { name: "成员与邀请" }).click();
+  await page.getByRole("link", { name: "项目成员" }).click();
   await expect(page).toHaveURL(/\/projects\/research-lab\/members$/);
   await expect(
     page.getByRole("heading", { name: "成员与邀请", level: 1 }),
@@ -566,7 +688,22 @@ test("project home omits private-work overview sections in dark mobile layout", 
     page.getByRole("button", { name: "打开项目导航" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "打开项目导航" }).click();
-  await expect(page.getByRole("link", { name: "成员与邀请" })).toBeVisible();
+  const mobileNavigation = page.getByRole("navigation", {
+    name: "项目导航",
+  });
+  await expect(
+    mobileNavigation.getByRole("link", { name: "项目成员" }),
+  ).toBeVisible();
+  await expect(
+    mobileNavigation
+      .getByRole("region", { name: "能力" })
+      .getByRole("link", { name: "Memory" }),
+  ).toBeVisible();
+  await expect(
+    mobileNavigation
+      .getByRole("region")
+      .getByRole("link", { name: "项目概览" }),
+  ).toHaveCount(0);
   await expect(page.getByRole("link", { name: "项目设置" })).toBeVisible();
   await expect(page.getByRole("link", { name: "返回工作空间" })).toBeVisible();
   await page.keyboard.press("Escape");

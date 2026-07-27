@@ -52,7 +52,7 @@ make check-db
 make start
 ```
 
-After future revisions are added, for an existing database at a supported ancestor revision:
+After future revisions are added, for an existing database at a verified older committed revision:
 
 ```bash
 # DATABASE_URL names the existing target; no administrator URL is required.
@@ -79,26 +79,27 @@ does not acquire the Scheduler ownership lock or start polling.
 
 ## Forward-only PostgreSQL migrations
 
-`0001_project_saas_baseline.py` is the immutable merged baseline.
-`0002_project_skill_hard_delete.py` adds the controlled project-Skill package deletion boundary,
-and `0003_project_skill_unique_name.py` is the current linear head that makes project Skill
-display names case-insensitively unique within each project. Every later schema change adds
-another linear Alembic revision; never edit, squash, or restamp an existing revision.
-When upgrading an exact `0001` or `0002` ancestor, `0003` preserves every Skill row, keeps the
-earliest `(created_at, id)` display name in each project-local case-insensitive duplicate group,
-and deterministically suffixes later names without changing their slug, ID, or asset version.
+`0001_project_saas_baseline.py` is the immutable merged baseline and the single current head.
+It already contains the schema, relationships, and constraints required for controlled
+project-Skill package hard deletion, case-insensitive project-local Skill name uniqueness,
+the four logical Agent documents (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md`), and
+private owner-scoped Agent Builder sessions plus idempotent operations.
+
+The first future schema change must add a new linear `0002` Alembic revision. Every subsequent
+change continues that forward-only chain; never edit, squash, restamp, or replace the frozen
+baseline or any later committed revision.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the
-named empty target if needed, applies the complete committed migration chain through head,
+named empty target if needed, applies the single current baseline,
 seeds the packaged system asset catalog, initializes the LangGraph checkpointer/store schema,
 and bootstraps the default project. The application role must be an ordinary non-superuser.
 
-`make migrate-db` uses only `DATABASE_URL` and upgrades an existing database from a verified,
-known ancestor revision by applying its pending committed migrations through head. It never
-creates the database and never seeds the catalog, initializes LangGraph, or bootstraps a default
-project. Runtime startup only performs read-only validation: an ancestor revision reports
-migration required, while an unknown revision, unversioned nonempty schema, or catalog drift
-fails closed without DDL or repair.
+An existing database for the current release must already match the exact baseline catalog.
+`make migrate-db` uses only `DATABASE_URL` and is reserved for future committed revisions; once
+such revisions exist, it may apply pending migrations from a verified older committed revision
+through head. It never creates the database and never seeds the catalog, initializes LangGraph,
+or bootstraps a default project. Runtime startup only performs read-only validation. An unknown
+revision, unversioned nonempty schema, or catalog drift fails closed without DDL or repair.
 
 `make check-db` is also read-only. It reports current/head revision, required application and
 LangGraph relations, and whether setup, migration, or operator intervention is required without
@@ -207,6 +208,49 @@ publish versions while suspended; activation is a separate capability-checked tr
 requires a published version. Resolution and runtime materialization accept only active,
 published Skills. Project Skill display names are case-insensitively unique within one project;
 different projects may use the same display name.
+Interactive project Skill creation atomically writes the suspended asset and version 1 Draft
+with one backend-generated root `SKILL.md` template in the same transaction, including quota
+reservation and both governance events. It never publishes that template, never leaves an
+asset without its initial version, and returns the final asset revision after both writes.
+Every later UI-authored version is a fork of the exact selected immutable version; there is no
+independent blank-version UI path.
+Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` entries are logical UI documents
+backed by fields on the immutable Agent version; they are not filesystem assets or a separate
+version graph. Saving them against a published Agent atomically clones and publishes the current
+runtime configuration before moving the published pointer. An Agent without a published runtime
+version receives an internal Draft that later runtime-version authoring inherits. New Agent
+payloads use checksum schema v2; migrated and packaged v1 rows retain their exact legacy
+Soul-only checksum and `<soul>` content wrapper, while runtime placement is intentionally
+promoted to the same highest project-configurable tier as v2 profiles. Worker renders the
+admitted four-field bundle after
+other project-configurable instructions, making it the highest project-configurable tier, and
+places it immediately before the final platform critical reminders. Platform authorization,
+confidentiality, and isolation invariants remain authoritative wherever they appear in the
+template. Worker passes the same redacted in-memory bundle to subagents without metadata or log
+serialization.
+Project and admin-project Gateway APIs expose Agent revision history as read-only data and do
+not register manual Agent-version creation or publish mutations. Builder confirmation and
+instruction saving continue to create or advance immutable revisions through internal service
+operations; Run admission and snapshots continue to pin the exact published revision.
+Agent creation uses a dedicated project-and-owner scoped Builder session, not an ordinary
+private Thread or Run. Creating the session stores only the normalized name and does not call a
+model or create an Agent. Each generation turn builds a bounded, server-authorized context and
+stores only validated clarification/candidate results; raw prompts are never attached to tracing.
+Final confirmation is one transaction that creates the project Agent as `suspended`, publishes
+complete version 1 with all four logical documents, advances the pointer, and marks the Builder
+session completed. The public confirmation response returns only the completed session and Agent;
+the internal revision is not exposed. Project-local Agent slugs remain unique. Interrupted generation is recoverable,
+and retention removes Builder messages and blueprints with the exact project/owner private scope.
+Agent lifecycle does not expose an archive mutation. Project and project-override APIs retain
+capability-checked activate/suspend transitions; project UI labels these as enable/disable. A
+project member with `shared_assets.edit` may hard-delete an unreferenced project Agent package,
+including every version and dependency-ref row. Any retained Thread, Automation, or exact Run
+snapshot reference rejects deletion with conflict; deletion never cascades into private work.
+Completed private Builder history is retained with a deleted-Agent tombstone. System Agents and
+platform override routes never expose Agent deletion. MCP archive/suspend and Skill
+activate/suspend remain independent. Historical Agent rows already carrying the frozen-schema
+`archived` status remain unreadable to execution; removing the API does not rewrite published
+migrations or historical data.
 Agent version authoring rejects a dependency set containing duplicate Skill slugs across
 system and project scope before that layout can become ambiguous. Worker materializes MCP
 secrets only after current capability, exact selected version/checksum,
@@ -252,10 +296,15 @@ falls back to the issuing AI tool call and callback tags, so provider-local call
 leak nested reasoning or tool output into the user conversation. Run-level message counts and
 last-answer summaries are lead-only.
 
+Subagents inherit the exact admitted Agent profile, but project-authored Agent/Skill/MCP text is
+followed by a final platform security and confidentiality reminder in their single SystemMessage.
 For a private Run, Worker also installs only the exact admitted MCP proxy objects in internal
 runtime context. Delegated Agents disable global MCP/ACP discovery and marshal each proxy call
 back to the owner Worker loop, so the same authorization, grant, Credential, endpoint, and
 side-effect checks run for every delegated invocation.
+A `general-purpose` subagent without a command-execution tool rejects explicit Shell/Python
+execution requests before creating its model Agent and returns a structured failed result; it
+must never fabricate output or loop through wrapper files as a substitute for execution.
 
 ## Project APIs
 
@@ -269,14 +318,21 @@ All private and governance APIs are project-scoped:
   readiness;
 - `/api/projects/{project_id}/agents`, `skills`, `mcp-servers`, and `credentials` for visible
   project/system assets and project bindings;
-- `/api/projects/{project_id}/usage` and `/api/projects/{project_id}/audit` for project
-  governance;
+- `/api/projects/{project_id}/usage`,
+  `/api/projects/{project_id}/usage/token-series`, and
+  `/api/projects/{project_id}/audit` for project governance;
 - `/api/admin/assets` and `/api/admin/operations` for authenticated system administration.
 
 Project input polish requires both `private_work.create` and `shared_assets.execute`, locks the
 Thread, and validates the exact Agent/Credential closure before the auxiliary model call.
 Channel inbound must resolve one connected PostgreSQL row carrying exact
 account/project/owner/connection authority before it can create a private Thread, Run, or job.
+
+The project Token series is a `project.usage.read` aggregate across owners in one project. It
+returns exactly 24 consecutive UTC hour buckets, assigns terminal Run counters by durable Job
+settlement time, and zero-fills missing buckets. The current-hour bucket is partial. The query
+must pin PostgreSQL bucketing to UTC and must not expose Run, Thread, owner, model, or payload
+identifiers.
 
 ## Quota, audit, and retention
 
@@ -291,6 +347,10 @@ and either project-Skill package deletion or project retention releases each exa
 reservation before physical deletion. Project Skill deletion is unavailable for system assets
 and fails closed while an immutable Agent dependency or admitted Run snapshot still references
 the package.
+Private Run file finalization is separate from the ten-file upload batch contract. It scans at
+most 2,000 regular workspace/output files within a 10,000-entry traversal boundary; directories
+do not consume the file count. Per-file and 100 MiB total byte limits apply only to files created
+or changed by the current Run, not to the restored cumulative Thread workspace.
 Gateway authoring and the explicit project-Skill import CLI use the same `AppConfig.quotas`
 defaults. Archive-creation requests have a scoped 160 MiB wire limit at both the ASGI receive
 boundary and each Nginx entry point, before JSON/Pydantic or multipart route processing.

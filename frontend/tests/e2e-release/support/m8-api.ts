@@ -98,22 +98,31 @@ const automationSchema = z
   .object({ id: z.string().min(1), version: z.number().int().positive() })
   .passthrough();
 
-const assetMutationSchema = z
-  .object({
-    item: z
-      .object({ id: uuidSchema, version: z.number().int().positive() })
-      .passthrough(),
-  })
-  .passthrough();
-
-const agentVersionMutationSchema = z
+const agentBuilderSessionResponseSchema = z
   .object({
     data: z
       .object({
         id: uuidSchema,
-        workflow_status: z.enum(["draft", "published", "archived"]),
-        model_ref: z.string(),
-        tool_groups: z.array(z.string()),
+        revision: z.number().int().positive(),
+        status: z.string().min(1),
+        blueprint_checksum: z.string().length(64).nullable(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+const agentBuilderCommitResponseSchema = z
+  .object({
+    data: z
+      .object({
+        agent: z
+          .object({
+            id: uuidSchema,
+            version: z.number().int().positive(),
+            status: z.literal("suspended"),
+            current_published_version_id: uuidSchema,
+          })
+          .passthrough(),
       })
       .passthrough(),
   })
@@ -407,52 +416,74 @@ export async function createPinnedLiveAgent(
   await expectStatus(current, 200);
   const owner = accountResponseSchema.parse(await current.json());
   const suffix = crypto.randomUUID().replaceAll("-", "");
-  const created = await context.request.post(
-    `/api/projects/${project.id}/agents`,
-    {
-      data: {
-        slug: `m8-live-${suffix.slice(0, 16)}`,
-        display_name: "M8 live synthetic Agent",
-      },
-      headers: await csrfHeaders(context),
+  const builderBase = `/api/projects/${project.id}/agent-builder/sessions`;
+  const created = await context.request.post(builderBase, {
+    data: {
+      slug: `m8-live-${suffix.slice(0, 16)}`,
+      display_name: "M8 live synthetic Agent",
+      idempotency_key: `m8-create-${suffix}`,
     },
-  );
+    headers: await csrfHeaders(context),
+  });
   await expectStatus(created, 201);
-  const asset = assetMutationSchema.parse(await created.json()).item;
-  const versionResponse = await context.request.post(
-    `/api/projects/${project.id}/agents/${asset.id}/versions`,
+  const session = agentBuilderSessionResponseSchema.parse(
+    await created.json(),
+  ).data;
+  const proposedResponse = await context.request.post(
+    `${builderBase}/${session.id}/turns`,
     {
       data: {
-        description: "M8 bounded live release Agent",
-        soul: "Follow the synthetic request and use only the approved file tools.",
-        model_ref: options.modelRef,
-        tool_groups: options.toolGroups,
-        skill_version_ids: [],
-        mcp_version_ids: [],
-        expected_asset_version: asset.version,
+        input: {
+          kind: "blueprint_update",
+          blueprint: {
+            description: "M8 bounded live release Agent",
+            agents_instructions:
+              "# AGENTS.md\n\nComplete the synthetic release probe using only the approved file tools.",
+            soul: "# SOUL.md\n\nBe precise, bounded, and deterministic.",
+            identity: "# IDENTITY.md\n\nYou are the M8 live release probe Agent.",
+            user_context:
+              "# USER.md\n\nThe user expects the exact requested file artifact.",
+            model_ref: options.modelRef,
+            tool_groups: options.toolGroups,
+            skill_version_ids: [],
+            mcp_version_ids: [],
+          },
+        },
+        expected_revision: session.revision,
+        idempotency_key: `m8-blueprint-${suffix}`,
       },
       headers: await csrfHeaders(context),
     },
   );
-  await expectStatus(versionResponse, 201);
-  const version = agentVersionMutationSchema.parse(
-    await versionResponse.json(),
+  await expectStatus(proposedResponse, 200);
+  const proposed = agentBuilderSessionResponseSchema.parse(
+    await proposedResponse.json(),
   ).data;
-  expect(version.model_ref).toBe(options.modelRef);
-  expect(version.tool_groups).toEqual(options.toolGroups);
-  const publishedResponse = await context.request.post(
-    `/api/projects/${project.id}/agents/${asset.id}/versions/${version.id}/publish`,
+  expect(proposed.status).toBe("proposal_ready");
+  expect(proposed.blueprint_checksum).toBeTruthy();
+  const committedResponse = await context.request.post(
+    `${builderBase}/${session.id}/commit`,
     {
-      data: { expected_asset_version: asset.version + 1 },
+      data: {
+        expected_revision: proposed.revision,
+        expected_blueprint_checksum: proposed.blueprint_checksum,
+        idempotency_key: `m8-commit-${suffix}`,
+      },
       headers: await csrfHeaders(context),
     },
   );
-  await expectStatus(publishedResponse, 200);
-  const published = agentVersionMutationSchema.parse(
-    await publishedResponse.json(),
-  ).data;
-  expect(published.id).toBe(version.id);
-  expect(published.workflow_status).toBe("published");
+  await expectStatus(committedResponse, 200);
+  const asset = agentBuilderCommitResponseSchema.parse(
+    await committedResponse.json(),
+  ).data.agent;
+  const activatedResponse = await context.request.post(
+    `/api/projects/${project.id}/agents/${asset.id}/activate`,
+    {
+      data: { expected_asset_version: asset.version },
+      headers: await csrfHeaders(context),
+    },
+  );
+  await expectStatus(activatedResponse, 200);
 
   const threadId = crypto.randomUUID();
   const threadResponse = await context.request.post(

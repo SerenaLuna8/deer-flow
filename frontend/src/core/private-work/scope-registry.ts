@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+import { agentBuilderRootKey } from "@/core/agent-builder/query-keys";
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
 import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
@@ -122,6 +123,7 @@ export async function transitionPrivateWorkScope(
 
   const roots = [
     privateWorkRoot(previous),
+    agentBuilderRootKey(previous.accountId, previous.projectId),
     automationRoot(previous),
     governanceRoot(previous),
     projectSharedAssetRoot(previous),

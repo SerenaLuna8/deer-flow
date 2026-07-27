@@ -38,6 +38,7 @@ async def run_oneshot_llm(
     app_config: AppConfig,
     model_name: str | None = None,
     thread_id: str | None = None,
+    attach_tracing: bool = True,
 ) -> str:
     """Run a single non-graph system+user LLM turn and return the raw text.
 
@@ -48,20 +49,29 @@ async def run_oneshot_llm(
         app_config: Application config used to build the model.
         model_name: Optional model override; ``None`` uses the default model.
         thread_id: Optional thread id, forwarded to Langfuse for tracing only.
+        attach_tracing: Attach configured tracing callbacks to the model. Sensitive
+            auxiliary calls can disable this so prompt bodies are not exported to
+            tracing providers.
 
     Returns:
         The extracted plain-text content of the model response (uncleaned).
     """
-    model = create_chat_model(name=model_name, thinking_enabled=False, app_config=app_config)
-    invoke_config: dict = {"run_name": run_name}
-    inject_langfuse_metadata(
-        invoke_config,
-        thread_id=thread_id,
-        user_id=get_effective_user_id(),
-        assistant_id=run_name,
-        model_name=model_name,
-        environment=_resolve_environment(),
+    model = create_chat_model(
+        name=model_name,
+        thinking_enabled=False,
+        app_config=app_config,
+        attach_tracing=attach_tracing,
     )
+    invoke_config: dict = {"run_name": run_name}
+    if attach_tracing:
+        inject_langfuse_metadata(
+            invoke_config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=run_name,
+            model_name=model_name,
+            environment=_resolve_environment(),
+        )
     response = await model.ainvoke(
         [
             SystemMessage(content=system_instruction),

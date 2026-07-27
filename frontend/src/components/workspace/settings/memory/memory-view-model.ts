@@ -22,6 +22,10 @@ export type MemorySectionGroup = {
   sections: MemorySection[];
 };
 
+export type MemorySummaryPreview = MemorySection & {
+  groupTitle: string;
+};
+
 export function buildMemorySectionGroups(
   memory: UserMemory,
   t: Translations,
@@ -76,6 +80,25 @@ export function countPopulatedSummaries(groups: MemorySectionGroup[]) {
       count + group.sections.filter((section) => section.summary.trim()).length,
     0,
   );
+}
+
+export function getMemorySummaryPreviews(
+  groups: MemorySectionGroup[],
+  excludedTitle: string,
+  limit = 2,
+): MemorySummaryPreview[] {
+  return groups
+    .flatMap((group) =>
+      group.sections.map((section) => ({
+        ...section,
+        groupTitle: group.title,
+      })),
+    )
+    .filter(
+      (section) =>
+        section.title !== excludedTitle && section.summary.trim().length > 0,
+    )
+    .slice(0, limit);
 }
 
 export function isMemorySummaryEmpty(memory: UserMemory) {

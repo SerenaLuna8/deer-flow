@@ -553,6 +553,30 @@ function installProjectStreamAdapter(
       reconnectStorage.removeItem(`lg:stream:${threadId}`);
       return;
     }
+    // The durable cursor intentionally resumes after frames the browser has
+    // already consumed. A route change clears the SDK's in-memory projection,
+    // though, so replaying only the tail would omit the current Human message
+    // and Lead Agent task call. Hydrate the latest checkpoint first, without an
+    // event id (and therefore without advancing or rewinding the durable
+    // cursor), then continue with the exact persisted Last-Event-ID.
+    if (
+      reconnectStorage.getItem(`lg:stream:${threadId}`) === runId
+    ) {
+      try {
+        const latestState = (
+          await client.threads.getHistory(threadId, { limit: 1 })
+        )[0];
+        if (latestState?.values) {
+          yield {
+            event: "values",
+            data: latestState.values,
+          };
+        }
+      } catch {
+        // Snapshot hydration is best effort. The durable tail remains the
+        // authoritative reconnect path and must still be attempted.
+      }
+    }
     const selectedOptions =
       typeof AbortSignal !== "undefined" && options instanceof AbortSignal
         ? { signal: options, lastEventId: String(state.lastEventId) }

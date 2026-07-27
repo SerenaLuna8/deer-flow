@@ -39,18 +39,18 @@ export function SubtaskCard({
   taskId,
   threadId,
   runId,
-  isLoading,
 }: {
   className?: string;
   taskId: string;
   threadId?: string;
   runId?: string;
-  isLoading: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const task = useSubtask(taskId)!;
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(
+    task.status === "in_progress",
+  );
   const updateSubtask = useUpdateSubtask();
   const privateWork = useProjectPrivateWorkScope();
 
@@ -234,7 +234,11 @@ export function SubtaskCard({
           )}
           {task.status === "failed" && (
             <ChainOfThoughtStep
-              label={<div className="text-red-500">{task.error}</div>}
+              label={
+                <div className="text-red-500">
+                  {task.error ?? t.subtasks.failed}
+                </div>
+              }
               icon={<XCircleIcon className="size-4 text-red-500" />}
             ></ChainOfThoughtStep>
           )}

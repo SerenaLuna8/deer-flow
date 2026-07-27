@@ -308,13 +308,16 @@ class TestMemoryRunStore:
             ("r2", "t1", "running", "m-a", 7),
             ("r3", "t2", "success", "m-a", 999),
             ("r4", "t1", "pending", "m-a", 3),
+            ("r5", "t1", "interrupted", "m-b", 5),
+            ("r6", "t1", "timeout", "m-a", 6),
         ]
         for run_id, thread_id, status, model, tokens in plan:
             await store.put(run_id, thread_id=thread_id)
             await store.update_run_completion(run_id, status=status, model_name=model, total_tokens=tokens)
 
         def _reference(thread_id, include_active):
-            statuses = ("success", "error", "running") if include_active else ("success", "error")
+            terminal_statuses = ("success", "error", "timeout", "interrupted")
+            statuses = (*terminal_statuses, "running") if include_active else terminal_statuses
             completed = [r for r in store._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
             return len(completed), sum(r.get("total_tokens", 0) for r in completed)
 

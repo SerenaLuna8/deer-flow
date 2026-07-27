@@ -114,6 +114,16 @@ Durable SSE cursor and deduplication state is keyed by account/project/thread. E
 thread-monotonic; duplicate IDs and duplicate terminal frames are ignored. Gateway restart
 must resume from the stored `Last-Event-ID` without cross-scope replay.
 
+Conversation history is a lead-Agent projection. Historical rows tagged with a subagent or
+middleware caller are hidden, and their tool results are filtered by the issuing AI
+`(run_id, tool_call_id)` pair; internal HumanMessages are hidden unless they are the explicit
+Run-admission row. This compatibility filter must remain until every retained Run was written by
+the lead-only journal contract. Rendering also associates tool results with the exact issuing
+AI group by `(run_id, tool_call_id)`, including late/replayed and result-before-call pagination
+order. Legacy rows without a Run ID are isolated to one Human turn. Never attach an unknown
+orphan tool result to the most recent or final assistant group, and always synthesize a stable
+non-empty group key when legacy messages have no ID.
+
 During a live project Run, successful `write_file` and `str_replace` tool calls select the
 written file in the artifact preview, open the right-hand file panel, and collapse the desktop
 project navigation. `present_files` remains the explicit publication boundary for rendering
@@ -130,13 +140,37 @@ Project asset pages group visible system and project Agent, Skill, MCP, and Cred
 Queries are keyed by account, project, and kind. UI actions use per-item capabilities and
 optimistic revisions; no role-based inference is allowed.
 
-Project Skill blank-version authoring starts from a backend-valid `SKILL.md` whose frontmatter
-name is the immutable asset slug. After creation, the detail sheet selects the returned version
-ID; unsaved file-workbench changes block publish, version switching, and competing version
-creation until the user saves or explicitly discards them. Slash suggestions exclude assets
-without a published version and honor the server-provided execute capability and system binding.
-Shared-asset mutations use the active project scope's abort controller and are removed with
-their project query/mutation roots during scope transition.
+Project Agent details expose four fixed logical Markdown entries: `AGENTS.md`, `SOUL.md`,
+`IDENTITY.md`, and `USER.md`. They are an asset-level editor over Agent-version fields, not a
+filesystem browser: do not add directory, create, rename, delete, breadcrumb, or independent
+file-version controls. New Agents open this editor even before any runtime version exists.
+The editor always uses the current published revision, otherwise the latest Draft. Agent
+revisions remain an internal Run-snapshot boundary: the detail sheet exposes no publish/version
+summary card, selector, status, history, technical metadata, or manual version action. Its header
+shows the formatted update time rather than repeating the slug. One explicit save submits all
+four values with the asset revision; dirty state blocks close, while a `409` keeps the local
+draft for retry.
+
+New project Agents are designed through `/projects/{project_slug}/agents/new` and the resumable
+`/agents/new/{session_id}` workspace. The name step creates only a private Builder session.
+The workspace keeps the page shell fixed, scrolls only its conversation region, renders bounded
+clarification cards and four fixed logical-document progress items, and allows preview/edit before
+one final confirmation. Completion creates a published version 1 but leaves the Agent suspended;
+cards and details expose the capability-checked activate action. Never fall back to the former
+generic Agent create dialog or sequence a bare Agent create before the Builder commit.
+
+Project Skill list creation is one scoped backend mutation that atomically creates the disabled
+asset plus version 1 Draft containing a backend-valid root `SKILL.md`; the frontend must never
+sequence a separate asset request and version request. The template frontmatter name is the
+immutable asset slug. After the catalog refresh, the detail sheet opens the returned asset ID,
+loads its version history, and selects Draft version 1. The detail sheet has no blank-version
+action: its single “创建新版本” entry starts an editable copy of the currently selected immutable
+version, and saving persists that copy through the Skill fork API. Unsaved file-workbench changes
+block publish, version switching, and competing version creation until the user saves or
+explicitly discards them. Slash suggestions exclude assets without a published version and honor
+the server-provided execute capability and system binding. Shared-asset mutations use the active
+project scope's abort controller and are removed with their project query/mutation roots during
+scope transition.
 
 Project Skill package import accepts `.zip`, `.skill`, `.tar`, `.tar.gz`, and `.tgz` through the
 scoped multipart upload API. A successful import creates and publishes the first immutable
@@ -150,13 +184,21 @@ while a disabled Skill remains editable and publishable. The version workbench r
 paths as an expandable folder tree and opens only the selected file. New-file creation requires a
 target folder and may create a nested folder inline; empty folders are local editor state because
 immutable Skill snapshots persist files rather than directory entries.
+System Skill binding is list-only: its catalog row keeps the enable/disable switch, while its
+detail sheet never exposes enable-to-project or pinned-version switching actions.
 
 Project Skill lifecycle has no archive or pause action. A project-owned Skill with
 `shared_assets.edit` exposes permanent package deletion from its detail sheet; the confirmation
 must state that every version and file will be removed, keep the destructive button disabled for
 five seconds, and close the detail plus remove list/version/file caches only after the scoped
-DELETE succeeds. System Skills never expose deletion. Agent and MCP archive behavior remains
-independent.
+DELETE succeeds. System Skills never expose deletion. Agent lifecycle exposes activate/suspend
+transitions but no archive mutation; project Agent screens label them as enable/disable. Project Agent
+cards never expose deletion. A project-owned Agent with `shared_assets.edit` exposes permanent
+deletion only from its detail sheet, using the same five-second delayed confirmation pattern and
+removing the Agent plus all of its settings only after the scoped DELETE succeeds. Referenced Agents
+remain visible and the API returns conflict rather than deleting Threads, Automations, or Run
+snapshots. Reversible Agent enable/disable actions use neutral styling; the detail action is labeled
+“删除”, and only that permanent action uses destructive styling. MCP archive remains independent.
 
 Global `/admin/assets` Agent, Skill, and MCP pages render the packaged PostgreSQL catalog as
 read-only governance metadata. They must not expose definition create/edit, new-version,
@@ -184,7 +226,7 @@ mutation failures stay visible in the active dialog without clearing the user's 
 This restriction is scope-specific: packaged System MCP retains the runtime-supported `stdio`,
 `sse`, and `http` transports plus their existing env/header/OAuth credential capabilities;
 only transports or definitions that the private runtime cannot execute are blocked.
-Agent cards, the Agent selector, Main chat, Connections, and
+Agent cards, the Agent selector, Main chat and Builder continuation, Connections, and
 Automation creation/resume/manual-run all use the same fail-closed MCP dependency assessment.
 Main re-reads the exact published dependency versions on every start and enables or moves the
 required System bindings before creating the Thread; an existing Main binding never bypasses
@@ -208,6 +250,12 @@ Usage and Audit pages mount hooks only after their exact readiness and capabilit
 Usage distinguishes configured/effective limit, used/reserved amount, and one 80% warning per
 dimension. Audit accepts a closed action enum and action-specific strict metadata, and never
 renders private target digests, owner/project internals, or secret content.
+
+The project overview mounts its Token trend query only after `project.usage.read` is present.
+Its query key stays under the exact account/project governance usage root, forwards the TanStack
+abort signal, and strictly validates 24 consecutive hourly buckets plus independently summed
+input/output/total counters. Loading, unavailable, and valid all-zero states remain distinct;
+the UI must not fabricate zero usage from a failed or malformed response.
 
 Admin operation pages mount no query until the authenticated identity is confirmed as
 `system_admin`. Their strict Zod contracts reject unknown owner, Run, Thread, payload,

@@ -1,6 +1,7 @@
 import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
 
+import { agentBuilderRootKey } from "@/core/agent-builder/query-keys";
 import { privateWorkRoot } from "@/core/private-work/query-keys";
 import {
   createPrivateWorkScopeRegistry,
@@ -157,7 +158,14 @@ describe("project private-work scope registry", () => {
 
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
 
-    expect(order).toEqual(["cancel", "cancel", "cancel", "cancel", "dispose"]);
+    expect(order).toEqual([
+      "cancel",
+      "cancel",
+      "cancel",
+      "cancel",
+      "cancel",
+      "dispose",
+    ]);
     expect(dispose).toHaveBeenCalledWith(A_P1);
     expect(registry.has(A_P1)).toBe(false);
     expect(
@@ -208,6 +216,66 @@ describe("project private-work scope registry", () => {
 
     resolveMutation("late-shared-asset");
     await pending;
+  });
+
+  test("aborts and removes Agent Builder queries and mutations on scope exit", async () => {
+    const registry = createPrivateWorkScopeRegistry();
+    const access = registry.acquire(A_P1);
+    const queryClient = new QueryClient();
+    const root = agentBuilderRootKey(A_P1.accountId, A_P1.projectId);
+    let queryStarted!: () => void;
+    const queryReady = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    let queryAborted = false;
+    const pendingQuery = queryClient
+      .fetchQuery({
+        queryKey: [...root, "sessions"],
+        queryFn: ({ signal }) =>
+          new Promise<string>((resolve) => {
+            signal.addEventListener("abort", () => {
+              queryAborted = true;
+              resolve("late-query");
+            });
+            queryStarted();
+          }),
+      })
+      .catch(() => undefined);
+
+    let mutationStarted!: () => void;
+    const mutationReady = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    let mutationAborted = false;
+    let resolveMutation!: (value: string) => void;
+    const deferredMutation = new Promise<string>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const mutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [...root, "mutation", "submit-turn"],
+      mutationFn: () =>
+        access.runAbortable!(async (signal) => {
+          signal.addEventListener("abort", () => {
+            mutationAborted = true;
+          });
+          mutationStarted();
+          return deferredMutation;
+        }),
+    });
+    const pendingMutation = mutation.execute(undefined);
+    await Promise.all([queryReady, mutationReady]);
+
+    await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
+
+    expect(queryAborted).toBe(true);
+    expect(mutationAborted).toBe(true);
+    expect(queryClient.getQueryData([...root, "sessions"])).toBeUndefined();
+    expect(
+      queryClient.getMutationCache().findAll({ mutationKey: root }),
+    ).toHaveLength(0);
+
+    resolveMutation("late-mutation");
+    await Promise.all([pendingQuery, pendingMutation]);
   });
 
   test("isolates reconnect metadata by account and project", () => {

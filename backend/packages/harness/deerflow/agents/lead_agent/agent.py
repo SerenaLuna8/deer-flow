@@ -632,6 +632,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered, deferred_names=setup.deferred_names)
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
+    private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,
@@ -658,7 +659,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
-            exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None else None,
+            exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None and private_prompt_bundle is None else None,
+            exact_agent_prompt=private_prompt_bundle,
             exact_skills=runtime_skills,
             exact_skills_container_path=container_base_path if runtime_skills is not None else None,
         ),

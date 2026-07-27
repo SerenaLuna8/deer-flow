@@ -1,19 +1,11 @@
 "use client";
 
-import {
-  CalendarDaysIcon,
-  FolderIcon,
-  PencilIcon,
-  PinIcon,
-  UsersIcon,
-} from "lucide-react";
+import { FolderIcon, PencilIcon, PinIcon } from "lucide-react";
 import Link from "next/link";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
-  CardContent,
   CardDescription,
   CardFooter,
   CardHeader,
@@ -22,18 +14,7 @@ import {
 import type { Project } from "@/core/projects/types";
 import { cn } from "@/lib/utils";
 
-import {
-  canUpdateProject,
-  formatProjectQuota,
-  formatProjectTime,
-} from "./project-view-model";
-
-const ROLE_LABELS: Record<Project["role"], string> = {
-  admin: "Admin",
-  editor: "Editor",
-  runner: "Runner",
-  viewer: "Viewer",
-};
+import { canUpdateProject } from "./project-view-model";
 
 export function ProjectCard({
   project,
@@ -46,7 +27,6 @@ export function ProjectCard({
   onEdit: () => void;
   pinPending?: boolean;
 }) {
-  const quota = formatProjectQuota(project.quota_summary);
   return (
     <Card
       data-testid="project-card"
@@ -103,36 +83,7 @@ export function ProjectCard({
           {project.description || "暂无项目描述"}
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex flex-wrap gap-2">
-          <Badge variant="secondary">{ROLE_LABELS[project.role]}</Badge>
-          <Badge variant="outline">{project.status}</Badge>
-        </div>
-        <div className="text-muted-foreground grid grid-cols-2 gap-2 text-xs">
-          <span className="flex items-center gap-1.5">
-            <UsersIcon size={14} /> {project.member_count} 位成员
-          </span>
-          <span className="flex items-center gap-1.5">
-            <CalendarDaysIcon size={14} />
-            {formatProjectTime(project.last_entered_at)}
-          </span>
-        </div>
-        <div className="bg-muted/60 grid grid-cols-3 rounded-lg p-2 text-center text-xs">
-          <span>Agent {project.agent_count}</span>
-          <span>Skill {project.skill_count}</span>
-          <span>MCP {project.mcp_count}</span>
-        </div>
-        <div
-          aria-label="项目配额摘要"
-          className="border-border/70 grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-xs"
-        >
-          <span>{quota.members}</span>
-          <span>{quota.storage}</span>
-          <span>{quota.runs}</span>
-          <span>{quota.mcp}</span>
-        </div>
-      </CardContent>
-      <CardFooter>
+      <CardFooter className="mt-auto">
         <Button asChild className="w-full">
           <Link href={`/projects/${encodeURIComponent(project.slug)}`}>
             进入项目

@@ -8,8 +8,6 @@ import {
 } from "@/components/projects/private-work/project-chat-page";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
-const THREAD_ID = "33333333-3333-4333-8333-333333333333";
-
 const project: Project = {
   id: "11111111-1111-4111-8111-111111111111",
   slug: "alpha",
@@ -46,7 +44,8 @@ describe("project chat route", () => {
     expect(scope.canUpload).toBe(true);
     expect(scope.canDelete).toBe(true);
     expect(scope.canDeleteFiles).toBe(true);
-    expect(scope.automationVisible).toBe(false);
+    expect(scope).not.toHaveProperty("automationVisible");
+    expect(scope).not.toHaveProperty("automationHref");
     expect(scope.goalVisible).toBe(true);
     expect(scope.compactVisible).toBe(true);
     expect(scope.branchVisible).toBe(true);
@@ -56,50 +55,19 @@ describe("project chat route", () => {
     expect(scope.followupSuggestionsEnabled).toBe(true);
   });
 
-  test("uses only the project Automation route when every Chat entry gate is open", () => {
-    const scope = projectChatRouteScope(project, true, true, false);
-    expect(scope.automationVisible).toBe(true);
-    expect(scope.automationHref(THREAD_ID)).toBe(
-      `/projects/alpha/automations?thread_id=${THREAD_ID}`,
-    );
-
-    const encodedScope = projectChatRouteScope(
-      { ...project, slug: "alpha/beta" },
-      true,
-      true,
-      false,
-    );
-    expect(encodedScope.automationHref(THREAD_ID)).toBe(
-      `/projects/alpha%2Fbeta/automations?thread_id=${THREAD_ID}`,
-    );
-  });
-
-  test("allows a read-only Viewer Chat entry but fails closed for every missing gate", () => {
+  test("does not expose an Automation shortcut for runner or Viewer chats", () => {
     const viewer: Project = {
       ...project,
       role: "viewer",
       capabilities: ["project.read", "private_work.read_own"],
     };
-    expect(projectChatRouteScope(viewer, true, true, false)).toMatchObject({
-      automationVisible: true,
-    });
-    expect(projectChatRouteScope(viewer, false, true, false)).toMatchObject({
-      automationVisible: false,
-    });
-    expect(projectChatRouteScope(viewer, true, false, false)).toMatchObject({
-      automationVisible: false,
-    });
-    expect(projectChatRouteScope(viewer, true, true, true)).toMatchObject({
-      automationVisible: false,
-    });
-    expect(
-      projectChatRouteScope(
-        { ...viewer, capabilities: ["project.read"] },
-        true,
-        true,
-        false,
-      ),
-    ).toMatchObject({ automationVisible: false });
+    for (const scope of [
+      projectChatRouteScope(project),
+      projectChatRouteScope(viewer),
+    ]) {
+      expect(scope).not.toHaveProperty("automationVisible");
+      expect(scope).not.toHaveProperty("automationHref");
+    }
   });
 
   test("same-project other-owner and cross-project metadata misses share not-found", () => {

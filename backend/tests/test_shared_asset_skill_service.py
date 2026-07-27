@@ -111,6 +111,117 @@ async def test_project_skill_creation_defaults_to_suspended() -> None:
 
 
 @pytest.mark.asyncio
+async def test_project_skill_template_creation_atomically_creates_draft_v1() -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    actor = _editor_context()
+    now = datetime.now(UTC)
+    asset = SkillRow(
+        id=uuid.uuid4(),
+        scope="project",
+        project_id=actor.project_id,
+        slug="meeting-brief",
+        display_name="Meeting Brief",
+        status="suspended",
+        current_published_version_id=None,
+        version=1,
+        created_by_user_id=str(actor.user_id),
+        created_at=now,
+        updated_at=now,
+    )
+
+    class Session:
+        async def flush(self):
+            return None
+
+    class Repository:
+        session = Session()
+        record = None
+        get_for_update = []
+
+        async def create_project_asset(self, context, command):
+            assert context is actor
+            assert command == service_module.CreateSkill(
+                slug="meeting-brief",
+                display_name="Meeting Brief",
+            )
+            return asset
+
+        async def get_project_asset(
+            self,
+            context,
+            asset_id,
+            *,
+            for_update=False,
+        ):
+            assert context is actor
+            assert asset_id == asset.id
+            self.get_for_update.append(for_update)
+            return asset
+
+        async def next_project_version_number(self, context, selected_asset):
+            assert context is actor
+            assert selected_asset is asset
+            return 1
+
+        async def create_project_version(
+            self,
+            context,
+            asset_id,
+            version,
+            files,
+        ):
+            assert context is actor
+            assert asset_id == asset.id
+            self.record = service_module.SkillVersionRecord(
+                version,
+                tuple(files),
+            )
+            return self.record
+
+    repository = Repository()
+    quota = AsyncMock()
+    governance = AsyncMock()
+    service = service_module.SkillService(
+        lambda: None,
+        governance_sink=governance,
+        quota=quota,
+    )
+    service._execute = _ServiceWithoutSessions(repository)
+
+    created = await service.create_project_with_template(
+        actor,
+        service_module.CreateSkill(
+            slug="meeting-brief",
+            display_name="Meeting Brief",
+        ),
+    )
+
+    assert created.id == asset.id
+    assert created.status == "suspended"
+    assert created.current_published_version_id is None
+    assert created.version == 2
+    assert repository.get_for_update == [True, False]
+    assert repository.record is not None
+    assert repository.record.row.version_number == 1
+    assert repository.record.row.workflow_status == WorkflowStatus.DRAFT.value
+    assert repository.record.row.supersedes_version_id is None
+    assert len(repository.record.files) == 1
+    template = repository.record.files[0]
+    assert template.path == "SKILL.md"
+    assert template.media_type == "text/markdown"
+    assert template.size_bytes == len(template.content)
+    assert template.sha256 == hashlib.sha256(template.content).hexdigest()
+    assert template.content.decode() == ("---\nname: meeting-brief\ndescription: Describe when and how to use this skill.\n---\n\n# meeting-brief\n\nAdd instructions for this skill here.\n")
+    quota.reserve_skill_version.assert_awaited_once_with(
+        repository.session,
+        project_id=actor.project_id,
+        version_id=repository.record.row.id,
+        size=len(template.content),
+    )
+    assert [call.kwargs["action"] for call in governance.append_project.await_args_list] == ["skill.create", "skill.version.create"]
+
+
+@pytest.mark.asyncio
 async def test_suspended_project_skill_can_author_publish_activate_and_suspend() -> None:
     service_module = importlib.import_module("app.shared_assets.skill_service")
     actor = _admin_context()

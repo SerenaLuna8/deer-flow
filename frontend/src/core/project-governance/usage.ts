@@ -95,6 +95,80 @@ export const usageResponseSchema = z
   })
   .strict();
 
+const tokenUsageTotalsSchema = z
+  .object({
+    input_tokens: z.number().int().nonnegative(),
+    output_tokens: z.number().int().nonnegative(),
+    total_tokens: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const tokenUsagePointSchema = tokenUsageTotalsSchema
+  .extend({
+    bucket_start: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const projectTokenUsageSeriesSchema = z
+  .object({
+    window_start: z.string().datetime({ offset: true }),
+    window_end: z.string().datetime({ offset: true }),
+    bucket_minutes: z.literal(60),
+    totals: tokenUsageTotalsSchema,
+    points: z.array(tokenUsagePointSchema).length(24),
+  })
+  .strict()
+  .superRefine((series, context) => {
+    const hourMilliseconds = series.bucket_minutes * 60 * 1000;
+    const windowStart = Date.parse(series.window_start);
+    const windowEnd = Date.parse(series.window_end);
+    const bucketStarts = series.points.map((point) =>
+      Date.parse(point.bucket_start),
+    );
+
+    if (
+      bucketStarts[0] !== windowStart ||
+      windowEnd < bucketStarts[bucketStarts.length - 1]! ||
+      windowEnd >= bucketStarts[bucketStarts.length - 1]! + hourMilliseconds
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Token usage window does not match its hourly buckets",
+      });
+    }
+
+    if (
+      bucketStarts.some(
+        (bucketStart, index) =>
+          index > 0 &&
+          bucketStart - bucketStarts[index - 1]! !== hourMilliseconds,
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Token usage buckets must be consecutive hours",
+      });
+    }
+
+    for (const field of [
+      "input_tokens",
+      "output_tokens",
+      "total_tokens",
+    ] as const) {
+      const pointTotal = series.points.reduce(
+        (total, point) => total + point[field],
+        0,
+      );
+      if (series.totals[field] !== pointTotal) {
+        context.addIssue({
+          code: "custom",
+          path: ["totals", field],
+          message: `Token usage ${field} total does not match its points`,
+        });
+      }
+    }
+  });
+
 export const updateQuotaLimitsSchema = z
   .object({
     expected_version: z.number().int().nonnegative(),
@@ -229,6 +303,10 @@ export function projectUsageQueryKey(scope: ProjectClientScope) {
   return [...governanceRoot(scope), "usage"] as const;
 }
 
+export function projectTokenUsageSeriesQueryKey(scope: ProjectClientScope) {
+  return [...projectUsageQueryKey(scope), "token-series"] as const;
+}
+
 function requiredScope(access: PrivateWorkAccess): ProjectClientScope {
   return access.scope;
 }
@@ -242,6 +320,17 @@ export async function fetchProjectUsage(
     { signal },
   );
   return readProjectGovernanceResponse(response, usageResponseSchema);
+}
+
+export async function fetchProjectTokenUsageSeries(
+  scope: ProjectClientScope,
+  signal?: AbortSignal,
+): Promise<ProjectTokenUsageSeries> {
+  const response = await requestProjectGovernance(
+    `${projectGovernanceBaseURL(scope)}/usage/token-series`,
+    { signal },
+  );
+  return readProjectGovernanceResponse(response, projectTokenUsageSeriesSchema);
 }
 
 export async function updateProjectQuotaLimits(
@@ -281,6 +370,25 @@ export function useProjectUsage(scope: ProjectClientScope) {
   return useQuery(projectUsageQueryOptions(scope));
 }
 
+export function projectTokenUsageSeriesQueryOptions(
+  scope: ProjectClientScope,
+  enabled = true,
+) {
+  const parsed = projectClientScopeSchema.parse(scope);
+  return {
+    queryKey: projectTokenUsageSeriesQueryKey(parsed),
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      fetchProjectTokenUsageSeries(parsed, signal),
+    enabled,
+    retry: false,
+    refetchOnWindowFocus: false,
+  };
+}
+
+export function useProjectTokenUsageSeries(scope: ProjectClientScope) {
+  return useQuery(projectTokenUsageSeriesQueryOptions(scope));
+}
+
 export function useUpdateProjectQuotaLimits(access: PrivateWorkAccess) {
   const queryClient = useQueryClient();
   const scope = requiredScope(access);
@@ -299,5 +407,8 @@ export function useUpdateProjectQuotaLimits(access: PrivateWorkAccess) {
 }
 
 export type ProjectUsage = z.infer<typeof usageResponseSchema>;
+export type ProjectTokenUsageSeries = z.infer<
+  typeof projectTokenUsageSeriesSchema
+>;
 export type QuotaPolicy = z.infer<typeof quotaPolicySchema>;
 export type UpdateQuotaLimits = z.input<typeof updateQuotaLimitsSchema>;

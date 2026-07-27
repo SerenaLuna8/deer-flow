@@ -32,6 +32,7 @@ from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
     PrivateRunRecord,
     PrivateRunRepository,
+    PrivateRunUsageSnapshot,
 )
 from app.private_work.sandbox_files import (
     PrivateFileRunScope,
@@ -76,6 +77,7 @@ from deerflow.runtime import (
     DisconnectMode,
     RunContext,
     RunManager,
+    RunRecord,
     RunStatus,
     run_agent,
 )
@@ -105,10 +107,18 @@ logger = logging.getLogger(__name__)
 class TransientExecutionError(RuntimeError):
     """A public-safe failure before an ambiguous external side effect."""
 
-    def __init__(self, public_error_code: str) -> None:
+    def __init__(
+        self,
+        public_error_code: str,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
+    ) -> None:
         if _PUBLIC_ERROR_CODE.fullmatch(public_error_code) is None:
             raise ValueError("transient execution error requires a public code")
+        if attempt_usage is not None and type(attempt_usage) is not PrivateRunUsageSnapshot:
+            raise TypeError("attempt_usage must be a PrivateRunUsageSnapshot or None")
         self.public_error_code = public_error_code
+        self.attempt_usage = attempt_usage
         super().__init__(public_error_code)
 
 
@@ -125,12 +135,23 @@ class PermanentExecutionError(RuntimeError):
 class AmbiguousExternalSideEffect(RuntimeError):
     """Execution may have crossed an external side-effect boundary."""
 
+    def __init__(
+        self,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
+    ) -> None:
+        if attempt_usage is not None and type(attempt_usage) is not PrivateRunUsageSnapshot:
+            raise TypeError("attempt_usage must be a PrivateRunUsageSnapshot or None")
+        self.attempt_usage = attempt_usage
+        super().__init__("external side-effect state is unknown")
+
 
 @dataclass(frozen=True, slots=True)
 class AgentExecutionResult:
     status: Literal["succeeded", "cancelled", "failed"]
     public_error_code: str | None = None
     retryable: bool = False
+    attempt_usage: PrivateRunUsageSnapshot | None = None
 
     def __post_init__(self) -> None:
         JobOutcome(self.status, self.public_error_code)
@@ -138,14 +159,24 @@ class AgentExecutionResult:
             raise TypeError("retryable must be a boolean")
         if self.status != "failed" and self.retryable:
             raise ValueError("terminal success/cancel outcomes cannot be retryable")
+        if self.attempt_usage is not None and type(self.attempt_usage) is not PrivateRunUsageSnapshot:
+            raise TypeError("attempt_usage must be a PrivateRunUsageSnapshot or None")
 
     @classmethod
-    def succeeded(cls) -> AgentExecutionResult:
-        return cls("succeeded")
+    def succeeded(
+        cls,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
+    ) -> AgentExecutionResult:
+        return cls("succeeded", attempt_usage=attempt_usage)
 
     @classmethod
-    def cancelled(cls) -> AgentExecutionResult:
-        return cls("cancelled")
+    def cancelled(
+        cls,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
+    ) -> AgentExecutionResult:
+        return cls("cancelled", attempt_usage=attempt_usage)
 
     @classmethod
     def failed(
@@ -153,8 +184,14 @@ class AgentExecutionResult:
         public_error_code: str,
         *,
         retryable: bool = True,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
     ) -> AgentExecutionResult:
-        return cls("failed", public_error_code, retryable)
+        return cls(
+            "failed",
+            public_error_code,
+            retryable,
+            attempt_usage,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,6 +919,19 @@ class RunAgentPrivateExecutor:
         return make_lead_agent
 
     @staticmethod
+    def _usage_snapshot(record: RunRecord) -> PrivateRunUsageSnapshot:
+        return PrivateRunUsageSnapshot(
+            total_input_tokens=record.total_input_tokens,
+            total_output_tokens=record.total_output_tokens,
+            total_tokens=record.total_tokens,
+            llm_call_count=record.llm_call_count,
+            lead_agent_tokens=record.lead_agent_tokens,
+            subagent_tokens=record.subagent_tokens,
+            middleware_tokens=record.middleware_tokens,
+            token_usage_by_model=record.token_usage_by_model,
+        )
+
+    @staticmethod
     def _graph_input(execution: PrivateRunExecution) -> object:
         if execution.resume_from_checkpoint:
             return None
@@ -949,6 +999,7 @@ class RunAgentPrivateExecutor:
         admitted = self._admitted(execution, claim)
         private_runtime = None
         file_authority = None
+        record: RunRecord | None = None
         try:
             exact_model_name = execution.run.model_name
             if exact_model_name is None or self._app_config.get_model_config(exact_model_name) is None:
@@ -1072,32 +1123,59 @@ class RunAgentPrivateExecutor:
                 raise TransientExecutionError(
                     "EXECUTION_AUTHORITY_UNAVAILABLE",
                 )
+            attempt_usage = self._usage_snapshot(record)
             if boundary.cancel_requested or boundary.authorization_revoked:
-                return AgentExecutionResult.cancelled()
+                return AgentExecutionResult.cancelled(
+                    attempt_usage=attempt_usage,
+                )
             if record.status is RunStatus.success:
-                return AgentExecutionResult.succeeded()
+                return AgentExecutionResult.succeeded(
+                    attempt_usage=attempt_usage,
+                )
             if record.status is RunStatus.interrupted:
-                return AgentExecutionResult.cancelled()
+                return AgentExecutionResult.cancelled(
+                    attempt_usage=attempt_usage,
+                )
             if boundary.ambiguous_side_effect:
-                raise AmbiguousExternalSideEffect
-            return AgentExecutionResult.failed("AGENT_EXECUTION_FAILED")
+                raise AmbiguousExternalSideEffect(
+                    attempt_usage=attempt_usage,
+                )
+            return AgentExecutionResult.failed(
+                "AGENT_EXECUTION_FAILED",
+                attempt_usage=attempt_usage,
+            )
         except asyncio.CancelledError:
             raise
-        except (TransientExecutionError, AmbiguousExternalSideEffect):
+        except TransientExecutionError as error:
+            if error.attempt_usage is None and record is not None and not boundary.lease_lost:
+                raise TransientExecutionError(
+                    error.public_error_code,
+                    attempt_usage=self._usage_snapshot(record),
+                ) from error
+            raise
+        except AmbiguousExternalSideEffect:
             raise
         except PrivateWorkMcpQuotaExceeded as error:
-            raise TransientExecutionError(error.code) from None
+            raise TransientExecutionError(
+                error.code,
+                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+            ) from None
         except AuthorizationRevoked:
             if boundary.lease_lost:
                 raise TransientExecutionError(
                     "EXECUTION_AUTHORITY_UNAVAILABLE",
                 ) from None
-            return AgentExecutionResult.cancelled()
+            return AgentExecutionResult.cancelled(
+                attempt_usage=(self._usage_snapshot(record) if record is not None else None),
+            )
         except Exception:
             if boundary.ambiguous_side_effect:
-                raise AmbiguousExternalSideEffect from None
+                raise AmbiguousExternalSideEffect(
+                    attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+                ) from None
             raise TransientExecutionError(
                 "PRIVATE_RUN_EXECUTION_FAILED",
+                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
             ) from None
         finally:
             if private_runtime is not None:
@@ -1378,6 +1456,7 @@ class PrivateRunJobHandler:
                         cancel_preempts_outcome=not durable_terminal,
                         retry_initial_seconds=self._retry_initial_seconds,
                         retry_max_seconds=self._retry_max_seconds,
+                        attempt_usage=result.attempt_usage,
                     )
                     settled_run = settlement.run
                     if not settlement.run_terminal_published and settled_run.status in {
@@ -1465,7 +1544,10 @@ class PrivateRunJobHandler:
         except asyncio.CancelledError:
             raise
         except TransientExecutionError as error:
-            result = AgentExecutionResult.failed(error.public_error_code)
+            result = AgentExecutionResult.failed(
+                error.public_error_code,
+                attempt_usage=error.attempt_usage,
+            )
         except PermanentExecutionError as error:
             result = AgentExecutionResult.failed(
                 error.public_error_code,
@@ -1473,10 +1555,13 @@ class PrivateRunJobHandler:
             )
         except PrivateWorkMcpQuotaExceeded as error:
             result = AgentExecutionResult.failed(error.code)
-        except AmbiguousExternalSideEffect:
+        except AmbiguousExternalSideEffect as error:
             return self._settlement(
                 claim,
-                AgentExecutionResult.failed("SIDE_EFFECT_STATE_UNKNOWN"),
+                AgentExecutionResult.failed(
+                    "SIDE_EFFECT_STATE_UNKNOWN",
+                    attempt_usage=error.attempt_usage,
+                ),
                 scope=execution.context.resource_scope,
                 ambiguous_side_effect=True,
             )
@@ -1490,7 +1575,9 @@ class PrivateRunJobHandler:
         if not isinstance(result, AgentExecutionResult):
             result = AgentExecutionResult.failed("INVALID_AGENT_RESULT")
         if authority.cancel_requested:
-            result = AgentExecutionResult.cancelled()
+            result = AgentExecutionResult.cancelled(
+                attempt_usage=result.attempt_usage,
+            )
         return self._settlement(
             claim,
             result,

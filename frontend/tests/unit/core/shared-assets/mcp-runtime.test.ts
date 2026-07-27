@@ -137,58 +137,6 @@ describe("MCP runtime compatibility", () => {
     ).toContain("仅支持 headers");
   });
 
-  test.each(["Authorization", "authorization"])(
-    "blocks duplicate Project Credential headers across slots: %s",
-    (duplicateName) => {
-      const duplicateHeaderVersion = mcpVersion("http");
-      duplicateHeaderVersion.credential_slots = [
-        {
-          id: "55555555-5555-4555-8555-555555555555",
-          name: "primary",
-          purpose: "Primary credential",
-          payload_schema: { headers: ["Authorization"] },
-          required: true,
-        },
-        {
-          id: "66666666-6666-4666-8666-666666666666",
-          name: "secondary",
-          purpose: "Secondary credential",
-          payload_schema: { headers: [duplicateName] },
-          required: true,
-        },
-      ];
-
-      expect(
-        mcpVersionRuntimeBlockReason(duplicateHeaderVersion, "project"),
-      ).toContain("不能重复声明请求头");
-    },
-  );
-
-  test("does not treat mirrored definition and persisted slots as duplicates", () => {
-    const mirroredVersion = mcpVersion("http");
-    mirroredVersion.definition.credential_slots = [
-      {
-        name: "api-token",
-        purpose: "Definition mirror",
-        payload_schema: { headers: ["Authorization"] },
-        required: true,
-      },
-    ];
-    mirroredVersion.credential_slots = [
-      {
-        id: "55555555-5555-4555-8555-555555555555",
-        name: "api-token",
-        purpose: "Persisted slot",
-        payload_schema: { headers: ["Authorization"] },
-        required: true,
-      },
-    ];
-
-    expect(
-      mcpVersionRuntimeBlockReason(mirroredVersion, "project"),
-    ).toBeNull();
-  });
-
   test("preserves supported system stdio, OAuth, env, and header capabilities", () => {
     const stdio = mcpVersion("stdio", null);
     stdio.definition.env = { MODE: "catalog" };

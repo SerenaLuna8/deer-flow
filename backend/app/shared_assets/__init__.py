@@ -1,4 +1,14 @@
-from app.shared_assets.agent_service import AgentAssetView, AgentService, AgentVersionView, CreateAgent
+from app.shared_assets.agent_service import (
+    AGENT_INSTRUCTION_FIELDS,
+    MAX_AGENT_INSTRUCTION_FIELD_BYTES,
+    MAX_AGENT_INSTRUCTIONS_TOTAL_BYTES,
+    AgentAssetView,
+    AgentInstructions,
+    AgentService,
+    AgentVersionView,
+    CreateAgent,
+    ProjectAgentCreateResult,
+)
 from app.shared_assets.binding_service import BindingService, SystemAssetBinding
 from app.shared_assets.contexts import SystemAssetGovernanceContext, resolve_asset_actor
 from app.shared_assets.credential_service import (
@@ -61,8 +71,10 @@ from app.shared_assets.skill_service import (
 )
 
 __all__ = [
+    "AGENT_INSTRUCTION_FIELDS",
     "AgentPayload",
     "AgentAssetView",
+    "AgentInstructions",
     "AgentService",
     "AgentVersionView",
     "AssetConflict",
@@ -77,6 +89,7 @@ __all__ = [
     "AssetValidationFailed",
     "BindingService",
     "CreateAgent",
+    "ProjectAgentCreateResult",
     "CreateCredential",
     "CreateMcpServer",
     "CreateSkill",
@@ -92,6 +105,8 @@ __all__ = [
     "McpService",
     "McpVersionView",
     "MaterializedMcpSecrets",
+    "MAX_AGENT_INSTRUCTION_FIELD_BYTES",
+    "MAX_AGENT_INSTRUCTIONS_TOTAL_BYTES",
     "ProjectAssetResolver",
     "ProjectSkillArchiveCreateResult",
     "ResolvedAgentSnapshot",

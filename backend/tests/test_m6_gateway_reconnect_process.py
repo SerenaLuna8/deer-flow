@@ -12,9 +12,11 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from support.project_agent_factory import create_project_agent_from_design
 
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.shared_assets.models import AgentPayload
 from deerflow.runtime.events.models import StreamFrame
 from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -135,7 +137,10 @@ async def _wait_ready(process: subprocess.Popen[bytes], base_url: str) -> None:
     raise AssertionError(f"Gateway pid={process.pid} did not become ready; last observation: {last_observation}")
 
 
-async def _create_project_thread(client: httpx.AsyncClient):
+async def _create_project_thread(
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[str, str, str]:
     registered = await client.post(
         "/api/v1/auth/register",
         json={
@@ -156,33 +161,29 @@ async def _create_project_thread(client: httpx.AsyncClient):
     )
     assert project.status_code == 201, project.text
     project_id = project.json()["id"]
-    asset = await client.post(
-        f"/api/projects/{project_id}/agents",
-        json={"slug": f"agent-{suffix}", "display_name": "Gateway Agent"},
+    created = await create_project_agent_from_design(
+        session_factory,
+        user_id=uuid.UUID(user_id),
+        project_id=uuid.UUID(project_id),
+        slug=f"agent-{suffix}",
+        display_name="Gateway Agent",
+        payload=AgentPayload(
+            description="Gateway reconnect process gate",
+            soul="Release gate",
+            model_ref="release-model",
+            tool_groups=(),
+            skill_version_ids=(),
+            mcp_version_ids=(),
+        ),
+        request_id="gateway-reconnect-agent-setup",
+    )
+    agent_id = str(created.asset.id)
+    activated = await client.post(
+        f"/api/projects/{project_id}/agents/{agent_id}/activate",
+        json={"expected_asset_version": created.asset.version},
         headers=headers,
     )
-    assert asset.status_code == 201, asset.text
-    agent_id = asset.json()["item"]["id"]
-    version = await client.post(
-        f"/api/projects/{project_id}/agents/{agent_id}/versions",
-        json={
-            "description": "Gateway reconnect process gate",
-            "soul": "Release gate",
-            "model_ref": "release-model",
-            "tool_groups": [],
-            "skill_version_ids": [],
-            "mcp_version_ids": [],
-            "expected_asset_version": 1,
-        },
-        headers=headers,
-    )
-    assert version.status_code == 201, version.text
-    published = await client.post(
-        f"/api/projects/{project_id}/agents/{agent_id}/versions/{version.json()['data']['id']}/publish",
-        json={"expected_asset_version": 2},
-        headers=headers,
-    )
-    assert published.status_code == 200, published.text
+    assert activated.status_code == 200, activated.text
     thread_id = str(uuid.uuid4())
     thread = await client.post(
         f"/api/projects/{project_id}/private-work/threads",
@@ -220,7 +221,10 @@ async def test_last_event_id_replays_after_formal_gateway_process_replacement(
             timeout=10,
             trust_env=False,
         ) as client:
-            user_id, project_id, thread_id = await _create_project_thread(client)
+            user_id, project_id, thread_id = await _create_project_thread(
+                client,
+                factory,
+            )
             cookies = httpx.Cookies(client.cookies)
 
         scope = PrivateResourceScope(

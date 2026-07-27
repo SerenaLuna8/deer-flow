@@ -255,6 +255,24 @@ export const enUS: Translations = {
     usage: "Usage",
     governance: {
       retry: "Retry",
+      tokenSeries: {
+        title: "Token usage trend",
+        description:
+          "Model token consumption across all project members for the latest 24 hourly buckets.",
+        loading: "Loading token usage",
+        unavailableTitle: "Token usage is unavailable",
+        unavailableDescription:
+          "Project token usage could not be read safely. Try again later.",
+        emptyTitle: "No token usage in the latest 24 hours",
+        emptyDescription:
+          "The trend will appear after a job settles with reported token usage.",
+        window: "Latest 24 hours",
+        settlementNote: "Grouped into hourly buckets by job settlement time",
+        interactionHint: "Hover or focus any hour to inspect its details",
+        chartLabel: "Project token usage line chart for the latest 24 hours",
+        tableCaption: "Project token usage details for the latest 24 hours",
+        bucket: "Hour",
+      },
       usage: {
         title: "Project usage",
         description: "Review effective limits and current project consumption.",
@@ -897,7 +915,7 @@ export const enUS: Translations = {
     memory: {
       title: "Memory",
       description: "Review and manage what DeerFlow remembers about you.",
-      manageMemory: "Manage memory",
+      manageMemory: "Data management",
       factCount: (count) => `${count} ${count === 1 ? "fact" : "facts"}`,
       summaryCount: (count) =>
         `${count} ${count === 1 ? "summary" : "summaries"}`,
@@ -947,7 +965,7 @@ export const enUS: Translations = {
       factValidationConfidence: "Confidence must be a number between 0 and 1.",
       noFacts: "No saved facts yet.",
       summaryReadOnly:
-        "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
+        "DeerFlow maintains these summaries automatically. This section is read-only.",
       memoryFullyEmpty: "No memory saved yet.",
       factPreviewLabel: "Fact to delete",
       searchPlaceholder: "Search memory",

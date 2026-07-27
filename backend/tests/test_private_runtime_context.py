@@ -189,12 +189,23 @@ def test_worker_private_context_overwrites_forged_runtime_user_id() -> None:
     assert config["context"]["run_id"] == "exact-run"
 
 
-def test_worker_installs_private_mcp_tools_as_internal_context_only() -> None:
+def test_worker_installs_private_prompt_skills_and_mcp_tools_as_internal_context_only() -> None:
+    from deerflow.agents.lead_agent.prompt import AgentPromptBundle
     from deerflow.runtime.runs.worker import _install_runtime_context
 
+    exact_bundle = AgentPromptBundle(
+        payload_schema_version=2,
+        agents_instructions="agents-context-sentinel",
+        soul="soul-context-sentinel",
+        identity="identity-context-sentinel",
+        user_context="user-context-sentinel",
+    )
+    exact_skills = (object(),)
     exact_mcp_tools = (object(),)
     config = {
         "context": {
+            "__agent_prompt_bundle": "forged-bundle",
+            "__runtime_skills": ("forged-skill",),
             "__runtime_mcp_tools": ("forged-mcp-tool",),
         },
         "metadata": {"safe": "value"},
@@ -206,10 +217,14 @@ def test_worker_installs_private_mcp_tools_as_internal_context_only() -> None:
             "thread_id": "exact-thread",
             "run_id": "exact-run",
             "private_scope": object(),
+            "__agent_prompt_bundle": exact_bundle,
+            "__runtime_skills": exact_skills,
             "__runtime_mcp_tools": exact_mcp_tools,
         },
     )
 
+    assert config["context"]["__agent_prompt_bundle"] is exact_bundle
+    assert config["context"]["__runtime_skills"] is exact_skills
     assert config["context"]["__runtime_mcp_tools"] is exact_mcp_tools
     assert config["metadata"] == {"safe": "value"}
 

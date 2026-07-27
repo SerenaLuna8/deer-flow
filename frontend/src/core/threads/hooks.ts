@@ -30,6 +30,7 @@ import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useUpdateSubtask } from "../tasks/context";
 import { messageToStep } from "../tasks/steps";
+import { parseSubtaskTerminalEvent } from "../tasks/subtask-result";
 import type { UploadedFileInfo } from "../uploads";
 import {
   promptInputFilePartToFile,
@@ -165,20 +166,6 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
 
-function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    return `message:${message.id}`;
-  }
-  return undefined;
-}
-
 function messageRunId(message: Message): string | undefined {
   const directRunId = Reflect.get(message, "run_id");
   if (typeof directRunId === "string" && directRunId.length > 0) {
@@ -188,6 +175,42 @@ function messageRunId(message: Message): string | undefined {
   return typeof additionalRunId === "string" && additionalRunId.length > 0
     ? additionalRunId
     : undefined;
+}
+
+export function resolveActiveRunIdForMessages(
+  messages: Message[],
+  isRunLoading: boolean,
+  explicitRunId: string | null,
+): string | null {
+  if (explicitRunId) {
+    return explicitRunId;
+  }
+  if (!isRunLoading) {
+    return null;
+  }
+  return (
+    [...messages]
+      .reverse()
+      .map(messageRunId)
+      .find((runId): runId is string => Boolean(runId)) ?? null
+  );
+}
+
+function messageIdentity(message: Message): string | undefined {
+  if (
+    "tool_call_id" in message &&
+    typeof message.tool_call_id === "string" &&
+    message.tool_call_id.length > 0
+  ) {
+    const runId = messageRunId(message);
+    return runId
+      ? `run:${runId}\u0000tool:${message.tool_call_id}`
+      : `tool:${message.tool_call_id}`;
+  }
+  if (typeof message.id === "string" && message.id.length > 0) {
+    return `message:${message.id}`;
+  }
+  return undefined;
 }
 
 function isRunAdmissionMessage(message: Message): boolean {
@@ -377,6 +400,34 @@ export function latestRunHasTerminalFailure(runs: Run[] | undefined) {
   return status === "error" || status === "failed" || status === "timeout";
 }
 
+export function rememberActiveRun(
+  runs: Run[] | undefined,
+  {
+    threadId,
+    runId,
+    createdAt,
+  }: {
+    threadId: string;
+    runId: string;
+    createdAt: string;
+  },
+): Run[] {
+  const existing = runs?.find((run) => run.run_id === runId);
+  const activeRun: Run =
+    existing ??
+    ({
+      run_id: runId,
+      thread_id: threadId,
+      assistant_id: "lead_agent",
+      created_at: createdAt,
+      updated_at: createdAt,
+      status: "running",
+      metadata: {},
+      multitask_strategy: null,
+    } satisfies Run);
+  return [activeRun, ...(runs ?? []).filter((run) => run.run_id !== runId)];
+}
+
 export function removeSetItems<T>(
   values: ReadonlySet<T>,
   itemsToRemove: Iterable<T>,
@@ -388,13 +439,93 @@ export function removeSetItems<T>(
   return next;
 }
 
+function isInternalHistoryCaller(caller: unknown): boolean {
+  return (
+    typeof caller === "string" &&
+    (caller.startsWith("subagent:") || caller.startsWith("middleware:"))
+  );
+}
+
+function getAIToolCallIds(message: Message): string[] {
+  if (message.type !== "ai") {
+    return [];
+  }
+
+  const ids = new Set<string>();
+  const collectIds = (toolCalls: unknown) => {
+    if (!Array.isArray(toolCalls)) {
+      return;
+    }
+    for (const toolCall of toolCalls) {
+      if (!toolCall || typeof toolCall !== "object") {
+        continue;
+      }
+      const id = Reflect.get(toolCall, "id");
+      if (typeof id === "string" && id.length > 0) {
+        ids.add(id);
+      }
+    }
+  };
+
+  collectIds(Reflect.get(message, "tool_calls"));
+  collectIds(message.additional_kwargs?.tool_calls);
+  return [...ids];
+}
+
+function runToolCallKey(runId: string, toolCallId: string): string {
+  return `${runId}\u0000${toolCallId}`;
+}
+
+function filterVisibleHistoryRows(messageRows: RunMessage[]): RunMessage[] {
+  const hiddenToolCalls = new Set<string>();
+  const visibleToolCalls = new Set<string>();
+
+  for (const row of messageRows) {
+    if (row.content.type !== "ai") {
+      continue;
+    }
+    const internal = isInternalHistoryCaller(row.metadata.caller);
+    for (const toolCallId of getAIToolCallIds(row.content)) {
+      const key = runToolCallKey(row.run_id, toolCallId);
+      if (internal) {
+        hiddenToolCalls.add(key);
+        visibleToolCalls.delete(key);
+      } else if (!hiddenToolCalls.has(key)) {
+        visibleToolCalls.add(key);
+      }
+    }
+  }
+
+  return messageRows.filter((row) => {
+    if (row.content.type === "human") {
+      return (
+        row.metadata.source === "run_admission" ||
+        !isInternalHistoryCaller(row.metadata.caller)
+      );
+    }
+    if (row.content.type === "ai") {
+      return !isInternalHistoryCaller(row.metadata.caller);
+    }
+    if (row.content.type === "tool") {
+      const toolCallId = Reflect.get(row.content, "tool_call_id");
+      if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+        return false;
+      }
+      return visibleToolCalls.has(runToolCallKey(row.run_id, toolCallId));
+    }
+    return true;
+  });
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
   appendedMessages: Message[],
 ) {
-  const visibleRows = messageRows.filter(
-    (message) => !supersededRunIds.has(message.run_id),
+  const visibleRows = filterVisibleHistoryRows(
+    messageRows.filter(
+      (message) => !supersededRunIds.has(message.run_id),
+    ),
   );
   return dedupeMessagesByIdentity([
     // Carry the owning run_id onto the content message so historical subtask
@@ -1042,6 +1173,7 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const messagesRef = useRef<Message[]>([]);
   const currentRunIdRef = useRef<string | null>(null);
+  const currentRunThreadIdRef = useRef<string | null>(null);
   const currentRunBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const runBaselinePreparedRef = useRef(false);
   const startedRef = useRef(false);
@@ -1095,6 +1227,7 @@ export function useThreadStream({
       );
     }
     currentRunIdRef.current = _runId;
+    currentRunThreadIdRef.current = _threadId;
     runBaselinePreparedRef.current = false;
     setOptimisticThreadId((currentOptimisticThreadId) => {
       const currentView = currentViewThreadIdRef.current;
@@ -1137,6 +1270,22 @@ export function useThreadStream({
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
+      const runQueryKey = scopedThreadQueryKey(
+        privateWork.scope,
+        "thread",
+        meta.thread_id,
+      );
+      queryClient.setQueryData<Run[]>(runQueryKey, (runs) =>
+        rememberActiveRun(runs, {
+          threadId: meta.thread_id,
+          runId: meta.run_id,
+          createdAt: now,
+        }),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: runQueryKey,
+        exact: true,
+      });
       upsertThreadInSearchCache(
         queryClient,
         {
@@ -1282,6 +1431,18 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      const terminalUpdate = parseSubtaskTerminalEvent(event);
+      if (terminalUpdate) {
+        updateSubtask({
+          ...terminalUpdate,
+          statusSource: "custom_event",
+          ...(terminalUpdate.status === "failed" && !terminalUpdate.error
+            ? { error: t.subtasks.failed }
+            : {}),
+        });
+        return;
+      }
+
       if (
         typeof event === "object" &&
         event !== null &&
@@ -1299,6 +1460,8 @@ export function useThreadStream({
         // normalized step (assistant turn or tool output) to the timeline.
         updateSubtask({
           id: e.task_id,
+          status: "in_progress",
+          statusSource: "custom_event",
           latestMessage: e.message,
           steps: [messageToStep(e.message, e.message_index ?? 0)],
         });
@@ -1425,6 +1588,7 @@ export function useThreadStream({
     sendInFlightRef.current = false;
     messagesRef.current = [];
     currentRunIdRef.current = null;
+    currentRunThreadIdRef.current = null;
     currentRunBaselineMessageIdsRef.current = new Set();
     runBaselinePreparedRef.current = false;
     pendingArchivedMessagesRef.current = [];
@@ -1862,12 +2026,6 @@ export function useThreadStream({
   if (persistedMessages.length >= messagesRef.current.length) {
     messagesRef.current = persistedMessages;
   }
-  const runScopedPersistedMessages = attachRunIdToNewMessages(
-    persistedMessages,
-    currentRunIdRef.current,
-    currentRunBaselineMessageIdsRef.current,
-  );
-
   const visibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
     prevHumanMsgCountRef.current,
@@ -1884,6 +2042,27 @@ export function useThreadStream({
     rescueBuffer.length > 0 && pendingArchiveThreadIdRef.current === threadId
       ? resolvePreservedHistory(visibleHistory, rescueBuffer)
       : visibleHistory;
+  const activeRunId = resolveActiveRunIdForMessages(
+    persistedMessages,
+    thread.isLoading,
+    currentRunThreadIdRef.current === threadId
+      ? currentRunIdRef.current
+      : null,
+  );
+  const runBaselineMessageIds = new Set(
+    currentRunBaselineMessageIdsRef.current,
+  );
+  for (const message of effectiveHistory) {
+    const identity = messageIdentity(message);
+    if (identity) {
+      runBaselineMessageIds.add(identity);
+    }
+  }
+  const runScopedPersistedMessages = attachRunIdToNewMessages(
+    persistedMessages,
+    activeRunId,
+    runBaselineMessageIds,
+  );
   const mergedMessages = mergeMessages(
     effectiveHistory,
     runScopedPersistedMessages,
@@ -2023,9 +2202,7 @@ export function useThreadHistory(
         ) {
           return;
         }
-        const _messages = result.data.filter(
-          (m) => !m.metadata.caller?.startsWith("middleware:"),
-        );
+        const _messages = result.data;
         setMessageRows((prev) =>
           mergeRunMessageRows(prev, _messages, runsRef.current),
         );
@@ -2042,7 +2219,7 @@ export function useThreadHistory(
           loadedRunIdsRef.current.add(run.run_id);
           if (
             shouldAutoContinueOnEmptyRun(
-              _messages.length,
+              filterVisibleHistoryRows(_messages).length,
               consecutiveEmptyLoads,
             )
           ) {

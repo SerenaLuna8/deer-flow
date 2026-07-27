@@ -456,7 +456,11 @@ class ProjectAssetResolver:
             dependency_version_ids=dependencies,
             payload=AgentPayload(
                 description=version.description,
+                payload_schema_version=version.payload_schema_version,
+                agents_instructions=version.agents_instructions,
                 soul=version.soul,
+                identity=version.identity,
+                user_context=version.user_context,
                 model_ref=version.model_ref,
                 tool_groups=tuple(version.tool_groups),
                 skill_version_ids=skill_ids,

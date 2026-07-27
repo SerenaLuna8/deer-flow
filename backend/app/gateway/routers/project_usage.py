@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from functools import wraps
 
 from fastapi import APIRouter, Depends, Request
@@ -22,6 +23,10 @@ from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
+from app.projects.token_usage import (
+    ProjectTokenUsageSeries,
+    read_project_token_usage_24h,
+)
 from app.quotas.models import (
     EffectiveQuotaLimits,
     ProjectQuotaLimits,
@@ -102,6 +107,26 @@ class ProjectUsageResponse(BaseModel):
     dimensions: list[QuotaDimensionResponse]
 
 
+class TokenUsageTotalsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class TokenUsagePointResponse(TokenUsageTotalsResponse):
+    bucket_start: datetime
+
+
+class ProjectTokenUsageSeriesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    window_start: datetime
+    window_end: datetime
+    bucket_minutes: int = Field(ge=1)
+    totals: TokenUsageTotalsResponse
+    points: list[TokenUsagePointResponse]
+
+
 class QuotaLimitsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     member_limit: int | None = None
@@ -155,6 +180,30 @@ def _usage_response(value: ProjectQuotaUsage) -> ProjectUsageResponse:
                 warning_threshold_reached=item.warning_threshold_reached,
             )
             for item in value.dimensions
+        ],
+    )
+
+
+def _token_usage_series_response(
+    value: ProjectTokenUsageSeries,
+) -> ProjectTokenUsageSeriesResponse:
+    return ProjectTokenUsageSeriesResponse(
+        window_start=value.window_start,
+        window_end=value.window_end,
+        bucket_minutes=value.bucket_minutes,
+        totals=TokenUsageTotalsResponse(
+            input_tokens=value.input_tokens,
+            output_tokens=value.output_tokens,
+            total_tokens=value.total_tokens,
+        ),
+        points=[
+            TokenUsagePointResponse(
+                bucket_start=point.bucket_start,
+                input_tokens=point.input_tokens,
+                output_tokens=point.output_tokens,
+                total_tokens=point.total_tokens,
+            )
+            for point in value.points
         ],
     )
 
@@ -214,6 +263,31 @@ async def get_project_usage(
     async with session.begin():
         context = await _project_context(session, project_id, identity, lock=False)
         return _usage_response(await quotas.read_usage(session, context))
+
+
+@router.get(
+    "/token-series",
+    response_model=ProjectTokenUsageSeriesResponse,
+)
+@_map_project_governance_errors
+async def get_project_token_usage_series(
+    project_id: uuid.UUID,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_project_identity),
+    session: AsyncSession = Depends(project_session),
+) -> ProjectTokenUsageSeriesResponse:
+    async with session.begin():
+        context = await _project_context(
+            session,
+            project_id,
+            identity,
+            lock=True,
+        )
+        return _token_usage_series_response(
+            await read_project_token_usage_24h(
+                session,
+                context.project_id,
+            )
+        )
 
 
 @router.patch("/limits", response_model=QuotaPolicyResponse)

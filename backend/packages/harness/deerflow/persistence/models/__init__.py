@@ -45,6 +45,8 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.shared_assets import (
+    AgentDesignOperationRow,
+    AgentDesignSessionRow,
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
@@ -75,6 +77,8 @@ __all__ = [
     "ChannelCredentialRow",
     "ChannelOAuthStateRow",
     "AgentRow",
+    "AgentDesignOperationRow",
+    "AgentDesignSessionRow",
     "AgentVersionMcpRefRow",
     "AgentVersionRow",
     "AgentVersionSkillRefRow",

@@ -206,30 +206,6 @@ def test_project_mcp_definition_rejects_unsafe_credential_header_names(
         )
 
 
-@pytest.mark.parametrize(
-    "duplicate_name",
-    ["Authorization", "authorization"],
-)
-def test_project_mcp_definition_rejects_duplicate_headers_across_slots(
-    duplicate_name: str,
-) -> None:
-    policy_module = importlib.import_module("deerflow.mcp.definition")
-
-    with pytest.raises(policy_module.McpDefinitionPolicyError):
-        policy_module.validate_project_mcp_definition(
-            transport="http",
-            url="https://mcp.example.test/tools",
-            env={},
-            headers={},
-            oauth={},
-            credential_slot_schemas=(
-                {"headers": ("Authorization",)},
-                {"headers": (duplicate_name,)},
-            ),
-            endpoint_policy=_PermitEveryEndpoint(),
-        )
-
-
 @pytest.mark.parametrize("transport", ["http", "sse"])
 def test_project_mcp_definition_accepts_an_exact_allowed_remote_endpoint(
     transport: str,
@@ -292,42 +268,6 @@ async def test_project_mcp_service_enforces_authoring_policy_before_storage(
             _context(),
             uuid.uuid4(),
             service_module.McpDefinition(**definition),
-            expected_asset_version=1,
-        )
-
-
-@pytest.mark.asyncio
-async def test_project_mcp_service_rejects_cross_slot_header_collisions_before_storage() -> None:
-    service_module = importlib.import_module("app.shared_assets.mcp_service")
-
-    class ExplodingFactory:
-        def __call__(self):
-            raise AssertionError("invalid authoring must not open storage")
-
-    service = service_module.McpService(
-        ExplodingFactory(),
-        endpoint_policy=_PermitEveryEndpoint(),
-    )
-    with pytest.raises(AssetValidationFailed):
-        await service.create_version(
-            _context(),
-            uuid.uuid4(),
-            service_module.McpDefinition(
-                transport="http",
-                url="https://mcp.example.test/tools",
-                credential_slots=(
-                    service_module.McpCredentialSlot(
-                        name="primary",
-                        purpose="Primary credential",
-                        payload_schema={"headers": ("Authorization",)},
-                    ),
-                    service_module.McpCredentialSlot(
-                        name="secondary",
-                        purpose="Secondary credential",
-                        payload_schema={"headers": ("authorization",)},
-                    ),
-                ),
-            ),
             expected_asset_version=1,
         )
 

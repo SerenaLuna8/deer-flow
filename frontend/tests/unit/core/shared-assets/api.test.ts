@@ -19,6 +19,7 @@ import {
   createProjectAsset,
   createProjectAssetVersion,
   createProjectCredential,
+  deleteProjectAgent,
   deleteProjectSkill,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
@@ -36,6 +37,7 @@ import {
   replaceProjectCredential,
   revokeProjectCredential,
   submitProjectMcpVersion,
+  updateProjectAgentInstructions,
   upgradeProjectSystemBinding,
 } from "@/core/shared-assets/api";
 
@@ -66,7 +68,11 @@ const agentVersion = {
   version_number: 1,
   workflow_status: "published",
   description: "Review changes",
+  agents_instructions: "# Agent\n\nReview changes carefully.",
   soul: "Be precise",
+  identity: "# Identity\n\nYou are a reviewer.",
+  user_context: "# User\n\nPrefer concise answers.",
+  payload_schema_version: 2,
   model_ref: "default",
   tool_groups: ["web"],
   skill_version_ids: [],
@@ -491,6 +497,53 @@ describe("shared asset api", () => {
     expect(mockedFetch).toHaveBeenCalledTimes(1);
   });
 
+  test("updates all four virtual Agent instruction documents with one revision-guarded PUT", async () => {
+    const input = {
+      agents_instructions: "# AGENTS.md",
+      soul: "# SOUL.md",
+      identity: "# IDENTITY.md",
+      user_context: "# USER.md",
+      expected_asset_version: 7,
+    };
+    const {
+      expected_asset_version: _expectedAssetVersion,
+      ...instructionDocuments
+    } = input;
+    void _expectedAssetVersion;
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        data: {
+          ...agentVersion,
+          ...instructionDocuments,
+          version_number: 2,
+        },
+        request_id: "req-agent-instructions",
+      }),
+    );
+    const signal = new AbortController().signal;
+
+    await expect(
+      updateProjectAgentInstructions(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toMatchObject({
+      data: {
+        agent_id: asset.id,
+        agents_instructions: input.agents_instructions,
+        soul: input.soul,
+        identity: input.identity,
+        user_context: input.user_context,
+      },
+    });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/instructions`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal,
+      },
+    );
+  });
+
   test("permanently deletes one project Skill package with its expected revision", async () => {
     mockedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
     const signal = new AbortController().signal;
@@ -522,7 +575,40 @@ describe("shared asset api", () => {
         code: "ASSET_VALIDATION_FAILED",
       }),
     );
+    expect(() =>
+      changeProjectAssetStatus(
+        PROJECT_ID,
+        "agents",
+        asset.id,
+        "archive" as never,
+        input,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "ASSET_VALIDATION_FAILED",
+      }),
+    );
     expect(mockedFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("permanently deletes one project Agent package with its expected revision", async () => {
+    mockedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const signal = new AbortController().signal;
+    const input = { expected_asset_version: 9 };
+
+    await expect(
+      deleteProjectAgent(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toBeUndefined();
+
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal,
+      },
+    );
   });
 
   test("activates and suspends a project Skill through explicit status actions", async () => {
@@ -653,7 +739,7 @@ describe("shared asset api", () => {
   test("covers the project version credential approval and binding mutation routes", async () => {
     const responses = [
       { data: [], request_id: "req-history" },
-      { data: agentVersion, request_id: "req-version" },
+      { data: mcpVersion, request_id: "req-version" },
       { data: credentialVersion, request_id: "req-version" },
       {
         credential_id: asset.id,
@@ -675,7 +761,7 @@ describe("shared asset api", () => {
     await listProjectAssetVersions(PROJECT_ID, "agents", asset.id);
     await publishProjectAssetVersion(
       PROJECT_ID,
-      "agents",
+      "mcp-servers",
       asset.id,
       versionId,
       {
@@ -715,7 +801,7 @@ describe("shared asset api", () => {
 
     expect(mockedFetch.mock.calls.map(([url]) => url)).toEqual([
       `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/versions`,
-      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/versions/${versionId}/publish`,
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions/${versionId}/publish`,
       `/backend/api/projects/${PROJECT_ID}/credentials/${asset.id}/replace`,
       `/backend/api/projects/${PROJECT_ID}/credentials/${asset.id}/migrate-grants`,
       `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions/${versionId}/submit-approval`,
@@ -733,7 +819,7 @@ describe("shared asset api", () => {
 
   test("creates typed project versions plus write-only project and system credentials", async () => {
     const responses = [
-      { data: agentVersion, request_id: "req-agent" },
+      { data: mcpVersion, request_id: "req-mcp" },
       { item: { ...credential, status: "active" }, request_id: "req-cred" },
       { item: { ...credential, status: "active" }, request_id: "req-cred" },
     ];
@@ -741,13 +827,19 @@ describe("shared asset api", () => {
       mockedFetch.mockResolvedValueOnce(jsonResponse(201, body));
     }
 
-    const agentInput = {
-      description: "Writer",
-      soul: "Be precise",
-      model_ref: "default",
-      tool_groups: [],
-      skill_version_ids: [],
-      mcp_version_ids: [],
+    const mcpInput = {
+      description: "GitHub",
+      transport: "stdio" as const,
+      command: "github-mcp",
+      args: [],
+      url: null,
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
       expected_asset_version: 1,
     };
     const credentialInput = {
@@ -757,7 +849,12 @@ describe("shared asset api", () => {
       payload: { env: { TOKEN: "write-only" } },
     };
 
-    await createProjectAssetVersion(PROJECT_ID, "agents", asset.id, agentInput);
+    await createProjectAssetVersion(
+      PROJECT_ID,
+      "mcp-servers",
+      asset.id,
+      mcpInput,
+    );
     const credentialResult = await createProjectCredential(
       PROJECT_ID,
       credentialInput,
@@ -765,7 +862,7 @@ describe("shared asset api", () => {
     await createAdminCredential(credentialInput);
 
     expect(mockedFetch.mock.calls.map(([url]) => url)).toEqual([
-      `/backend/api/projects/${PROJECT_ID}/agents/${asset.id}/versions`,
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions`,
       `/backend/api/projects/${PROJECT_ID}/credentials`,
       "/backend/api/admin/assets/credentials",
     ]);

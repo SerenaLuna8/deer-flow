@@ -1174,13 +1174,11 @@ test("project detail loads history and streams without legacy private-work calls
   await expect(page.getByText("Previous project question")).toBeVisible();
   await expect(page.getByRole("button", { name: "Submit" })).toBeVisible();
   await expect(page.getByTestId("add-attachments-button")).toBeVisible();
-  const automationLink = page.locator(
-    `a[href="/projects/research-lab/automations?thread_id=${THREAD_ID}"]`,
-  );
-  await expect(automationLink).toHaveAttribute(
-    "href",
-    `/projects/research-lab/automations?thread_id=${THREAD_ID}`,
-  );
+  await expect(
+    page.locator(
+      `a[href="/projects/research-lab/automations?thread_id=${THREAD_ID}"]`,
+    ),
+  ).toHaveCount(0);
   await expect(page.getByText("Scheduled tasks")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /sidecar/i })).toHaveCount(0);
 

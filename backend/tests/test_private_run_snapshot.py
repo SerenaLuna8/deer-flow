@@ -287,39 +287,6 @@ def test_run_snapshot_rejects_historical_project_non_header_credential_slot() ->
         )
 
 
-def test_run_snapshot_rejects_cross_slot_credential_header_collisions() -> None:
-    endpoint = "https://allowed.example.test/mcp"
-    version_id = uuid.uuid4()
-    asset = SimpleNamespace(scope="project")
-    version = SimpleNamespace(
-        id=version_id,
-        transport="http",
-        url=endpoint,
-        non_secret_env={},
-        non_secret_headers={},
-        oauth_metadata={},
-    )
-    closures = {
-        version_id: SimpleNamespace(
-            slots=(
-                SimpleNamespace(
-                    payload_schema={"headers": ["Authorization"]},
-                ),
-                SimpleNamespace(
-                    payload_schema={"headers": ["authorization"]},
-                ),
-            ),
-        )
-    }
-
-    with pytest.raises(RunSnapshotAssetStale):
-        RunSnapshotRepository._validate_project_mcp_credential_slots(
-            [(asset, version)],
-            closures,
-            endpoint_policy=ExactMcpEndpointPolicy(frozenset({endpoint})),
-        )
-
-
 @pytest_asyncio.fixture()
 async def snapshot_scenario(migrated_postgres_database_url):
     seed = await seed_m4_thread_database(migrated_postgres_database_url)

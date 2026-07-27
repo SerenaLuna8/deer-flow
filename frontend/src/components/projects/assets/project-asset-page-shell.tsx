@@ -9,6 +9,7 @@ import {
   SparklesIcon,
   UploadIcon,
 } from "lucide-react";
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -30,8 +31,8 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { agentBuilderCanAuthor } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { useModels } from "@/core/models/hooks";
 import type { Project } from "@/core/projects/types";
 import {
   useCreateProjectAsset,
@@ -51,7 +52,6 @@ import {
 import { useCurrentProject } from "../project-context";
 import { ProjectPageHeader } from "../project-page-header";
 
-import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import {
@@ -65,6 +65,7 @@ import {
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 export type ProjectAssetSourceFilter = "system" | "project";
+export type ProjectAssetPageLayout = "default" | "agent-cards";
 export type ProjectAssetListRenderContext = {
   project: Project;
   items: ProjectAssetItem[];
@@ -196,6 +197,18 @@ export function importedSkillSelectionReady(
   }
   return selection;
 }
+
+export function createdProjectAssetSelectionReady(
+  data: Pick<ProjectAssetList, "project_items"> | undefined,
+  assetId: string | null,
+): string | null {
+  if (!data || !assetId) return null;
+  return data.project_items.some((item) => item.id === assetId)
+    ? assetId
+    : null;
+}
+
+export const createdSkillSelectionReady = createdProjectAssetSelectionReady;
 
 export function handleRequestedVersion(
   current: Record<string, string>,
@@ -507,15 +520,28 @@ function ProjectAssetCatalog({
   accountId,
   project,
   kind,
+  layout,
+  createOpen,
+  initialSelectedAssetId,
+  onCreateOpenChange,
   renderList,
+  renderAssetEditor,
   renderVersion,
   renderLead,
 }: {
   accountId: string;
   project: Project;
   kind: MutableAssetKind;
+  layout: ProjectAssetPageLayout;
+  createOpen: boolean;
+  initialSelectedAssetId: string | null;
+  onCreateOpenChange: (open: boolean) => void;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
-  renderVersion: (
+  renderAssetEditor?: (
+    effectiveVersion: AssetVersion | null,
+    context: ProjectAssetVersionRenderContext,
+  ) => ReactNode;
+  renderVersion?: (
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
@@ -529,7 +555,7 @@ function ProjectAssetCatalog({
   const createVersion = useCreateProjectAssetVersion(
     accountId,
     project.id,
-    kind,
+    kind === "agents" ? null : kind,
   );
   const enableBinding = useEnableProjectSystemBinding(
     accountId,
@@ -543,21 +569,9 @@ function ProjectAssetCatalog({
   );
   const changeStatus = useChangeProjectAssetStatus(accountId, project.id, kind);
   const importSkill = useImportProjectSkillArchive(accountId, project.id);
-  const modelCatalog = useModels({ enabled: kind === "agents" });
-  const skillDependencies = useProjectAssets(
-    accountId,
-    project.id,
-    "skills",
-    kind === "agents",
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(
+    initialSelectedAssetId,
   );
-  const mcpDependencies = useProjectAssets(
-    accountId,
-    project.id,
-    "mcp-servers",
-    kind === "agents",
-  );
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] =
@@ -581,6 +595,7 @@ function ProjectAssetCatalog({
   >({});
   const [importedSkillSelection, setImportedSkillSelection] =
     useState<ImportedSkillSelection | null>(null);
+  const [createdAssetId, setCreatedAssetId] = useState<string | null>(null);
   const [versionSubmission, setVersionSubmission] = useState<{
     token: VersionDialogSubmissionToken;
     pending: boolean;
@@ -588,8 +603,13 @@ function ProjectAssetCatalog({
   } | null>(null);
 
   useEffect(() => {
-    if (createAsset.isSuccess) setCreateOpen(false);
-  }, [createAsset.isSuccess]);
+    if (!createAsset.isSuccess) return;
+    onCreateOpenChange(false);
+    if ((kind !== "skills" && kind !== "agents") || !createAsset.data) return;
+    setSourceTouched(true);
+    setSourceFilter("project");
+    setCreatedAssetId(createAsset.data.item.id);
+  }, [createAsset.data, createAsset.isSuccess, kind, onCreateOpenChange]);
 
   const handleRequestedVersionHandled = useCallback(
     (assetId: string, versionId: string) => {
@@ -606,7 +626,11 @@ function ProjectAssetCatalog({
     );
   }, []);
 
-  function openVersionDialog(item: ProjectAssetItem) {
+  function openVersionDialog(
+    item: ProjectAssetItem,
+    _selectedVersion: AssetVersion | null,
+  ) {
+    if (kind === "agents") return;
     const token = {
       assetId: item.id,
       generation: ++versionDialogGeneration.current,
@@ -714,6 +738,16 @@ function ProjectAssetCatalog({
     );
     setImportedSkillSelection(null);
   }, [data, importedSkillSelection]);
+
+  useEffect(() => {
+    const readyAssetId = createdProjectAssetSelectionReady(
+      data,
+      createdAssetId,
+    );
+    if (!readyAssetId) return;
+    setSelectedAssetId(readyAssetId);
+    setCreatedAssetId(null);
+  }, [createdAssetId, data]);
 
   useEffect(() => {
     if (selectedAssetId && data && !selectedItem) setSelectedAssetId(null);
@@ -852,141 +886,151 @@ function ProjectAssetCatalog({
     <>
       {renderLead?.({ project, data })}
 
-      <Tabs
-        value={sourceFilter}
-        onValueChange={(value) => {
-          setSourceTouched(true);
-          setSourceFilter(value as ProjectAssetSourceFilter);
-        }}
-        className="gap-0"
-      >
-        <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center">
-          {sourceOptions.length > 1 ? (
-            <TabsList
-              variant="line"
-              aria-label="资产来源"
-              className="w-full justify-start lg:w-auto"
+      {layout === "agent-cards" && renderList ? (
+        renderList({
+          project,
+          items: filteredData.project_items,
+          source: "project",
+          selectedAssetId,
+          onSelect: (item) => setSelectedAssetId(item.id),
+        })
+      ) : (
+        <Tabs
+          value={sourceFilter}
+          onValueChange={(value) => {
+            setSourceTouched(true);
+            setSourceFilter(value as ProjectAssetSourceFilter);
+          }}
+          className="gap-0"
+        >
+          <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-center">
+            {sourceOptions.length > 1 ? (
+              <TabsList
+                variant="line"
+                aria-label="资产来源"
+                className="w-full justify-start lg:w-auto"
+              >
+                {sourceOptions.map(([value, label]) => {
+                  const count =
+                    value === "system"
+                      ? data.system_items.length
+                      : data.project_items.length;
+                  return (
+                    <TabsTrigger
+                      key={value}
+                      value={value}
+                      className="data-[state=active]:after:bg-selection min-w-0 flex-1 px-3 lg:flex-none"
+                    >
+                      {label}
+                      <span className="text-muted-foreground text-xs tabular-nums">
+                        {count}
+                      </span>
+                    </TabsTrigger>
+                  );
+                })}
+              </TabsList>
+            ) : null}
+
+            <label
+              className={`relative min-w-0 flex-1 ${
+                sourceOptions.length > 1 ? "lg:ml-2" : ""
+              }`}
             >
-              {sourceOptions.map(([value, label]) => {
-                const count =
-                  value === "system"
-                    ? data.system_items.length
-                    : data.project_items.length;
-                return (
-                  <TabsTrigger
-                    key={value}
-                    value={value}
-                    className="data-[state=active]:after:bg-selection min-w-0 flex-1 px-3 lg:flex-none"
+              <span className="sr-only">搜索{KIND_META[kind].singular}</span>
+              <SearchIcon
+                aria-hidden
+                className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+              />
+              <Input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="搜索名称或 slug"
+                className="h-9 bg-transparent pl-9"
+              />
+            </label>
+
+            {filterActive ? (
+              <p
+                role="status"
+                className="text-muted-foreground shrink-0 text-xs tabular-nums"
+              >
+                显示 {visibleCount} / {sourceCount} 项
+              </p>
+            ) : null}
+
+            {canCreate && sourceFilter === "project" ? (
+              <div className="flex shrink-0 items-center gap-2">
+                {kind === "skills" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      importSkill.reset();
+                      setImportOpen(true);
+                    }}
                   >
-                    {label}
-                    <span className="text-muted-foreground text-xs tabular-nums">
-                      {count}
-                    </span>
-                  </TabsTrigger>
-                );
-              })}
-            </TabsList>
-          ) : null}
-
-          <label
-            className={`relative min-w-0 flex-1 ${
-              sourceOptions.length > 1 ? "lg:ml-2" : ""
-            }`}
-          >
-            <span className="sr-only">搜索{KIND_META[kind].singular}</span>
-            <SearchIcon
-              aria-hidden
-              className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-            />
-            <Input
-              type="search"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="搜索名称或 slug"
-              className="h-9 bg-transparent pl-9"
-            />
-          </label>
-
-          {filterActive ? (
-            <p
-              role="status"
-              className="text-muted-foreground shrink-0 text-xs tabular-nums"
-            >
-              显示 {visibleCount} / {sourceCount} 项
-            </p>
-          ) : null}
-
-          {canCreate && sourceFilter === "project" ? (
-            <div className="flex shrink-0 items-center gap-2">
-              {kind === "skills" ? (
+                    <UploadIcon aria-hidden className="size-4" />
+                    上传压缩包
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    importSkill.reset();
-                    setImportOpen(true);
-                  }}
+                  onClick={() => onCreateOpenChange(true)}
                 >
-                  <UploadIcon aria-hidden className="size-4" />
-                  上传压缩包
+                  <PlusIcon aria-hidden className="size-4" />
+                  新建{KIND_META[kind].singular}
                 </Button>
-              ) : null}
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => setCreateOpen(true)}
-              >
-                <PlusIcon aria-hidden className="size-4" />
-                新建{KIND_META[kind].singular}
-              </Button>
-            </div>
-          ) : null}
-        </div>
+              </div>
+            ) : null}
+          </div>
 
-        {sourceOptions.map(([value]) => {
-          const items =
-            value === "system"
-              ? filteredData.system_items
-              : filteredData.project_items;
-          return (
-            <TabsContent key={value} value={value} className="pt-4">
-              {filterActive && items.length === 0 ? (
-                <p
-                  role="status"
-                  className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm"
-                >
-                  没有找到匹配的 {KIND_META[kind].singular}，请调整搜索词。
-                </p>
-              ) : renderList ? (
-                renderList({
-                  project,
-                  items,
-                  source: value,
-                  selectedAssetId,
-                  onSelect: (item) => setSelectedAssetId(item.id),
-                })
-              ) : (
-                <ProjectAssetListView
-                  kind={kind}
-                  data={filteredData}
-                  source={value}
-                  selectedAssetId={selectedAssetId}
-                  onSelect={(item) => setSelectedAssetId(item.id)}
-                  onToggleSystemBinding={toggleSystemBinding}
-                  onToggleProjectSkillStatus={toggleProjectSkillStatus}
-                  bindingIntent={bindingIntent}
-                  bindingErrorAssetId={bindingErrorAssetId}
-                  bindingError={bindingError}
-                  skillStatusIntent={skillStatusIntent}
-                  skillStatusErrorAssetId={skillStatusErrorAssetId}
-                  skillStatusError={changeStatus.error}
-                />
-              )}
-            </TabsContent>
-          );
-        })}
-      </Tabs>
+          {sourceOptions.map(([value]) => {
+            const items =
+              value === "system"
+                ? filteredData.system_items
+                : filteredData.project_items;
+            return (
+              <TabsContent key={value} value={value} className="pt-4">
+                {filterActive && items.length === 0 ? (
+                  <p
+                    role="status"
+                    className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm"
+                  >
+                    没有找到匹配的 {KIND_META[kind].singular}，请调整搜索词。
+                  </p>
+                ) : renderList ? (
+                  renderList({
+                    project,
+                    items,
+                    source: value,
+                    selectedAssetId,
+                    onSelect: (item) => setSelectedAssetId(item.id),
+                  })
+                ) : (
+                  <ProjectAssetListView
+                    kind={kind}
+                    data={filteredData}
+                    source={value}
+                    selectedAssetId={selectedAssetId}
+                    onSelect={(item) => setSelectedAssetId(item.id)}
+                    onToggleSystemBinding={toggleSystemBinding}
+                    onToggleProjectSkillStatus={toggleProjectSkillStatus}
+                    bindingIntent={bindingIntent}
+                    bindingErrorAssetId={bindingErrorAssetId}
+                    bindingError={bindingError}
+                    skillStatusIntent={skillStatusIntent}
+                    skillStatusErrorAssetId={skillStatusErrorAssetId}
+                    skillStatusError={changeStatus.error}
+                  />
+                )}
+              </TabsContent>
+            );
+          })}
+        </Tabs>
+      )}
 
       {selectedItem && (
         <ProjectAssetDetailSheet
@@ -1012,23 +1056,26 @@ function ProjectAssetCatalog({
           }}
           onVersionCreated={rememberVersion}
           onRequestedVersionHandled={handleRequestedVersionHandled}
+          renderAssetEditor={renderAssetEditor}
           renderVersion={renderVersion}
         />
       )}
 
-      <CreateAssetDialog
-        kind={kind}
-        scope="project"
-        open={createOpen}
-        pending={createAsset.isPending}
-        errorMessage={
-          createAsset.error
-            ? projectAssetCreateErrorMessage(kind, createAsset.error)
-            : null
-        }
-        onOpenChange={setCreateOpen}
-        onSubmit={(input) => createAsset.mutate(input)}
-      />
+      {kind !== "agents" ? (
+        <CreateAssetDialog
+          kind={kind}
+          scope="project"
+          open={createOpen}
+          pending={createAsset.isPending}
+          errorMessage={
+            createAsset.error
+              ? projectAssetCreateErrorMessage(kind, createAsset.error)
+              : null
+          }
+          onOpenChange={onCreateOpenChange}
+          onSubmit={(input) => createAsset.mutate(input)}
+        />
+      ) : null}
 
       {kind === "skills" ? (
         <ProjectSkillImportDialog
@@ -1048,7 +1095,7 @@ function ProjectAssetCatalog({
         />
       ) : null}
 
-      {versionAsset && (
+      {versionAsset && kind !== "agents" ? (
         <CreateVersionDialog
           key={`${versionAsset.id}:${activeVersionDialog.current?.generation ?? "closed"}`}
           kind={kind}
@@ -1072,22 +1119,10 @@ function ProjectAssetCatalog({
               ? adminAssetErrorMessage(versionSubmission.error)
               : null
           }
-          modelOptions={modelCatalog.models.map((model) => ({
-            name: model.name,
-            displayName: model.display_name,
-          }))}
-          skillVersionOptions={dependencyVersionOptions(
-            skillDependencies.data as ProjectAssetList | undefined,
-          )}
-          mcpVersionOptions={dependencyVersionOptions(
-            mcpDependencies.data as ProjectAssetList | undefined,
-          )}
-          modelsLoading={modelCatalog.isLoading}
-          modelsError={Boolean(modelCatalog.error)}
           onOpenChange={(next) => !next && closeVersionDialog()}
           onSubmit={(input: VersionAuthoringInput) => void submitVersion(input)}
         />
-      )}
+      ) : null}
     </>
   );
 }
@@ -1096,15 +1131,24 @@ export function ProjectAssetPageShell({
   kind,
   title,
   description,
+  layout = "default",
+  initialSelectedAssetId = null,
   renderList,
+  renderAssetEditor,
   renderVersion,
   renderLead,
 }: {
   kind: MutableAssetKind;
   title: string;
   description: string;
+  layout?: ProjectAssetPageLayout;
+  initialSelectedAssetId?: string | null;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
-  renderVersion: (
+  renderAssetEditor?: (
+    effectiveVersion: AssetVersion | null,
+    context: ProjectAssetVersionRenderContext,
+  ) => ReactNode;
+  renderVersion?: (
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
@@ -1115,6 +1159,7 @@ export function ProjectAssetPageShell({
 }) {
   const { user } = useAuth();
   const project = useCurrentProject();
+  const [createOpen, setCreateOpen] = useState(false);
 
   if (!user) return null;
 
@@ -1125,13 +1170,31 @@ export function ProjectAssetPageShell({
         eyebrow={`${project.display_name} · 项目资产`}
         title={title}
         description={description}
+        actions={
+          layout === "agent-cards" &&
+          agentBuilderCanAuthor(project.capabilities) ? (
+            <Button asChild>
+              <Link
+                href={`/projects/${encodeURIComponent(project.slug)}/agents/new`}
+              >
+                <PlusIcon aria-hidden className="size-4" />
+                新建 Agent
+              </Link>
+            </Button>
+          ) : null
+        }
       />
 
       <ProjectAssetCatalog
         accountId={user.id}
         project={project}
         kind={kind}
+        layout={layout}
+        createOpen={createOpen}
+        initialSelectedAssetId={initialSelectedAssetId}
+        onCreateOpenChange={setCreateOpen}
         renderList={renderList}
+        renderAssetEditor={renderAssetEditor}
         renderVersion={renderVersion}
         renderLead={renderLead}
       />

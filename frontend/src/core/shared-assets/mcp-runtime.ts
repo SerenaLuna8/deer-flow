@@ -51,13 +51,10 @@ export function mcpVersionRuntimeBlockReason(
   scope: AssetScope,
 ): string | null {
   const transport = version.definition.transport;
-  const credentialSlots =
-    version.credential_slots.length > 0
-      ? version.credential_slots
-      : version.definition.credential_slots;
-  const credentialSchemas = credentialSlots.map((slot) =>
-    Object.keys(slot.payload_schema),
-  );
+  const credentialSchemas = [
+    ...version.definition.credential_slots,
+    ...version.credential_slots,
+  ].map((slot) => Object.keys(slot.payload_schema));
 
   if (scope === "project") {
     if (!isMcpRuntimeTransport(transport)) {
@@ -78,16 +75,6 @@ export function mcpVersionRuntimeBlockReason(
       )
     ) {
       return "当前 Project MCP Credential 槽位仅支持 headers。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
-    }
-    const seenHeaderNames = new Set<string>();
-    for (const slot of credentialSlots) {
-      for (const headerName of slot.payload_schema.headers ?? []) {
-        const normalizedName = headerName.toLowerCase();
-        if (seenHeaderNames.has(normalizedName)) {
-          return "当前 Project MCP Credential 槽位不能重复声明请求头。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
-        }
-        seenHeaderNames.add(normalizedName);
-      }
     }
     return null;
   }

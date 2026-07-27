@@ -3,6 +3,7 @@
 import { useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ProjectPageHeader } from "@/components/projects/project-page-header";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,12 +24,13 @@ import {
   truncateFactPreview,
 } from "@/components/workspace/settings/memory/memory-view-model";
 import {
+  MemoryContextSidecar,
   MemoryEmptyState,
   MemoryFactList,
   MemoryHeaderActions,
   MemoryLoadError,
   MemoryLoadingState,
-  MemoryOverview,
+  MemoryStatusBar,
   MemorySummaryDisclosure,
   MemoryToolbar,
   type MemorySourceThreadHref,
@@ -274,6 +276,8 @@ export function MemorySettingsView({
     showSummaries &&
     !hasNoMatches &&
     (normalizedQuery.length === 0 || filteredSectionGroups.length > 0);
+  const filteredSummaryCount = countPopulatedSummaries(filteredSectionGroups);
+  const showContextSidecar = filter === "all" && shouldRenderSummariesBlock;
 
   useEffect(() => {
     const trigger = summaryTriggerRef.current;
@@ -461,46 +465,44 @@ export function MemorySettingsView({
 
   return (
     <>
-      <section data-testid="memory-workbench" className="space-y-6">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              {t.settings.memory.title}
-            </h1>
-            <p className="text-muted-foreground max-w-2xl text-sm">
-              {t.settings.memory.description}
-            </p>
-          </div>
-
-          {!isLoading && !error && memory ? (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,application/json"
-                className="hidden"
-                onChange={(event) => void handleImportFileSelection(event)}
-              />
-              <MemoryHeaderActions
-                t={t}
-                isImporting={importMemoryMutation?.isPending ?? false}
-                isExporting={isExporting}
-                isClearing={clearMemory?.isPending ?? false}
-                isReloading={reloadMemory?.isPending ?? false}
-                canAddFact={permissions.canAdd}
-                canImport={permissions.canImport}
-                canExport={permissions.canExport}
-                canClear={permissions.canClear}
-                canReload={permissions.canReload}
-                onAddFact={openCreateFactDialog}
-                onImport={() => fileInputRef.current?.click()}
-                onExport={() => void handleExportMemory()}
-                onClear={() => setClearDialogOpen(true)}
-                onReload={() => void handleReloadMemory()}
-              />
-            </>
-          ) : null}
-        </header>
+      <section
+        data-testid="memory-workbench"
+        className="space-y-6 lg:space-y-11"
+      >
+        <ProjectPageHeader
+          title={t.settings.memory.title}
+          description={t.settings.memory.description}
+          actions={
+            !isLoading && !error && memory ? (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(event) => void handleImportFileSelection(event)}
+                />
+                <MemoryHeaderActions
+                  t={t}
+                  isImporting={importMemoryMutation?.isPending ?? false}
+                  isExporting={isExporting}
+                  isClearing={clearMemory?.isPending ?? false}
+                  isReloading={reloadMemory?.isPending ?? false}
+                  canAddFact={permissions.canAdd}
+                  canImport={permissions.canImport}
+                  canExport={permissions.canExport}
+                  canClear={permissions.canClear}
+                  canReload={permissions.canReload}
+                  onAddFact={openCreateFactDialog}
+                  onImport={() => fileInputRef.current?.click()}
+                  onExport={() => void handleExportMemory()}
+                  onClear={() => setClearDialogOpen(true)}
+                  onReload={() => void handleReloadMemory()}
+                />
+              </>
+            ) : undefined
+          }
+        />
 
         {isLoading ? (
           <MemoryLoadingState label={t.common.loading} />
@@ -512,39 +514,95 @@ export function MemorySettingsView({
           </div>
         ) : (
           <>
-            <MemoryOverview
+            <MemoryStatusBar
               t={t}
               factCount={memory.facts.length}
               summaryCount={summaryCount}
               lastUpdated={formatTimeAgo(memory.lastUpdated)}
-              recentFocus={recentFocus}
-              onViewSummaries={handleViewSummaries}
-            />
-            <MemoryToolbar
-              t={t}
-              query={query}
-              filter={filter}
-              onQueryChange={setQuery}
-              onFilterChange={setFilter}
             />
 
             {memoryFullyEmpty ? (
-              <MemoryEmptyState
-                t={t}
-                onAddFact={
-                  permissions.canAdd ? openCreateFactDialog : undefined
-                }
-              />
-            ) : hasNoMatches ? (
-              <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                {noMatches}
-              </div>
-            ) : (
               <div className="space-y-4">
-                {shouldRenderFactsBlock ? (
+                <MemoryToolbar
+                  t={t}
+                  query={query}
+                  filter={filter}
+                  factCount={memory.facts.length}
+                  summaryCount={summaryCount}
+                  onQueryChange={setQuery}
+                  onFilterChange={setFilter}
+                />
+                <MemoryEmptyState
+                  t={t}
+                  onAddFact={
+                    permissions.canAdd ? openCreateFactDialog : undefined
+                  }
+                />
+              </div>
+            ) : hasNoMatches ? (
+              <section className="bg-card overflow-hidden rounded-xl border">
+                <MemoryToolbar
+                  t={t}
+                  query={query}
+                  filter={filter}
+                  factCount={memory.facts.length}
+                  summaryCount={summaryCount}
+                  embedded
+                  onQueryChange={setQuery}
+                  onFilterChange={setFilter}
+                />
+                <div className="text-muted-foreground p-5 text-sm">
+                  {noMatches}
+                </div>
+              </section>
+            ) : filter === "summaries" ? (
+              <section className="bg-card overflow-hidden rounded-xl border">
+                <MemoryToolbar
+                  t={t}
+                  query={query}
+                  filter={filter}
+                  factCount={memory.facts.length}
+                  summaryCount={summaryCount}
+                  embedded
+                  onQueryChange={setQuery}
+                  onFilterChange={setFilter}
+                />
+                <MemorySummaryDisclosure
+                  t={t}
+                  groups={filteredSectionGroups}
+                  summaryCount={filteredSummaryCount}
+                  open={summariesOpen}
+                  onOpenChange={(open) => {
+                    if (!summariesForcedOpen) {
+                      setSummariesExpanded(open);
+                    }
+                  }}
+                  triggerRef={summaryTriggerRef}
+                  embedded
+                />
+              </section>
+            ) : (
+              <div
+                className={
+                  showContextSidecar
+                    ? "grid min-w-0 gap-4 lg:grid-cols-[minmax(0,2.15fr)_minmax(20rem,1fr)]"
+                    : "grid min-w-0 gap-4"
+                }
+              >
+                <section className="bg-card min-w-0 overflow-hidden rounded-xl border">
+                  <MemoryToolbar
+                    t={t}
+                    query={query}
+                    filter={filter}
+                    factCount={memory.facts.length}
+                    summaryCount={summaryCount}
+                    embedded
+                    onQueryChange={setQuery}
+                    onFilterChange={setFilter}
+                  />
                   <MemoryFactList
                     t={t}
-                    facts={filteredFacts}
+                    facts={shouldRenderFactsBlock ? filteredFacts : []}
                     isDeleting={deleteMemoryFact?.isPending ?? false}
                     onEdit={
                       permissions.canModify ? openEditFactDialog : undefined
@@ -553,23 +611,18 @@ export function MemorySettingsView({
                       permissions.canDelete ? setFactToDelete : undefined
                     }
                     sourceThreadHref={sourceThreadHref}
+                    embedded
+                    showHeading={false}
                   />
-                ) : null}
+                </section>
 
-                {shouldRenderSummariesBlock ? (
-                  <MemorySummaryDisclosure
+                {showContextSidecar ? (
+                  <MemoryContextSidecar
                     t={t}
+                    recentFocus={recentFocus}
                     groups={filteredSectionGroups}
-                    summaryCount={countPopulatedSummaries(
-                      filteredSectionGroups,
-                    )}
-                    open={summariesOpen}
-                    onOpenChange={(open) => {
-                      if (!summariesForcedOpen) {
-                        setSummariesExpanded(open);
-                      }
-                    }}
-                    triggerRef={summaryTriggerRef}
+                    summaryCount={filteredSummaryCount}
+                    onViewSummaries={handleViewSummaries}
                   />
                 ) : null}
               </div>

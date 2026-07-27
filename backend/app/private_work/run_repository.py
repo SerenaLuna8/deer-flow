@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -57,6 +58,59 @@ class PrivateRunExecutionState:
 class PrivateRunSettlement:
     run: PrivateRunRecord
     run_terminal_published: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateRunUsageSnapshot:
+    """Attempt-local token usage produced by the Worker Run journal."""
+
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_tokens: int = 0
+    llm_call_count: int = 0
+    lead_agent_tokens: int = 0
+    subagent_tokens: int = 0
+    middleware_tokens: int = 0
+    token_usage_by_model: dict[str, dict[str, int]] = field(
+        default_factory=dict,
+    )
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_tokens",
+            "llm_call_count",
+            "lead_agent_tokens",
+            "subagent_tokens",
+            "middleware_tokens",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise TypeError(
+                    f"{field_name} must be a non-negative integer",
+                )
+        normalized: dict[str, dict[str, int]] = {}
+        if not isinstance(self.token_usage_by_model, Mapping):
+            raise TypeError("token_usage_by_model must be a mapping")
+        for model_name, raw_usage in self.token_usage_by_model.items():
+            if type(model_name) is not str or not model_name:
+                raise TypeError("token usage model names must be non-empty strings")
+            if not isinstance(raw_usage, Mapping):
+                raise TypeError("per-model token usage must be a mapping")
+            usage: dict[str, int] = {}
+            for counter_name, counter_value in raw_usage.items():
+                if type(counter_name) is not str or not counter_name:
+                    raise TypeError(
+                        "token usage counter names must be non-empty strings",
+                    )
+                if type(counter_value) is not int or counter_value < 0:
+                    raise TypeError(
+                        "per-model token usage counters must be non-negative integers",
+                    )
+                usage[counter_name] = counter_value
+            normalized[model_name] = usage
+        object.__setattr__(self, "token_usage_by_model", normalized)
 
 
 class PrivateRunConflict(Exception):
@@ -553,11 +607,14 @@ class PrivateRunRepository:
         cancel_preempts_outcome: bool = True,
         retry_initial_seconds: int = 2,
         retry_max_seconds: int = 300,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
         now: datetime | None = None,
     ) -> PrivateRunSettlement:
         if type(cancel_preempts_outcome) is not bool:
             raise PrivateRunConflict
         if type(retryable_failure) is not bool:
+            raise PrivateRunConflict
+        if attempt_usage is not None and type(attempt_usage) is not PrivateRunUsageSnapshot:
             raise PrivateRunConflict
         settled_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
@@ -639,6 +696,22 @@ class PrivateRunRepository:
                 run.error = job.public_error_code or public_error_code
         if not changed:
             raise PrivateRunExecutionLeaseLost
+        if attempt_usage is not None:
+            # A logical Run may span multiple retry attempts. Each journal
+            # snapshot starts at zero, so settlement must add rather than replace.
+            run.total_input_tokens += attempt_usage.total_input_tokens
+            run.total_output_tokens += attempt_usage.total_output_tokens
+            run.total_tokens += attempt_usage.total_tokens
+            run.llm_call_count += attempt_usage.llm_call_count
+            run.lead_agent_tokens += attempt_usage.lead_agent_tokens
+            run.subagent_tokens += attempt_usage.subagent_tokens
+            run.middleware_tokens += attempt_usage.middleware_tokens
+            by_model = {model_name: dict(usage) for model_name, usage in (run.token_usage_by_model or {}).items()}
+            for model_name, usage in attempt_usage.token_usage_by_model.items():
+                model_totals = by_model.setdefault(model_name, {})
+                for counter_name, counter_value in usage.items():
+                    model_totals[counter_name] = model_totals.get(counter_name, 0) + counter_value
+            run.token_usage_by_model = by_model
         run.execution_lease_token_hash = None
         run.execution_lease_expires_at = None
         run.execution_heartbeat_at = None

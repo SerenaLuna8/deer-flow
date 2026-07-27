@@ -138,6 +138,8 @@ def _build_runtime_context(
 
 class PrivateAgentRuntime(Protocol):
     skill_root: Any
+    skills: tuple[Any, ...]
+    prompt_bundle: Any
 
     async def aclose(self) -> None: ...
 
@@ -191,6 +193,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "__authorization_boundary",
             "__file_authority",
             "__run_read_only_mounts",
+            "__agent_prompt_bundle",
+            "__runtime_skills",
             "__runtime_mcp_tools",
         ):
             if key in runtime_context:
@@ -581,6 +585,10 @@ async def run_agent(
             # Context is merged after configurable by the Agent factory. Keep
             # both channels pinned to the same persisted private-Run model.
             runtime_ctx["model_name"] = record.model_name
+            prompt_bundle = getattr(ctx.private_agent_runtime, "prompt_bundle", None)
+            if prompt_bundle is not None:
+                runtime_ctx["__agent_prompt_bundle"] = prompt_bundle
+            runtime_ctx["__runtime_skills"] = tuple(getattr(ctx.private_agent_runtime, "skills", ()))
             runtime_ctx["__runtime_mcp_tools"] = tuple(getattr(ctx.private_agent_runtime, "mcp_tools", ()))
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()

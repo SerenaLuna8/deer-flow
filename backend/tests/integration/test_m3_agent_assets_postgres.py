@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import importlib
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -312,6 +313,148 @@ async def test_project_agent_publish_pins_dependencies_and_hides_other_project(
 
 
 @pytest.mark.asyncio
+async def test_agent_virtual_instructions_survive_runtime_configuration_and_hot_publish(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(engine, factory, label="instructions")
+    _, skill_version_id = await _seed_dependency(
+        engine,
+        kind="skill",
+        scope="project",
+        project_id=editor.project_id,
+        user_id=editor.user_id,
+    )
+    service = service_module.AgentService(factory)
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateAgent("instruction-agent", "Instruction Agent"),
+        )
+        instruction_draft = await service.update_instructions(
+            editor,
+            asset.id,
+            service_module.AgentInstructions(
+                agents_instructions="# Agent rules",
+                soul="# Soul",
+                identity="# Identity",
+                user_context="# User",
+            ),
+            expected_asset_version=1,
+        )
+        assert instruction_draft.workflow_status is WorkflowStatus.DRAFT
+        assert instruction_draft.payload_schema_version == 2
+
+        runtime_draft = await service.create_version(
+            editor,
+            asset.id,
+            AgentPayload(
+                description="Configured runtime",
+                soul="",
+                model_ref="default",
+                tool_groups=("research",),
+                skill_version_ids=(skill_version_id,),
+                mcp_version_ids=(),
+            ),
+            expected_asset_version=2,
+        )
+        assert runtime_draft.agents_instructions == "# Agent rules"
+        assert runtime_draft.soul == "# Soul"
+        assert runtime_draft.identity == "# Identity"
+        assert runtime_draft.user_context == "# User"
+
+        newer_instruction_draft = await service.update_instructions(
+            editor,
+            asset.id,
+            service_module.AgentInstructions(
+                agents_instructions="# Updated Agent rules",
+                soul="",
+                identity="# Updated Identity",
+                user_context="",
+            ),
+            expected_asset_version=3,
+        )
+        assert newer_instruction_draft.workflow_status is WorkflowStatus.DRAFT
+        assert newer_instruction_draft.version_number == 3
+
+        published = await service.publish(
+            editor,
+            asset.id,
+            runtime_draft.id,
+            expected_asset_version=4,
+        )
+        assert published.id != runtime_draft.id
+        assert published.version_number == 4
+        assert published.workflow_status is WorkflowStatus.PUBLISHED
+        assert published.description == runtime_draft.description
+        assert published.model_ref == runtime_draft.model_ref
+        assert published.tool_groups == runtime_draft.tool_groups
+        assert published.agents_instructions == newer_instruction_draft.agents_instructions
+        assert published.soul == newer_instruction_draft.soul
+        assert published.identity == newer_instruction_draft.identity
+        assert published.user_context == newer_instruction_draft.user_context
+        assert published.skill_version_ids == (skill_version_id,)
+        assert published.payload_schema_version == 2
+        async with engine.connect() as connection:
+            generation_before = int(await connection.scalar(text("SELECT generation FROM asset_catalog_state WHERE id=1")))
+            version_count_before_retry = int(
+                await connection.scalar(
+                    text("SELECT count(*) FROM agent_versions WHERE agent_id=:agent_id"),
+                    {"agent_id": asset.id},
+                )
+            )
+            source_status = await connection.scalar(
+                text("SELECT workflow_status FROM agent_versions WHERE id=:version_id"),
+                {"version_id": runtime_draft.id},
+            )
+        assert source_status == WorkflowStatus.REJECTED.value
+
+        with pytest.raises(AssetConflict):
+            await service.publish(
+                editor,
+                asset.id,
+                runtime_draft.id,
+                expected_asset_version=5,
+            )
+        async with engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM agent_versions WHERE agent_id=:agent_id"),
+                    {"agent_id": asset.id},
+                )
+                == version_count_before_retry
+            )
+
+        updated = await service.update_instructions(
+            editor,
+            asset.id,
+            service_module.AgentInstructions(
+                agents_instructions="# Final Agent rules",
+                soul="# Final Soul",
+                identity="# Final Identity",
+                user_context="# Final User",
+            ),
+            expected_asset_version=5,
+        )
+
+        assert updated.workflow_status is WorkflowStatus.PUBLISHED
+        assert updated.version_number == 5
+        assert updated.supersedes_version_id == published.id
+        assert updated.skill_version_ids == (skill_version_id,)
+        assert updated.payload_schema_version == 2
+        assert (await service.get(editor, asset.id)).current_published_version_id == updated.id
+        async with engine.connect() as connection:
+            generation_after = int(await connection.scalar(text("SELECT generation FROM asset_catalog_state WHERE id=1")))
+            refs = (await connection.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == updated.id))).scalars().all()
+        assert generation_after == generation_before + 2
+        assert refs == [skill_version_id]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_agent_dependency_closure_enforces_scope_binding_and_dependency_status(
     migrated_postgres_database_url: str,
 ) -> None:
@@ -545,12 +688,8 @@ async def test_agent_publish_is_optimistic_and_lifecycle_is_scope_authorized(
         assert sum(isinstance(result, AssetConflict) for result in results) == 1
         assert (await service.get(editor, asset.id)).version == 3
 
-        with pytest.raises(AssetConflict):
-            await service.archive(editor, asset.id, expected_asset_version=2)
-        archived = await service.archive(editor, asset.id, expected_asset_version=3)
-        assert archived.status == "archived" and archived.version == 4
         with pytest.raises(AssetForbidden):
-            await service.suspend(editor, asset.id, expected_asset_version=4)
+            await service.suspend(editor, asset.id, expected_asset_version=3)
 
         admin_asset = await service.create_asset(admin, service_module.CreateAgent("stoppable", "Stoppable"))
         suspended = await service.suspend(admin, admin_asset.id, expected_asset_version=1)
@@ -847,5 +986,392 @@ async def test_create_version_snapshots_payload_collections_before_database_awai
         draft = await service.create_version(editor, asset.id, payload, expected_asset_version=1)
         assert draft.skill_version_ids == (allowed_skill_version,)
         assert draft.tool_groups == ("research",)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_agent_hard_delete_removes_the_package_and_preserves_private_builder_history(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="agent-hard-delete",
+    )
+    skill_id, skill_version_id = await _seed_dependency(
+        engine,
+        kind="skill",
+        scope="project",
+        project_id=editor.project_id,
+        user_id=editor.user_id,
+    )
+    mcp_id, mcp_version_id = await _seed_dependency(
+        engine,
+        kind="mcp",
+        scope="project",
+        project_id=editor.project_id,
+        user_id=editor.user_id,
+    )
+    service = service_module.AgentService(factory)
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateAgent("delete-package", "Delete Package"),
+        )
+        first = await service.create_version(
+            editor,
+            asset.id,
+            _payload(
+                skill_version_ids=(skill_version_id,),
+                mcp_version_ids=(mcp_version_id,),
+            ),
+            expected_asset_version=1,
+        )
+        published = await service.publish(
+            editor,
+            asset.id,
+            first.id,
+            expected_asset_version=2,
+        )
+        second = await service.create_version(
+            editor,
+            asset.id,
+            _payload(
+                skill_version_ids=(skill_version_id,),
+                mcp_version_ids=(mcp_version_id,),
+                soul="A newer draft.",
+            ),
+            expected_asset_version=3,
+        )
+        builder_session_id = uuid.uuid4()
+        private_messages = [{"role": "user", "content": "keep this private"}]
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO agent_design_sessions
+                    (id,project_id,owner_user_id,thread_id,slug,display_name,
+                     status,revision,messages_json,progress_json,
+                     blueprint_json,blueprint_checksum,created_agent_id,
+                     created_agent_version_id,create_idempotency_key_hash,
+                     create_request_checksum)
+                    VALUES
+                    (:id,:project,:owner,:thread,:slug,:display,'completed',4,
+                     CAST(:messages AS jsonb),'[]'::jsonb,'{}'::jsonb,:checksum,
+                     :agent,:version,:idempotency,:request_checksum)"""
+                ),
+                {
+                    "id": builder_session_id,
+                    "project": editor.project_id,
+                    "owner": str(editor.user_id),
+                    "thread": uuid.uuid4(),
+                    "slug": asset.slug,
+                    "display": asset.display_name,
+                    "messages": json.dumps(private_messages),
+                    "checksum": "a" * 64,
+                    "agent": asset.id,
+                    "version": published.id,
+                    "idempotency": "b" * 64,
+                    "request_checksum": "c" * 64,
+                },
+            )
+
+        current = await service.get(editor, asset.id)
+        await service.delete(
+            editor,
+            asset.id,
+            expected_asset_version=current.version,
+        )
+
+        async with engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM agents WHERE id=:id"),
+                    {"id": asset.id},
+                )
+                == 0
+            )
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM agent_versions WHERE agent_id=:id"),
+                    {"id": asset.id},
+                )
+                == 0
+            )
+            for table in (
+                "agent_version_skill_refs",
+                "agent_version_mcp_refs",
+            ):
+                assert (
+                    await connection.scalar(
+                        text(f"SELECT count(*) FROM {table} WHERE agent_version_id IN (:first,:published,:second)"),
+                        {
+                            "first": first.id,
+                            "published": published.id,
+                            "second": second.id,
+                        },
+                    )
+                    == 0
+                )
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM skills WHERE id=:id"),
+                    {"id": skill_id},
+                )
+                == 1
+            )
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM mcp_servers WHERE id=:id"),
+                    {"id": mcp_id},
+                )
+                == 1
+            )
+            builder_row = (
+                await connection.execute(
+                    text(
+                        """SELECT status,messages_json,created_agent_id,
+                                  created_agent_version_id,
+                                  created_agent_deleted
+                           FROM agent_design_sessions
+                           WHERE id=:id"""
+                    ),
+                    {"id": builder_session_id},
+                )
+            ).one()
+        assert builder_row[0] == "completed"
+        assert builder_row[1] == private_messages
+        assert builder_row[2] is None
+        assert builder_row[3] is None
+        assert builder_row[4] is True
+
+        recreated = await service.create_asset(
+            editor,
+            service_module.CreateAgent("delete-package", "Delete Package"),
+        )
+        assert recreated.id != asset.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_agent_hard_delete_rejects_retained_thread_reference(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="agent-delete-thread",
+    )
+    service = service_module.AgentService(factory)
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateAgent("thread-agent", "Thread Agent"),
+        )
+        now = datetime.now(UTC)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO threads_meta
+                    (thread_id,owner_user_id,status,metadata_json,created_at,
+                     updated_at,project_id,agent_asset_id,agent_scope,version)
+                    VALUES
+                    (:thread,:owner,'idle','{}'::jsonb,:now,:now,:project,
+                     :agent,'project',1)"""
+                ),
+                {
+                    "thread": f"thread-{uuid.uuid4()}",
+                    "owner": str(editor.user_id),
+                    "now": now,
+                    "project": editor.project_id,
+                    "agent": asset.id,
+                },
+            )
+
+        with pytest.raises(AssetConflict):
+            await service.delete(
+                editor,
+                asset.id,
+                expected_asset_version=asset.version,
+            )
+
+        assert (await service.get(editor, asset.id)).id == asset.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_agent_hard_delete_rejects_retained_automation_reference(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="agent-delete-automation",
+    )
+    service = service_module.AgentService(factory)
+    try:
+        asset = await service.create_asset(
+            editor,
+            service_module.CreateAgent(
+                "automation-agent",
+                "Automation Agent",
+            ),
+        )
+        now = datetime.now(UTC)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO scheduled_tasks
+                    (id,project_id,owner_user_id,thread_id,context_mode,
+                     agent_asset_id,agent_scope,title,prompt,schedule_type,
+                     schedule_spec,timezone,status,overlap_policy,next_run_at,
+                     last_run_at,last_outcome,last_error_code,run_count,version,
+                     frozen_at,deleted_at,created_at,updated_at)
+                    VALUES
+                    (:id,:project,:owner,NULL,'fresh_thread_per_run',
+                     :agent,'project','Retained automation','test','once',
+                     '{}'::json,'UTC','cancelled','skip',NULL,NULL,NULL,NULL,
+                     0,1,:now,:now,:now,:now)"""
+                ),
+                {
+                    "id": f"task-{uuid.uuid4()}",
+                    "project": editor.project_id,
+                    "owner": str(editor.user_id),
+                    "agent": asset.id,
+                    "now": now,
+                },
+            )
+
+        with pytest.raises(AssetConflict):
+            await service.delete(
+                editor,
+                asset.id,
+                expected_asset_version=asset.version,
+            )
+
+        assert (await service.get(editor, asset.id)).id == asset.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_agent_hard_delete_rejects_an_exact_terminal_run_snapshot(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="agent-delete-run",
+    )
+    service = service_module.AgentService(factory)
+    try:
+        target = await service.create_asset(
+            editor,
+            service_module.CreateAgent("snapshot-target", "Snapshot Target"),
+        )
+        draft = await service.create_version(
+            editor,
+            target.id,
+            _payload(),
+            expected_asset_version=1,
+        )
+        published = await service.publish(
+            editor,
+            target.id,
+            draft.id,
+            expected_asset_version=2,
+        )
+        thread_agent = await service.create_asset(
+            editor,
+            service_module.CreateAgent("thread-owner", "Thread Owner"),
+        )
+        thread_id = f"thread-{uuid.uuid4()}"
+        run_id = f"run-{uuid.uuid4()}"
+        now = datetime.now(UTC)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO threads_meta
+                    (thread_id,owner_user_id,status,metadata_json,created_at,
+                     updated_at,project_id,agent_asset_id,agent_scope,version)
+                    VALUES
+                    (:thread,:owner,'idle','{}'::jsonb,:now,:now,:project,
+                     :thread_agent,'project',1)"""
+                ),
+                {
+                    "thread": thread_id,
+                    "owner": str(editor.user_id),
+                    "now": now,
+                    "project": editor.project_id,
+                    "thread_agent": thread_agent.id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO runs
+                    (run_id,thread_id,project_id,owner_user_id,status,
+                     multitask_strategy,metadata_json,kwargs_json,
+                     finalization_status,message_count,total_input_tokens,
+                     total_output_tokens,total_tokens,llm_call_count,
+                     lead_agent_tokens,subagent_tokens,middleware_tokens,
+                     token_usage_by_model,created_at,updated_at)
+                    VALUES
+                    (:run,:thread,:project,:owner,'success','reject',
+                     '{}'::json,'{}'::json,'complete',0,0,0,0,0,0,0,0,
+                     '{}'::json,:now,:now)"""
+                ),
+                {
+                    "run": run_id,
+                    "thread": thread_id,
+                    "project": editor.project_id,
+                    "owner": str(editor.user_id),
+                    "now": now,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO run_asset_versions
+                    (project_id,owner_user_id,thread_id,run_id,asset_kind,
+                     dependency_order,asset_scope,asset_id,version_id,
+                     payload_checksum,catalog_generation)
+                    VALUES
+                    (:project,:owner,:thread,:run,'agent',0,'project',
+                     :asset,:version,:checksum,
+                     (SELECT generation FROM asset_catalog_state WHERE id=1))"""
+                ),
+                {
+                    "project": editor.project_id,
+                    "owner": str(editor.user_id),
+                    "thread": thread_id,
+                    "run": run_id,
+                    "asset": target.id,
+                    "version": published.id,
+                    "checksum": published.payload_checksum,
+                },
+            )
+
+        current = await service.get(editor, target.id)
+        with pytest.raises(AssetConflict):
+            await service.delete(
+                editor,
+                target.id,
+                expected_asset_version=current.version,
+            )
+
+        assert (await service.get(editor, target.id)).id == target.id
     finally:
         await engine.dispose()

@@ -1,31 +1,29 @@
 "use client";
 
 import type { Thread } from "@langchain/langgraph-sdk";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
   ScopedChatPage,
   type ScopedChatRouteScope,
 } from "@/components/workspace/project-chat";
+import {
+  resolveThreadAgentIdentity,
+  ThreadAgentIndicator,
+} from "@/components/workspace/thread-agent-indicator";
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
-import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
-import {
-  PROJECT_AUTOMATION,
-  projectAutomationEntryEnabled,
-} from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
-import { isStaticWebsiteOnly } from "@/core/static-mode";
+import {
+  useProjectAssets,
+  type ProjectAssetList,
+} from "@/core/shared-assets";
+import type { AgentThread } from "@/core/threads";
 
 export type ProjectChatRouteScope = Omit<ScopedChatRouteScope, "privateWork">;
 
-export function projectChatRouteScope(
-  project: Project,
-  automationReady = false,
-  automationFeatureEnabled: boolean = PROJECT_AUTOMATION,
-  staticWebsiteOnly = false,
-): ProjectChatRouteScope {
+export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
   const base = `/projects/${encodeURIComponent(project.slug)}/chats`;
   const canCreate = project.capabilities.includes("private_work.create");
   const canRun =
@@ -39,14 +37,6 @@ export function projectChatRouteScope(
     canUpload: canRun,
     canDelete: canRead,
     canDeleteFiles: canRead,
-    automationVisible: projectAutomationEntryEnabled(
-      automationFeatureEnabled,
-      staticWebsiteOnly,
-      canRead,
-      automationReady ? "ready" : undefined,
-    ),
-    automationHref: (threadId) =>
-      `/projects/${encodeURIComponent(project.slug)}/automations?thread_id=${encodeURIComponent(threadId)}`,
     goalVisible: canRead,
     compactVisible: canRun,
     branchVisible: canCreate,
@@ -90,34 +80,42 @@ export function ProjectChatNotFound({ chatsPath }: { chatsPath: string }) {
 
 export function ProjectChatPage({ project }: { project: Project }) {
   const privateWork: ProjectPrivateWorkScope = useProjectPrivateWorkScope();
-  const staticWebsiteOnly = isStaticWebsiteOnly();
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
   );
-  const automationReadiness = useProjectAutomationReadiness(
-    PROJECT_AUTOMATION && canReadPrivateWork && !staticWebsiteOnly,
+  const agents = useProjectAssets(
+    privateWork.scope.accountId,
+    project.id,
+    "agents",
+    canReadPrivateWork,
   );
-  const automationReady = Boolean(
-    automationReadiness.data?.status === "ready" &&
-    automationReadiness.data.project_private_work_ready &&
-    automationReadiness.data.schema_ready,
+  const agentCatalog = agents.data as ProjectAssetList | undefined;
+  const agentCatalogSettled =
+    agentCatalog !== undefined || (!agents.isLoading && !agents.isFetching);
+  const renderHeaderAccessory = useCallback(
+    (thread: AgentThread | null | undefined) => (
+      <ThreadAgentIndicator
+        identity={resolveThreadAgentIdentity(
+          thread,
+          agentCatalog,
+          agentCatalogSettled,
+        )}
+      />
+    ),
+    [agentCatalog, agentCatalogSettled],
   );
   const scope = useMemo(
     () => ({
-      ...projectChatRouteScope(
-        project,
-        automationReady,
-        PROJECT_AUTOMATION,
-        staticWebsiteOnly,
-      ),
+      ...projectChatRouteScope(project),
       privateWork,
     }),
-    [automationReady, privateWork, project, staticWebsiteOnly],
+    [privateWork, project],
   );
   return (
     <div className="h-[calc(100vh-3.5rem)] min-h-0 md:h-screen">
       <ScopedChatPage
         scope={scope}
+        renderHeaderAccessory={renderHeaderAccessory}
         missingThreadFallback={
           <ProjectChatNotFound
             chatsPath={`/projects/${encodeURIComponent(project.slug)}/chats`}

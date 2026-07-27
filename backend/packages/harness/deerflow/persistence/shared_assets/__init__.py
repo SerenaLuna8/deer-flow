@@ -1,3 +1,7 @@
+from deerflow.persistence.shared_assets.agent_design_model import (
+    AgentDesignOperationRow,
+    AgentDesignSessionRow,
+)
 from deerflow.persistence.shared_assets.agent_model import (
     AgentRow,
     AgentVersionMcpRefRow,
@@ -29,6 +33,8 @@ from deerflow.persistence.shared_assets.skill_model import (
 
 __all__ = [
     "AgentRow",
+    "AgentDesignOperationRow",
+    "AgentDesignSessionRow",
     "AgentVersionMcpRefRow",
     "AgentVersionRow",
     "AgentVersionSkillRefRow",

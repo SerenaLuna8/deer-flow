@@ -244,6 +244,21 @@ export const zhCN: Translations = {
     usage: "用量",
     governance: {
       retry: "重试",
+      tokenSeries: {
+        title: "Token 使用量趋势",
+        description: "项目内所有成员最近 24 个小时的模型 Token 消耗。",
+        loading: "正在加载 Token 使用量",
+        unavailableTitle: "Token 使用量暂不可用",
+        unavailableDescription: "无法安全读取项目 Token 使用量，请稍后重试。",
+        emptyTitle: "最近 24 个小时暂无 Token 消耗",
+        emptyDescription: "任务结算并返回 Token 用量后，趋势会显示在这里。",
+        window: "最近 24 个小时",
+        settlementNote: "按任务结算时间归入小时区间",
+        interactionHint: "悬浮或聚焦任意小时可查看明细",
+        chartLabel: "最近 24 个小时的项目 Token 使用量折线图",
+        tableCaption: "最近 24 个小时的项目 Token 使用量明细",
+        bucket: "小时",
+      },
       usage: {
         title: "项目用量",
         description: "查看有效配额和当前项目用量。",
@@ -866,7 +881,7 @@ export const zhCN: Translations = {
     memory: {
       title: "记忆",
       description: "查看和管理 DeerFlow 对你的长期理解。",
-      manageMemory: "管理记忆",
+      manageMemory: "数据管理",
       factCount: (count) => `${count} 条事实`,
       summaryCount: (count) => `${count} 个摘要`,
       recentFocus: "近期关注",
@@ -912,8 +927,7 @@ export const zhCN: Translations = {
       factValidationContent: "事实内容不能为空。",
       factValidationConfidence: "置信度必须是 0 到 1 之间的数字。",
       noFacts: "还没有保存的事实。",
-      summaryReadOnly:
-        "摘要分区当前仍为只读。现在你可以清空全部记忆或删除单条事实。",
+      summaryReadOnly: "这些摘要由 DeerFlow 自动维护，当前为只读。",
       memoryFullyEmpty: "还没有保存任何记忆。",
       factPreviewLabel: "即将删除的事实",
       searchPlaceholder: "搜索记忆",

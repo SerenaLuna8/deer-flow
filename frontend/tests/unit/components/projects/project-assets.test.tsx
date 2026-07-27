@@ -13,7 +13,6 @@ import {
   ProjectAssetCatalogView,
   ProjectAssetHistoryView,
   ProjectCredentialCatalogView,
-  dependencyVersionOptions,
   projectAssetCanAuthor,
   projectCredentialShowsHistory,
 } from "@/components/projects/assets/project-assets-page";
@@ -136,16 +135,6 @@ const pendingMcpVersion: AssetVersion = {
 };
 
 describe("project shared asset pages", () => {
-  test("maps exact dependency versions to readable system or project labels", () => {
-    expect(dependencyVersionOptions(adminData)).toEqual([
-      {
-        id: VERSION_ID,
-        label: "项目 · Analyst（analyst）",
-      },
-    ]);
-    expect(dependencyVersionOptions(undefined)).toEqual([]);
-  });
-
   test("keeps same-name system and project assets separate with source badges", () => {
     const html = renderToStaticMarkup(
       <ProjectAssetCatalogView kind="agents" data={adminData} />,
@@ -159,7 +148,7 @@ describe("project shared asset pages", () => {
     expect(html).not.toContain(VERSION_ID);
   });
 
-  test("uses item capabilities for binding and editing actions without run CTA", () => {
+  test("uses item capabilities for binding without restoring Agent version creation or run CTA", () => {
     const html = renderToStaticMarkup(
       <ProjectAssetCatalogView kind="agents" data={adminData} />,
     );
@@ -181,7 +170,7 @@ describe("project shared asset pages", () => {
     );
 
     expect(html).toContain("管理绑定");
-    expect(html).toContain("创建新版本");
+    expect(html).not.toContain("创建新版本");
     expect(readOnly).not.toContain("管理绑定");
     expect(readOnly).not.toContain("创建新版本");
     for (const forbidden of ["运行 Agent", "开始对话", "立即运行"]) {
@@ -217,7 +206,7 @@ describe("project shared asset pages", () => {
     expect(projectAssetCanAuthor(suspendedProject)).toBe(false);
     expect(
       projectAssetDetailLifecycleActions("agents", suspendedProject),
-    ).toEqual(["archive"]);
+    ).toEqual([]);
     expect(
       projectAssetDetailLifecycleActions("agents", {
         ...suspendedProject,
@@ -244,6 +233,30 @@ describe("project shared asset pages", () => {
     expect(projectAssetCanAuthor(suspendedSkill, "skills")).toBe(true);
     expect(
       projectAssetDetailLifecycleActions("skills", suspendedSkill),
+    ).toEqual([]);
+  });
+
+  test("keeps a suspended project Agent editable without enabling it", () => {
+    const suspendedAgent = {
+      ...adminData.project_items[0]!,
+      status: "suspended" as const,
+    };
+
+    expect(projectAssetCanAuthor(suspendedAgent, "agents")).toBe(true);
+    expect(
+      projectAssetCanAuthor(
+        {
+          ...suspendedAgent,
+          capabilities: ["shared_assets.read"],
+        },
+        "agents",
+      ),
+    ).toBe(false);
+    expect(
+      projectAssetDetailLifecycleActions("agents", suspendedAgent, [
+        "shared_assets.read",
+        "shared_assets.edit",
+      ]),
     ).toEqual([]);
   });
 

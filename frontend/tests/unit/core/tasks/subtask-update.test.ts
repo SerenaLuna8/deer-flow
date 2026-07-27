@@ -57,15 +57,82 @@ describe("computeNextSubtask", () => {
   });
 
   it("keeps a terminal status stable against a late in_progress write", () => {
-    const previous = baseTask({ status: "completed" });
+    const previous = baseTask({
+      status: "completed",
+      statusSource: "custom_event",
+    });
 
     const { next, becameTerminal } = computeNextSubtask(previous, {
       id: "t1",
       status: "in_progress",
+      statusSource: "inferred",
     });
 
     expect(next.status).toBe("completed");
+    expect(next.statusSource).toBe("custom_event");
     expect(becameTerminal).toBe(false);
+  });
+
+  it("replaces an inferred failure with an authoritative completed event", () => {
+    const previous = baseTask({
+      status: "failed",
+      statusSource: "inferred",
+      error: "子任务失败",
+    });
+
+    const { next, becameTerminal } = computeNextSubtask(previous, {
+      id: "t1",
+      status: "completed",
+      statusSource: "custom_event",
+      result: "done",
+    });
+
+    expect(next.status).toBe("completed");
+    expect(next.statusSource).toBe("custom_event");
+    expect(next.result).toBe("done");
+    expect(next.error).toBeUndefined();
+    expect(becameTerminal).toBe(true);
+  });
+
+  it("does not let a later inferred failure overwrite an authoritative result", () => {
+    const previous = baseTask({
+      status: "completed",
+      statusSource: "custom_event",
+      result: "done",
+    });
+
+    const { next, becameTerminal } = computeNextSubtask(previous, {
+      id: "t1",
+      status: "failed",
+      statusSource: "inferred",
+      error: "子任务失败",
+    });
+
+    expect(next.status).toBe("completed");
+    expect(next.statusSource).toBe("custom_event");
+    expect(next.result).toBe("done");
+    expect(next.error).toBeUndefined();
+    expect(becameTerminal).toBe(false);
+  });
+
+  it("lets the structured tool result override an earlier custom-event status", () => {
+    const previous = baseTask({
+      status: "failed",
+      statusSource: "custom_event",
+      error: "temporary terminal event",
+    });
+
+    const { next } = computeNextSubtask(previous, {
+      id: "t1",
+      status: "completed",
+      statusSource: "tool_result",
+      result: "authoritative result",
+    });
+
+    expect(next.status).toBe("completed");
+    expect(next.statusSource).toBe("tool_result");
+    expect(next.result).toBe("authoritative result");
+    expect(next.error).toBeUndefined();
   });
 
   it("flags becameTerminal on the first transition to a terminal status", () => {

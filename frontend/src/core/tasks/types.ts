@@ -2,9 +2,21 @@ import type { AIMessage } from "@langchain/langgraph-sdk";
 
 import type { SubtaskStep } from "./steps";
 
+export type SubtaskStatusSource =
+  | "inferred"
+  | "custom_event"
+  | "tool_result";
+
 export interface Subtask {
   id: string;
   status: "in_progress" | "completed" | "failed";
+  /**
+   * Where the current status came from. Pending card inference is weaker than
+   * the streamed lifecycle event, while the structured ToolMessage remains the
+   * final authority. The rank prevents a later render of the original task
+   * tool call from overwriting a terminal result.
+   */
+  statusSource?: SubtaskStatusSource;
   subagent_type: string;
   description: string;
   latestMessage?: AIMessage;

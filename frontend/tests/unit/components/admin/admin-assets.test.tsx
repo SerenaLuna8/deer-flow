@@ -31,7 +31,6 @@ rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: () => false }));
 
 import AdminLayout from "@/app/admin/layout";
 import {
-  AgentVersionFields,
   skillMarkdownTemplate,
   McpVersionFields,
   SkillVersionFields,
@@ -206,7 +205,6 @@ describe("admin asset access and credential safety", () => {
 
   test("authoring fields use Chinese labels for ordinary UI terms", () => {
     const html = [
-      renderToStaticMarkup(createElement(AgentVersionFields)),
       renderToStaticMarkup(
         createElement(SkillVersionFields, { assetSlug: "review-skill" }),
       ),
@@ -214,10 +212,6 @@ describe("admin asset access and credential safety", () => {
     ].join("\n");
 
     for (const label of [
-      "逻辑模型",
-      "工具组",
-      "Skill 依赖版本",
-      "MCP 依赖版本",
       "媒体类型",
       "传输方式",
       "URL",
@@ -303,34 +297,25 @@ describe("admin asset access and credential safety", () => {
     expect(html).not.toContain('name="media_type"');
   });
 
-  test("agent authoring selects configured logical models and named dependencies", () => {
-    const html = renderToStaticMarkup(
-      createElement(AgentVersionFields, {
-        modelOptions: [
-          { name: "fast", displayName: "Fast model" },
-          { name: "quality", displayName: "Quality model" },
-        ],
-        skillVersionOptions: [
-          {
-            id: "11111111-1111-4111-8111-111111111111",
-            label: "项目 · Research Skill（research-skill）",
-          },
-        ],
-        mcpVersionOptions: [
-          {
-            id: "22222222-2222-4222-8222-222222222222",
-            label: "系统 · GitHub MCP（github-mcp）",
-          },
-        ],
-      }),
+  test("project Agent authoring has no manual version surface", () => {
+    const pageSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/admin/assets/admin-project-asset-page.tsx",
+      ),
+      "utf8",
+    );
+    const dialogSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/admin/assets/admin-asset-dialogs.tsx",
+      ),
+      "utf8",
     );
 
-    expect(html).toContain('name="model_ref"');
-    expect(html).toContain('value="fast"');
-    expect(html).toContain("Research Skill");
-    expect(html).toContain("GitHub MCP");
-    expect(html).toContain("仅保存 /api/models 返回的逻辑名称");
-    expect(html).not.toContain('name="model_ref" type="text"');
+    expect(dialogSource).not.toContain("AgentVersionFields");
+    expect(dialogSource).not.toContain('kind === "agents"');
+    expect(pageSource).toContain('kind !== "agents"');
   });
 
   test("credential card exposes metadata actions without secret reveal or copy", () => {
@@ -533,6 +518,41 @@ describe("admin asset access and credential safety", () => {
     expect(html).not.toContain("ciphertext");
     expect(html).not.toContain("复制密钥");
     expect(html).not.toContain("Payload checksum");
+  });
+
+  test("Agent runtime diff does not expose independently edited profile documents", () => {
+    const html = renderToStaticMarkup(
+      createElement(AssetVersionDiff, {
+        current: {
+          id: "11111111-1111-4111-8111-111111111111",
+          agent_id: "22222222-2222-4222-8222-222222222222",
+          version_number: 2,
+          workflow_status: "published",
+          description: "Runtime config",
+          agents_instructions: "agents-profile-sentinel",
+          soul: "soul-profile-sentinel",
+          identity: "identity-profile-sentinel",
+          user_context: "user-profile-sentinel",
+          payload_schema_version: 2,
+          model_ref: "default",
+          tool_groups: ["web"],
+          skill_version_ids: [],
+          mcp_version_ids: [],
+          supersedes_version_id: null,
+          payload_checksum: "agent-payload-checksum",
+          created_by_user_id: "admin",
+          created_at: "2026-07-13T09:00:00+00:00",
+        },
+      }),
+    );
+
+    expect(html).toContain("Runtime config");
+    expect(html).toContain("default");
+    expect(html).not.toContain("agents-profile-sentinel");
+    expect(html).not.toContain("soul-profile-sentinel");
+    expect(html).not.toContain("identity-profile-sentinel");
+    expect(html).not.toContain("user-profile-sentinel");
+    expect(html).not.toContain("角色设定（Soul）");
   });
 
   test("credential diff translates payload metadata labels", () => {

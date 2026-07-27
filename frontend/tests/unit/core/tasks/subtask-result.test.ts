@@ -11,7 +11,9 @@ import {
   SUBAGENT_STOP_REASON_KEY,
   derivePendingSubtaskStatus,
   hasSubtaskToolResult,
+  isSubtaskRunActive,
   parseSubtaskResult,
+  parseSubtaskTerminalEvent,
 } from "@/core/tasks/subtask-result";
 
 interface ContractFile {
@@ -104,7 +106,7 @@ describe("hasSubtaskToolResult", () => {
 });
 
 describe("derivePendingSubtaskStatus", () => {
-  it("keeps a task in progress while its own assistant turn is loading", () => {
+  it("keeps a task in progress while its owning run is active", () => {
     const messages = [{ type: "ai" }] as Message[];
 
     expect(derivePendingSubtaskStatus("call_task_1", messages, true)).toBe(
@@ -112,7 +114,7 @@ describe("derivePendingSubtaskStatus", () => {
     );
   });
 
-  it("does not revive an earlier unfinished task during a later turn", () => {
+  it("marks an unfinished task failed only after its owning run stops", () => {
     const messages = [{ type: "ai" }] as Message[];
 
     expect(derivePendingSubtaskStatus("call_task_1", messages, false)).toBe(
@@ -129,6 +131,106 @@ describe("derivePendingSubtaskStatus", () => {
     expect(derivePendingSubtaskStatus("call_task_1", messages, false)).toBe(
       "in_progress",
     );
+  });
+});
+
+describe("isSubtaskRunActive", () => {
+  const messages = [
+    {
+      id: "old-task",
+      type: "ai",
+      run_id: "run-old",
+      content: "",
+    },
+    {
+      id: "current-task",
+      type: "ai",
+      run_id: "run-current",
+      content: "",
+    },
+    {
+      id: "current-processing",
+      type: "ai",
+      additional_kwargs: { run_id: "run-current" },
+      content: "",
+    },
+  ] as unknown as Message[];
+
+  it("keeps an earlier task group active when a later group belongs to the same live run", () => {
+    expect(isSubtaskRunActive([messages[1]!], messages, true)).toBe(true);
+  });
+
+  it("does not revive a task from an older run while a newer run is active", () => {
+    expect(isSubtaskRunActive([messages[0]!], messages, true)).toBe(false);
+  });
+
+  it("returns false once the parent run is no longer loading", () => {
+    expect(isSubtaskRunActive([messages[1]!], messages, false)).toBe(false);
+  });
+});
+
+describe("parseSubtaskTerminalEvent", () => {
+  it("maps task_completed to a completed update with its result", () => {
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_completed",
+        task_id: "call-1",
+        result: "finished report",
+      }),
+    ).toEqual({
+      id: "call-1",
+      status: "completed",
+      result: "finished report",
+    });
+  });
+
+  it("maps failed, cancelled, and timed-out events to terminal failure updates", () => {
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_failed",
+        task_id: "call-failed",
+        error: "provider error",
+      }),
+    ).toEqual({
+      id: "call-failed",
+      status: "failed",
+      error: "provider error",
+    });
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_cancelled",
+        task_id: "call-cancelled",
+        error: "cancelled by user",
+      }),
+    ).toEqual({
+      id: "call-cancelled",
+      status: "failed",
+      error: "cancelled by user",
+    });
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_timed_out",
+        task_id: "call-timeout",
+      }),
+    ).toEqual({
+      id: "call-timeout",
+      status: "failed",
+    });
+  });
+
+  it("ignores running and malformed events", () => {
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_running",
+        task_id: "call-1",
+      }),
+    ).toBeNull();
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_completed",
+        task_id: "",
+      }),
+    ).toBeNull();
   });
 });
 

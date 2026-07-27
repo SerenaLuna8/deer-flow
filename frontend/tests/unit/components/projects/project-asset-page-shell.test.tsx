@@ -2,13 +2,19 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  createProjectAgentDeleteSnapshot,
   createProjectSkillDeleteSnapshot,
+  projectAssetDetailCanManageSystemBinding,
+  projectAssetDetailShowsVersionHistory,
   ProjectAssetDetailHeader,
+  ProjectSkillDetailActions,
   versionActionDisabled,
   versionPublishDisabled,
 } from "@/components/projects/assets/project-asset-detail-sheet";
 import {
   closeCompletedVersionDialog,
+  createdProjectAssetSelectionReady,
+  createdSkillSelectionReady,
   defaultProjectAssetSource,
   filterProjectAssetItems,
   handleRequestedVersion,
@@ -21,11 +27,12 @@ import {
 } from "@/components/projects/assets/project-asset-page-shell";
 import {
   projectAssetCreateErrorMessage,
+  projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
   projectSkillStatusToggleState,
-  projectSkillCanDelete,
 } from "@/components/projects/assets/project-asset-view-model";
 import {
+  ProjectAgentDeleteConfirmation,
   ProjectSkillDeleteConfirmation,
   skillDeleteSecondsRemaining,
 } from "@/components/projects/assets/project-skill-delete-dialog";
@@ -202,6 +209,26 @@ describe("project asset list", () => {
     expect(html).not.toContain('role="switch"');
   });
 
+  test("keeps system Skill binding controls on the list only", () => {
+    const systemAsset = catalog.system_items[0]!;
+
+    expect(
+      projectAssetDetailCanManageSystemBinding("skills", systemAsset),
+    ).toBe(false);
+    expect(
+      projectAssetDetailCanManageSystemBinding("agents", systemAsset),
+    ).toBe(false);
+    expect(
+      projectAssetDetailCanManageSystemBinding("mcp-servers", systemAsset),
+    ).toBe(true);
+  });
+
+  test("keeps Agent revisions internal while preserving Skill and MCP version history", () => {
+    expect(projectAssetDetailShowsVersionHistory("agents")).toBe(false);
+    expect(projectAssetDetailShowsVersionHistory("skills")).toBe(true);
+    expect(projectAssetDetailShowsVersionHistory("mcp-servers")).toBe(true);
+  });
+
   test("renders a project Skill enable switch and keeps detail access independent", () => {
     const suspendedSkill: ProjectAssetItem = {
       ...catalog.project_items[0]!,
@@ -323,6 +350,67 @@ describe("project asset list", () => {
     expect(html).not.toContain("meeting-brief");
     expect(html).not.toContain("项目自建");
     expect(html).not.toContain("已暂停");
+  });
+
+  test("shows the Agent update time under its title instead of repeating the slug", () => {
+    const projectAgent = catalog.project_items[0]!;
+    const html = renderToStaticMarkup(
+      <Sheet open>
+        <ProjectAssetDetailHeader
+          kind="agents"
+          item={projectAgent}
+          statusPending={false}
+          onToggleProjectSkillStatus={() => undefined}
+        />
+      </Sheet>,
+    );
+
+    expect(html).toContain(projectAgent.display_name);
+    expect(html).toContain(`dateTime="${projectAgent.updated_at}"`);
+    expect(html).toContain(
+      new Date(projectAgent.updated_at).toLocaleString("zh-CN"),
+    );
+    expect(html).not.toContain(projectAgent.slug);
+    expect(html).not.toContain("最近更新");
+  });
+
+  test("places the selected-version editor immediately before permanent Skill deletion", () => {
+    const html = renderToStaticMarkup(
+      <ProjectSkillDetailActions
+        actionPending={false}
+        canAuthor
+        canDelete
+        editing={false}
+        hasSelectedVersion
+        versionDirty={false}
+        versionSelectionPending={false}
+        onCreateVersion={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+
+    const createVersionIndex = html.indexOf("创建新版本");
+    const deleteSkillIndex = html.indexOf("删除 Skill");
+    expect(createVersionIndex).toBeGreaterThanOrEqual(0);
+    expect(deleteSkillIndex).toBeGreaterThan(createVersionIndex);
+    expect(html).not.toContain("从空白创建");
+    expect(html).not.toContain("编辑为新版本");
+
+    const editingHtml = renderToStaticMarkup(
+      <ProjectSkillDetailActions
+        actionPending={false}
+        canAuthor
+        canDelete
+        editing
+        hasSelectedVersion
+        versionDirty={false}
+        versionSelectionPending={false}
+        onCreateVersion={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+    expect(editingHtml).not.toContain("创建新版本");
+    expect(editingHtml).toContain("删除 Skill");
   });
 
   test("does not present active project lifecycle as a fake enable control", () => {
@@ -473,7 +561,23 @@ describe("project asset list", () => {
     expect(importedSkillSelectionReady(catalog, null)).toBeNull();
   });
 
-  test("explains same-project name conflicts only for blank Skill creation", () => {
+  test("waits for the refreshed project Agent or Skill list before opening a newly created asset", () => {
+    expect(
+      createdProjectAssetSelectionReady(
+        { project_items: [] },
+        PROJECT_ASSET_ID,
+      ),
+    ).toBeNull();
+    expect(createdProjectAssetSelectionReady(catalog, PROJECT_ASSET_ID)).toBe(
+      PROJECT_ASSET_ID,
+    );
+    expect(createdProjectAssetSelectionReady(catalog, null)).toBeNull();
+    expect(createdSkillSelectionReady(catalog, PROJECT_ASSET_ID)).toBe(
+      PROJECT_ASSET_ID,
+    );
+  });
+
+  test("explains same-project name conflicts only for project Skill list creation", () => {
     const conflict = new SharedAssetApiError(
       409,
       "ASSET_CONFLICT",
@@ -508,10 +612,10 @@ describe("project asset list", () => {
         projectSkill,
         projectSkill.capabilities,
       ),
-    ).toEqual(["archive"]);
-    expect(projectSkillCanDelete("skills", projectSkill)).toBe(true);
-    expect(projectSkillCanDelete("agents", projectSkill)).toBe(false);
-    expect(projectSkillCanDelete("skills", systemSkill)).toBe(false);
+    ).toEqual([]);
+    expect(projectAssetCanDelete("skills", projectSkill)).toBe(true);
+    expect(projectAssetCanDelete("agents", projectSkill)).toBe(true);
+    expect(projectAssetCanDelete("skills", systemSkill)).toBe(false);
 
     expect(skillDeleteSecondsRemaining(1_000, 1_000)).toBe(5);
     expect(skillDeleteSecondsRemaining(1_000, 5_001)).toBe(1);
@@ -551,6 +655,23 @@ describe("project asset list", () => {
     expect(ready).toContain('role="alert"');
     expect(ready).toContain("资产状态已变化，请刷新后重试。");
     expect(ready).not.toContain('disabled=""');
+
+    const agentWaiting = renderToStaticMarkup(
+      <Dialog open>
+        <ProjectAgentDeleteConfirmation
+          agentName="Project Agent"
+          remainingSeconds={5}
+          pending={false}
+          errorMessage={null}
+          onCancel={() => undefined}
+          onConfirm={() => undefined}
+        />
+      </Dialog>,
+    );
+    expect(agentWaiting).toContain("永久删除 Agent");
+    expect(agentWaiting).toContain("全部设置");
+    expect(agentWaiting).not.toContain("版本");
+    expect(agentWaiting).toContain("确认删除（5 秒）");
   });
 
   test("freezes the confirmed Skill identity and revision for the full delay", () => {
@@ -571,5 +692,21 @@ describe("project asset list", () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(snapshot.expectedAssetVersion).not.toBe(refreshedItem.version);
     expect(snapshot.skillName).not.toBe(refreshedItem.display_name);
+  });
+
+  test("freezes the confirmed Agent identity and revision for the full delay", () => {
+    const projectAgent = {
+      ...catalog.project_items[0]!,
+      display_name: "Project Agent",
+    };
+    const snapshot = createProjectAgentDeleteSnapshot(projectAgent, 2_000);
+
+    expect(snapshot).toEqual({
+      assetId: projectAgent.id,
+      agentName: "Project Agent",
+      expectedAssetVersion: projectAgent.version,
+      startedAt: 2_000,
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
   });
 });

@@ -139,6 +139,63 @@ async def test_frames_survive_bridge_restart_with_gap_free_decimal_cursor(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_namespaced_frame_uses_bounded_event_type_and_replays_full_name(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"m6-stream-namespace-{uuid.uuid4()}"
+    run_id = str(uuid.uuid4())
+    event = f"messages|tools:{uuid.uuid4()}|model:{uuid.uuid4()}"
+    try:
+        await _seed_run(seed, thread_id=thread_id, run_id=run_id)
+        bridge = PostgresStreamBridge(seed.factory)
+
+        stored = await bridge.publish_frame(
+            seed.owner_a_scope,
+            thread_id,
+            run_id,
+            StreamFrame(event=event, data={"content": "nested"}),
+        )
+        replay = await PostgresStreamBridge(seed.factory).read_after(
+            seed.owner_a_scope,
+            thread_id,
+            cursor=0,
+            limit=10,
+            run_id=run_id,
+        )
+        async with seed.factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """SELECT event_type,event_metadata
+                           FROM run_events
+                           WHERE project_id=:project_id
+                             AND owner_user_id=:owner_user_id
+                             AND thread_id=:thread_id
+                             AND run_id=:run_id
+                             AND seq=1"""
+                    ),
+                    {
+                        "project_id": seed.owner_a.project_id,
+                        "owner_user_id": str(seed.owner_a.user_id),
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                    },
+                )
+            ).one()
+
+        assert stored.event == event
+        assert len(replay) == 1
+        assert replay[0].event == event
+        assert row.event_type == "messages"
+        assert len(row.event_type) <= 32
+        assert row.event_metadata["stream_event_name"] == event
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_thread_cursor_high_watermark_survives_run_event_retention(
     migrated_postgres_database_url: str,
 ) -> None:

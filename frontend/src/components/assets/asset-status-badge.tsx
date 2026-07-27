@@ -22,14 +22,20 @@ const LABELS: Record<Status, string> = {
   revoked: "已撤销",
 };
 
-export function AssetStatusBadge({ status }: { status: Status }) {
+export function AssetStatusBadge({
+  status,
+  label,
+}: {
+  status: Status;
+  label?: string;
+}) {
   return (
     <Badge
       variant={
         status === "active" || status === "published" ? "default" : "secondary"
       }
     >
-      {LABELS[status]}
+      {label ?? LABELS[status]}
     </Badge>
   );
 }

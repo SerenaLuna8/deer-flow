@@ -6,8 +6,11 @@ import {
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 
-type ProjectLifecycleItem = Pick<ProjectAssetItem, "capabilities" | "status">;
-type ProjectSkillDeleteItem = Pick<ProjectAssetItem, "capabilities" | "scope">;
+type ProjectLifecycleItem = Pick<
+  ProjectAssetItem,
+  "capabilities" | "current_published_version_id" | "status"
+>;
+type ProjectAssetDeleteItem = Pick<ProjectAssetItem, "capabilities" | "scope">;
 type ProjectSkillStatusItem = Pick<
   ProjectAssetItem,
   "capabilities" | "current_published_version_id" | "scope" | "status"
@@ -29,7 +32,18 @@ export function projectAssetCreateErrorMessage(
 }
 
 export type ProjectAssetDetailLifecycleAction<Kind extends MutableAssetKind> =
-  Kind extends "skills" ? never : "archive" | "suspend";
+  Kind extends "skills"
+    ? never
+    : Kind extends "agents"
+      ? "activate" | "suspend"
+      : "archive" | "suspend";
+
+export function projectAssetCanCreateVersion(
+  kind: MutableAssetKind,
+  canAuthor: boolean,
+): boolean {
+  return kind === "mcp-servers" && canAuthor;
+}
 
 export function projectAssetCanAuthor(
   item: ProjectLifecycleItem,
@@ -38,7 +52,7 @@ export function projectAssetCanAuthor(
   return (
     item.capabilities.includes("shared_assets.edit") &&
     (item.status === "active" ||
-      (kind === "skills" && item.status === "suspended"))
+      ((kind === "skills" || kind === "agents") && item.status === "suspended"))
   );
 }
 
@@ -52,10 +66,25 @@ export function projectAssetDetailLifecycleActions<
   if (kind === "skills") {
     return [] as ProjectAssetDetailLifecycleAction<Kind>[];
   }
-  const canArchive = item.capabilities.includes("shared_assets.edit");
   const canSuspend = projectCapabilities.includes(
     "shared_assets.manage_bindings",
   );
+  if (kind === "agents") {
+    const canManageAgent =
+      canSuspend && item.capabilities.includes("shared_assets.manage_bindings");
+    if (!canManageAgent) {
+      return [] as ProjectAssetDetailLifecycleAction<Kind>[];
+    }
+    return (
+      item.status === "active"
+        ? ["suspend" as const]
+        : item.status === "suspended" &&
+            item.current_published_version_id !== null
+          ? ["activate" as const]
+          : []
+    ) as ProjectAssetDetailLifecycleAction<Kind>[];
+  }
+  const canArchive = item.capabilities.includes("shared_assets.edit");
 
   if (item.status === "active") {
     return [
@@ -102,12 +131,12 @@ export function projectSkillStatusToggleState(
   };
 }
 
-export function projectSkillCanDelete(
+export function projectAssetCanDelete(
   kind: MutableAssetKind,
-  item: ProjectSkillDeleteItem,
+  item: ProjectAssetDeleteItem,
 ): boolean {
   return (
-    kind === "skills" &&
+    (kind === "skills" || kind === "agents") &&
     item.scope === "project" &&
     item.capabilities.includes("shared_assets.edit")
   );

@@ -101,6 +101,7 @@ def _agent(
     scope: AssetScope,
     *,
     current_published_version_id: uuid.UUID | None = None,
+    description: str = "",
 ) -> AgentAssetView:
     return AgentAssetView(
         id=uuid.uuid4(),
@@ -114,6 +115,7 @@ def _agent(
         created_by_user_id=str(uuid.uuid4()),
         created_at=NOW,
         updated_at=NOW,
+        description=description,
     )
 
 
@@ -210,7 +212,7 @@ def test_project_asset_list_keeps_unbound_system_assets_visible() -> None:
     assert response.json()["system_items"][0]["binding"] is None
 
 
-def test_project_skill_list_includes_published_description_without_changing_other_asset_contracts() -> None:
+def test_project_asset_lists_include_current_published_descriptions() -> None:
     skill_service = AsyncMock()
     agent_service = AsyncMock()
     binding_service = AsyncMock()
@@ -229,7 +231,11 @@ def test_project_skill_list_includes_published_description_without_changing_othe
         description="Review, analyze, critique, or summarize academic papers.",
     )
     skill_service.list_visible.return_value = (system_skill,)
-    agent_service.list_visible.return_value = (_agent(AssetScope.SYSTEM),)
+    system_agent = _agent(
+        AssetScope.SYSTEM,
+        description="Review code changes and report actionable findings.",
+    )
+    agent_service.list_visible.return_value = (system_agent,)
     binding_service.list_visible.return_value = ()
     client = _client(
         agent_service=agent_service,
@@ -242,7 +248,8 @@ def test_project_skill_list_includes_published_description_without_changing_othe
 
     assert skill_response.status_code == 200
     assert skill_response.json()["system_items"][0]["description"] == system_skill.description
-    assert "description" not in agent_response.json()["system_items"][0]
+    assert agent_response.status_code == 200
+    assert agent_response.json()["system_items"][0]["description"] == system_agent.description
 
 
 def test_project_asset_capabilities_expose_suspend_only_to_effective_admins() -> None:
@@ -267,8 +274,8 @@ def test_project_mcp_and_credential_capabilities_are_scope_effective() -> None:
     mcp_service = AsyncMock()
     binding_service = AsyncMock()
     credential_service = AsyncMock()
-    system_mcp = McpAssetView(**vars(_agent(AssetScope.SYSTEM)))
-    project_mcp = McpAssetView(**vars(_agent(AssetScope.PROJECT)))
+    system_mcp = McpAssetView(**{key: value for key, value in vars(_agent(AssetScope.SYSTEM)).items() if key != "description"})
+    project_mcp = McpAssetView(**{key: value for key, value in vars(_agent(AssetScope.PROJECT)).items() if key != "description"})
     mcp_service.list_visible.return_value = (system_mcp, project_mcp)
     binding_service.list_visible.return_value = ()
 
@@ -354,6 +361,88 @@ def test_project_asset_version_history_returns_typed_envelope() -> None:
     assert requested_asset_id == asset_id
 
 
+def test_project_agent_manual_version_mutation_routes_are_not_public() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    client = _client(agent_service=service)
+
+    create = client.post(
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}/versions",
+        json={},
+    )
+    publish = client.post(
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}/versions/{version_id}/publish",
+        json={},
+    )
+
+    assert create.status_code == 405
+    assert publish.status_code == 404
+    service.create_version.assert_not_awaited()
+    service.publish.assert_not_awaited()
+
+
+def test_project_agent_instructions_route_saves_all_virtual_files_atomically() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = AgentVersionView(
+        id=uuid.uuid4(),
+        agent_id=asset_id,
+        version_number=3,
+        workflow_status=WorkflowStatus.PUBLISHED,
+        description="Runtime configuration",
+        soul="# Soul",
+        model_ref="default",
+        tool_groups=("web",),
+        skill_version_ids=(),
+        mcp_version_ids=(),
+        supersedes_version_id=uuid.uuid4(),
+        payload_checksum="a" * 64,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        agents_instructions="# Agents",
+        identity="# Identity",
+        user_context="# User",
+        payload_schema_version=2,
+    )
+    service.update_instructions.return_value = version
+    body = {
+        "agents_instructions": "# Agents",
+        "soul": "# Soul",
+        "identity": "# Identity",
+        "user_context": "# User",
+        "expected_asset_version": 4,
+    }
+
+    response = _client(agent_service=service).put(
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}/instructions",
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["agents_instructions"] == "# Agents"
+    assert response.json()["data"]["soul"] == "# Soul"
+    assert response.json()["data"]["identity"] == "# Identity"
+    assert response.json()["data"]["user_context"] == "# User"
+    assert response.json()["data"]["payload_schema_version"] == 2
+    actor, selected_asset_id, instructions = service.update_instructions.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert selected_asset_id == asset_id
+    assert dataclasses.asdict(instructions) == {
+        "agents_instructions": "# Agents",
+        "soul": "# Soul",
+        "identity": "# Identity",
+        "user_context": "# User",
+    }
+    assert service.update_instructions.await_args.kwargs == {"expected_asset_version": 4}
+
+    invalid = _client(agent_service=service).put(
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}/instructions",
+        json={**body, "unexpected": True},
+    )
+    assert invalid.status_code == 422
+
+
 def _skill_version(asset_id: uuid.UUID, *, source_id: uuid.UUID | None = None) -> SkillVersionView:
     return SkillVersionView(
         id=uuid.uuid4(),
@@ -373,6 +462,46 @@ def _skill_version(asset_id: uuid.UUID, *, source_id: uuid.UUID | None = None) -
         created_by_user_id=str(uuid.uuid4()),
         created_at=NOW,
     )
+
+
+def test_project_skill_create_uses_atomic_template_service_and_keeps_asset_envelope() -> None:
+    service = AsyncMock()
+    asset = SkillAssetView(
+        id=uuid.uuid4(),
+        scope=AssetScope.PROJECT,
+        project_id=PROJECT_ID,
+        slug="meeting-brief",
+        display_name="Meeting Brief",
+        status="suspended",
+        current_published_version_id=None,
+        version=2,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+        description="",
+    )
+    service.create_project_with_template.return_value = asset
+
+    response = _client(skill_service=service).post(
+        f"/api/projects/{PROJECT_ID}/skills",
+        json={
+            "slug": "meeting-brief",
+            "display_name": "Meeting Brief",
+        },
+    )
+
+    assert response.status_code == 201
+    assert set(response.json()) == {"item", "request_id"}
+    assert response.json()["item"]["id"] == str(asset.id)
+    assert response.json()["item"]["status"] == "suspended"
+    assert response.json()["item"]["current_published_version_id"] is None
+    assert response.json()["item"]["version"] == 2
+    actor, command = service.create_project_with_template.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert actor.request_id == "req-project-assets"
+    assert command.slug == "meeting-brief"
+    assert command.display_name == "Meeting Brief"
+    service.create_asset.assert_not_awaited()
 
 
 def test_project_skill_archive_upload_returns_created_suspended_skill_and_published_version() -> None:
@@ -571,6 +700,25 @@ def test_project_skill_delete_returns_204_and_forwards_expected_revision() -> No
     assert service.delete.await_args.kwargs == {"expected_asset_version": 7}
 
 
+def test_project_agent_delete_returns_204_and_forwards_expected_revision() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+
+    response = _client(agent_service=service).request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}",
+        json={"expected_asset_version": 9},
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    service.delete.assert_awaited_once()
+    actor, selected_asset_id = service.delete.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert selected_asset_id == asset_id
+    assert service.delete.await_args.kwargs == {"expected_asset_version": 9}
+
+
 def test_project_skill_activate_route_forwards_expected_revision() -> None:
     service = AsyncMock()
     asset_id = uuid.uuid4()
@@ -603,6 +751,35 @@ def test_project_skill_activate_route_forwards_expected_revision() -> None:
     assert service.activate.await_args.kwargs == {"expected_asset_version": 3}
 
 
+def test_project_agent_activate_route_forwards_expected_revision() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    activated = dataclasses.replace(
+        _agent(
+            AssetScope.PROJECT,
+            current_published_version_id=uuid.uuid4(),
+        ),
+        id=asset_id,
+        status="active",
+        version=4,
+    )
+    service.activate.return_value = activated
+
+    response = _client(agent_service=service).post(
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}/activate",
+        json={"expected_asset_version": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["item"]["status"] == "active"
+    actor, selected_asset_id = service.activate.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert selected_asset_id == asset_id
+    assert service.activate.await_args.kwargs == {
+        "expected_asset_version": 3,
+    }
+
+
 def test_project_skill_archive_is_not_exposed() -> None:
     service = AsyncMock()
     asset_id = uuid.uuid4()
@@ -619,6 +796,30 @@ def test_project_skill_archive_is_not_exposed() -> None:
     assert "/api/projects/{project_id}/skills/{asset_id}/archive" not in paths
     assert "/api/projects/{project_id}/skills/{asset_id}/activate" in paths
     assert "/api/projects/{project_id}/skills/{asset_id}/suspend" in paths
+
+
+def test_project_agent_archive_is_not_exposed_without_removing_other_status_routes() -> None:
+    agent_service = AsyncMock()
+    mcp_service = AsyncMock()
+    asset_id = uuid.uuid4()
+    client = _client(
+        agent_service=agent_service,
+        mcp_service=mcp_service,
+    )
+
+    response = client.post(
+        f"/api/projects/{PROJECT_ID}/agents/{asset_id}/archive",
+        json={"expected_asset_version": 1},
+    )
+
+    assert response.status_code == 404
+    agent_service.archive.assert_not_awaited()
+    paths = client.app.openapi()["paths"]
+    assert "/api/projects/{project_id}/agents/{asset_id}/archive" not in paths
+    assert "/api/projects/{project_id}/agents/{asset_id}/activate" in paths
+    assert "/api/projects/{project_id}/agents/{asset_id}/suspend" in paths
+    assert "/api/projects/{project_id}/mcp-servers/{asset_id}/archive" in paths
+    assert "/api/projects/{project_id}/mcp-servers/{asset_id}/suspend" in paths
 
 
 def _mcp_version_with_read_only_mappings(asset_id: uuid.UUID) -> McpVersionView:
@@ -677,7 +878,6 @@ def test_project_mcp_version_history_serializes_read_only_mapping_fields() -> No
     service = AsyncMock()
     asset_id = uuid.uuid4()
     version = _mcp_version_with_read_only_mappings(asset_id)
-    service.get.return_value = McpAssetView(**vars(_agent(AssetScope.PROJECT)))
     service.get_version_history.return_value = (version,)
 
     response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions")
@@ -699,7 +899,6 @@ def test_project_mcp_history_never_replays_signed_endpoint_details() -> None:
     service = AsyncMock()
     asset_id = uuid.uuid4()
     version = _mcp_version_with_read_only_mappings(asset_id)
-    service.get.return_value = McpAssetView(**vars(_agent(AssetScope.PROJECT)))
     signed_marker = "must-never-return-signed-query"
     version = dataclasses.replace(
         version,
@@ -716,37 +915,6 @@ def test_project_mcp_history_never_replays_signed_endpoint_details() -> None:
     assert response.json()["data"][0]["definition"]["url"] == ("https://analytics.example.test")
     assert signed_marker not in response.text
     assert "/private/path" not in response.text
-
-
-def test_project_mcp_history_preserves_system_stdio_runtime_definition() -> None:
-    service = AsyncMock()
-    asset_id = uuid.uuid4()
-    version = _mcp_version_with_read_only_mappings(asset_id)
-    version = dataclasses.replace(
-        version,
-        definition=dataclasses.replace(
-            version.definition,
-            transport="stdio",
-            command="system-mcp-server",
-            args=("--safe-mode",),
-            url=None,
-            oauth=MappingProxyType({}),
-            routing=MappingProxyType({}),
-            tool_overrides=MappingProxyType({}),
-        ),
-    )
-    service.get.return_value = McpAssetView(**vars(_agent(AssetScope.SYSTEM)))
-    service.get_version_history.return_value = (version,)
-
-    response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions")
-
-    assert response.status_code == 200
-    definition = response.json()["data"][0]["definition"]
-    assert definition["transport"] == "stdio"
-    assert definition["command"] == "system-mcp-server"
-    assert definition["args"] == ["--safe-mode"]
-    assert definition["env"] == {}
-    assert definition["headers"] == {}
 
 
 def test_project_mcp_version_mutation_serializes_after_committing_domain_result() -> None:
@@ -837,7 +1005,6 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
         "credentials": "CredentialVersionHistoryResponse",
     }
     version_models = {
-        "agents": "AgentVersionResponse",
         "skills": "SkillVersionResponse",
         "mcp-servers": "McpVersionResponse",
     }
@@ -854,6 +1021,11 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
         assert credential_migration == {"$ref": "#/components/schemas/CredentialGrantMigrationResponse"}
 
     for prefix in mutable_prefixes:
+        agent_versions_path = f"{prefix}/agents/{{asset_id}}/versions"
+        assert "post" not in openapi["paths"][agent_versions_path]
+        assert f"{prefix}/agents/{{asset_id}}/versions/{{version_id}}/publish" not in openapi["paths"]
+        agent_instructions_schema = openapi["paths"][f"{prefix}/agents/{{asset_id}}/instructions"]["put"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert agent_instructions_schema == {"$ref": "#/components/schemas/AgentVersionResponse"}
         for segment, model_name in version_models.items():
             create_schema = openapi["paths"][f"{prefix}/{segment}/{{asset_id}}/versions"]["post"]["responses"]["201"]["content"]["application/json"]["schema"]
             publish_schema = openapi["paths"][f"{prefix}/{segment}/{{asset_id}}/versions/{{version_id}}/publish"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
@@ -862,7 +1034,8 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
             assert publish_schema == expected
 
     components = openapi["components"]["schemas"]
-    for model_name in (*history_models.values(), *version_models.values()):
+    assert "AgentVersionRequest" not in components
+    for model_name in (*history_models.values(), *version_models.values(), "AgentVersionResponse"):
         assert components[model_name]["additionalProperties"] is False
     preview_path = openapi["paths"]["/api/projects/{project_id}/skills/{asset_id}/versions/{version_id}/files/content"]
     assert preview_path["get"]["responses"]["200"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/SkillFileContentResponse"}

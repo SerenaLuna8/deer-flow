@@ -189,6 +189,21 @@ export interface Translations {
     usage: string;
     governance: {
       retry: string;
+      tokenSeries: {
+        title: string;
+        description: string;
+        loading: string;
+        unavailableTitle: string;
+        unavailableDescription: string;
+        emptyTitle: string;
+        emptyDescription: string;
+        window: string;
+        settlementNote: string;
+        interactionHint: string;
+        chartLabel: string;
+        tableCaption: string;
+        bucket: string;
+      };
       usage: {
         title: string;
         description: string;

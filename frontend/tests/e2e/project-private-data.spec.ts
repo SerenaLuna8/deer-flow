@@ -227,7 +227,7 @@ test("project Memory loads and exports from the project route", async ({
     "href",
     "/projects/research-lab/chats/20000000-0000-4000-8000-000000000001",
   );
-  await page.getByRole("button", { name: "Manage memory" }).click();
+  await page.getByRole("button", { name: "Data management" }).click();
   await page.getByRole("menuitem", { name: "Export memory" }).click();
 
   await expect.poll(state.exportCount).toBe(1);

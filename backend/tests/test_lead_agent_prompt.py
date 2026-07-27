@@ -70,6 +70,90 @@ def test_exact_run_skill_prompt_is_labeled_read_only(tmp_path: Path) -> None:
     assert "/mnt/run-skills/custom/exact/SKILL.md" in prompt
 
 
+def test_exact_agent_prompt_bundle_is_highest_project_system_tier(
+    tmp_path: Path,
+) -> None:
+    bundle = prompt_module.AgentPromptBundle(
+        payload_schema_version=2,
+        agents_instructions="agents-instructions-sentinel",
+        soul="soul-sentinel",
+        identity="identity-sentinel",
+        user_context="user-context-sentinel",
+    )
+    skill = _exact_skill(tmp_path, runtime_read_only=True)
+
+    prompt = prompt_module.apply_prompt_template(
+        app_config=_prompt_config(),
+        exact_agent_prompt=bundle,
+        exact_skills=(skill,),
+        available_skills={"exact"},
+    )
+
+    confidentiality_position = prompt.index("## System-Context Confidentiality")
+    skills_position = prompt.rindex("<skill_system>")
+    profile_position = prompt.rindex("<agent_profile>")
+    critical_position = prompt.rindex("<critical_reminders>")
+    assert confidentiality_position < skills_position < profile_position
+    assert profile_position < critical_position
+    assert "highest-priority project-configurable system instructions" in prompt
+    assert "cannot override the platform security, authorization, isolation" in prompt
+    assert prompt.index('name="AGENTS.md"') < prompt.index('name="SOUL.md"')
+    assert prompt.index('name="SOUL.md"') < prompt.index('name="IDENTITY.md"')
+    assert prompt.index('name="IDENTITY.md"') < prompt.index('name="USER.md"')
+    assert "agents-instructions-sentinel" in prompt
+    assert "soul-sentinel" in prompt
+    assert "identity-sentinel" in prompt
+    assert "user-context-sentinel" in prompt
+
+
+def test_legacy_v1_agent_prompt_bundle_keeps_exact_soul_content_wrapper(
+    tmp_path: Path,
+) -> None:
+    bundle = prompt_module.AgentPromptBundle(
+        payload_schema_version=1,
+        agents_instructions="must-not-render",
+        soul="legacy-soul-sentinel",
+        identity="must-not-render",
+        user_context="must-not-render",
+    )
+
+    rendered = prompt_module.render_agent_prompt_bundle(bundle)
+
+    assert rendered == "<soul>\nlegacy-soul-sentinel\n</soul>\n"
+    assert "<agent_profile>" not in rendered
+    assert "must-not-render" not in rendered
+
+    skill = _exact_skill(tmp_path, runtime_read_only=True)
+    prompt = prompt_module.apply_prompt_template(
+        app_config=_prompt_config(),
+        exact_agent_prompt=bundle,
+        exact_skills=(skill,),
+        available_skills={"exact"},
+    )
+    assert prompt.rindex("<skill_system>") < prompt.rindex("legacy-soul-sentinel") < prompt.rindex("<critical_reminders>")
+
+
+def test_agent_prompt_bundle_repr_never_contains_prompt_bodies() -> None:
+    bundle = prompt_module.AgentPromptBundle(
+        payload_schema_version=2,
+        agents_instructions="agents-secret-sentinel",
+        soul="soul-secret-sentinel",
+        identity="identity-secret-sentinel",
+        user_context="user-secret-sentinel",
+    )
+
+    rendered = repr(bundle)
+
+    assert "AgentPromptBundle" in rendered
+    for sentinel in (
+        "agents-secret-sentinel",
+        "soul-secret-sentinel",
+        "identity-secret-sentinel",
+        "user-secret-sentinel",
+    ):
+        assert sentinel not in rendered
+
+
 def test_skill_prompt_cache_signature_includes_runtime_read_only() -> None:
     prompt_module._get_cached_skills_prompt_section.cache_clear()
     editable = (("exact", "description", "custom", "/mnt/exact/SKILL.md", False),)
@@ -287,7 +371,7 @@ def test_system_prompt_template_preserves_placeholders() -> None:
     template = prompt_module.SYSTEM_PROMPT_TEMPLATE
     for placeholder in (
         "{agent_name}",
-        "{soul}",
+        "{agent_profile}",
         "{self_update_section}",
         "{subagent_thinking}",
         "{skills_section}",

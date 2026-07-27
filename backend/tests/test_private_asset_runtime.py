@@ -40,6 +40,55 @@ _TEST_PROJECT_MCP_ENDPOINT = "https://private-runtime-mcp.example.test/exact"
 _TEST_PROJECT_MCP_ENDPOINT_POLICY = ExactMcpEndpointPolicy(frozenset({_TEST_PROJECT_MCP_ENDPOINT}))
 
 
+def test_private_agent_runtime_exposes_redacted_immutable_prompt_bundle(
+    tmp_path: Path,
+) -> None:
+    manifest = PrivateAgentManifest(
+        agent_asset_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        checksum="a" * 64,
+        catalog_generation=1,
+        description="description-prompt-sentinel",
+        payload_schema_version=2,
+        agents_instructions="agents-prompt-sentinel",
+        soul="soul-prompt-sentinel",
+        identity="identity-prompt-sentinel",
+        user_context="user-prompt-sentinel",
+        model_ref="test-model",
+        tool_groups=("task",),
+        skills=(),
+        mcps=(),
+    )
+    runtime = PrivateAgentRuntime(
+        context=object(),  # type: ignore[arg-type]
+        run_id="exact-run",
+        resolver=object(),  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        safe_manifest=manifest,
+        skill_root=tmp_path,
+        skills=(),
+        mcp_snapshots=(),
+        authorization_boundary=object(),
+    )
+
+    bundle = runtime.prompt_bundle
+
+    assert bundle.payload_schema_version == 2
+    assert bundle.agents_instructions == "agents-prompt-sentinel"
+    assert bundle.soul == "soul-prompt-sentinel"
+    assert bundle.identity == "identity-prompt-sentinel"
+    assert bundle.user_context == "user-prompt-sentinel"
+    for rendered in (repr(manifest), repr(bundle)):
+        for sentinel in (
+            "description-prompt-sentinel",
+            "agents-prompt-sentinel",
+            "soul-prompt-sentinel",
+            "identity-prompt-sentinel",
+            "user-prompt-sentinel",
+        ):
+            assert sentinel not in rendered
+
+
 def _private_mcp_runtime(
     tmp_path: Path,
     *,
@@ -67,7 +116,11 @@ def _private_mcp_runtime(
         checksum="a" * 64,
         catalog_generation=1,
         description="",
+        payload_schema_version=2,
+        agents_instructions="",
         soul="",
+        identity="",
+        user_context="",
         model_ref="test-model",
         tool_groups=(),
         skills=(),

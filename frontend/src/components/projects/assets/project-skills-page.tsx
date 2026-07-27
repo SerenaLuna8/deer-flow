@@ -18,6 +18,8 @@ export function ProjectSkillsPage() {
               projectId: context.projectId,
               item: context.item,
               canAuthor: context.canAuthor,
+              editing: context.editing,
+              onEditingChange: context.onEditingChange,
               onDirtyChange: context.onDirtyChange,
               onVersionCreated: context.onVersionCreated,
             }}

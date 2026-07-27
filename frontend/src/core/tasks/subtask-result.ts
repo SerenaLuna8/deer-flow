@@ -181,12 +181,102 @@ export function hasSubtaskToolResult(
 export function derivePendingSubtaskStatus(
   toolCallId: string | undefined,
   messages: Message[],
-  isCurrentTurnLoading: boolean,
+  isOwningRunActive: boolean,
 ): SubtaskStatus {
-  if (isCurrentTurnLoading || hasSubtaskToolResult(toolCallId, messages)) {
+  if (isOwningRunActive || hasSubtaskToolResult(toolCallId, messages)) {
     return "in_progress";
   }
   return "failed";
+}
+
+function messageRunId(message: Message): string | undefined {
+  const directRunId = Reflect.get(message, "run_id");
+  if (typeof directRunId === "string" && directRunId.length > 0) {
+    return directRunId;
+  }
+  const additionalRunId = message.additional_kwargs?.run_id;
+  return typeof additionalRunId === "string" && additionalRunId.length > 0
+    ? additionalRunId
+    : undefined;
+}
+
+/**
+ * Decide whether a subtask group belongs to the currently running parent Run.
+ *
+ * A subtask group can stop being the last visible group while the Lead Agent
+ * continues with other tools or starts another subtask. Run identity, rather
+ * than group position, is therefore the stable ownership signal. Looking up
+ * the latest Run ID also restores the correct running state after navigating
+ * away from an active conversation and reconnecting.
+ */
+export function isSubtaskRunActive(
+  groupMessages: Message[],
+  allMessages: Message[],
+  isRunLoading: boolean,
+): boolean {
+  if (!isRunLoading) {
+    return false;
+  }
+
+  const activeRunId = [...allMessages]
+    .reverse()
+    .map(messageRunId)
+    .find((runId): runId is string => Boolean(runId));
+  if (!activeRunId) {
+    return false;
+  }
+
+  return groupMessages.some(
+    (message) => messageRunId(message) === activeRunId,
+  );
+}
+
+export type SubtaskTerminalEventUpdate = SubtaskResultUpdate & {
+  id: string;
+};
+
+/**
+ * Parse authoritative terminal task lifecycle events emitted on the live
+ * custom-event stream. ToolMessage metadata may arrive later and remains the
+ * highest-priority result, but the card should transition immediately instead
+ * of guessing from message-group position.
+ */
+export function parseSubtaskTerminalEvent(
+  event: unknown,
+): SubtaskTerminalEventUpdate | null {
+  if (typeof event !== "object" || event === null) {
+    return null;
+  }
+
+  const type = Reflect.get(event, "type");
+  const taskId = Reflect.get(event, "task_id");
+  if (typeof taskId !== "string" || taskId.length === 0) {
+    return null;
+  }
+
+  if (type === "task_completed") {
+    const result = Reflect.get(event, "result");
+    return {
+      id: taskId,
+      status: "completed",
+      ...(typeof result === "string" && result.length > 0 ? { result } : {}),
+    };
+  }
+
+  if (
+    type === "task_failed" ||
+    type === "task_cancelled" ||
+    type === "task_timed_out"
+  ) {
+    const error = Reflect.get(event, "error");
+    return {
+      id: taskId,
+      status: "failed",
+      ...(typeof error === "string" && error.length > 0 ? { error } : {}),
+    };
+  }
+
+  return null;
 }
 
 interface StructuredStatus {

@@ -22,8 +22,10 @@ from deerflow.persistence.user.model import UserRow
 _ACTIONS: dict[str, AuditAction] = {
     "agent.create": AuditAction.ASSET_CREATED,
     "agent.version.create": AuditAction.ASSET_UPDATED,
+    "agent.instructions.update": AuditAction.ASSET_UPDATED,
     "agent.publish": AuditAction.ASSET_PUBLISHED,
-    "agent.archive": AuditAction.ASSET_DEPRECATED,
+    "agent.delete": AuditAction.ASSET_DELETED,
+    "agent.activate": AuditAction.ASSET_UPDATED,
     "agent.suspend": AuditAction.ASSET_DEPRECATED,
     "skill.create": AuditAction.ASSET_CREATED,
     "skill.version.create": AuditAction.ASSET_UPDATED,

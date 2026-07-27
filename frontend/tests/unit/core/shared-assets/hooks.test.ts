@@ -10,6 +10,7 @@ import {
   configureAdminMcpCredentialGrants,
   changeProjectAssetStatus,
   createProjectAssetVersion,
+  deleteProjectAgent,
   deleteProjectSkill,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
@@ -24,6 +25,7 @@ import {
   revokeProjectCredential,
   rollbackProjectSystemBinding,
   submitProjectMcpVersion,
+  updateProjectAgentInstructions,
   upgradeProjectSystemBinding,
 } from "@/core/shared-assets/api";
 import {
@@ -33,6 +35,7 @@ import {
   useConfigureAdminMcpCredentialGrants,
   useChangeProjectAssetStatus,
   useCreateProjectAssetVersion,
+  useDeleteProjectAgent,
   useDeleteProjectSkill,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
@@ -46,6 +49,7 @@ import {
   useRevokeProjectCredential,
   useRollbackProjectSystemBinding,
   useSubmitProjectMcpVersion,
+  useUpdateProjectAgentInstructions,
   useUpgradeProjectSystemBinding,
 } from "@/core/shared-assets/hooks";
 
@@ -63,6 +67,7 @@ rs.mock("@/core/shared-assets/api", () => ({
   changeProjectAssetStatus: rs.fn(),
   createProjectAsset: rs.fn(),
   createProjectAssetVersion: rs.fn(),
+  deleteProjectAgent: rs.fn(),
   deleteProjectSkill: rs.fn(),
   disableProjectSystemBinding: rs.fn(),
   enableProjectSystemBinding: rs.fn(),
@@ -80,6 +85,7 @@ rs.mock("@/core/shared-assets/api", () => ({
   revokeProjectCredential: rs.fn(),
   rollbackProjectSystemBinding: rs.fn(),
   submitProjectMcpVersion: rs.fn(),
+  updateProjectAgentInstructions: rs.fn(),
   upgradeProjectSystemBinding: rs.fn(),
 }));
 
@@ -141,6 +147,7 @@ beforeEach(() => {
     revokeProjectCredential,
     rollbackProjectSystemBinding,
     submitProjectMcpVersion,
+    updateProjectAgentInstructions,
     upgradeProjectSystemBinding,
   ]) {
     rs.mocked(api).mockResolvedValue({} as never);
@@ -352,6 +359,45 @@ describe("shared asset hooks", () => {
     });
   });
 
+  test("deletes a whole project Agent through the active scope and refreshes its catalog", async () => {
+    const remove = mutation(useDeleteProjectAgent(accountId, projectId));
+    const input = { expected_asset_version: 9 };
+
+    await remove.mutationFn({ assetId, input } as never);
+    await remove.onSuccess(undefined, { assetId, input } as never);
+
+    expect(deleteProjectAgent).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      input,
+      mutationController.signal,
+    );
+    expect(remove.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "agents",
+      "mutation",
+      "delete",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "agents",
+      ],
+    });
+    expect(client.setQueryData).toHaveBeenCalledWith(
+      ["account", accountId, "shared-assets", "project", projectId, "agents"],
+      expect.any(Function),
+    );
+  });
+
   test("changes project Skill enablement through the active scope and refreshes the shared list", async () => {
     const toggle = mutation(
       useChangeProjectAssetStatus(accountId, projectId, "skills"),
@@ -483,26 +529,32 @@ describe("shared asset hooks", () => {
   });
 
   test("wires typed project version authoring hooks", async () => {
-    const agentInput = {
-      description: "Writer",
-      soul: "Be precise",
-      model_ref: "default",
-      tool_groups: [],
-      skill_version_ids: [],
-      mcp_version_ids: [],
+    const mcpInput = {
+      description: "GitHub",
+      transport: "stdio",
+      command: "github-mcp",
+      args: [],
+      url: null,
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
       expected_asset_version: 1,
     };
     const projectVersion = mutation(
-      useCreateProjectAssetVersion(accountId, projectId, "agents"),
+      useCreateProjectAssetVersion(accountId, projectId, "mcp-servers"),
     );
-    await projectVersion.mutationFn({ assetId, input: agentInput } as never);
+    await projectVersion.mutationFn({ assetId, input: mcpInput } as never);
     await projectVersion.onSuccess();
 
     expect(createProjectAssetVersion).toHaveBeenCalledWith(
       projectId,
-      "agents",
+      "mcp-servers",
       assetId,
-      agentInput,
+      mcpInput,
       mutationController.signal,
     );
     expect(projectVersion.mutationKey).toEqual([
@@ -511,7 +563,7 @@ describe("shared asset hooks", () => {
       "shared-assets",
       "project",
       projectId,
-      "agents",
+      "mcp-servers",
       "mutation",
       "create-version",
     ]);
@@ -523,7 +575,7 @@ describe("shared asset hooks", () => {
         "shared-assets",
         "project",
         projectId,
-        "agents",
+        "mcp-servers",
       ],
     });
     expect(client.invalidateQueries).toHaveBeenCalledWith({
@@ -531,14 +583,63 @@ describe("shared asset hooks", () => {
     });
   });
 
+  test("updates Agent instructions through the active project scope and refreshes Agent data", async () => {
+    const update = mutation(
+      useUpdateProjectAgentInstructions(accountId, projectId),
+    );
+    const input = {
+      agents_instructions: "# AGENTS.md",
+      soul: "# SOUL.md",
+      identity: "# IDENTITY.md",
+      user_context: "# USER.md",
+      expected_asset_version: 3,
+    };
+
+    await update.mutationFn({ assetId, input } as never);
+    await update.onSuccess();
+
+    expect(updateProjectAgentInstructions).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      input,
+      mutationController.signal,
+    );
+    expect(update.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "agents",
+      "mutation",
+      "update-instructions",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "agents",
+      ],
+    });
+  });
+
   test("drops a late project mutation success after its origin scope is inactive", async () => {
-    const agentInput = {
-      description: "Writer",
-      soul: "Be precise",
-      model_ref: "default",
-      tool_groups: [],
-      skill_version_ids: [],
-      mcp_version_ids: [],
+    const mcpInput = {
+      description: "GitHub",
+      transport: "stdio",
+      command: "github-mcp",
+      args: [],
+      url: null,
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
       expected_asset_version: 1,
     };
     rs.mocked(createProjectAssetVersion).mockImplementationOnce(async () => {
@@ -546,13 +647,13 @@ describe("shared asset hooks", () => {
       return {} as never;
     });
     const projectVersion = mutation(
-      useCreateProjectAssetVersion(accountId, projectId, "agents"),
+      useCreateProjectAssetVersion(accountId, projectId, "mcp-servers"),
     );
 
     await expect(
       projectVersion.mutationFn({
         assetId,
-        input: agentInput,
+        input: mcpInput,
       } as never),
     ).rejects.toMatchObject({ name: "AbortError" });
     await expect(projectVersion.onSuccess()).rejects.toMatchObject({
@@ -563,11 +664,11 @@ describe("shared asset hooks", () => {
 
     scopeActive = true;
     const completedBeforeTransition = mutation(
-      useCreateProjectAssetVersion(accountId, projectId, "agents"),
+      useCreateProjectAssetVersion(accountId, projectId, "mcp-servers"),
     );
     await completedBeforeTransition.mutationFn({
       assetId,
-      input: agentInput,
+      input: mcpInput,
     } as never);
     scopeActive = false;
 
@@ -599,7 +700,7 @@ describe("shared asset hooks", () => {
 
   test("keeps binding invalidation on the asset catalog without remounting project context", async () => {
     const publish = mutation(
-      usePublishProjectAssetVersion(accountId, projectId, "agents"),
+      usePublishProjectAssetVersion(accountId, projectId, "mcp-servers"),
     );
     const revoke = mutation(useRevokeProjectCredential(accountId, projectId));
     const submit = mutation(useSubmitProjectMcpVersion(accountId, projectId));

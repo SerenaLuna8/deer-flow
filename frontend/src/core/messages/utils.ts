@@ -2,7 +2,7 @@ import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
 interface GenericMessageGroup<T = string> {
   type: T;
-  id: string | undefined;
+  id: string;
   messages: Message[];
 }
 
@@ -33,74 +33,131 @@ const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "todo_completion_reminder",
 ]);
 
+function messageRunId(message: Message): string | undefined {
+  const directRunId = Reflect.get(message, "run_id");
+  if (typeof directRunId === "string" && directRunId.length > 0) {
+    return directRunId;
+  }
+
+  const additionalRunId = message.additional_kwargs?.run_id;
+  return typeof additionalRunId === "string" && additionalRunId.length > 0
+    ? additionalRunId
+    : undefined;
+}
+
 export function getMessageGroups(messages: Message[]): MessageGroup[] {
   if (messages.length === 0) {
     return [];
   }
 
   const groups: MessageGroup[] = [];
+  const groupByToolCallId = new Map<string, MessageGroup>();
+  const pendingToolMessagesByCallId = new Map<string, Message[]>();
+  const usedGroupIds = new Set<string>();
+  let unscopedTurn = 0;
 
-  // Returns the last group if it can still accept tool messages
-  // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
-  function lastOpenGroup() {
-    const last = groups[groups.length - 1];
-    if (
-      last &&
-      last.type !== "human" &&
-      last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
-    ) {
-      return last;
-    }
-    return null;
+  function toolCallAssociationKey(message: Message, toolCallId: string) {
+    const runId = messageRunId(message);
+    return JSON.stringify(
+      runId
+        ? ["run", runId, toolCallId]
+        : ["unscoped-turn", unscopedTurn, toolCallId],
+    );
   }
 
-  for (const message of messages) {
+  function createGroupId(
+    message: Message,
+    index: number,
+    type: MessageGroup["type"],
+  ) {
+    const messageId =
+      typeof message.id === "string" && message.id.length > 0
+        ? message.id
+        : `${type}-${index}`;
+    let groupId = messageId;
+    let suffix = 1;
+    while (usedGroupIds.has(groupId)) {
+      groupId = `${messageId}-${suffix}`;
+      suffix += 1;
+    }
+    usedGroupIds.add(groupId);
+    return groupId;
+  }
+
+  function associateToolCalls(message: AIMessage, group: MessageGroup) {
+    for (const toolCall of message.tool_calls ?? []) {
+      const toolCallId = toolCall.id;
+      if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+        continue;
+      }
+
+      const associationKey = toolCallAssociationKey(message, toolCallId);
+      if (groupByToolCallId.has(associationKey)) {
+        continue;
+      }
+
+      groupByToolCallId.set(associationKey, group);
+      const pendingToolMessages =
+        pendingToolMessagesByCallId.get(associationKey) ?? [];
+      group.messages.push(...pendingToolMessages);
+      pendingToolMessagesByCallId.delete(associationKey);
+    }
+  }
+
+  function associateToolMessage(message: Message) {
+    if (message.type !== "tool") {
+      return;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+      return;
+    }
+
+    const associationKey = toolCallAssociationKey(message, toolCallId);
+    const group = groupByToolCallId.get(associationKey);
+    if (group) {
+      group.messages.push(message);
+      return;
+    }
+
+    const pendingToolMessages =
+      pendingToolMessagesByCallId.get(associationKey) ?? [];
+    pendingToolMessages.push(message);
+    pendingToolMessagesByCallId.set(associationKey, pendingToolMessages);
+  }
+
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.type === "human") {
+      // A hidden compatibility/control input still marks a new legacy turn.
+      // Advancing before the visibility filter keeps unscoped call ids from
+      // being reused across that otherwise invisible boundary.
+      unscopedTurn += 1;
+    }
+
     if (isHiddenFromUIMessage(message)) {
       continue;
     }
 
     if (message.type === "human") {
-      groups.push({ id: message.id, type: "human", messages: [message] });
+      groups.push({
+        id: createGroupId(message, messageIndex, "human"),
+        type: "human",
+        messages: [message],
+      });
       continue;
     }
 
     if (message.type === "tool") {
+      associateToolMessage(message);
       if (isClarificationToolMessage(message)) {
-        // Add to the preceding processing group to preserve tool-call association,
-        // then also open a standalone clarification group for prominent display.
-        lastOpenGroup()?.messages.push(message);
+        // The exact issuing AI group receives the result through
+        // associateToolMessage. Keep the standalone card for prominent input.
         groups.push({
-          id: message.id,
+          id: createGroupId(message, messageIndex, "assistant:clarification"),
           type: "assistant:clarification",
           messages: [message],
         });
-      } else {
-        const open = lastOpenGroup();
-        if (open) {
-          open.messages.push(message);
-        } else {
-          // Fallback for orphan tool messages — LangGraph `messages-tuple` can
-          // emit tool-result events out of order or replay them from subagent
-          // state (e.g. bash subagent under LocalSandboxProvider with
-          // allow_host_bash). When that happens, the tool message arrives after
-          // a terminal group and lastOpenGroup() returns null. Previously we
-          // dropped the message with console.error, silently hiding the tool
-          // result from the UI. Attach to the most recent group instead so the
-          // user can still see what the agent did.
-          const lastGroup = groups[groups.length - 1];
-          if (lastGroup) {
-            lastGroup.messages.push(message);
-          } else {
-            // groups is empty (shouldn't happen — the outer for loop is guarded
-            // by `messages.length === 0 -> return []`), but keep the diagnostic
-            // just in case.
-            console.error(
-              "Unexpected tool message with no preceding group",
-              message,
-            );
-          }
-        }
       }
       continue;
     }
@@ -115,19 +172,24 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       // still belong in the processing group.
       const becomesAssistantBubble =
         hasContent(message) && !hasToolCalls(message);
+      let toolCallGroup: MessageGroup | null = null;
 
       if (hasPresentFiles(message)) {
-        groups.push({
-          id: message.id,
+        const group: AssistantPresentFilesGroup = {
+          id: createGroupId(message, messageIndex, "assistant:present-files"),
           type: "assistant:present-files",
           messages: [message],
-        });
+        };
+        groups.push(group);
+        toolCallGroup = group;
       } else if (hasSubagent(message)) {
-        groups.push({
-          id: message.id,
+        const group: AssistantSubagentGroup = {
+          id: createGroupId(message, messageIndex, "assistant:subagent"),
           type: "assistant:subagent",
           messages: [message],
-        });
+        };
+        groups.push(group);
+        toolCallGroup = group;
       } else if (
         !becomesAssistantBubble &&
         (hasReasoning(message) || hasToolCalls(message))
@@ -135,22 +197,36 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         const lastGroup = groups[groups.length - 1];
         // Accumulate consecutive intermediate AI messages into one processing group.
         if (lastGroup?.type !== "assistant:processing") {
-          groups.push({
-            id: message.id,
+          const group: AssistantProcessingGroup = {
+            id: createGroupId(message, messageIndex, "assistant:processing"),
             type: "assistant:processing",
             messages: [message],
-          });
+          };
+          groups.push(group);
+          toolCallGroup = group;
         } else {
           lastGroup.messages.push(message);
+          toolCallGroup = lastGroup;
         }
       }
 
+      if (toolCallGroup) {
+        associateToolCalls(message, toolCallGroup);
+      }
+
       if (becomesAssistantBubble) {
-        groups.push({ id: message.id, type: "assistant", messages: [message] });
+        groups.push({
+          id: createGroupId(message, messageIndex, "assistant"),
+          type: "assistant",
+          messages: [message],
+        });
       }
     }
   }
 
+  // Any tool results still pending reference no visible issuing AI call. They
+  // are intentionally omitted: guessing a nearby group can leak raw tool
+  // output into a terminal assistant answer and scramble the conversation.
   return groups;
 }
 

@@ -18,36 +18,27 @@ from support.m4_private_threads import seed_m4_thread_database
 import deerflow.persistence.models  # noqa: F401
 from app.final_schema import M7_FINAL_SCHEMA_REVISION
 from app.gateway.auth.sessions import generate_session_id, hash_session_id
-from app.private_work.asset_runtime import PrivateAssetRuntime
-from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets.agent_service import AgentService
+from app.shared_assets.agent_design_service import (
+    AgentDesignService,
+    CreateAgentDesignSession,
+)
 from app.shared_assets.errors import AssetConflict
-from app.shared_assets.models import AgentPayload, SkillArchiveFile
 from app.shared_assets.skill_service import CreateSkill, SkillService
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.auth_sessions import AuthSessionRepository, AuthSessionRow
 from deerflow.persistence.base import Base
-from deerflow.persistence.shared_assets import (
-    AgentRow,
-    AgentVersionRow,
-    AgentVersionSkillRefRow,
-    SkillRow,
-    SkillVersionFileRow,
-    SkillVersionRow,
-)
 from deerflow.persistence.user.model import UserRow
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-INTERMEDIATE_REVISION = "0002_project_skill_hard_delete"
-CURRENT_REVISION = "0003_project_skill_unique_name"
-FROZEN_BASELINE_SHA256 = "a2239e89966891c13d75a307d54deec2e45f03eb19b10ac8f3bf06d2ffb3eb71"
+CURRENT_REVISION = BASELINE_REVISION
+FROZEN_BASELINE_SHA256 = "60cc71df98cbd345a338e54820dde05861e061cb76546fec1279060a04c108a6"
 
 LEGACY_RELATIONS = {
     "automation_cutover_state",
@@ -74,6 +65,8 @@ REQUIRED_FUNCTIONS = {
     "set_m7_updated_at",
 }
 REQUIRED_TRIGGERS = {
+    "trg_agent_design_operations_updated_at",
+    "trg_agent_design_sessions_updated_at",
     "trg_audit_logs_append_only",
     "trg_dead_jobs_append_only",
     "trg_project_usage_ledger_append_only",
@@ -87,12 +80,22 @@ EXPECTED_FUNCTION_FRAGMENTS = {
     "enforce_stream_terminal_invariant": "stream event cannot follow terminal event",
     "ensure_system_binding_published_version": "system binding requires published version",
     "prevent_bound_published_version_downgrade": "bound published version cannot change workflow status",
-    "prevent_published_version_child_mutation": "published version child rows are immutable",
+    "prevent_published_version_child_mutation": "deerflow.skill_hard_delete_asset_id",
     "prevent_shared_asset_version_payload_update": "shared asset version payload is immutable",
     "reject_m7_append_only_mutation": "M7 append-only rows cannot be updated or deleted",
     "set_m7_updated_at": "NEW.updated_at := now()",
 }
 EXPECTED_TRIGGER_IDENTITIES = {
+    "trg_agent_design_operations_updated_at": (
+        "agent_design_operations",
+        "set_m7_updated_at",
+        19,
+    ),
+    "trg_agent_design_sessions_updated_at": (
+        "agent_design_sessions",
+        "set_m7_updated_at",
+        19,
+    ),
     "trg_audit_logs_append_only": ("audit_logs", "reject_m7_append_only_mutation", 27),
     "trg_dead_jobs_append_only": ("dead_jobs", "reject_m7_append_only_mutation", 27),
     "trg_project_usage_ledger_append_only": ("project_usage_ledger", "reject_m7_append_only_mutation", 27),
@@ -323,13 +326,9 @@ async def _native_relational_catalog(
     return snapshot
 
 
-def test_migration_history_preserves_frozen_history_and_has_one_0003_head() -> None:
+def test_migration_history_has_one_consolidated_0001_head() -> None:
     revision_files = sorted(path for path in _versions_dir().glob("*.py") if path.name != "__init__.py")
-    assert [path.name for path in revision_files] == [
-        "0001_project_saas_baseline.py",
-        "0002_project_skill_hard_delete.py",
-        "0003_project_skill_unique_name.py",
-    ]
+    assert [path.name for path in revision_files] == ["0001_project_saas_baseline.py"]
     assert hashlib.sha256(revision_files[0].read_bytes()).hexdigest() == FROZEN_BASELINE_SHA256
 
     baseline_spec = importlib.util.spec_from_file_location("m7_final_baseline", revision_files[0])
@@ -338,27 +337,9 @@ def test_migration_history_preserves_frozen_history_and_has_one_0003_head() -> N
     baseline_spec.loader.exec_module(baseline_module)
     assert baseline_module.revision == BASELINE_REVISION
     assert baseline_module.down_revision is None
-
-    intermediate_spec = importlib.util.spec_from_file_location("project_skill_hard_delete", revision_files[1])
-    assert intermediate_spec is not None and intermediate_spec.loader is not None
-    intermediate_module = importlib.util.module_from_spec(intermediate_spec)
-    intermediate_spec.loader.exec_module(intermediate_module)
-    assert intermediate_module.revision == INTERMEDIATE_REVISION
-    assert intermediate_module.down_revision == BASELINE_REVISION
-
-    head_spec = importlib.util.spec_from_file_location("project_skill_unique_name", revision_files[2])
-    assert head_spec is not None and head_spec.loader is not None
-    head_module = importlib.util.module_from_spec(head_spec)
-    head_spec.loader.exec_module(head_module)
-    assert head_module.revision == CURRENT_REVISION
-    assert head_module.down_revision == INTERMEDIATE_REVISION
     assert bootstrap_module._get_head_revision() == CURRENT_REVISION
     with pytest.raises(RuntimeError, match="M7 baseline downgrade is unsupported"):
         baseline_module.downgrade()
-    with pytest.raises(RuntimeError, match="forward-only schema downgrade is unsupported"):
-        intermediate_module.downgrade()
-    with pytest.raises(RuntimeError, match="forward-only schema downgrade is unsupported"):
-        head_module.downgrade()
 
 
 def test_final_metadata_and_contract_have_no_staged_relations() -> None:
@@ -378,7 +359,122 @@ async def test_empty_database_installs_current_forward_head(
             assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
             assert await connection.scalar(text("SELECT to_regclass('user_notifications')")) == "user_notifications"
             relations = set((await connection.execute(text("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"))).scalars())
+            assert {
+                "agent_design_operations",
+                "agent_design_sessions",
+            } <= relations
             assert not (relations & LEGACY_RELATIONS)
+            agent_version_columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            """SELECT column_name
+                               FROM information_schema.columns
+                               WHERE table_schema=current_schema()
+                                 AND table_name='agent_versions'"""
+                        )
+                    )
+                ).scalars()
+            )
+            assert {
+                "agents_instructions",
+                "identity",
+                "payload_schema_version",
+                "user_context",
+            } <= agent_version_columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_agent_builder_session_persists_optional_json_as_sql_null(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    user_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    membership_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    try:
+        await bootstrap_module.bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                       (id,email,system_role,created_at,needs_setup,token_version)
+                       VALUES (:id,:email,'user',:now,false,0)"""
+                ),
+                {
+                    "id": str(user_id),
+                    "email": f"agent-builder-{user_id}@example.com",
+                    "now": now,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO projects
+                       (id,slug,display_name,created_by_user_id,created_at,updated_at)
+                       VALUES (:id,:slug,:name,:user_id,:now,:now)"""
+                ),
+                {
+                    "id": project_id,
+                    "slug": "agent-builder-null",
+                    "name": "Agent Builder Null",
+                    "user_id": str(user_id),
+                    "now": now,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_memberships
+                       (id,project_id,user_id,role,status,version,
+                        activation_generation,created_at,updated_at)
+                       VALUES (:id,:project_id,:user_id,'admin','active',1,1,:now,:now)"""
+                ),
+                {
+                    "id": membership_id,
+                    "project_id": project_id,
+                    "user_id": str(user_id),
+                    "now": now,
+                },
+            )
+
+        role = ProjectRole.ADMIN
+        context = ProjectContext(
+            user_id=user_id,
+            project_id=project_id,
+            membership_id=membership_id,
+            role=role,
+            capabilities=capabilities_for(role),
+            membership_version=1,
+            request_id="req-agent-builder-null",
+        )
+        created = await AgentDesignService(factory).create(
+            context,
+            CreateAgentDesignSession(
+                slug="null-safe-agent",
+                display_name="Null Safe Agent",
+                idempotency_key="create-null-safe-agent",
+            ),
+        )
+
+        assert created.blueprint is None
+        assert created.active_clarification is None
+        async with engine.connect() as connection:
+            stored = (
+                await connection.execute(
+                    text(
+                        """SELECT blueprint_json IS NULL,
+                                  active_clarification_json IS NULL
+                           FROM agent_design_sessions
+                           WHERE id=:session_id"""
+                    ),
+                    {"session_id": created.id},
+                )
+            ).one()
+        assert stored == (True, True)
     finally:
         await engine.dispose()
 
@@ -526,461 +622,6 @@ async def test_project_skill_display_name_is_case_insensitively_unique_per_proje
                 == 2
             )
     finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_exact_0001_ancestor_requires_and_accepts_explicit_migration(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        await asyncio.to_thread(
-            bootstrap_module._upgrade,
-            bootstrap_module._get_alembic_config(engine),
-            BASELINE_REVISION,
-        )
-        async with engine.connect() as connection:
-            assert await bootstrap_module.classify_database(connection) == "upgradeable"
-        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
-            await bootstrap_module.validate_schema(engine)
-        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
-            await bootstrap_module.bootstrap_schema(engine)
-
-        await bootstrap_module.migrate_schema(engine)
-
-        async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
-            assert await bootstrap_module.classify_database(connection) == "current"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_exact_0002_ancestor_requires_and_accepts_explicit_migration(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    try:
-        await asyncio.to_thread(
-            bootstrap_module._upgrade,
-            bootstrap_module._get_alembic_config(engine),
-            INTERMEDIATE_REVISION,
-        )
-        async with engine.connect() as connection:
-            assert await bootstrap_module.classify_database(connection) == "upgradeable"
-        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
-            await bootstrap_module.validate_schema(engine)
-        with pytest.raises(bootstrap_module.SchemaMigrationRequired):
-            await bootstrap_module.bootstrap_schema(engine)
-
-        await bootstrap_module.migrate_schema(engine)
-
-        async with engine.connect() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
-            assert await bootstrap_module.classify_database(connection) == "current"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_0003_migration_deduplicates_legacy_project_skill_names_without_losing_rows(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    user_id = uuid.UUID("10000000-0000-0000-0000-000000000001")
-    first_project_id = uuid.UUID("20000000-0000-0000-0000-000000000001")
-    second_project_id = uuid.UUID("20000000-0000-0000-0000-000000000002")
-    skill_ids = {
-        "first_keeper": uuid.UUID("30000000-0000-0000-0000-000000000001"),
-        "first_second": uuid.UUID("30000000-0000-0000-0000-000000000002"),
-        "first_third": uuid.UUID("30000000-0000-0000-0000-000000000003"),
-        "first_reserved": uuid.UUID("30000000-0000-0000-0000-000000000004"),
-        "long_keeper": uuid.UUID("30000000-0000-0000-0000-000000000005"),
-        "long_second": uuid.UUID("30000000-0000-0000-0000-000000000006"),
-        "second_keeper": uuid.UUID("30000000-0000-0000-0000-000000000007"),
-        "second_duplicate": uuid.UUID("30000000-0000-0000-0000-000000000008"),
-    }
-    base_time = datetime(2026, 1, 1, tzinfo=UTC)
-    long_name = "长" * 120
-    try:
-        await asyncio.to_thread(
-            bootstrap_module._upgrade,
-            bootstrap_module._get_alembic_config(engine),
-            INTERMEDIATE_REVISION,
-        )
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """INSERT INTO users
-                       (id,email,system_role,created_at,needs_setup,token_version)
-                       VALUES (:id,'legacy-skill-names@example.com','user',:now,false,0)"""
-                ),
-                {"id": str(user_id), "now": base_time},
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO projects
-                       (id,slug,display_name,created_by_user_id,created_at,updated_at)
-                       VALUES (:id,:slug,:display_name,:user_id,:now,:now)"""
-                ),
-                [
-                    {
-                        "id": first_project_id,
-                        "slug": "legacy-skill-names-first",
-                        "display_name": "Legacy Skill Names First",
-                        "user_id": str(user_id),
-                        "now": base_time,
-                    },
-                    {
-                        "id": second_project_id,
-                        "slug": "legacy-skill-names-second",
-                        "display_name": "Legacy Skill Names Second",
-                        "user_id": str(user_id),
-                        "now": base_time,
-                    },
-                ],
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO skills
-                       (id,scope,project_id,slug,display_name,version,
-                        created_by_user_id,created_at,updated_at)
-                       VALUES
-                       (:id,'project',:project_id,:slug,:display_name,:version,
-                        :user_id,:created_at,:created_at)"""
-                ),
-                [
-                    {
-                        "id": skill_ids["first_keeper"],
-                        "project_id": first_project_id,
-                        "slug": "first-keeper",
-                        "display_name": "nAmE",
-                        "version": 7,
-                        "user_id": str(user_id),
-                        "created_at": base_time,
-                    },
-                    {
-                        "id": skill_ids["first_second"],
-                        "project_id": first_project_id,
-                        "slug": "first-second",
-                        "display_name": "Name",
-                        "version": 8,
-                        "user_id": str(user_id),
-                        "created_at": base_time + timedelta(seconds=1),
-                    },
-                    {
-                        "id": skill_ids["first_third"],
-                        "project_id": first_project_id,
-                        "slug": "first-third",
-                        "display_name": "NAME",
-                        "version": 9,
-                        "user_id": str(user_id),
-                        "created_at": base_time + timedelta(seconds=1),
-                    },
-                    {
-                        "id": skill_ids["first_reserved"],
-                        "project_id": first_project_id,
-                        "slug": "first-reserved",
-                        "display_name": "name (2)",
-                        "version": 10,
-                        "user_id": str(user_id),
-                        "created_at": base_time,
-                    },
-                    {
-                        "id": skill_ids["long_keeper"],
-                        "project_id": first_project_id,
-                        "slug": "long-keeper",
-                        "display_name": long_name,
-                        "version": 11,
-                        "user_id": str(user_id),
-                        "created_at": base_time,
-                    },
-                    {
-                        "id": skill_ids["long_second"],
-                        "project_id": first_project_id,
-                        "slug": "long-second",
-                        "display_name": long_name,
-                        "version": 12,
-                        "user_id": str(user_id),
-                        "created_at": base_time + timedelta(seconds=1),
-                    },
-                    {
-                        "id": skill_ids["second_keeper"],
-                        "project_id": second_project_id,
-                        "slug": "second-keeper",
-                        "display_name": "Name",
-                        "version": 13,
-                        "user_id": str(user_id),
-                        "created_at": base_time,
-                    },
-                    {
-                        "id": skill_ids["second_duplicate"],
-                        "project_id": second_project_id,
-                        "slug": "second-duplicate",
-                        "display_name": "name",
-                        "version": 14,
-                        "user_id": str(user_id),
-                        "created_at": base_time + timedelta(seconds=1),
-                    },
-                ],
-            )
-            before_identity = tuple(
-                (
-                    row.id,
-                    row.slug,
-                    row.version,
-                )
-                for row in (
-                    await connection.execute(
-                        text(
-                            """SELECT id,slug,version FROM skills
-                               ORDER BY id"""
-                        )
-                    )
-                )
-            )
-
-        await bootstrap_module.migrate_schema(engine)
-
-        async with engine.connect() as connection:
-            rows = {
-                row.id: row.display_name
-                for row in (
-                    await connection.execute(
-                        text(
-                            """SELECT id,display_name FROM skills
-                               ORDER BY id"""
-                        )
-                    )
-                )
-            }
-            after_identity = tuple(
-                (
-                    row.id,
-                    row.slug,
-                    row.version,
-                )
-                for row in (
-                    await connection.execute(
-                        text(
-                            """SELECT id,slug,version FROM skills
-                               ORDER BY id"""
-                        )
-                    )
-                )
-            )
-            assert after_identity == before_identity
-            assert rows == {
-                skill_ids["first_keeper"]: "nAmE",
-                skill_ids["first_second"]: "nAmE (3)",
-                skill_ids["first_third"]: "nAmE (4)",
-                skill_ids["first_reserved"]: "name (2)",
-                skill_ids["long_keeper"]: long_name,
-                skill_ids["long_second"]: f"{'长' * 116} (2)",
-                skill_ids["second_keeper"]: "Name",
-                skill_ids["second_duplicate"]: "Name (2)",
-            }
-            assert all(len(display_name) <= 120 for display_name in rows.values())
-            assert (
-                await connection.scalar(
-                    text(
-                        """SELECT count(*) FROM (
-                               SELECT project_id,lower(display_name)
-                               FROM skills
-                               WHERE scope='project'
-                               GROUP BY project_id,lower(display_name)
-                               HAVING count(*) > 1
-                           ) duplicate_names"""
-                    )
-                )
-                == 0
-            )
-
-        with pytest.raises(IntegrityError):
-            async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        """INSERT INTO skills
-                           (id,scope,project_id,slug,display_name,created_by_user_id)
-                           VALUES (:id,'project',:project_id,'post-migration-conflict',
-                                   'NAME',:user_id)"""
-                    ),
-                    {
-                        "id": uuid.uuid4(),
-                        "project_id": first_project_id,
-                        "user_id": str(user_id),
-                    },
-                )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_0001_skill_and_run_snapshot_remain_readable_and_materializable_after_0003(
-    postgres_database_url: str,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    seed = None
-    runtime = None
-    try:
-        await asyncio.to_thread(
-            bootstrap_module._upgrade,
-            bootstrap_module._get_alembic_config(engine),
-            BASELINE_REVISION,
-        )
-        seed = await seed_m4_thread_database(postgres_database_url)
-        factory = seed.factory
-        skill_id = uuid.uuid4()
-        skill_version_id = uuid.uuid4()
-        agent_id = uuid.uuid4()
-        agent_version_id = uuid.uuid4()
-        skill_content = b"---\nname: v1-migration-skill\ndescription: Existing revision 0001 Skill\n---\n\nKeep this package executable after migration.\n"
-        skill_checksum = _v1_skill_checksum("SKILL.md", skill_content)
-        agent_payload = AgentPayload(
-            description="Existing revision 0001 Agent",
-            soul="Use the exact persisted Skill.",
-            model_ref="test-model",
-            tool_groups=(),
-            skill_version_ids=(skill_version_id,),
-            mcp_version_ids=(),
-        )
-        agent_checksum = AgentService._payload_checksum(agent_payload)
-
-        async with factory() as session, session.begin():
-            skill = SkillRow(
-                id=skill_id,
-                scope="project",
-                project_id=seed.owner_a.project_id,
-                slug="v1-migration-skill",
-                display_name="V1 Migration Skill",
-                created_by_user_id=str(seed.owner_a.user_id),
-            )
-            session.add(skill)
-            await session.flush()
-            skill_version = SkillVersionRow(
-                id=skill_version_id,
-                skill_id=skill_id,
-                version_number=1,
-                workflow_status="draft",
-                description="Existing revision 0001 Skill",
-                frontmatter={
-                    "name": "v1-migration-skill",
-                    "description": "Existing revision 0001 Skill",
-                },
-                compatibility=None,
-                secret_requirements=[],
-                scan_decision="allow",
-                scan_summary={},
-                payload_checksum=skill_checksum,
-                created_by_user_id=str(seed.owner_a.user_id),
-            )
-            session.add(skill_version)
-            await session.flush()
-            session.add(
-                SkillVersionFileRow(
-                    skill_version_id=skill_version_id,
-                    path="SKILL.md",
-                    media_type="text/markdown",
-                    size_bytes=len(skill_content),
-                    sha256=hashlib.sha256(skill_content).hexdigest(),
-                    content=skill_content,
-                )
-            )
-            await session.flush()
-            skill_version.workflow_status = "published"
-            skill.current_published_version_id = skill_version_id
-
-            agent = AgentRow(
-                id=agent_id,
-                scope="project",
-                project_id=seed.owner_a.project_id,
-                slug="v1-migration-agent",
-                display_name="V1 Migration Agent",
-                created_by_user_id=str(seed.owner_a.user_id),
-            )
-            session.add(agent)
-            await session.flush()
-            agent_version = AgentVersionRow(
-                id=agent_version_id,
-                agent_id=agent_id,
-                version_number=1,
-                workflow_status="draft",
-                description=agent_payload.description,
-                soul=agent_payload.soul,
-                model_ref=agent_payload.model_ref,
-                tool_groups=list(agent_payload.tool_groups),
-                payload_checksum=agent_checksum,
-                created_by_user_id=str(seed.owner_a.user_id),
-            )
-            session.add(agent_version)
-            await session.flush()
-            session.add(
-                AgentVersionSkillRefRow(
-                    agent_version_id=agent_version_id,
-                    skill_version_id=skill_version_id,
-                    sort_order=0,
-                )
-            )
-            await session.flush()
-            agent_version.workflow_status = "published"
-            agent.current_published_version_id = agent_version_id
-            await session.flush()
-
-        thread_id = f"v1-migration-{uuid.uuid4().hex}"
-        async with factory() as session, session.begin():
-            await PrivateThreadRepository(session).create(
-                scope=seed.owner_a_scope,
-                thread_id=thread_id,
-                agent=ThreadAgentRef(agent_id, "project"),
-            )
-        admitted = await PrivateRunAdmissionService(factory).admit(
-            seed.owner_a,
-            thread_id,
-            PrivateRunCreate(),
-        )
-        assert [item.payload_checksum for item in admitted.snapshot.assets] == [
-            agent_checksum,
-            skill_checksum,
-        ]
-
-        await bootstrap_module.migrate_schema(engine)
-
-        actor = ProjectContext(
-            user_id=seed.owner_a.user_id,
-            project_id=seed.owner_a.project_id,
-            membership_id=seed.owner_a.membership_id,
-            role=seed.owner_a.role,
-            capabilities=seed.owner_a.capabilities,
-            membership_version=seed.owner_a.membership_version,
-            request_id="req-v1-skill-after-0003",
-        )
-        assert await SkillService(factory).load_version_files(
-            actor,
-            skill_id,
-            skill_version_id,
-        ) == (
-            SkillArchiveFile(
-                path="SKILL.md",
-                content=skill_content,
-                media_type="text/markdown",
-            ),
-        )
-
-        runtime = await PrivateAssetRuntime(factory).materialize(
-            seed.owner_a,
-            admitted,
-        )
-        assert (runtime.skill_root / "custom" / skill_id.hex / "SKILL.md").read_bytes() == skill_content
-    finally:
-        if runtime is not None:
-            await runtime.aclose()
-        if seed is not None:
-            await seed.engine.dispose()
         await engine.dispose()
 
 
@@ -1561,6 +1202,7 @@ async def test_baseline_installs_required_functions_and_triggers(postgres_databa
         for function_name, fragment in EXPECTED_FUNCTION_FRAGMENTS.items():
             assert fragment in functions[function_name]
             assert f"FUNCTION public.{function_name}()" in functions[function_name]
+        assert "deerflow.agent_hard_delete_asset_id" in functions["prevent_published_version_child_mutation"]
 
         triggers = {name: (table, function, event_bits, definition) for name, table, function, event_bits, definition in trigger_rows}
         assert set(triggers) == REQUIRED_TRIGGERS

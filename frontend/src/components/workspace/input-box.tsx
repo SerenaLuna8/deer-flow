@@ -1538,10 +1538,7 @@ export function InputBox({
   return (
     <div
       ref={promptRootRef}
-      className={cn(
-        "relative flex min-w-0 flex-col",
-        isWelcomeMode ? "gap-4" : "gap-2",
-      )}
+      className="relative flex min-w-0 flex-col gap-2"
     >
       {showFollowups && (
         <div className="flex items-center justify-center pb-1">
@@ -2158,7 +2155,10 @@ export function InputBox({
         searchParams.get("mode") !== "skill" &&
         !selectedSlashSkill &&
         !showSkillSuggestions && (
-          <div className="flex items-center justify-center pt-2">
+          <div
+            className="flex items-center justify-center"
+            data-testid="welcome-quick-actions"
+          >
             <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
@@ -2204,7 +2204,7 @@ function SuggestionList({
     [textInput, onSelectPlaceholder],
   );
   return (
-    <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
+    <Suggestions className="w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
       <ConfettiButton
         className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
         variant="outline"

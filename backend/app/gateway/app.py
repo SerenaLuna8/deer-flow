@@ -24,6 +24,7 @@ from app.gateway.routers import (
     notifications,
     privacy_center,
     private_work,
+    project_agent_builder,
     project_assets,
     project_audit,
     project_automations,
@@ -327,6 +328,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(project_audit.router)
     app.include_router(project_assets.catalog_router)
     app.include_router(project_assets.project_router)
+    app.include_router(project_agent_builder.router)
     # Readiness must precede the dynamic /{task_id} project Automation route.
     app.include_router(project_automations.readiness_router)
     app.include_router(project_automations.router)

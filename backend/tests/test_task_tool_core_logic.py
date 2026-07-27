@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import inspect
+import json
 import threading
 import uuid
 from enum import Enum
@@ -359,6 +360,116 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
 
 
+def test_task_tool_forwards_private_prompt_bundle_and_runtime_skills_outside_metadata(
+    monkeypatch,
+):
+    from deerflow.agents.lead_agent.prompt import AgentPromptBundle
+
+    prompt_bundle = AgentPromptBundle(
+        payload_schema_version=2,
+        agents_instructions="agents-prompt-sentinel",
+        soul="soul-prompt-sentinel",
+        identity="identity-prompt-sentinel",
+        user_context="user-prompt-sentinel",
+    )
+    runtime_skill = object()
+    runtime = _make_runtime()
+    runtime.context["__agent_prompt_bundle"] = prompt_bundle
+    runtime.context["__runtime_skills"] = (runtime_skill,)
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行子任务",
+        prompt="collect diagnostics",
+        subagent_type="general-purpose",
+        tool_call_id="tc-private-prompt",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["executor_kwargs"]["agent_prompt_bundle"] is prompt_bundle
+    assert captured["executor_kwargs"]["runtime_skills"] == (runtime_skill,)
+    serialized_metadata = json.dumps(runtime.config["metadata"], default=str)
+    assert "agents-prompt-sentinel" not in serialized_metadata
+    assert "soul-prompt-sentinel" not in serialized_metadata
+    assert "identity-prompt-sentinel" not in serialized_metadata
+    assert "user-prompt-sentinel" not in serialized_metadata
+
+
+def test_task_tool_forwards_private_run_file_authority_to_executor(monkeypatch):
+    """Delegated work must stay inside the parent's exact private Run sandbox."""
+    private_scope = object()
+    file_authority = object()
+    authorization_boundary = object()
+    authorization_checker = MagicMock()
+    run_mounts = (object(),)
+    runtime = _make_runtime()
+    runtime.context.update(
+        {
+            "private_scope": private_scope,
+            "__file_authority": file_authority,
+            "__authorization_boundary": authorization_boundary,
+            "__authorization_checker": authorization_checker,
+            "__run_read_only_mounts": run_mounts,
+        }
+    )
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行子任务",
+        prompt="read /mnt/user-data/workspace/surprise.py",
+        subagent_type="general-purpose",
+        tool_call_id="tc-private-files",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    kwargs = captured["executor_kwargs"]
+    assert kwargs["private_scope"] is private_scope
+    assert kwargs["file_authority"] is file_authority
+    assert kwargs["authorization_boundary"]._target is authorization_boundary
+    assert kwargs["authorization_checker"]._target is authorization_checker
+    assert kwargs["run_read_only_mounts"] is run_mounts
+
+
 def test_task_tool_passes_only_admitted_private_mcp_proxies_to_subagent(monkeypatch):
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel
@@ -434,6 +545,31 @@ def test_task_tool_passes_only_admitted_private_mcp_proxies_to_subagent(monkeypa
     assert [tool.name for tool in tools] == ["project_exact_echo"]
     assert tools[0] is not admitted_tool
     assert tools[0].metadata == admitted_tool.metadata
+
+
+@pytest.mark.asyncio
+async def test_private_run_authority_proxy_marshals_checks_to_parent_loop():
+    owner_loop = asyncio.get_running_loop()
+    owner_thread = threading.get_ident()
+    observed = {}
+
+    class Boundary:
+        async def before_sandbox_exec(self):
+            observed["loop"] = asyncio.get_running_loop()
+            observed["thread"] = threading.get_ident()
+            return "authorized"
+
+    proxy = task_tool_module._OwnerLoopAuthorityProxy(Boundary(), owner_loop)
+
+    result = await asyncio.to_thread(
+        lambda: asyncio.run(proxy.before_sandbox_exec()),
+    )
+
+    assert result == "authorized"
+    assert observed == {
+        "loop": owner_loop,
+        "thread": owner_thread,
+    }
 
 
 @pytest.mark.asyncio

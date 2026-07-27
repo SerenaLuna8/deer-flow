@@ -151,7 +151,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
   };
 
   return (
-    <div className="mx-auto w-full max-w-6xl p-6 lg:p-8">
+    <div className="mx-auto w-full max-w-[1488px] px-4 py-8 sm:px-6 lg:px-10 lg:py-10">
       <MemorySettingsView
         sourceThreadHref={(fact) =>
           projectMemorySourceThreadHref(project.slug, fact)

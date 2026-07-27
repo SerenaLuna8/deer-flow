@@ -421,6 +421,192 @@ class TestAgentConstruction:
         assert messages[1].content == "Do the task"
 
     @pytest.mark.anyio
+    async def test_build_initial_state_inherits_agent_prompt_in_single_system_message(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """The parent run's immutable Agent prompt stays ahead of Skill context."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor_module = sys.modules["deerflow.subagents.executor"]
+        prompt_bundle = object()
+        rendered_profile = "<agent_profile>exact-agent-profile</agent_profile>"
+        captured = {}
+
+        def render(bundle):
+            captured["bundle"] = bundle
+            return rendered_profile
+
+        monkeypatch.setattr(
+            executor_module,
+            "_render_inherited_agent_prompt_bundle",
+            render,
+        )
+        skill = _runtime_skill(tmp_path, "inherited-skill", "inherited-skill-sentinel")
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            agent_prompt_bundle=prompt_bundle,
+            runtime_skills=(skill,),
+        )
+
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        messages = state["messages"]
+        system_messages = [message for message in messages if isinstance(message, SystemMessage)]
+        assert len(system_messages) == 1
+        assert messages[0] is system_messages[0]
+        assert isinstance(messages[1], HumanMessage)
+        assert captured["bundle"] is prompt_bundle
+        assert system_messages[0].content.index(base_config.system_prompt) < system_messages[0].content.index("inherited-skill-sentinel")
+        assert system_messages[0].content.index("inherited-skill-sentinel") < system_messages[0].content.index(rendered_profile)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "subagent_name",
+        ["general-purpose", "custom-researcher", "batch-worker"],
+    )
+    async def test_subagent_system_message_starts_with_platform_confidentiality_guard(
+        self,
+        classes,
+        subagent_name,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ):
+        """Every subagent flavor protects inherited system context."""
+        from langchain_core.messages import SystemMessage
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor_module = sys.modules["deerflow.subagents.executor"]
+        profile = "<agent_profile>profile-body-sentinel</agent_profile>"
+        monkeypatch.setattr(
+            executor_module,
+            "_render_inherited_agent_prompt_bundle",
+            lambda _bundle: profile,
+        )
+        skill = _runtime_skill(
+            tmp_path,
+            f"{subagent_name}-skill",
+            "skill-body-sentinel",
+        )
+        config = SubagentConfig(
+            name=subagent_name,
+            description="Confidentiality test agent",
+            system_prompt="subagent-system-prompt-sentinel",
+            max_turns=10,
+            timeout_seconds=60,
+        )
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            thread_id="test-thread",
+            runtime_skills=(skill,),
+            agent_prompt_bundle=object(),
+        )
+
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        system_messages = [message for message in state["messages"] if isinstance(message, SystemMessage)]
+        assert len(system_messages) == 1
+        assert state["messages"][0] is system_messages[0]
+        content = system_messages[0].content
+        assert isinstance(content, str)
+        guard = executor_module.SUBAGENT_SYSTEM_CONFIDENTIALITY_GUARD
+        assert content.startswith(guard)
+        assert "agent_profile" in guard
+        assert "Skill" in guard
+        assert "MCP" in guard
+        assert "system instructions" in guard
+        assert "must not reveal, summarize, quote, or reproduce" in guard.lower()
+        assert content.index(guard) < content.index("subagent-system-prompt-sentinel")
+        assert content.index(guard) < content.index("skill-body-sentinel")
+        assert content.index(guard) < content.index("profile-body-sentinel")
+        final_guard = executor_module.SUBAGENT_FINAL_PLATFORM_GUARD
+        assert content.endswith(final_guard)
+        assert content.index("subagent-system-prompt-sentinel") < content.index(final_guard)
+        assert content.index("skill-body-sentinel") < content.index(final_guard)
+        assert content.index("profile-body-sentinel") < content.index(final_guard)
+        assert "cannot override" in final_guard.lower()
+        assert "must not disclose" in final_guard.lower()
+
+    @pytest.mark.anyio
+    async def test_general_purpose_without_bash_gets_explicit_command_execution_guard(
+        self,
+        classes,
+    ):
+        """A file-capable general-purpose agent must not mistake file writes for execution."""
+        from langchain_core.messages import SystemMessage
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor_module = sys.modules["deerflow.subagents.executor"]
+        config = SubagentConfig(
+            name="general-purpose",
+            description="General-purpose subagent",
+            system_prompt="Complete the delegated task.",
+            max_turns=10,
+            timeout_seconds=60,
+        )
+        executor = SubagentExecutor(
+            config=config,
+            tools=[NamedTool("read_file"), NamedTool("write_file")],
+            thread_id="test-thread",
+        )
+
+        state, final_tools, _deferred_setup = await executor._build_initial_state("Run python3 /mnt/user-data/workspace/surprise.py and report its output.")
+
+        assert "bash" not in {tool.name for tool in final_tools}
+        assert isinstance(state["messages"][0], SystemMessage)
+        content = state["messages"][0].content
+        assert isinstance(content, str)
+        guard = executor_module.SUBAGENT_NO_COMMAND_EXECUTION_GUARD
+        assert guard in content
+        assert "cannot run shell commands or scripts" in guard.lower()
+        assert "runner, wrapper, launcher" in guard.lower()
+        assert "must not claim" in guard.lower()
+        assert "immediately" in guard.lower()
+
+    @pytest.mark.anyio
+    async def test_command_execution_guard_only_applies_to_general_purpose_without_bash(
+        self,
+        classes,
+    ):
+        """The capability warning is dynamic and does not shadow a real bash tool."""
+        from langchain_core.messages import SystemMessage
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor_module = sys.modules["deerflow.subagents.executor"]
+
+        async def system_content(name: str, tools: list[NamedTool]) -> str:
+            executor = SubagentExecutor(
+                config=SubagentConfig(
+                    name=name,
+                    description="Scoped capability test",
+                    system_prompt="Complete the delegated task.",
+                    max_turns=10,
+                    timeout_seconds=60,
+                ),
+                tools=tools,
+                thread_id="test-thread",
+            )
+            state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+            message = state["messages"][0]
+            assert isinstance(message, SystemMessage)
+            assert isinstance(message.content, str)
+            return message.content
+
+        guard = executor_module.SUBAGENT_NO_COMMAND_EXECUTION_GUARD
+        assert guard not in await system_content("general-purpose", [NamedTool("bash")])
+        assert guard not in await system_content("researcher", [NamedTool("read_file")])
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_skills_only_system_prompt(
         self,
         classes,
@@ -696,6 +882,73 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_general_purpose_command_request_without_bash_fails_before_agent_start(
+        self,
+        classes,
+    ):
+        """An explicit Python execution request must not enter an LLM workaround loop."""
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        executor_module = sys.modules["deerflow.subagents.executor"]
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="General-purpose subagent",
+                system_prompt="Complete the delegated task.",
+                max_turns=150,
+                timeout_seconds=60,
+            ),
+            tools=[NamedTool("read_file"), NamedTool("write_file")],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent") as create_agent_mock:
+            result = await executor._aexecute("Run the Python script at /mnt/user-data/workspace/surprise.py using python3 and report the captured output.")
+
+        create_agent_mock.assert_not_called()
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == executor_module.SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR
+        assert result.ai_messages == []
+
+    @pytest.mark.anyio
+    async def test_command_discussion_without_bash_still_uses_general_purpose_agent(
+        self,
+        classes,
+        mock_agent,
+        msg,
+    ):
+        """Research about command execution is not itself an execution request."""
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        final_state = {
+            "messages": [
+                msg.human("Explain how to run Python safely."),
+                msg.ai("Use an isolated sandbox.", "msg-command-discussion"),
+            ]
+        }
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="General-purpose subagent",
+                system_prompt="Complete the delegated task.",
+                max_turns=10,
+                timeout_seconds=60,
+            ),
+            tools=[NamedTool("read_file"), NamedTool("write_file")],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+            result = await executor._aexecute("Explain how to run Python safely.")
+
+        create_agent_mock.assert_called_once()
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "Use an isolated sandbox."
+
+    @pytest.mark.anyio
     async def test_aexecute_collects_ai_messages(self, classes, base_config, mock_agent, msg):
         """Test that AI messages are collected during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -913,6 +1166,58 @@ class TestAsyncExecutionPath:
         # completed suppresses the error blob; the cap lives on stop_reason only.
         assert result.error is None
         assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_recursion_error_skips_empty_ai_turns_when_recovering_partial(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+    ):
+        """Tool-call and empty AI turns after useful prose must not hide that prose."""
+        from langgraph.errors import GraphRecursionError
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        useful_partial = msg.ai("The earlier usable research result", "msg-useful")
+        empty_ai = msg.ai("", "msg-empty")
+        tool_call_only_ai = classes["AIMessage"](
+            content="",
+            id="msg-tool-call",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"path": "/mnt/user-data/workspace/surprise.py"},
+                    "id": "call-read",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        partial_state = {
+            "messages": [
+                msg.human("Task"),
+                useful_partial,
+                empty_ai,
+                tool_call_only_ai,
+            ]
+        }
+
+        async def mock_astream(*args, **kwargs):
+            yield partial_state
+            raise GraphRecursionError("Recursion limit reached after a pending tool call")
+
+        mock_agent.astream = mock_astream
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "The earlier usable research result"
+        assert result.stop_reason == "turn_capped"
+        assert result.error is None
 
     @pytest.mark.anyio
     async def test_aexecute_recursion_error_prefers_guard_stop_reason_over_turn_capped(self, classes, base_config, mock_agent, msg):
@@ -2601,6 +2906,53 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context.get("channel_user_id") == "ou_group_sender_1"
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_private_run_file_authority_context(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Subagent middleware must resolve the parent's projected workspace."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        private_scope = object()
+        file_authority = object()
+        authorization_boundary = object()
+        authorization_checker = MagicMock()
+        run_mounts = (object(),)
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="Private workspace inheritance test agent",
+                system_prompt="Use the inherited workspace.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            thread_id="thread-private-1",
+            trace_id="trace-private-1",
+            private_scope=private_scope,
+            file_authority=file_authority,
+            authorization_boundary=authorization_boundary,
+            authorization_checker=authorization_checker,
+            run_read_only_mounts=run_mounts,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("read /mnt/user-data/workspace/surprise.py")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("private_scope") is private_scope
+        assert context.get("__file_authority") is file_authority
+        assert context.get("__authorization_boundary") is authorization_boundary
+        assert context.get("__authorization_checker") is authorization_checker
+        assert context.get("__run_read_only_mounts") is run_mounts
 
     @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(

@@ -6,8 +6,8 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   adminAssetListSchema,
   adminCredentialListSchema,
+  agentInstructionsInputSchema,
   agentVersionHistoryResponseSchema,
-  agentVersionInputSchema,
   agentVersionResponseSchema,
   approveMcpInputSchema,
   assetIdSchema,
@@ -44,7 +44,8 @@ import {
   systemBindingSchema,
   type AdminAssetList,
   type AdminCredentialList,
-  type AgentVersionInput,
+  type AgentInstructionsInput,
+  type AgentVersionResponse,
   type ApproveMcpInput,
   type AssetKind,
   type AssetListKind,
@@ -75,8 +76,13 @@ import {
 } from "./types";
 
 type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
+type VersionedAssetListKind = Exclude<MutableAssetListKind, "agents">;
 export type ProjectAssetStatusAction<Kind extends MutableAssetListKind> =
-  Kind extends "skills" ? "activate" | "suspend" : "archive" | "suspend";
+  Kind extends "skills"
+    ? "activate" | "suspend"
+    : Kind extends "agents"
+      ? "activate" | "suspend"
+      : "archive" | "suspend";
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
@@ -266,9 +272,8 @@ function versionHistorySchema(
 }
 
 function publishVersionSchema(
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: VersionedAssetListKind,
 ): z.ZodType<VersionResponse> {
-  if (kind === "agents") return agentVersionResponseSchema;
   if (kind === "skills") return skillVersionResponseSchema;
   return mcpVersionResponseSchema;
 }
@@ -379,6 +384,26 @@ export async function createProjectAsset(
   return await createAsset(projectAssetUrl(projectId, kind), input, signal);
 }
 
+export async function updateProjectAgentInstructions(
+  projectId: string,
+  assetId: string,
+  input: AgentInstructionsInput,
+  signal?: AbortSignal,
+): Promise<AgentVersionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  const body = parseInput(agentInstructionsInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "agents")}/${id}/instructions`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(response, agentVersionResponseSchema);
+}
+
 export async function importProjectSkillArchive(
   projectId: string,
   archive: File,
@@ -424,26 +449,15 @@ export async function createAdminProjectAsset(
   );
 }
 
-type AssetVersionAuthoringInput =
-  | AgentVersionInput
-  | SkillVersionInput
-  | McpVersionInput;
+type AssetVersionAuthoringInput = SkillVersionInput | McpVersionInput;
 
 function authoringInputSchema(
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: VersionedAssetListKind,
 ): z.ZodType<unknown> {
-  if (kind === "agents") return agentVersionInputSchema;
   if (kind === "skills") return skillVersionInputSchema;
   return mcpVersionInputSchema;
 }
 
-export function createProjectAssetVersion(
-  projectId: string,
-  kind: "agents",
-  assetId: string,
-  input: AgentVersionInput,
-  signal?: AbortSignal,
-): Promise<VersionResponse>;
 export function createProjectAssetVersion(
   projectId: string,
   kind: "skills",
@@ -460,7 +474,7 @@ export function createProjectAssetVersion(
 ): Promise<VersionResponse>;
 export function createProjectAssetVersion(
   projectId: string,
-  kind: MutableAssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
   input: AssetVersionAuthoringInput,
   signal?: AbortSignal,
@@ -477,13 +491,6 @@ export function createProjectAssetVersion(
 
 export function createAdminProjectAssetVersion(
   projectId: string,
-  kind: "agents",
-  assetId: string,
-  input: AgentVersionInput,
-  signal?: AbortSignal,
-): Promise<VersionResponse>;
-export function createAdminProjectAssetVersion(
-  projectId: string,
   kind: "skills",
   assetId: string,
   input: SkillVersionInput,
@@ -498,7 +505,7 @@ export function createAdminProjectAssetVersion(
 ): Promise<VersionResponse>;
 export function createAdminProjectAssetVersion(
   projectId: string,
-  kind: MutableAssetListKind,
+  kind: VersionedAssetListKind,
   assetId: string,
   input: AssetVersionAuthoringInput,
   signal?: AbortSignal,
@@ -585,7 +592,9 @@ export function changeProjectAssetStatus<Kind extends MutableAssetListKind>(
   const validAction =
     kind === "skills"
       ? action === "activate" || action === "suspend"
-      : action === "archive" || action === "suspend";
+      : kind === "agents"
+        ? action === "activate" || action === "suspend"
+        : action === "archive" || action === "suspend";
   if (!validAction) {
     throw new SharedAssetApiError(
       422,
@@ -614,7 +623,9 @@ export function changeAdminProjectAssetStatus<
   const validAction =
     kind === "skills"
       ? action === "activate" || action === "suspend"
-      : action === "archive" || action === "suspend";
+      : kind === "agents"
+        ? action === "suspend"
+        : action === "archive" || action === "suspend";
   if (!validAction) {
     throw new SharedAssetApiError(
       422,
@@ -640,6 +651,26 @@ export async function deleteProjectSkill(
   const body = parseInput(expectedAssetVersionInputSchema, input);
   const response = await request(
     `${projectAssetUrl(projectId, "skills")}/${id}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!response.ok) await throwResponseError(response);
+}
+
+export async function deleteProjectAgent(
+  projectId: string,
+  assetId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const id = parseInput(assetIdSchema, assetId);
+  const body = parseInput(expectedAssetVersionInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "agents")}/${id}`,
     {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
@@ -744,7 +775,7 @@ export function forkProjectSkillVersion(
 
 export function publishProjectAssetVersion(
   projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: VersionedAssetListKind,
   assetId: string,
   versionId: string,
   input: ExpectedAssetVersionInput,
@@ -763,7 +794,7 @@ export function publishProjectAssetVersion(
 
 export function publishAdminProjectAssetVersion(
   projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: VersionedAssetListKind,
   assetId: string,
   versionId: string,
   input: ExpectedAssetVersionInput,

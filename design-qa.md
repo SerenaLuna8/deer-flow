@@ -312,3 +312,77 @@ final result: passed
 - Targeted ESLint: passed
 
 final result: passed
+
+---
+
+# DeerFlow Agent 卡片与详情简化 Design QA
+
+## 对照基线
+
+- Source visual truth:
+  `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-ce833bd0-3cdf-400e-8014-e0b731d05fb6.png`
+- Browser implementation:
+  `http://localhost:2026/projects/default-project/agents`
+- Agent cards screenshot:
+  `/private/tmp/deerflow-agent-cards-final.png`
+- Agent detail screenshot:
+  `/private/tmp/deerflow-agent-detail-simplified.png`
+- Reference comparison:
+  `/private/tmp/deerflow-agent-cards-comparison.png`
+- Viewport: `1280 × 720` CSS px
+- State:
+  一个未发布 Agent 与一个已发布 Agent；已发布 Agent 的“对话”按钮可用。
+
+## Findings
+
+- 无剩余 P0、P1 或 P2 问题。
+- Agent 列表已改为两列卡片；标题、简介、主对话按钮和卡片间距与参考方向一致。
+- Agent 专属页面不再显示 Skill/MCP 使用的搜索与来源工具栏，“新建 Agent”位于页面标题操作区。
+- 卡片主体进入详情；已发布且具备执行权限的 Agent 可直接创建绑定该 Agent 的私有会话。
+- 详情页顶部只保留名称与 slug，来源和状态两个标签已删除。
+- Agent 详情不再提供“创建版本”和“归档”；后端 Agent 归档入口与服务方法同步移除。
+- Agent 列表不放删除按钮；详情页提供“删除 Agent”，二次确认明确删除整个 Agent 及全部版本，并等待 5 秒后才允许确认。
+- DeerFlow 现有项目侧栏和内容最大宽度保持不变，未扩散修改 Skill、MCP 页面布局。
+
+## Required Fidelity Surfaces
+
+- Fonts and typography:
+  复用 DeerFlow 现有标题、正文和辅助文字层级；卡片名称采用中等字重，简介使用 muted 文本。
+- Spacing and layout rhythm:
+  标题操作区、两列卡片、卡片内容与底部对话按钮形成稳定节奏；小屏保持响应式单列。
+- Colors and visual tokens:
+  复用 `background`、`card`、`border`、`muted-foreground`、`primary` 与禁用状态令牌。
+- Image quality and asset fidelity:
+  本轮没有新增位图资产；Agent 与对话图标使用项目现有 Lucide 图标体系。
+- Copy and content:
+  使用“新建 Agent”和“对话”；未发布 Agent 给出可操作的禁用原因。
+- Interaction and accessibility:
+  卡片详情入口和对话入口分离；对话按钮禁用状态包含原因，避免不可执行 Agent 创建空会话。
+
+## Comparison History
+
+1. Pass 1:
+   将用户参考图与真实浏览器卡片页并排检查，确认核心卡片结构、两列布局、底部主操作和标题区 CTA 已实现。
+2. Intentional constraints:
+   保留 DeerFlow 项目侧栏与现有页面容器；永久删除未在缺少明确数据契约时从参考图推断实现。
+3. Pass 2:
+   单独检查详情页与真实对话跳转，未发现剩余 P0、P1 或 P2 差异；无需额外聚焦裁切，完整卡片区在 1280 × 720 截图中已清晰可读，详情另有独立截图。
+
+## Browser Verification
+
+- Primary interactions tested:
+  - 点击卡片主体进入 Agent 详情
+  - 未发布 Agent 的“对话”按钮保持禁用
+  - 已发布 Agent 的“对话”按钮创建新会话并进入聊天页
+  - 新会话元数据绑定所选 `agent_scope=project` 与正确 `agent_slug`
+  - 详情页无来源/状态标签、无“创建版本”、无“归档”
+- Console errors: `0`
+
+## Automated Verification
+
+- Focused frontend unit tests: `89 passed`
+- Frontend lint, formatting and type checks: passed
+- Focused backend tests: `66 passed, 2 skipped`
+- Targeted backend Ruff check and formatting: passed
+
+final result: passed

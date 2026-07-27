@@ -435,6 +435,44 @@ async def test_include_active_picks_up_running_progress_snapshot(migrated_postgr
         await seed.engine.dispose()
 
 
+@pytest.mark.anyio
+async def test_terminal_usage_includes_interrupted_and_timeout_runs(
+    migrated_postgres_database_url,
+):
+    seed, repo = await _make_sql_repo(migrated_postgres_database_url)
+    scope = seed.owner_a_scope
+    try:
+        for run_id, status, tokens in (
+            ("run-interrupted", "interrupted", 11),
+            ("run-timeout", "timeout", 19),
+        ):
+            await repo.put(run_id, thread_id=_THREAD, status="pending", scope=scope)
+            assert await repo.update_run_completion(
+                run_id,
+                status=status,
+                total_tokens=tokens,
+                lead_agent_tokens=tokens,
+                token_usage_by_model={
+                    "terminal-model": {
+                        "total_tokens": tokens,
+                    }
+                },
+                scope=scope,
+            )
+
+        aggregate = await repo.aggregate_tokens_by_thread(
+            _THREAD,
+            scope=scope,
+        )
+        assert aggregate["total_runs"] == 2
+        assert aggregate["total_tokens"] == 30
+        assert aggregate["by_model"] == {
+            "terminal-model": {"tokens": 30, "runs": 2},
+        }
+    finally:
+        await seed.engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Prompt-cache-hit accounting (powers cache-aware cost estimation in
 # /api/console): cache_read_tokens is a *sparse* bucket key — present only

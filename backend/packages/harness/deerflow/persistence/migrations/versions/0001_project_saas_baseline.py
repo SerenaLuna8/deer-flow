@@ -1,7 +1,9 @@
-"""Fresh-install-only M7 project SaaS baseline.
+"""Fresh-install-only consolidated project SaaS baseline.
 
-Generated once from the audited final SQLAlchemy metadata.  This revision is
-self-contained: it never imports application models at migration runtime.
+This revision contains the complete pre-release schema through project Skill
+and Agent hard deletion, Skill name uniqueness, logical Agent instructions,
+and private Agent Builder sessions. It is self-contained and never imports
+application models at migration runtime.
 """
 
 from __future__ import annotations
@@ -138,9 +140,23 @@ _FINAL_POSTGRES_DDL = (
     "                    JOIN projects project ON project.id = asset.project_id\n"
     "                    WHERE version.id = OLD.skill_version_id\n"
     "                      AND asset.scope = 'project'\n"
-    "                      AND project.status = 'pending_deletion'\n"
-    "                      AND project.deletion_effective_at IS NOT NULL\n"
-    "                      AND project.deletion_effective_at <= now()\n"
+    "                      AND (\n"
+    "                          (\n"
+    "                              project.status = 'pending_deletion'\n"
+    "                              AND project.deletion_effective_at IS NOT NULL\n"
+    "                              AND project.deletion_effective_at <= now()\n"
+    "                          )\n"
+    "                          OR (\n"
+    "                              project.status = 'active'\n"
+    "                              AND project.is_suspended IS FALSE\n"
+    "                              AND asset.status = 'archived'\n"
+    "                              AND asset.current_published_version_id IS NULL\n"
+    "                              AND current_setting(\n"
+    "                                  'deerflow.skill_hard_delete_asset_id',\n"
+    "                                  true\n"
+    "                              ) = asset.id::text\n"
+    "                          )\n"
+    "                      )\n"
     "                ) INTO purge_allowed;\n"
     "            END IF;\n"
     "        WHEN 'agent_version_skill_refs' THEN\n"
@@ -156,9 +172,23 @@ _FINAL_POSTGRES_DDL = (
     "                    JOIN projects project ON project.id = asset.project_id\n"
     "                    WHERE version.id = OLD.agent_version_id\n"
     "                      AND asset.scope = 'project'\n"
-    "                      AND project.status = 'pending_deletion'\n"
-    "                      AND project.deletion_effective_at IS NOT NULL\n"
-    "                      AND project.deletion_effective_at <= now()\n"
+    "                      AND (\n"
+    "                          (\n"
+    "                              project.status = 'pending_deletion'\n"
+    "                              AND project.deletion_effective_at IS NOT NULL\n"
+    "                              AND project.deletion_effective_at <= now()\n"
+    "                          )\n"
+    "                          OR (\n"
+    "                              project.status = 'active'\n"
+    "                              AND project.is_suspended IS FALSE\n"
+    "                              AND asset.status = 'archived'\n"
+    "                              AND asset.current_published_version_id IS NULL\n"
+    "                              AND current_setting(\n"
+    "                                  'deerflow.agent_hard_delete_asset_id',\n"
+    "                                  true\n"
+    "                              ) = asset.id::text\n"
+    "                          )\n"
+    "                      )\n"
     "                ) OR EXISTS (\n"
     "                    SELECT 1\n"
     "                    FROM skill_versions version\n"
@@ -184,9 +214,23 @@ _FINAL_POSTGRES_DDL = (
     "                    JOIN projects project ON project.id = asset.project_id\n"
     "                    WHERE version.id = OLD.agent_version_id\n"
     "                      AND asset.scope = 'project'\n"
-    "                      AND project.status = 'pending_deletion'\n"
-    "                      AND project.deletion_effective_at IS NOT NULL\n"
-    "                      AND project.deletion_effective_at <= now()\n"
+    "                      AND (\n"
+    "                          (\n"
+    "                              project.status = 'pending_deletion'\n"
+    "                              AND project.deletion_effective_at IS NOT NULL\n"
+    "                              AND project.deletion_effective_at <= now()\n"
+    "                          )\n"
+    "                          OR (\n"
+    "                              project.status = 'active'\n"
+    "                              AND project.is_suspended IS FALSE\n"
+    "                              AND asset.status = 'archived'\n"
+    "                              AND asset.current_published_version_id IS NULL\n"
+    "                              AND current_setting(\n"
+    "                                  'deerflow.agent_hard_delete_asset_id',\n"
+    "                                  true\n"
+    "                              ) = asset.id::text\n"
+    "                          )\n"
+    "                      )\n"
     "                ) OR EXISTS (\n"
     "                    SELECT 1\n"
     "                    FROM mcp_server_versions version\n"
@@ -369,6 +413,8 @@ _FINAL_POSTGRES_DDL = (
     "CREATE TRIGGER trg_run_events_stream_terminal BEFORE INSERT ON run_events FOR EACH ROW EXECUTE FUNCTION enforce_stream_terminal_invariant()",
     "\nCREATE OR REPLACE FUNCTION set_m7_updated_at()\nRETURNS trigger AS $$\nBEGIN\n    NEW.updated_at := now();\n    RETURN NEW;\nEND;\n$$ LANGUAGE plpgsql\n",
     "CREATE TRIGGER trg_agents_updated_at BEFORE UPDATE ON agents FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
+    "CREATE TRIGGER trg_agent_design_operations_updated_at BEFORE UPDATE ON agent_design_operations FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
+    "CREATE TRIGGER trg_agent_design_sessions_updated_at BEFORE UPDATE ON agent_design_sessions FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_asset_catalog_state_updated_at BEFORE UPDATE ON asset_catalog_state FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_channel_connections_updated_at BEFORE UPDATE ON channel_connections FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
     "CREATE TRIGGER trg_channel_conversations_updated_at BEFORE UPDATE ON channel_conversations FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at()",
@@ -741,6 +787,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("id", "scope", name="uq_agents_id_scope"),
+        sa.UniqueConstraint("project_id", "id", name="uq_agents_project_id_id"),
         sa.UniqueConstraint("source_key", name="uq_agents_source_key"),
     )
     op.create_index("uq_agents_project_slug", "agents", ["project_id", sa.literal_column("lower(slug)")], unique=True, postgresql_where=sa.text("scope = 'project'"))
@@ -1023,6 +1070,13 @@ def upgrade() -> None:
         sa.UniqueConstraint("id", "scope", name="uq_skills_id_scope"),
         sa.UniqueConstraint("source_key", name="uq_skills_source_key"),
     )
+    op.create_index(
+        "uq_skills_project_display_name",
+        "skills",
+        ["project_id", sa.literal_column("lower(display_name)")],
+        unique=True,
+        postgresql_where=sa.text("scope = 'project'"),
+    )
     op.create_index("uq_skills_project_slug", "skills", ["project_id", sa.literal_column("lower(slug)")], unique=True, postgresql_where=sa.text("scope = 'project'"))
     op.create_index("uq_skills_system_slug", "skills", [sa.literal_column("lower(slug)")], unique=True, postgresql_where=sa.text("scope = 'system'"))
     op.create_table(
@@ -1043,7 +1097,12 @@ def upgrade() -> None:
         sa.Column("review_note", sa.Text(), nullable=True),
         sa.Column("created_by_user_id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column("agents_instructions", sa.Text(), server_default="", nullable=False),
+        sa.Column("identity", sa.Text(), server_default="", nullable=False),
+        sa.Column("user_context", sa.Text(), server_default="", nullable=False),
+        sa.Column("payload_schema_version", sa.Integer(), server_default=sa.text("1"), nullable=False),
         sa.CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_agent_versions_checksum"),
+        sa.CheckConstraint("payload_schema_version IN (1, 2)", name="ck_agent_versions_payload_schema_version"),
         sa.CheckConstraint("workflow_status IN ('draft', 'pending_approval', 'published', 'rejected')", name="ck_agent_versions_workflow_status"),
         sa.CheckConstraint("version_number >= 1", name="ck_agent_versions_number"),
         sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="RESTRICT"),
@@ -1059,6 +1118,251 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("agent_id", "id", name="uq_agent_versions_asset_id"),
         sa.UniqueConstraint("agent_id", "version_number", name="uq_agent_versions_asset_number"),
+    )
+    op.create_table(
+        "agent_design_sessions",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column("owner_user_id", sa.String(length=36), nullable=False),
+        sa.Column("thread_id", sa.Uuid(), nullable=False),
+        sa.Column("slug", sa.String(length=63), nullable=False),
+        sa.Column("display_name", sa.String(length=120), nullable=False),
+        sa.Column("status", sa.String(length=32), server_default="interviewing", nullable=False),
+        sa.Column("revision", sa.BigInteger(), server_default=sa.text("1"), nullable=False),
+        sa.Column(
+            "messages_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column(
+            "progress_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column(
+            "active_clarification_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+        ),
+        sa.Column(
+            "blueprint_json",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+        ),
+        sa.Column("blueprint_checksum", sa.CHAR(length=64), nullable=True),
+        sa.Column("error_code", sa.String(length=64), nullable=True),
+        sa.Column("error_message", sa.String(length=255), nullable=True),
+        sa.Column("created_agent_id", sa.Uuid(), nullable=True),
+        sa.Column("created_agent_version_id", sa.Uuid(), nullable=True),
+        sa.Column("create_idempotency_key_hash", sa.CHAR(length=64), nullable=False),
+        sa.Column("create_request_checksum", sa.CHAR(length=64), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "created_agent_deleted",
+            sa.Boolean(),
+            server_default=sa.text("false"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "(blueprint_json IS NULL AND blueprint_checksum IS NULL) OR (blueprint_json IS NOT NULL AND blueprint_checksum IS NOT NULL)",
+            name="ck_agent_design_sessions_blueprint",
+        ),
+        sa.CheckConstraint(
+            "(status = 'completed' AND ("
+            "(created_agent_deleted IS FALSE AND created_agent_id IS NOT NULL "
+            "AND created_agent_version_id IS NOT NULL) OR "
+            "(created_agent_deleted IS TRUE AND created_agent_id IS NULL "
+            "AND created_agent_version_id IS NULL))) OR "
+            "(status <> 'completed' AND created_agent_deleted IS FALSE "
+            "AND created_agent_id IS NULL AND created_agent_version_id IS NULL)",
+            name="ck_agent_design_sessions_completion",
+        ),
+        sa.CheckConstraint(
+            "(status IN ('proposal_ready', 'committing', 'completed') AND blueprint_json IS NOT NULL AND blueprint_checksum IS NOT NULL) OR status NOT IN ('proposal_ready', 'committing', 'completed')",
+            name="ck_agent_design_sessions_ready_blueprint",
+        ),
+        sa.CheckConstraint(
+            "(status = 'awaiting_clarification' AND active_clarification_json IS NOT NULL) OR (status <> 'awaiting_clarification' AND active_clarification_json IS NULL)",
+            name="ck_agent_design_sessions_clarification",
+        ),
+        sa.CheckConstraint(
+            "(status = 'failed' AND error_code IS NOT NULL AND error_message IS NOT NULL) OR (status <> 'failed' AND error_code IS NULL AND error_message IS NULL)",
+            name="ck_agent_design_sessions_error",
+        ),
+        sa.CheckConstraint(
+            "revision >= 1",
+            name="ck_agent_design_sessions_revision",
+        ),
+        sa.CheckConstraint(
+            "status IN ('interviewing', 'generating', 'awaiting_clarification', 'proposal_ready', 'committing', 'completed', 'failed', 'cancelled')",
+            name="ck_agent_design_sessions_status",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id", "created_agent_id"],
+            ["agents.project_id", "agents.id"],
+            name="fk_agent_design_sessions_created_agent_project",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["created_agent_id", "created_agent_version_id"],
+            ["agent_versions.agent_id", "agent_versions.id"],
+            name="fk_agent_design_sessions_created_agent_version",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["owner_user_id"],
+            ["users.id"],
+            name="fk_agent_design_sessions_owner",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_agent_design_sessions_project",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_agent_design_sessions_membership",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_agent_design_sessions"),
+        sa.UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "create_idempotency_key_hash",
+            name="uq_agent_design_sessions_create_idempotency",
+        ),
+        sa.UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "id",
+            name="uq_agent_design_sessions_private_scope",
+        ),
+        sa.UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            name="uq_agent_design_sessions_thread_scope",
+        ),
+    )
+    op.create_index(
+        "ix_agent_design_sessions_resume",
+        "agent_design_sessions",
+        [
+            "project_id",
+            "owner_user_id",
+            "status",
+            sa.literal_column("updated_at DESC"),
+            sa.literal_column("id DESC"),
+        ],
+        unique=False,
+    )
+    op.create_table(
+        "agent_design_operations",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column("owner_user_id", sa.String(length=36), nullable=False),
+        sa.Column("session_id", sa.Uuid(), nullable=False),
+        sa.Column("operation_kind", sa.String(length=16), nullable=False),
+        sa.Column("idempotency_key_hash", sa.CHAR(length=64), nullable=False),
+        sa.Column("request_checksum", sa.CHAR(length=64), nullable=False),
+        sa.Column(
+            "status",
+            sa.String(length=16),
+            server_default="in_progress",
+            nullable=False,
+        ),
+        sa.Column("result_revision", sa.BigInteger(), nullable=True),
+        sa.Column("public_error_code", sa.String(length=64), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "operation_kind IN ('turn', 'commit', 'cancel')",
+            name="ck_agent_design_operations_kind",
+        ),
+        sa.CheckConstraint(
+            "result_revision IS NULL OR result_revision >= 1",
+            name="ck_agent_design_operations_result_revision",
+        ),
+        sa.CheckConstraint(
+            "status IN ('in_progress', 'completed', 'failed')",
+            name="ck_agent_design_operations_status",
+        ),
+        sa.CheckConstraint(
+            "(status = 'in_progress' AND result_revision IS NULL "
+            "AND public_error_code IS NULL) "
+            "OR (status = 'completed' AND result_revision IS NOT NULL "
+            "AND public_error_code IS NULL) "
+            "OR (status = 'failed' AND result_revision IS NOT NULL "
+            "AND public_error_code IS NOT NULL)",
+            name="ck_agent_design_operations_completion",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "session_id"],
+            [
+                "agent_design_sessions.project_id",
+                "agent_design_sessions.owner_user_id",
+                "agent_design_sessions.id",
+            ],
+            name="fk_agent_design_operations_session",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["owner_user_id"],
+            ["users.id"],
+            name="fk_agent_design_operations_owner",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_agent_design_operations_project",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_agent_design_operations"),
+        sa.UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "operation_kind",
+            "idempotency_key_hash",
+            name="uq_agent_design_operations_idempotency",
+        ),
+    )
+    op.create_index(
+        "ix_agent_design_operations_session",
+        "agent_design_operations",
+        [
+            "project_id",
+            "owner_user_id",
+            "session_id",
+            sa.literal_column("created_at DESC"),
+        ],
+        unique=False,
     )
     op.create_table(
         "channel_connections",

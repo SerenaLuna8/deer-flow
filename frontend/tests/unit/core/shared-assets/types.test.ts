@@ -2,7 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import { CAPABILITIES, capabilitySchema } from "@/core/projects/types";
 import {
-  agentVersionInputSchema,
+  agentInstructionsInputSchema,
   agentVersionSchema,
   assetSummarySchema,
   createCredentialInputSchema,
@@ -212,7 +212,11 @@ describe("shared asset contracts", () => {
       version_number: 1,
       workflow_status: "published",
       description: "Review changes",
+      agents_instructions: "# Agent\n\nReview changes carefully.",
       soul: "Be precise",
+      identity: "# Identity\n\nYou are a reviewer.",
+      user_context: "# User\n\nPrefer concise answers.",
+      payload_schema_version: 2,
       model_ref: "default",
       tool_groups: ["web"],
       skill_version_ids: [],
@@ -231,6 +235,13 @@ describe("shared asset contracts", () => {
         request_id: "req-3",
       }),
     ).toMatchObject({ data: [{ version_number: 1 }] });
+    expect(agentVersion).toMatchObject({
+      agents_instructions: "# Agent\n\nReview changes carefully.",
+      soul: "Be precise",
+      identity: "# Identity\n\nYou are a reviewer.",
+      user_context: "# User\n\nPrefer concise answers.",
+      payload_schema_version: 2,
+    });
 
     expect(() =>
       credentialVersionSchema.parse({
@@ -248,18 +259,7 @@ describe("shared asset contracts", () => {
     ).toThrow();
   });
 
-  test("keeps Agent Skill MCP authoring payloads distinct and credential secrets write-only", () => {
-    expect(
-      agentVersionInputSchema.parse({
-        description: "Writer",
-        soul: "Be precise",
-        model_ref: "default",
-        tool_groups: [],
-        skill_version_ids: [],
-        mcp_version_ids: [],
-        expected_asset_version: 1,
-      }),
-    ).toMatchObject({ soul: "Be precise" });
+  test("keeps Skill and MCP authoring payloads distinct and credential secrets write-only", () => {
     expect(
       skillVersionInputSchema.parse({
         files: [
@@ -288,13 +288,6 @@ describe("shared asset contracts", () => {
         expected_asset_version: 1,
       }),
     ).toMatchObject({ transport: "stdio" });
-    expect(() =>
-      agentVersionInputSchema.parse({
-        files: [],
-        expected_asset_version: 1,
-      }),
-    ).toThrow();
-
     const input = createCredentialInputSchema.parse({
       name: "github",
       display_name: "GitHub",
@@ -303,6 +296,30 @@ describe("shared asset contracts", () => {
     });
     expect(input.payload.env?.TOKEN).toBe("write-only");
     expect(input).not.toHaveProperty("ciphertext");
+  });
+
+  test("strictly validates the four virtual Agent instruction documents and revision", () => {
+    const input = {
+      agents_instructions: "# AGENTS.md",
+      soul: "# SOUL.md",
+      identity: "# IDENTITY.md",
+      user_context: "# USER.md",
+      expected_asset_version: 7,
+    };
+
+    expect(agentInstructionsInputSchema.parse(input)).toEqual(input);
+    expect(
+      agentInstructionsInputSchema.safeParse({
+        ...input,
+        expected_asset_version: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      agentInstructionsInputSchema.safeParse({
+        ...input,
+        path: "AGENTS.md",
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts only non-empty multi-field Credential payload sections", () => {

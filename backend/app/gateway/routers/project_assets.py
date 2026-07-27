@@ -31,7 +31,8 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
 from app.shared_assets import (
-    AgentPayload,
+    MAX_AGENT_INSTRUCTION_FIELD_BYTES,
+    AgentInstructions,
     AgentService,
     AssetConflict,
     AssetForbidden,
@@ -128,6 +129,7 @@ class BindingItemResponse(_StrictModel):
 class ProjectAssetItemResponse(AssetItemResponse):
     capabilities: list[Capability]
     binding: BindingItemResponse | None
+    description: str = ""
 
 
 class ProjectSkillItemResponse(ProjectAssetItemResponse):
@@ -224,13 +226,11 @@ class BindingResponse(_StrictModel):
     request_id: str
 
 
-class AgentVersionRequest(_StrictModel):
-    description: str = ""
-    soul: str = ""
-    model_ref: str = ""
-    tool_groups: list[str] = Field(default_factory=list)
-    skill_version_ids: list[uuid.UUID] = Field(default_factory=list)
-    mcp_version_ids: list[uuid.UUID] = Field(default_factory=list)
+class AgentInstructionsRequest(_StrictModel):
+    agents_instructions: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     expected_asset_version: int = Field(ge=1)
 
 
@@ -342,12 +342,16 @@ class AgentVersionItemResponse(_StrictModel):
     version_number: int
     workflow_status: WorkflowStatus
     description: str
+    agents_instructions: str
     soul: str
+    identity: str
+    user_context: str
     model_ref: str
     tool_groups: list[str]
     skill_version_ids: list[uuid.UUID]
     mcp_version_ids: list[uuid.UUID]
     supersedes_version_id: uuid.UUID | None
+    payload_schema_version: int
     payload_checksum: str
     created_by_user_id: str
     created_at: datetime
@@ -791,20 +795,14 @@ async def _version_call(actor, operation, response_model: type[_StrictModel]):
         raise_asset_domain(exc)
 
 
-async def _version_history(
-    actor,
-    operation,
-    response_model: type[_StrictModel],
-    *,
-    redact_project_mcp: bool = False,
-):
+async def _version_history(actor, operation, response_model: type[_StrictModel]):
     try:
         versions = await operation()
         return response_model(
             data=[
                 _response_data(
                     version,
-                    redact_project_mcp=redact_project_mcp,
+                    redact_project_mcp=_is_project_asset_actor(actor),
                 )
                 for version in versions
             ],
@@ -973,7 +971,7 @@ def register_asset_routes(
     actor_dependency,
     *,
     include_shared_asset_mutations: bool = True,
-    include_project_skill_delete: bool = False,
+    include_project_asset_delete: bool = False,
 ) -> None:
     async def create_agent(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateAgent(body.slug, body.display_name)))
@@ -981,24 +979,47 @@ def register_asset_routes(
     async def get_agent(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _asset_call(actor, lambda: service.get(actor, asset_id))
 
-    async def create_agent_version(asset_id: uuid.UUID, body: AgentVersionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        payload = AgentPayload(
-            body.description,
-            body.soul,
-            body.model_ref,
-            tuple(body.tool_groups),
-            tuple(body.skill_version_ids),
-            tuple(body.mcp_version_ids),
+    async def update_agent_instructions(asset_id: uuid.UUID, body: AgentInstructionsRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
+        instructions = AgentInstructions(
+            agents_instructions=body.agents_instructions,
+            soul=body.soul,
+            identity=body.identity,
+            user_context=body.user_context,
         )
-        return await _version_call(actor, lambda: service.create_version(actor, asset_id, payload, expected_asset_version=body.expected_asset_version), AgentVersionResponse)
+        return await _version_call(
+            actor,
+            lambda: service.update_instructions(
+                actor,
+                asset_id,
+                instructions,
+                expected_asset_version=body.expected_asset_version,
+            ),
+            AgentVersionResponse,
+        )
 
     async def get_agent_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), AgentVersionHistoryResponse)
 
-    async def publish_agent(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), AgentVersionResponse)
+    async def delete_agent(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
+        try:
+            await service.delete(
+                actor,
+                asset_id,
+                expected_asset_version=body.expected_asset_version,
+            )
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     async def create_skill(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
+        if isinstance(actor, ProjectContext):
+            return await _asset_call(
+                actor,
+                lambda: service.create_project_with_template(
+                    actor,
+                    CreateSkill(body.slug, body.display_name),
+                ),
+            )
         return await _asset_call(actor, lambda: service.create_asset(actor, CreateSkill(body.slug, body.display_name)))
 
     async def get_skill(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
@@ -1035,16 +1056,7 @@ def register_asset_routes(
         return await _version_call(actor, lambda: service.create_version(actor, asset_id, _mcp_definition(body), expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
     async def get_mcp_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        try:
-            asset = await service.get(actor, asset_id)
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-        return await _version_history(
-            actor,
-            lambda: service.get_version_history(actor, asset_id),
-            McpVersionHistoryResponse,
-            redact_project_mcp=asset.scope is AssetScope.PROJECT,
-        )
+        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), McpVersionHistoryResponse)
 
     async def publish_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), McpVersionResponse)
@@ -1119,8 +1131,7 @@ def register_asset_routes(
     )
     shared_asset_write_routes = (
         ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
-        ("/agents/{asset_id}/versions", create_agent_version, ["POST"], AgentVersionResponse, 201),
-        ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent, ["POST"], AgentVersionResponse, 200),
+        ("/agents/{asset_id}/instructions", update_agent_instructions, ["PUT"], AgentVersionResponse, 200),
         ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], SkillVersionResponse, 200),
@@ -1143,7 +1154,15 @@ def register_asset_routes(
         routes = (*routes, *shared_asset_write_routes)
     for path, endpoint, methods, response_model, code in routes:
         router.add_api_route(path, endpoint, methods=methods, response_model=response_model, status_code=code)
-    if include_project_skill_delete:
+    if include_project_asset_delete:
+        router.add_api_route(
+            "/agents/{asset_id}",
+            delete_agent,
+            methods=["DELETE"],
+            response_model=None,
+            status_code=status.HTTP_204_NO_CONTENT,
+            name="delete_project_agent",
+        )
         router.add_api_route(
             "/skills/{asset_id}",
             delete_skill,
@@ -1153,12 +1172,10 @@ def register_asset_routes(
             name="delete_project_skill",
         )
     if include_shared_asset_mutations:
-        for segment, dependency in (
-            ("agents", get_agent_service),
-            ("mcp-servers", get_mcp_service),
-        ):
-            add_status_route(segment, "archive", dependency)
-            add_status_route(segment, "suspend", dependency)
+        add_status_route("agents", "activate", get_agent_service)
+        add_status_route("agents", "suspend", get_agent_service)
+        add_status_route("mcp-servers", "archive", get_mcp_service)
+        add_status_route("mcp-servers", "suspend", get_mcp_service)
         add_status_route("skills", "activate", get_skill_service)
         add_status_route("skills", "suspend", get_skill_service)
 
@@ -1399,5 +1416,5 @@ for _segment, _kind in _BINDING_KINDS.items():
 register_asset_routes(
     project_router,
     project_asset_context,
-    include_project_skill_delete=True,
+    include_project_asset_delete=True,
 )

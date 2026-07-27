@@ -30,9 +30,14 @@ from app.gateway.deps import (
 )
 from app.gateway.routers import project_audit, project_usage
 from app.gateway.routers.projects import authenticated_project_identity
+from app.private_work.thread_repository import (
+    PrivateThreadRepository,
+    ThreadAgentRef,
+)
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.projects.token_usage import read_project_token_usage_24h
 from app.quotas.service import QuotaService
 from app.reliability.error_mapping import (
     ReliabilityHTTPException,
@@ -41,8 +46,10 @@ from app.reliability.error_mapping import (
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.audit.model import AuditLogRow
+from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.quotas.model import ProjectQuotaRow, ProjectUsageLedgerRow
+from deerflow.persistence.run.model import RunRow
 
 
 def _keyring() -> AuditHmacKeyring:
@@ -118,6 +125,75 @@ async def _append_run_audit(
     )
 
 
+async def _seed_token_run(
+    seed,
+    *,
+    scope,
+    thread_id: str,
+    run_id: str,
+    completed_at: datetime | None,
+    input_tokens: int,
+    output_tokens: int,
+    status: str = "success",
+    created_at: datetime | None = None,
+) -> None:
+    project_id = uuid.UUID(scope.project_id)
+    owner_user_id = str(uuid.UUID(scope.owner_user_id))
+    job_id = uuid.uuid4()
+    job_status = {
+        "success": "succeeded",
+        "interrupted": "cancelled",
+        "error": "failed",
+        "timeout": "failed",
+        "pending": "queued",
+        "running": "running",
+    }[status]
+    run_created_at = created_at or (completed_at or datetime.now(UTC)) - timedelta(
+        minutes=5,
+    )
+    run_updated_at = completed_at or run_created_at
+    async with seed.factory() as session, session.begin():
+        run = RunRow(
+            run_id=run_id,
+            thread_id=thread_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            status=status,
+            total_input_tokens=input_tokens,
+            total_output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            lead_agent_tokens=input_tokens + output_tokens,
+            token_usage_by_model={
+                "test-model": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                }
+            },
+            created_at=run_created_at,
+            updated_at=run_updated_at,
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            JobRow(
+                id=job_id,
+                job_type="private_run",
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                run_id=run_id,
+                idempotency_key=uuid.uuid4().hex + uuid.uuid4().hex,
+                status=job_status,
+                max_attempts=1,
+                completed_at=completed_at,
+                updated_at=run_updated_at,
+            )
+        )
+        await session.flush()
+        run.job_id = job_id
+        await session.flush()
+
+
 def _assert_public_not_found(response: httpx.Response) -> None:
     assert response.status_code == 404
     assert response.json() == {
@@ -132,6 +208,7 @@ def test_project_governance_routes_are_mounted() -> None:
 
     paths = {route.path for route in app.routes}
     assert "/api/projects/{project_id}/usage" in paths
+    assert "/api/projects/{project_id}/usage/token-series" in paths
     assert "/api/projects/{project_id}/usage/limits" in paths
     assert "/api/projects/{project_id}/audit" in paths
 
@@ -213,6 +290,252 @@ async def test_usage_is_admin_and_project_scoped_with_effective_limits_and_warni
         assert dimensions["members"]["warning_threshold_reached"] is False
         for hidden in (member, viewer, wrong_project):
             _assert_public_not_found(hidden)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_token_series_has_24_hour_buckets_and_is_admin_project_scoped(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    keyring = _keyring()
+    quotas = QuotaService(seed.factory, QuotaConfig(), source_ref_hasher=keyring)
+    audit = AuditService(seed.factory, keyring)
+    app = _test_app(
+        seed,
+        quotas,
+        audit,
+        OperationalAuditSink(
+            audit,
+            process_context=_bind_gateway_audit_process(audit),
+        ),
+    )
+    now = datetime.now(UTC)
+    owner_a_thread = f"usage-owner-a-{uuid.uuid4()}"
+    owner_b_thread = f"usage-owner-b-{uuid.uuid4()}"
+    project_b_thread = f"usage-project-b-{uuid.uuid4()}"
+    try:
+        async with seed.factory() as session, session.begin():
+            threads = PrivateThreadRepository(session)
+            await threads.create(
+                scope=seed.owner_a_scope,
+                thread_id=owner_a_thread,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await threads.create(
+                scope=seed.owner_b_scope,
+                thread_id=owner_b_thread,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await threads.create(
+                scope=seed.project_b_owner_a_scope,
+                thread_id=project_b_thread,
+                agent=ThreadAgentRef(seed.project_b_agent_id, "project"),
+            )
+
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=owner_a_thread,
+            run_id=f"usage-owner-a-{uuid.uuid4()}",
+            completed_at=now - timedelta(minutes=10),
+            input_tokens=80,
+            output_tokens=20,
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_b_scope,
+            thread_id=owner_b_thread,
+            run_id=f"usage-owner-b-{uuid.uuid4()}",
+            completed_at=now - timedelta(hours=2, minutes=10),
+            input_tokens=30,
+            output_tokens=10,
+            status="interrupted",
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=owner_a_thread,
+            run_id=f"usage-old-{uuid.uuid4()}",
+            completed_at=now - timedelta(hours=25),
+            input_tokens=999,
+            output_tokens=1,
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.project_b_owner_a_scope,
+            thread_id=project_b_thread,
+            run_id=f"usage-project-b-{uuid.uuid4()}",
+            completed_at=now - timedelta(minutes=5),
+            input_tokens=500,
+            output_tokens=500,
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                f"/api/projects/{seed.owner_a.project_id}/usage/token-series",
+                headers={"x-test-user": str(seed.owner_a.user_id)},
+            )
+            member = await client.get(
+                f"/api/projects/{seed.owner_a.project_id}/usage/token-series",
+                headers={"x-test-user": str(seed.owner_b.user_id)},
+            )
+            wrong_project = await client.get(
+                f"/api/projects/{seed.project_b_owner_a.project_id}/usage/token-series",
+                headers={"x-test-user": str(seed.owner_b.user_id)},
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["bucket_minutes"] == 60
+        assert len(body["points"]) == 24
+        assert body["totals"] == {
+            "input_tokens": 110,
+            "output_tokens": 30,
+            "total_tokens": 140,
+        }
+        assert sum(point["total_tokens"] for point in body["points"]) == 140
+        assert sum(point["input_tokens"] for point in body["points"]) == 110
+        assert sum(point["output_tokens"] for point in body["points"]) == 30
+        bucket_starts = [datetime.fromisoformat(point["bucket_start"]) for point in body["points"]]
+        assert all(value.tzinfo is not None for value in bucket_starts)
+        assert all(later - earlier == timedelta(hours=1) for earlier, later in zip(bucket_starts, bucket_starts[1:]))
+        _assert_public_not_found(member)
+        _assert_public_not_found(wrong_project)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_token_series_uses_deterministic_utc_settlement_boundaries_and_zero_fills(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    fixed_now = datetime(2026, 7, 27, 10, 37, 42, tzinfo=UTC)
+    current_hour = fixed_now.replace(minute=0, second=0, microsecond=0)
+    window_start = current_hour - timedelta(hours=23)
+    thread_id = f"usage-boundaries-{uuid.uuid4()}"
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            run_id=f"usage-at-start-{uuid.uuid4()}",
+            completed_at=window_start,
+            input_tokens=10,
+            output_tokens=1,
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            run_id=f"usage-before-start-{uuid.uuid4()}",
+            completed_at=window_start - timedelta(microseconds=1),
+            input_tokens=900,
+            output_tokens=99,
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            run_id=f"usage-at-end-{uuid.uuid4()}",
+            completed_at=fixed_now,
+            input_tokens=20,
+            output_tokens=2,
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            run_id=f"usage-after-end-{uuid.uuid4()}",
+            completed_at=fixed_now + timedelta(microseconds=1),
+            input_tokens=800,
+            output_tokens=88,
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            run_id=f"usage-active-{uuid.uuid4()}",
+            completed_at=fixed_now - timedelta(hours=2),
+            input_tokens=700,
+            output_tokens=77,
+            status="running",
+        )
+        await _seed_token_run(
+            seed,
+            scope=seed.owner_a_scope,
+            thread_id=thread_id,
+            run_id=f"usage-without-completion-{uuid.uuid4()}",
+            completed_at=None,
+            created_at=fixed_now - timedelta(hours=1),
+            input_tokens=600,
+            output_tokens=66,
+        )
+
+        async with seed.factory() as session, session.begin():
+            # The query must pin UTC bucket boundaries independently of the
+            # connection's presentation timezone.
+            await session.execute(text("SET LOCAL TIME ZONE 'Asia/Kathmandu'"))
+            series = await read_project_token_usage_24h(
+                session,
+                seed.owner_a.project_id,
+                now=fixed_now,
+            )
+            empty = await read_project_token_usage_24h(
+                session,
+                uuid.uuid4(),
+                now=fixed_now,
+            )
+
+        expected_bucket_starts = tuple(window_start + timedelta(hours=offset) for offset in range(24))
+        assert series.window_start == window_start
+        assert series.window_end == fixed_now
+        assert series.bucket_minutes == 60
+        assert tuple(point.bucket_start for point in series.points) == (expected_bucket_starts)
+        assert all(point.bucket_start.utcoffset() == timedelta(0) for point in series.points)
+        assert series.points[-1].bucket_start == current_hour
+        assert series.points[-1].bucket_start < series.window_end < series.points[-1].bucket_start + timedelta(hours=1)
+
+        assert (
+            series.points[0].input_tokens,
+            series.points[0].output_tokens,
+            series.points[0].total_tokens,
+        ) == (10, 1, 11)
+        assert (
+            series.points[-1].input_tokens,
+            series.points[-1].output_tokens,
+            series.points[-1].total_tokens,
+        ) == (20, 2, 22)
+        assert all(point.total_tokens == 0 for point in series.points[1:-1])
+        assert (
+            series.input_tokens,
+            series.output_tokens,
+            series.total_tokens,
+        ) == (30, 3, 33)
+
+        assert empty.window_start == window_start
+        assert empty.window_end == fixed_now
+        assert tuple(point.bucket_start for point in empty.points) == (expected_bucket_starts)
+        assert all(point.total_tokens == 0 for point in empty.points)
+        assert (empty.input_tokens, empty.output_tokens, empty.total_tokens) == (
+            0,
+            0,
+            0,
+        )
     finally:
         await seed.engine.dispose()
 

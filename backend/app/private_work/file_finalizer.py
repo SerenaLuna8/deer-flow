@@ -20,7 +20,6 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.file_paths import normalize_private_logical_path
-from app.private_work.file_service import PrivateFileLimits
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.sandbox_files import (
     AuthorityManifest,
@@ -28,6 +27,7 @@ from app.private_work.sandbox_files import (
     _joined_to_thread,
 )
 from app.projects.capabilities import Capability
+from app.upload_contracts import PRIVATE_UPLOAD_DEFAULTS
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
     PrivateArtifactRecord,
@@ -46,6 +46,8 @@ _SCAN_ROOTS = (
     ("/mnt/user-data/outputs", "outputs", "output"),
 )
 _PRESENTED_OUTPUT_PREFIX = "/mnt/user-data/outputs/"
+_DEFAULT_PRIVATE_FINALIZATION_MAX_SCANNED_FILES = 2_000
+_DEFAULT_PRIVATE_FINALIZATION_MAX_SCAN_ENTRIES = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,20 @@ class FinalizationResult:
     artifacts: tuple[PrivateArtifactRecord, ...]
     deleted_file_ids: tuple[uuid.UUID, ...]
     workspace_changes: dict[str, list[str]] | None
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateFileFinalizationLimits:
+    """Bound one finalization pass independently from upload batching and diff display."""
+
+    max_scanned_files: int = _DEFAULT_PRIVATE_FINALIZATION_MAX_SCANNED_FILES
+    max_scan_entries: int = _DEFAULT_PRIVATE_FINALIZATION_MAX_SCAN_ENTRIES
+    max_changed_file_size: int = PRIVATE_UPLOAD_DEFAULTS.max_file_size
+    max_changed_total_size: int = PRIVATE_UPLOAD_DEFAULTS.max_total_size
+
+    def __post_init__(self) -> None:
+        if self.max_scanned_files < 1 or self.max_scan_entries < self.max_scanned_files or self.max_changed_file_size < 1 or self.max_changed_total_size < 1:
+            raise ValueError("private file finalization limits must be positive")
 
 
 class PrivateFileFinalizationQuotaPort(Protocol):
@@ -124,11 +140,11 @@ class PrivateFileFinalizer:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        limits: PrivateFileLimits | None = None,
+        limits: PrivateFileFinalizationLimits | None = None,
         quota: PrivateFileFinalizationQuotaPort | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._limits = limits or PrivateFileLimits()
+        self._limits = limits or PrivateFileFinalizationLimits()
         self._quota = quota or _NoopPrivateFileFinalizationQuota()
         self._revalidator = PrivateWorkRevalidator()
 
@@ -185,16 +201,19 @@ class PrivateFileFinalizer:
         files: list[_AfterFile] = []
         logical_paths: set[str] = set()
         count = 0
-        total = 0
+        scanned_entries = 0
         for virtual_root, logical_root, kind in _SCAN_ROOTS:
             prefix = virtual_root.rstrip("/") + "/"
             entries = None
             try:
                 entries = sandbox.list_secure_files(
                     virtual_root,
-                    max_entries=self._limits.max_files + 1,
+                    max_entries=self._limits.max_scan_entries,
                 )
                 for entry in entries:
+                    scanned_entries += 1
+                    if scanned_entries > self._limits.max_scan_entries:
+                        raise PrivateWorkTooLarge(run_scope.context.request_id)
                     if entry.file_type == "directory":
                         continue
                     if entry.file_type != "regular" or not entry.path.startswith(prefix):
@@ -211,8 +230,7 @@ class PrivateFileFinalizer:
                         raise PrivateWorkInvalid(run_scope.context.request_id)
                     logical_paths.add(logical_path)
                     count += 1
-                    total += entry.size
-                    if count > self._limits.max_files or entry.size > self._limits.max_file_size or total > self._limits.max_total_size:
+                    if count > self._limits.max_scanned_files:
                         raise PrivateWorkTooLarge(run_scope.context.request_id)
                     media_type = mimetypes.guess_type(relative_path.name)[0] or "application/octet-stream"
                     files.append(
@@ -233,6 +251,17 @@ class PrivateFileFinalizer:
                 if callable(close_entries):
                     close_entries()
         return tuple(sorted(files, key=lambda item: item.logical_path))
+
+    def _validate_changed_files(
+        self,
+        run_scope: PrivateFileRunScope,
+        changed_files: tuple[_AfterFile, ...],
+    ) -> None:
+        total = 0
+        for changed in changed_files:
+            total += changed.size
+            if changed.size > self._limits.max_changed_file_size or total > self._limits.max_changed_total_size:
+                raise PrivateWorkTooLarge(run_scope.context.request_id)
 
     async def _hash_sandbox_file(
         self,
@@ -259,7 +288,7 @@ class PrivateFileFinalizer:
                 if not isinstance(content, bytes) or len(content) > PRIVATE_FILE_CHUNK_SIZE:
                     raise PrivateWorkInvalid(run_scope.context.request_id)
                 total += len(content)
-                if total > after.size or total > self._limits.max_file_size:
+                if total > after.size:
                     raise PrivateWorkInvalid(run_scope.context.request_id)
                 whole.update(content)
         finally:
@@ -314,7 +343,7 @@ class PrivateFileFinalizer:
                     break
                 whole.update(content)
                 total += len(content)
-                if total > after.size or total > self._limits.max_file_size:
+                if total > after.size or total > self._limits.max_changed_file_size:
                     raise PrivateWorkInvalid(run_scope.context.request_id)
                 async with self._session_factory() as session, session.begin():
                     await self._revalidator.require(
@@ -619,6 +648,7 @@ class PrivateFileFinalizer:
                 await checker()
             after_files = await _joined_to_thread(self._scan, run_scope, sandbox)
             before = before_manifest.by_logical_path()
+            changed_files: list[_AfterFile] = []
             for after in after_files:
                 old = before.get(after.logical_path)
                 if old is not None and old.size == after.size:
@@ -631,6 +661,9 @@ class PrivateFileFinalizer:
                         == old.sha256
                     ):
                         continue
+                changed_files.append(after)
+            self._validate_changed_files(run_scope, tuple(changed_files))
+            for after in changed_files:
                 file_id = uuid.uuid4()
                 staging_ids.append(file_id)
                 staged.append(

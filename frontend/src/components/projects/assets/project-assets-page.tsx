@@ -2,40 +2,28 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
-  CreateAssetDialog,
-  CreateVersionDialog,
   CredentialGrantMigrationDialog,
   CredentialRevokeDialog,
   CredentialSecretDialog,
-  type VersionAuthoringInput,
 } from "@/components/admin/assets/admin-asset-dialogs";
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
-import { ProjectAgentStartContinuation } from "@/components/projects/private-work/project-agent-start-continuation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useAuth } from "@/core/auth/AuthProvider";
-import { useModels } from "@/core/models/hooks";
 import {
   createProjectCredential,
   migrateProjectCredentialGrants,
   projectAssetKey,
   replaceProjectCredential,
   revokeProjectCredential,
-  useApproveProjectMcpVersion,
-  useChangeProjectAssetStatus,
-  useCreateProjectAsset,
-  useCreateProjectAssetVersion,
   useProjectAssets,
   useProjectAssetVersions,
-  usePublishProjectAssetVersion,
-  useSubmitProjectMcpVersion,
   type AssetListKind,
   type AssetVersion,
   type ProjectAssetList,
@@ -49,14 +37,12 @@ import {
 
 import { useCurrentProject } from "../project-context";
 
-import { dependencyVersionOptions } from "./asset-dependency-options";
 import { ProjectAssetSection } from "./project-asset-section";
 import {
   projectAssetCanAuthor,
   projectAssetDetailLifecycleActions,
 } from "./project-asset-view-model";
 import { SystemAssetSection } from "./system-asset-section";
-import { SystemBindingDialog } from "./system-binding-dialog";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
 type CredentialPayloadGroup = "env" | "headers" | "oauth";
@@ -320,8 +306,6 @@ export function projectCredentialShowsHistory(
 
 export { projectAssetCanAuthor };
 
-export { dependencyVersionOptions } from "./asset-dependency-options";
-
 function ErrorNotice({ error }: { error: unknown }) {
   if (!error) return null;
   return (
@@ -393,7 +377,13 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
               disabled={pending}
               onClick={() => onChangeStatus?.(action)}
             >
-              {action === "archive" ? "归档" : "暂停"}
+              {action === "archive"
+                ? "归档"
+                : action === "activate"
+                  ? "启用"
+                  : kind === "agents"
+                    ? "停用"
+                    : "暂停"}
             </Button>
           ))}
         </div>
@@ -427,92 +417,6 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
       )}
       <ErrorNotice error={actionError} />
     </div>
-  );
-}
-
-function ProjectAssetHistory({
-  accountId,
-  projectId,
-  kind,
-  item,
-}: {
-  accountId: string;
-  projectId: string;
-  kind: MutableKind;
-  item: ProjectAssetItem;
-}) {
-  const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
-  const publish = usePublishProjectAssetVersion(accountId, projectId, kind);
-  const submit = useSubmitProjectMcpVersion(accountId, projectId);
-  const approve = useApproveProjectMcpVersion(accountId, projectId);
-  const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
-  const canApprove = item.capabilities.includes("mcp.credentials.approve");
-  const credentialCatalog = useProjectAssets(
-    accountId,
-    projectId,
-    "credentials",
-    kind === "mcp-servers" && canApprove,
-  );
-  const pending =
-    publish.isPending ||
-    submit.isPending ||
-    approve.isPending ||
-    changeStatus.isPending;
-  const versions = history.data?.data ?? [];
-  const credentialData = credentialCatalog.data as
-    | ProjectCredentialList
-    | undefined;
-  const approvalCredentials = credentialData
-    ? credentialData.project_items
-    : [];
-
-  return (
-    <ProjectAssetHistoryView
-      kind={kind}
-      item={item}
-      versions={versions}
-      approvalCredentials={approvalCredentials}
-      approvalCredentialsLoading={credentialCatalog.isLoading}
-      approvalCredentialsError={credentialCatalog.error}
-      onRetryApprovalCredentials={() => void credentialCatalog.refetch()}
-      isLoading={history.isLoading}
-      error={history.error}
-      actionError={
-        publish.error ?? submit.error ?? approve.error ?? changeStatus.error
-      }
-      pending={pending}
-      onChangeStatus={(action) =>
-        changeStatus.mutate({
-          assetId: item.id,
-          action,
-          input: { expected_asset_version: item.version },
-        })
-      }
-      onPublish={(version) =>
-        publish.mutate({
-          assetId: item.id,
-          versionId: version.id,
-          input: { expected_asset_version: item.version },
-        })
-      }
-      onSubmit={(version) =>
-        submit.mutate({
-          assetId: item.id,
-          versionId: version.id,
-          input: { expected_asset_version: item.version },
-        })
-      }
-      onApprove={(version, credentialVersions) =>
-        approve.mutate({
-          assetId: item.id,
-          versionId: version.id,
-          input: {
-            credential_versions: credentialVersions,
-            expected_asset_version: item.version,
-          },
-        })
-      }
-    />
   );
 }
 
@@ -586,182 +490,6 @@ function CredentialHistory({
         />
       )}
     </div>
-  );
-}
-
-const PAGE_META: Record<AssetListKind, { title: string; description: string }> =
-  {
-    agents: {
-      title: "项目 Agent",
-      description: "查看系统 Agent 绑定，并维护当前项目的 Agent 版本。",
-    },
-    skills: {
-      title: "项目 Skill",
-      description: "查看系统 Skill 绑定，并维护完整的项目 Skill 快照。",
-    },
-    "mcp-servers": {
-      title: "项目 MCP",
-      description: "维护不含敏感信息的定义；含 Credential 槽位的版本必须审批。",
-    },
-    credentials: {
-      title: "项目 Credential",
-      description: "只展示安全元数据；Credential 值写入后永不回显。",
-    },
-  };
-
-function MutableProjectAssets({
-  accountId,
-  projectId,
-  kind,
-  startChatIntent,
-  startChatIntentId,
-}: {
-  accountId: string;
-  projectId: string;
-  kind: MutableKind;
-  startChatIntent: boolean;
-  startChatIntentId: string | null;
-}) {
-  const project = useCurrentProject();
-  const query = useProjectAssets(accountId, projectId, kind);
-  const modelCatalog = useModels({ enabled: kind === "agents" });
-  const skillDependencies = useProjectAssets(
-    accountId,
-    projectId,
-    "skills",
-    kind === "agents",
-  );
-  const mcpDependencies = useProjectAssets(
-    accountId,
-    projectId,
-    "mcp-servers",
-    kind === "agents",
-  );
-  const createAsset = useCreateProjectAsset(accountId, projectId, kind);
-  const createVersion = useCreateProjectAssetVersion(
-    accountId,
-    projectId,
-    kind,
-  );
-  const [createOpen, setCreateOpen] = useState(false);
-  const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
-    null,
-  );
-  const [bindingAssetId, setBindingAssetId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (createAsset.isSuccess) setCreateOpen(false);
-  }, [createAsset.isSuccess]);
-  useEffect(() => {
-    if (createVersion.isSuccess) setVersionAsset(null);
-  }, [createVersion.isSuccess]);
-
-  if (query.isLoading) return <Skeleton className="h-72 w-full" />;
-  if (query.error) {
-    return (
-      <div className="border-destructive/30 rounded-xl border p-6">
-        <ErrorNotice error={query.error} />
-        <Button
-          type="button"
-          className="mt-4"
-          variant="outline"
-          onClick={() => void query.refetch()}
-        >
-          重试
-        </Button>
-      </div>
-    );
-  }
-  const data = query.data as ProjectAssetList;
-  const bindingAsset =
-    data.system_items.find((item) => item.id === bindingAssetId) ?? null;
-  const canCreate = project.capabilities.includes("shared_assets.edit");
-  return (
-    <>
-      {kind === "agents" && (
-        <ProjectAgentStartContinuation
-          project={project}
-          catalog={data}
-          requested={startChatIntent}
-          intentId={startChatIntentId}
-        />
-      )}
-      {canCreate && (
-        <div className="mb-6 flex justify-end">
-          <Button type="button" onClick={() => setCreateOpen(true)}>
-            <PlusIcon aria-hidden className="size-4" />
-            创建项目资产
-          </Button>
-        </div>
-      )}
-      <ProjectAssetCatalogView
-        kind={kind}
-        data={data}
-        onManageBinding={(item) => setBindingAssetId(item.id)}
-        onCreateVersion={setVersionAsset}
-        renderProjectDetails={(item) => (
-          <ProjectAssetHistory
-            accountId={accountId}
-            projectId={projectId}
-            kind={kind}
-            item={item}
-          />
-        )}
-      />
-      <CreateAssetDialog
-        kind={kind}
-        scope="project"
-        open={createOpen}
-        pending={createAsset.isPending}
-        errorMessage={
-          createAsset.error ? adminAssetErrorMessage(createAsset.error) : null
-        }
-        onOpenChange={setCreateOpen}
-        onSubmit={(input) => createAsset.mutate(input)}
-      />
-      {versionAsset && (
-        <CreateVersionDialog
-          kind={kind}
-          asset={versionAsset}
-          open
-          pending={createVersion.isPending}
-          errorMessage={
-            createVersion.error
-              ? adminAssetErrorMessage(createVersion.error)
-              : null
-          }
-          modelOptions={modelCatalog.models.map((model) => ({
-            name: model.name,
-            displayName: model.display_name,
-          }))}
-          skillVersionOptions={dependencyVersionOptions(
-            skillDependencies.data as ProjectAssetList | undefined,
-          )}
-          mcpVersionOptions={dependencyVersionOptions(
-            mcpDependencies.data as ProjectAssetList | undefined,
-          )}
-          modelsLoading={modelCatalog.isLoading}
-          modelsError={Boolean(modelCatalog.error)}
-          onOpenChange={(open) => !open && setVersionAsset(null)}
-          onSubmit={(input: VersionAuthoringInput) =>
-            createVersion.mutate({
-              assetId: versionAsset.id,
-              input,
-            })
-          }
-        />
-      )}
-      {bindingAsset && (
-        <SystemBindingDialog
-          accountId={accountId}
-          projectId={projectId}
-          kind={kind}
-          item={bindingAsset}
-          open
-          onOpenChange={(open) => !open && setBindingAssetId(null)}
-        />
-      )}
-    </>
   );
 }
 
@@ -956,67 +684,6 @@ function ProjectCredentialReplaceDialog({
           .run(() => replaceProjectCredential(projectId, credential.id, input))
           .then((success) => success && onClose());
       }}
-    />
-  );
-}
-
-function AuthenticatedProjectAssetPage({
-  accountId,
-  kind,
-  startChatIntent,
-  startChatIntentId,
-}: {
-  accountId: string;
-  kind: AssetListKind;
-  startChatIntent: boolean;
-  startChatIntentId: string | null;
-}) {
-  const project = useCurrentProject();
-  const meta = PAGE_META[kind];
-  return (
-    <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-      <header className="mb-8">
-        <p className="text-primary mb-2 text-sm font-medium">
-          {project.display_name} · 共享资产
-        </p>
-        <h1 className="text-3xl font-semibold tracking-tight">{meta.title}</h1>
-        <p className="text-muted-foreground mt-2">{meta.description}</p>
-      </header>
-      {kind === "credentials" ? (
-        <ProjectCredentialsWorkspace
-          accountId={accountId}
-          projectId={project.id}
-        />
-      ) : (
-        <MutableProjectAssets
-          accountId={accountId}
-          projectId={project.id}
-          kind={kind}
-          startChatIntent={startChatIntent}
-          startChatIntentId={startChatIntentId}
-        />
-      )}
-    </main>
-  );
-}
-
-export function ProjectAssetsPage({
-  kind,
-  startChatIntent = false,
-  startChatIntentId = null,
-}: {
-  kind: AssetListKind;
-  startChatIntent?: boolean;
-  startChatIntentId?: string | null;
-}) {
-  const { user } = useAuth();
-  if (!user) return null;
-  return (
-    <AuthenticatedProjectAssetPage
-      accountId={user.id}
-      kind={kind}
-      startChatIntent={startChatIntent}
-      startChatIntentId={startChatIntentId}
     />
   );
 }

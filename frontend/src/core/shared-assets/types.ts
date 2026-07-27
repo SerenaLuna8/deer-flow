@@ -163,7 +163,11 @@ export const agentVersionSchema = z
     version_number: z.number().int().positive(),
     workflow_status: assetWorkflowStatusSchema,
     description: z.string(),
+    agents_instructions: z.string(),
     soul: z.string(),
+    identity: z.string(),
+    user_context: z.string(),
+    payload_schema_version: z.number().int().positive(),
     model_ref: z.string(),
     tool_groups: z.array(z.string()),
     skill_version_ids: z.array(assetIdSchema),
@@ -556,14 +560,12 @@ export const expectedAssetVersionInputSchema = z
   .object({ expected_asset_version: z.number().int().positive() })
   .strict();
 
-export const agentVersionInputSchema = z
+export const agentInstructionsInputSchema = z
   .object({
-    description: z.string().default(""),
-    soul: z.string().default(""),
-    model_ref: z.string().default(""),
-    tool_groups: z.array(z.string()).default([]),
-    skill_version_ids: z.array(assetIdSchema).default([]),
-    mcp_version_ids: z.array(assetIdSchema).default([]),
+    agents_instructions: z.string(),
+    soul: z.string(),
+    identity: z.string(),
+    user_context: z.string(),
     expected_asset_version: z.number().int().positive(),
   })
   .strict();
@@ -701,6 +703,7 @@ export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
 export type ProjectCredentialItem = z.infer<typeof projectCredentialItemSchema>;
 export type AssetVersion = z.infer<typeof assetVersionSchema>;
 export type VersionResponse = z.infer<typeof versionResponseSchema>;
+export type AgentVersionResponse = z.infer<typeof agentVersionResponseSchema>;
 export type VersionHistoryResponse = z.infer<
   typeof versionHistoryResponseSchema
 >;
@@ -724,7 +727,9 @@ export type CredentialGrantMigrationResponse = z.infer<
   typeof credentialGrantMigrationResponseSchema
 >;
 export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
-export type AgentVersionInput = z.input<typeof agentVersionInputSchema>;
+export type AgentInstructionsInput = z.input<
+  typeof agentInstructionsInputSchema
+>;
 export type SkillVersionInput = z.input<typeof skillVersionInputSchema>;
 export type SkillVersionFileContent = z.infer<
   typeof skillVersionFileContentSchema

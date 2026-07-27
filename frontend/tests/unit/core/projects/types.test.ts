@@ -1,9 +1,11 @@
 import { describe, expect, test } from "@rstest/core";
 
+import { normalizeProjectSlug, projectSlugError } from "@/core/projects/slug";
 import {
   CAPABILITIES,
   changeProjectMemberRoleSchema,
   createdProjectInvitationSchema,
+  createProjectSchema,
   createProjectInvitationSchema,
   INVITABLE_PROJECT_ROLES,
   PROJECT_ROLES,
@@ -52,6 +54,42 @@ const invitation = {
 } as const;
 
 describe("project contracts", () => {
+  test("normalizes valid project slugs and rejects values outside the gateway rule", () => {
+    expect(normalizeProjectSlug("  Research-Lab  ")).toBe("research-lab");
+    expect(projectSlugError("")).toBe("请输入项目标识。");
+    expect(projectSlugError("ab")).toBe("项目标识至少需要 3 个字符。");
+    expect(projectSlugError("a".repeat(64))).toBe(
+      "项目标识不能超过 63 个字符。",
+    );
+    expect(projectSlugError("alpha_project")).toBe(
+      "项目标识只能使用小写英文字母、数字和单个连字符（-），且不能以连字符开头或结尾。",
+    );
+    expect(projectSlugError("alpha-project")).toBeNull();
+
+    expect(
+      createProjectSchema.parse({
+        slug: "  Research-Lab  ",
+        display_name: "Research Lab",
+      }).slug,
+    ).toBe("research-lab");
+    for (const slug of [
+      "ab",
+      "a".repeat(64),
+      "-alpha",
+      "alpha-",
+      "alpha--project",
+      "alpha_project",
+      "中文项目",
+    ]) {
+      expect(
+        createProjectSchema.safeParse({
+          slug,
+          display_name: "Research Lab",
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   test("freezes the complete role and capability enums", () => {
     expect(PROJECT_ROLES).toEqual(["admin", "editor", "runner", "viewer"]);
     expect(CAPABILITIES).toEqual([

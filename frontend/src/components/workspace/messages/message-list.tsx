@@ -61,6 +61,7 @@ import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
 import {
   derivePendingSubtaskStatus,
+  isSubtaskRunActive,
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
@@ -1002,6 +1003,11 @@ export function MessageList({
                 </div>
               );
             } else if (group.type === "assistant:subagent") {
+              const subtaskRunIsActive = isSubtaskRunActive(
+                group.messages,
+                messages,
+                thread.isLoading,
+              );
               const tasks = new Set<Subtask>();
               for (const message of group.messages) {
                 if (message.type === "ai") {
@@ -1014,7 +1020,7 @@ export function MessageList({
                       const status = derivePendingSubtaskStatus(
                         taskId,
                         group.messages,
-                        groupIsLoading,
+                        subtaskRunIsActive,
                       );
                       const task: Subtask = {
                         id: taskId,
@@ -1022,9 +1028,7 @@ export function MessageList({
                         description: toolCall.args.description,
                         prompt: toolCall.args.prompt,
                         status,
-                        ...(status === "failed"
-                          ? { error: t.subtasks.failed }
-                          : {}),
+                        statusSource: "inferred",
                       };
                       updateSubtask(task);
                       tasks.add(task);
@@ -1037,7 +1041,11 @@ export function MessageList({
                       extractTextFromMessage(message),
                       message.additional_kwargs,
                     );
-                    updateSubtask({ id: taskId, ...parsed });
+                    updateSubtask({
+                      id: taskId,
+                      ...parsed,
+                      statusSource: "tool_result",
+                    });
                   }
                 }
               }
@@ -1085,7 +1093,6 @@ export function MessageList({
                       taskId={taskId}
                       threadId={threadId}
                       runId={(message as { run_id?: string }).run_id}
-                      isLoading={groupIsLoading}
                     />,
                   );
                 }

@@ -6,6 +6,7 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 import type { Project } from "@/core/projects/types";
 
@@ -38,7 +39,13 @@ const assets = [
   },
 ] as const;
 
-export function ProjectHome({ project }: { project: Project }) {
+export function ProjectHome({
+  project,
+  tokenUsageSection,
+}: {
+  project: Project;
+  tokenUsageSection?: ReactNode;
+}) {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   return (
     <div data-testid="project-home" className="bg-background min-h-screen">
@@ -53,6 +60,7 @@ export function ProjectHome({ project }: { project: Project }) {
             返回工作空间
           </Link>
         </div>
+        {tokenUsageSection}
         {project.capabilities.includes("shared_assets.read") && (
           <section>
             <div className="mb-4">

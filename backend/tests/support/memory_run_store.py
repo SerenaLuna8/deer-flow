@@ -146,7 +146,8 @@ class MemoryRunStore(RunStore):
         return results
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, scope=None) -> dict[str, Any]:
-        statuses = ("success", "error", "running") if include_active else ("success", "error")
+        terminal_statuses = ("success", "error", "timeout", "interrupted")
+        statuses = (*terminal_statuses, "running") if include_active else terminal_statuses
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run in the process (mirrors ``list_by_thread``).
         run_ids = self._runs_by_thread.get(thread_id) or ()
