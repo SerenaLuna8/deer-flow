@@ -20,6 +20,7 @@ from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -384,6 +385,19 @@ def _submit_to_isolated_loop_in_context(
             _get_isolated_subagent_loop(),
         )
     )
+
+
+def _copy_detached_subagent_context() -> Context:
+    """Copy request context without inheriting the lead graph stream runtime.
+
+    Detached subagents report progress through ``task_running`` custom events.
+    Keeping the parent RunnableConfig would additionally send their raw model
+    and tool frames through the lead stream writer. Clear only that ContextVar
+    so request identity, authorization, and tracing context still propagate.
+    """
+    context = copy_context()
+    context.run(var_child_runnable_config.set, None)
+    return context
 
 
 def _filter_tools(
@@ -985,7 +999,7 @@ class SubagentExecutor:
         from being tied to a short-lived loop that gets closed per execution.
         """
         future: Future[SubagentResult] | None = None
-        parent_context = copy_context()
+        parent_context = _copy_detached_subagent_context()
         try:
             future = _submit_to_isolated_loop_in_context(
                 parent_context,
@@ -1039,8 +1053,11 @@ class SubagentExecutor:
                 logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated loop")
                 return self._execute_in_isolated_loop(task, result_holder)
 
-            # Standard path: no running event loop, use asyncio.run
-            return asyncio.run(self._aexecute(task, result_holder))
+            # Standard path: no running event loop. Run in the same detached
+            # request context as the isolated-loop paths so a synchronous
+            # caller cannot leak raw child frames through the lead writer.
+            detached_context = _copy_detached_subagent_context()
+            return detached_context.run(lambda: asyncio.run(self._aexecute(task, result_holder)))
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
             # Create a result with error if we don't have one
@@ -1081,7 +1098,7 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_tasks[task_id] = result
 
-        parent_context = copy_context()
+        parent_context = _copy_detached_subagent_context()
 
         # Submit to scheduler pool
         def run_task():

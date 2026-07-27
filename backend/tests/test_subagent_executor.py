@@ -1566,6 +1566,50 @@ class TestSkillAllowedTools:
 class TestSyncExecutionPath:
     """Test execute() synchronous execution path with asyncio.run()."""
 
+    def test_execute_without_running_loop_drops_parent_runnable_config_but_preserves_user(self, classes, base_config):
+        """The plain asyncio.run path must detach from the lead graph stream."""
+        from langchain_core.runnables.config import var_child_runnable_config
+
+        from deerflow.runtime.user_context import (
+            get_effective_user_id,
+            reset_current_user,
+            set_current_user,
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        observed: dict[str, object] = {}
+        expected_result = object()
+
+        async def fake_aexecute(task, result_holder=None):
+            observed["task"] = task
+            observed["result_holder"] = result_holder
+            observed["runnable_config"] = var_child_runnable_config.get()
+            observed["user_id"] = get_effective_user_id()
+            return expected_result
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        user_token = set_current_user(SimpleNamespace(id="alice"))
+        runnable_token = var_child_runnable_config.set({"metadata": {"source": "lead-agent"}})
+        try:
+            with patch.object(executor, "_aexecute", side_effect=fake_aexecute):
+                result = executor.execute("Task")
+        finally:
+            var_child_runnable_config.reset(runnable_token)
+            reset_current_user(user_token)
+
+        assert result is expected_result
+        assert observed == {
+            "task": "Task",
+            "result_holder": None,
+            "runnable_config": None,
+            "user_id": "alice",
+        }
+
     def test_execute_runs_async_in_event_loop(self, classes, base_config, mock_agent, msg):
         """Test that execute() runs _aexecute() in a new event loop via asyncio.run()."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -1635,6 +1679,8 @@ class TestSyncExecutionPath:
     @pytest.mark.anyio
     async def test_execute_in_running_event_loop_calls_isolated_loop_directly(self, classes, base_config, mock_agent, msg):
         """Test that execute() calls the isolated-loop helper directly in a running loop."""
+        from langchain_core.runnables.config import var_child_runnable_config
+
         from deerflow.runtime.user_context import (
             get_effective_user_id,
             reset_current_user,
@@ -1648,6 +1694,7 @@ class TestSyncExecutionPath:
         isolated_helper_threads = []
         execution_threads = []
         effective_user_ids = []
+        runnable_configs = []
         final_state = {
             "messages": [
                 msg.human("Task"),
@@ -1658,6 +1705,7 @@ class TestSyncExecutionPath:
         async def mock_astream(*args, **kwargs):
             execution_threads.append(threading.current_thread().name)
             effective_user_ids.append(get_effective_user_id())
+            runnable_configs.append(var_child_runnable_config.get())
             yield final_state
 
         mock_agent.astream = mock_astream
@@ -1675,11 +1723,13 @@ class TestSyncExecutionPath:
             return original_isolated_execute(task, result_holder)
 
         token = set_current_user(SimpleNamespace(id="alice"))
+        runnable_token = var_child_runnable_config.set({"metadata": {"source": "lead-agent"}})
         try:
             with patch.object(executor, "_create_agent", return_value=mock_agent):
                 with patch.object(executor, "_execute_in_isolated_loop", side_effect=tracked_isolated_execute) as isolated:
                     result = executor.execute("Task")
         finally:
+            var_child_runnable_config.reset(runnable_token)
             reset_current_user(token)
 
         assert isolated.call_count == 1
@@ -1687,6 +1737,7 @@ class TestSyncExecutionPath:
         assert execution_threads
         assert execution_threads == ["subagent-persistent-loop"]
         assert effective_user_ids == ["alice"]
+        assert runnable_configs == [None]
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "Async loop result"
 
@@ -2347,6 +2398,71 @@ class TestCooperativeCancellation:
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "alice"
         assert result.error is None
+
+    def test_execute_async_drops_parent_runnable_config_but_preserves_deerflow_context(self, executor_module, classes, base_config):
+        """A detached subagent must not inherit the lead graph stream runtime."""
+        import concurrent.futures
+
+        from langchain_core.runnables.config import var_child_runnable_config
+
+        from deerflow.runtime.user_context import (
+            get_effective_user_id,
+            reset_current_user,
+            set_current_user,
+        )
+        from deerflow.trace_context import (
+            get_current_trace_id,
+            reset_current_trace_id,
+            set_current_trace_id,
+        )
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        observed: dict[str, object] = {}
+
+        async def fake_aexecute(task, result_holder=None):
+            observed["runnable_config"] = var_child_runnable_config.get()
+            observed["user_id"] = get_effective_user_id()
+            observed["trace_id"] = get_current_trace_id()
+            result = result_holder
+            result.status = SubagentStatus.COMPLETED
+            result.result = task
+            result.completed_at = datetime.now()
+            return result
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        scheduler = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        parent_runnable_config = {"metadata": {"source": "lead-agent"}}
+        user_token = set_current_user(SimpleNamespace(id="alice"))
+        trace_token = set_current_trace_id("trace-123")
+        runnable_token = var_child_runnable_config.set(parent_runnable_config)
+        try:
+            with (
+                patch.object(executor_module, "_scheduler_pool", scheduler),
+                patch.object(executor, "_aexecute", side_effect=fake_aexecute),
+            ):
+                task_id = executor.execute_async("Task")
+                executor_module._scheduler_pool.shutdown(wait=True)
+        finally:
+            var_child_runnable_config.reset(runnable_token)
+            reset_current_trace_id(trace_token)
+            reset_current_user(user_token)
+            scheduler.shutdown(wait=False, cancel_futures=True)
+
+        result = executor_module._background_tasks.get(task_id)
+        assert result is not None
+        assert result.status == SubagentStatus.COMPLETED
+        assert observed == {
+            "runnable_config": None,
+            "user_id": "alice",
+            "trace_id": "trace-123",
+        }
 
     def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
         """Test that the real timeout handler does not overwrite CANCELLED status.

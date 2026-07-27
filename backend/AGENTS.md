@@ -301,7 +301,11 @@ followed by a final platform security and confidentiality reminder in their sing
 For a private Run, Worker also installs only the exact admitted MCP proxy objects in internal
 runtime context. Delegated Agents disable global MCP/ACP discovery and marshal each proxy call
 back to the owner Worker loop, so the same authorization, grant, Credential, endpoint, and
-side-effect checks run for every delegated invocation.
+side-effect checks run for every delegated invocation. Detached subagent execution preserves
+request identity, authorization, and trace ContextVars but clears the parent LangGraph
+`RunnableConfig` before entering its isolated loop, so raw child model/tool frames cannot leak
+through the lead stream writer. The parent `task` tool's bounded `task_running`/terminal custom
+events and persisted `subagent.step`/`subagent.end` rows are the authoritative subtask UI channels.
 A `general-purpose` subagent without a command-execution tool rejects explicit Shell/Python
 execution requests before creating its model Agent and returns a structured failed result; it
 must never fabricate output or loop through wrapper files as a substitute for execution.
