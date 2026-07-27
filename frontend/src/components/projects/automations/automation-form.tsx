@@ -39,6 +39,11 @@ export type AutomationAgentOption = {
   isDefault?: boolean;
 };
 
+export type AutomationThreadOption = {
+  id: string;
+  title: string;
+};
+
 export type AutomationFormDraft = {
   title: string;
   prompt: string;
@@ -159,7 +164,7 @@ export function buildAutomationFormSubmission(
     draft.contextMode === "reuse_thread" &&
     !UUID_PATTERN.test(draft.threadId.trim())
   ) {
-    return { ok: false, message: "请输入有效的 Thread UUID。" };
+    return { ok: false, message: "请选择要复用的会话。" };
   }
   if (!timezone) return { ok: false, message: "请选择时区。" };
   if (timezone.length > 64) {
@@ -277,6 +282,9 @@ export function AutomationForm({
   initial,
   initialThreadId,
   agents,
+  threads = [],
+  threadsLoading = false,
+  threadsError = null,
   canSubmit,
   onSubmit,
   onCancel,
@@ -285,14 +293,18 @@ export function AutomationForm({
   initial?: Automation;
   initialThreadId?: string;
   agents: AutomationAgentOption[];
+  threads?: AutomationThreadOption[];
+  threadsLoading?: boolean;
+  threadsError?: Error | null;
   canSubmit: boolean;
   onSubmit: (
     input: CreateAutomationInput | UpdateAutomationInput,
   ) => void | Promise<void>;
   onCancel?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const immutable = mode === "edit";
+  const createMode = mode === "create";
   const [draft, setDraft] = useState(() =>
     initialDraft(initial, initialThreadId, agents),
   );
@@ -303,6 +315,13 @@ export function AutomationForm({
   const [scheduleRevision, setScheduleRevision] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
   const defaultAgent = defaultAutomationAgent(agents);
+  const selectedThreadIsMissing =
+    Boolean(draft.threadId) &&
+    !threads.some((thread) => thread.id === draft.threadId);
+  const threadSelectDisabled =
+    immutable ||
+    threadsLoading ||
+    (threads.length === 0 && !selectedThreadIsMissing);
 
   useEffect(() => {
     if (mode !== "create" || defaultAgentApplied.current || !defaultAgent) {
@@ -331,7 +350,8 @@ export function AutomationForm({
 
   return (
     <form
-      className="space-y-5"
+      className={createMode ? "space-y-7" : "space-y-5"}
+      data-layout="prompt-first"
       data-testid="automation-form"
       onSubmit={(event) => {
         event.preventDefault();
@@ -353,144 +373,229 @@ export function AutomationForm({
         void onSubmit(result.input);
       }}
     >
-      {mode === "create" ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground text-sm">模板</span>
-          {RECIPES.map((recipe) => (
-            <Button
-              key={recipe.id}
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setDraft((current) =>
-                  applyAutomationRecipeToDraft(current, recipe),
-                );
-                setScheduleRevision((current) => current + 1);
-              }}
-            >
-              <span aria-hidden>{recipe.icon}</span>
-              {RECIPE_TITLES[recipe.titleKey]}
-            </Button>
-          ))}
-        </div>
+      {createMode ? (
+        <section
+          className="grid gap-3 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center"
+          data-testid="automation-template-strip"
+        >
+          <h3 className="text-muted-foreground text-sm font-medium">模板</h3>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {RECIPES.map((recipe) => (
+              <Button
+                key={recipe.id}
+                className="h-11 w-full justify-start px-3 lg:justify-center"
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setDraft((current) =>
+                    applyAutomationRecipeToDraft(current, recipe),
+                  );
+                  setScheduleRevision((current) => current + 1);
+                }}
+              >
+                <span aria-hidden className="text-base leading-none">
+                  {recipe.icon}
+                </span>
+                {RECIPE_TITLES[recipe.titleKey]}
+              </Button>
+            ))}
+          </div>
+        </section>
       ) : null}
 
-      <fieldset className="space-y-2" disabled={immutable}>
-        <legend className="text-sm font-medium">对话上下文</legend>
-        <div
-          className="flex flex-wrap gap-2"
-          data-testid="automation-context-mode"
-        >
-          <Button
-            type="button"
-            size="sm"
-            variant={
-              draft.contextMode === "fresh_thread_per_run"
-                ? "default"
-                : "outline"
-            }
-            aria-pressed={draft.contextMode === "fresh_thread_per_run"}
-            onClick={() =>
-              setDraft((current) => ({
-                ...current,
-                contextMode: "fresh_thread_per_run",
-                threadId: "",
-              }))
-            }
-          >
-            每次新建 Thread
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={
-              draft.contextMode === "reuse_thread" ? "default" : "outline"
-            }
-            aria-pressed={draft.contextMode === "reuse_thread"}
-            onClick={() =>
-              setDraft((current) => ({
-                ...current,
-                contextMode: "reuse_thread",
-              }))
-            }
-          >
-            复用 Thread
-          </Button>
-        </div>
-        {draft.contextMode === "reuse_thread" ? (
+      <section className="space-y-5" data-testid="automation-task-composer">
+        <label className="block space-y-2 text-sm font-medium">
+          <span>{t.automation.fields.title}</span>
           <Input
-            aria-label="Thread UUID"
-            value={draft.threadId}
+            className={createMode ? "h-12" : undefined}
+            value={draft.title}
+            maxLength={255}
+            placeholder={
+              locale.startsWith("zh") ? "输入标题…" : "Enter a title…"
+            }
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, title: event.target.value }))
+            }
+          />
+        </label>
+
+        <label className="block space-y-2 text-sm font-medium">
+          <span>{t.automation.fields.prompt}</span>
+          <Textarea
+            className={createMode ? "min-h-40 resize-y" : "resize-y"}
+            rows={5}
+            value={draft.prompt}
+            placeholder={
+              locale.startsWith("zh")
+                ? "输入要让 Agent 执行的任务或指令…"
+                : "Describe the task or instruction for the Agent…"
+            }
             onChange={(event) =>
               setDraft((current) => ({
                 ...current,
-                threadId: event.target.value,
+                prompt: event.target.value,
               }))
             }
           />
-        ) : null}
-      </fieldset>
+        </label>
+      </section>
 
-      <label className="block space-y-2 text-sm font-medium">
-        <span>Agent</span>
-        <select
-          data-testid="automation-agent"
-          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm disabled:opacity-50"
-          value={
-            draft.agentAssetId
-              ? `${draft.agentScope}:${draft.agentAssetId}`
-              : ""
-          }
-          disabled={immutable}
-          onChange={(event) => selectAgent(event.target.value)}
-        >
-          <option value="">请选择可执行 Agent</option>
-          {agents.map((agent) => (
-            <option
-              key={`${agent.scope}:${agent.id}`}
-              value={`${agent.scope}:${agent.id}`}
+      <section
+        className="grid gap-5 border-t pt-5 sm:grid-cols-2 sm:items-start"
+        data-testid="automation-run-context"
+      >
+        <fieldset className="space-y-2" disabled={immutable}>
+          <legend className="text-sm font-medium">对话上下文</legend>
+          <div
+            className="flex flex-wrap gap-2"
+            data-testid="automation-context-mode"
+          >
+            <Button
+              type="button"
+              size={createMode ? "default" : "sm"}
+              variant={
+                draft.contextMode === "fresh_thread_per_run"
+                  ? "default"
+                  : "outline"
+              }
+              aria-pressed={draft.contextMode === "fresh_thread_per_run"}
+              onClick={() =>
+                setDraft((current) => ({
+                  ...current,
+                  contextMode: "fresh_thread_per_run",
+                  threadId: "",
+                }))
+              }
             >
-              {agent.displayName} ·{" "}
-              {agent.scope === "project" ? "项目" : "系统"}
-            </option>
-          ))}
-        </select>
-      </label>
+              每次新建 Thread
+            </Button>
+            <Button
+              type="button"
+              size={createMode ? "default" : "sm"}
+              variant={
+                draft.contextMode === "reuse_thread" ? "default" : "outline"
+              }
+              aria-pressed={draft.contextMode === "reuse_thread"}
+              onClick={() =>
+                setDraft((current) => ({
+                  ...current,
+                  contextMode: "reuse_thread",
+                }))
+              }
+            >
+              复用 Thread
+            </Button>
+          </div>
+        </fieldset>
 
-      <label className="block space-y-2 text-sm font-medium">
-        <span>{t.automation.fields.title}</span>
-        <Input
-          value={draft.title}
-          maxLength={255}
-          onChange={(event) =>
-            setDraft((current) => ({ ...current, title: event.target.value }))
-          }
-        />
-      </label>
+        <label className="block space-y-2 text-sm font-medium">
+          <span>Agent</span>
+          <select
+            data-testid="automation-agent"
+            className={`border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 w-full rounded-md border px-3 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:opacity-50 ${
+              createMode ? "h-12" : "h-9"
+            }`}
+            value={
+              draft.agentAssetId
+                ? `${draft.agentScope}:${draft.agentAssetId}`
+                : ""
+            }
+            disabled={immutable}
+            onChange={(event) => selectAgent(event.target.value)}
+          >
+            <option value="">请选择可执行 Agent</option>
+            {agents.map((agent) => (
+              <option
+                key={`${agent.scope}:${agent.id}`}
+                value={`${agent.scope}:${agent.id}`}
+              >
+                {agent.displayName} ·{" "}
+                {agent.scope === "project" ? "项目" : "系统"}
+              </option>
+            ))}
+          </select>
+        </label>
 
-      <label className="block space-y-2 text-sm font-medium">
-        <span>{t.automation.fields.prompt}</span>
-        <Textarea
-          rows={6}
-          value={draft.prompt}
-          onChange={(event) =>
-            setDraft((current) => ({ ...current, prompt: event.target.value }))
-          }
-        />
-      </label>
+        {draft.contextMode === "reuse_thread" ? (
+          <div
+            className="space-y-2 sm:col-span-2"
+            data-testid="automation-reuse-thread"
+          >
+            <label
+              className="block text-sm font-medium"
+              htmlFor="automation-thread-select"
+            >
+              选择已有会话
+            </label>
+            <select
+              id="automation-thread-select"
+              aria-label="选择已有会话"
+              aria-describedby="automation-thread-help"
+              data-testid="automation-thread-select"
+              className={`border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 w-full rounded-md border px-3 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 ${
+                createMode ? "h-12" : "h-9"
+              }`}
+              value={draft.threadId}
+              disabled={threadSelectDisabled}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  threadId: event.target.value,
+                }))
+              }
+            >
+              <option value="" disabled>
+                {threadsLoading
+                  ? "正在加载会话…"
+                  : threadsError
+                    ? "会话列表不可用"
+                    : threads.length === 0
+                      ? "暂无可复用会话"
+                      : "选择一个会话"}
+              </option>
+              {selectedThreadIsMissing ? (
+                <option value={draft.threadId}>当前绑定会话</option>
+              ) : null}
+              {threads.map((thread) => (
+                <option key={thread.id} value={thread.id}>
+                  {thread.title}
+                </option>
+              ))}
+            </select>
+            <p
+              id="automation-thread-help"
+              className={
+                threadsError
+                  ? "text-destructive text-xs"
+                  : "text-muted-foreground text-xs"
+              }
+              role={threadsError ? "alert" : undefined}
+            >
+              {threadsError
+                ? "无法加载会话列表，请关闭后重试。"
+                : threads.length === 0 && !selectedThreadIsMissing
+                  ? "暂无可复用会话，请先在“会话”中创建一个会话。"
+                  : "Automation 会在所选会话中延续上下文。"}
+            </p>
+          </div>
+        ) : null}
+      </section>
 
-      <div className="space-y-2">
+      <section
+        className="space-y-3 border-t pt-5"
+        data-testid="automation-schedule-section"
+      >
         <p className="text-sm font-medium">{t.automation.fields.schedule}</p>
         <AutomationScheduleInput
           key={scheduleRevision}
           initial={draft.schedule}
+          layout={createMode ? "compact" : "stacked"}
           scheduleTypeLocked={immutable}
           onChange={(schedule) =>
             setDraft((current) => ({ ...current, schedule }))
           }
         />
-      </div>
+      </section>
 
       {formError ? (
         <p role="alert" className="text-destructive text-sm">
@@ -498,14 +603,23 @@ export function AutomationForm({
         </p>
       ) : null}
 
-      <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+      <div className="flex flex-col-reverse gap-2 border-t pt-5 sm:flex-row sm:justify-end">
         {onCancel ? (
-          <Button type="button" variant="outline" onClick={onCancel}>
+          <Button
+            type="button"
+            size={createMode ? "lg" : "default"}
+            variant="outline"
+            onClick={onCancel}
+          >
             取消
           </Button>
         ) : null}
-        <Button type="submit" disabled={!canSubmit}>
-          {mode === "create" ? "创建 Automation" : "保存修改"}
+        <Button
+          type="submit"
+          size={createMode ? "lg" : "default"}
+          disabled={!canSubmit}
+        >
+          {createMode ? "创建 Automation" : "保存修改"}
         </Button>
       </div>
     </form>

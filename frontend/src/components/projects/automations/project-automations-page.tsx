@@ -26,6 +26,8 @@ import type {
 } from "@/core/project-automations/types";
 import type { Capability, Project } from "@/core/projects/types";
 import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";
+import { useThreads } from "@/core/threads/hooks";
+import { titleOfThread } from "@/core/threads/utils";
 
 import {
   executableProjectAgents,
@@ -204,6 +206,19 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
     "agents",
     listEnabled && permissions.canExecute && Boolean(user),
   );
+  const threadsQuery = useThreads(
+    {
+      limit: 50,
+      offset: 0,
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      select: ["thread_id", "updated_at", "values", "metadata"],
+    },
+    undefined,
+    {
+      enabled: listEnabled && permissions.canExecute && Boolean(user),
+    },
+  );
   const agentItems = executableProjectAgents(
     agentsQuery.data as ProjectAssetList | undefined,
   );
@@ -227,6 +242,13 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
         ]
       : [],
   );
+  const threadOptions = (threadsQuery.data ?? []).map((thread) => {
+    const title = titleOfThread(thread).trim();
+    return {
+      id: thread.thread_id,
+      title: title && title !== "Untitled" ? title : "新对话",
+    };
+  });
   const agentRuntimeReasonByKey = new Map(
     agentItems.map((agent, index) => [
       `${agent.scope}:${agent.id}`,
@@ -343,6 +365,9 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       permissions={permissions}
       schedulerEnabled={readiness.data?.scheduler_enabled ?? false}
       agents={agents}
+      threads={threadOptions}
+      threadsLoading={threadsQuery.isLoading}
+      threadsError={threadsQuery.error}
       agentsLoading={agentsQuery.isLoading || mcpDependencyRuntime.isLoading}
       agentsError={
         agentsQuery.error ??

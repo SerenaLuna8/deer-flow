@@ -80,6 +80,103 @@ final result: passed
 
 ---
 
+# DeerFlow 创建 Automation 方案 3 Design QA
+
+## 对照基线
+
+- Source visual truth:
+  `/Users/jiangfeng/.codex/generated_images/019fa243-0f39-7c71-90fb-acaf8423bb49/call_CnTaYFS11PFJirjjCWxEKRgM.png`
+- Reuse Thread issue reference:
+  `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-e0bf1a8e-3ac6-4151-8c6b-8d2e54baefb3.png`
+- Browser implementation:
+  `http://localhost:2026/projects/default-project/automations`
+- Default-state implementation screenshot:
+  `/Users/jiangfeng/.codex/visualizations/2026/07/27/019fa243-0f39-7c71-90fb-acaf8423bb49/automation-option-3-implementation-final-v3.png`
+- Reuse Thread implementation screenshot:
+  `/Users/jiangfeng/.codex/visualizations/2026/07/27/019fa243-0f39-7c71-90fb-acaf8423bb49/automation-option-3-thread-selector-final.png`
+- Full comparison:
+  `/Users/jiangfeng/.codex/visualizations/2026/07/27/019fa243-0f39-7c71-90fb-acaf8423bb49/automation-option-3-comparison-final-v3.png`
+- Focused Reuse Thread comparison:
+  `/Users/jiangfeng/.codex/visualizations/2026/07/27/019fa243-0f39-7c71-90fb-acaf8423bb49/automation-thread-selector-comparison-final.png`
+- Responsive screenshot:
+  `/Users/jiangfeng/.codex/visualizations/2026/07/27/019fa243-0f39-7c71-90fb-acaf8423bb49/automation-option-3-thread-selector-responsive-913x823.png`
+- Primary viewport: `1322 × 1190` CSS px
+- Responsive viewport: `913 × 823` CSS px
+- Source pixels: `1322 × 1190`
+- Implementation pixels: `1322 × 1190`
+- `devicePixelRatio`: `1`
+- Density normalization:
+  整体对照保持相同像素尺寸；Reuse Thread 聚焦对照统一缩放至 `888px` 高，仅用于视觉比较。
+- State:
+  新建 Automation 弹窗；整体对照使用“每次新建 Thread”，聚焦对照使用“复用 Thread”并选择真实会话标题。
+
+## Findings
+
+- 无剩余 P0、P1 或 P2 问题。
+- 表单改为“模板 → 标题/提示词 → 对话上下文与 Agent → 调度 → 操作”的清晰层级，业务字段与提交协议保持不变。
+- “复用 Thread”不再要求用户手输 UUID，改为按当前项目中真实会话标题选择；提交时仍使用原始 `thread_id`。
+- 模板图标按用户补充要求恢复为原来的 `🔥`、`📰`、`🏷️`、`📅`。
+- 调度控件在桌面端紧凑成行，小视口允许弹窗纵向滚动；`913 × 823` 下弹窗左右各保留 `16px`，无水平溢出。
+- 方案视觉稿使用接近满高的弹窗；真实实现按内容自适应高度，避免大块空白并改善小视口可用性，属于经过验收的 P3 产品约束。
+
+## Required Fidelity Surfaces
+
+- Fonts and typography:
+  复用 DeerFlow 现有标题、字段标签、正文与辅助文字体系；弹窗标题提升至清晰的页面级层级。
+- Spacing and layout rhythm:
+  模板、任务描述、执行上下文和调度四个区域以分隔线与一致间距组织；主输入区获得最大纵向空间。
+- Colors and visual tokens:
+  完全复用现有 `background`、`border`、`muted-foreground`、`primary` 与 focus ring 语义令牌。
+- Image quality and asset fidelity:
+  本轮没有新增位图资产；模板使用用户要求恢复的既有 emoji 图标。
+- Copy and content:
+  保留既有中文字段和服务端权限说明；为标题、提示词和会话选择补充明确占位与辅助文案。
+- Interaction and accessibility:
+  Reuse Thread 使用有 label、`aria-describedby` 和加载/空/错误状态的原生 select；不暴露内部 UUID。
+
+## Comparison History
+
+1. Pass 1:
+   初版弹窗仍偏窄、控件密度偏高，与方案 3 形成 P2 视觉差异。
+2. Fix:
+   弹窗最大宽度从 `920px` 调整为 `1100px`，增加区块间距、输入高度和提示词编辑空间。
+3. Pass 2:
+   `913px` 视口下弹窗贴近两侧，形成 P2 响应式问题。
+4. Fix:
+   弹窗宽度改为 `calc(100% - 2rem)`，实测宽 `881px`、左右边距 `16px`、无水平溢出。
+5. Pass 3:
+   用户标注 Reuse Thread 的 UUID 输入不合理，属于核心路径 P1 可用性问题。
+6. Fix:
+   接入项目会话列表，以标题选择会话并保留 `thread_id` 提交契约；同时恢复原模板图标。
+7. Pass 4:
+   将整体视觉稿、默认实现以及 Reuse Thread 标注前后状态分别并排检查，未发现剩余 P0、P1 或 P2 差异。
+
+## Browser Verification
+
+- Primary interactions tested:
+  - 打开“创建 Automation”
+  - 点击模板自动填充标题、提示词与调度
+  - “每次新建 Thread”与“复用 Thread”切换
+  - Reuse Thread 显示真实会话标题并成功选择
+  - “重复”与“单次”调度状态切换
+  - `913 × 823` 响应式滚动和横向溢出检查
+- Reuse Thread raw UUID input: `0`
+- Responsive body scroll width: `913px`
+- Responsive horizontal overflow: `false`
+- Console errors: `0`
+- 未执行创建提交，避免产生测试 Automation。
+
+## Automated Verification
+
+- Frontend full unit suite: `1206 passed`
+- Targeted automation ESLint: passed
+- TypeScript: passed
+- Git diff check: passed
+
+final result: passed
+
+---
+
 # DeerFlow 项目 Skill 列表与文件工作区 Design QA
 
 ## 对照基线

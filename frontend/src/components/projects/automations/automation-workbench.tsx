@@ -23,7 +23,11 @@ import type {
 } from "@/core/project-automations/types";
 import { cn } from "@/lib/utils";
 
-import { AutomationForm, type AutomationAgentOption } from "./automation-form";
+import {
+  AutomationForm,
+  type AutomationAgentOption,
+  type AutomationThreadOption,
+} from "./automation-form";
 
 export type AutomationPermissions = {
   canRead: boolean;
@@ -161,6 +165,9 @@ export function AutomationWorkbench({
   permissions,
   schedulerEnabled,
   agents,
+  threads = [],
+  threadsLoading = false,
+  threadsError = null,
   agentsLoading = false,
   agentsError = null,
   agentRuntimeNotice = null,
@@ -188,6 +195,9 @@ export function AutomationWorkbench({
   permissions: AutomationPermissions;
   schedulerEnabled: boolean;
   agents: AutomationAgentOption[];
+  threads?: AutomationThreadOption[];
+  threadsLoading?: boolean;
+  threadsError?: Error | null;
   agentsLoading?: boolean;
   agentsError?: Error | null;
   agentRuntimeNotice?: string | null;
@@ -706,10 +716,10 @@ export function AutomationWorkbench({
         open={createOpen}
         onOpenChange={(open) => (open ? openCreate() : closeCreate())}
       >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogContent className="max-h-[92vh] gap-7 overflow-y-auto p-8 sm:w-[calc(100%-2rem)] sm:max-w-[1100px] sm:p-10">
           <DialogHeader>
-            <DialogTitle>创建 Automation</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-2xl">创建 Automation</DialogTitle>
+            <DialogDescription className="text-base">
               Agent 来自当前项目可执行 catalog，运行时仍由服务端复核权限。
             </DialogDescription>
           </DialogHeader>
@@ -734,6 +744,9 @@ export function AutomationWorkbench({
               mode="create"
               initialThreadId={initialThreadId}
               agents={agents}
+              threads={threads}
+              threadsLoading={threadsLoading}
+              threadsError={threadsError}
               canSubmit={canCreate && !isMutating && agents.length > 0}
               onCancel={closeCreate}
               onSubmit={async (input) => {
@@ -783,6 +796,9 @@ export function AutomationWorkbench({
                       },
                     ]
               }
+              threads={threads}
+              threadsLoading={threadsLoading}
+              threadsError={threadsError}
               canSubmit={canEdit && !isMutating}
               onCancel={closeEdit}
               onSubmit={async (input) => {

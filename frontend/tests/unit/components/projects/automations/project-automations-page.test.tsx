@@ -35,6 +35,9 @@ rs.mock("@/components/projects/assets/use-mcp-dependency-runtime", () => ({
 rs.mock("@/core/shared-assets", () => ({
   useProjectAssets: rs.fn(),
 }));
+rs.mock("@/core/threads/hooks", () => ({
+  useThreads: rs.fn(),
+}));
 
 import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-mcp-dependency-runtime";
 import {
@@ -59,6 +62,7 @@ import { useProjectAutomationReadiness } from "@/core/project-automations/readin
 import type { AutomationReadiness } from "@/core/project-automations/types";
 import type { Project } from "@/core/projects/types";
 import { useProjectAssets } from "@/core/shared-assets";
+import { useThreads } from "@/core/threads/hooks";
 
 import {
   AUTOMATION,
@@ -146,6 +150,18 @@ function prepare({
       system_items: [],
       request_id: "req-agents",
     },
+    isLoading: false,
+    error: null,
+  } as never);
+  rs.mocked(useThreads).mockReturnValue({
+    data: [
+      {
+        thread_id: "33333333-3333-4333-8333-333333333333",
+        values: { title: "发布回顾" },
+        metadata: {},
+        updated_at: "2026-07-15T00:00:00Z",
+      },
+    ],
     isLoading: false,
     error: null,
   } as never);

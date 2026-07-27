@@ -195,6 +195,59 @@ describe("AutomationForm", () => {
     }
   });
 
+  test("renders the create form in prompt-first order with a compact schedule", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <AutomationForm
+          mode="create"
+          agents={[MAIN_AGENT]}
+          canSubmit
+          onSubmit={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    const templateIndex = html.indexOf(
+      'data-testid="automation-template-strip"',
+    );
+    const composerIndex = html.indexOf(
+      'data-testid="automation-task-composer"',
+    );
+    const contextIndex = html.indexOf('data-testid="automation-run-context"');
+    const scheduleIndex = html.indexOf(
+      'data-testid="automation-schedule-section"',
+    );
+
+    expect(templateIndex).toBeGreaterThan(-1);
+    expect(composerIndex).toBeGreaterThan(templateIndex);
+    expect(contextIndex).toBeGreaterThan(composerIndex);
+    expect(scheduleIndex).toBeGreaterThan(contextIndex);
+    expect(html).toContain('data-layout="compact"');
+    expect(html).toContain("输入要让 Agent 执行的任务或指令…");
+  });
+
+  test("selects reusable conversations by title without exposing a UUID field", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <AutomationForm
+          mode="create"
+          initialThreadId={THREAD_ID}
+          agents={[MAIN_AGENT]}
+          threads={[{ id: THREAD_ID, title: "发布回顾" }]}
+          canSubmit
+          onSubmit={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain('data-testid="automation-thread-select"');
+    expect(html).toContain(
+      `<option value="${THREAD_ID}" selected="">发布回顾</option>`,
+    );
+    expect(html).not.toContain("Thread UUID");
+    expect(html).toContain("Automation 会在所选会话中延续上下文。");
+  });
+
   test("selects Main by default when creating an Automation", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="zh-CN">
