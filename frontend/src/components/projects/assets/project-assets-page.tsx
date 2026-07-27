@@ -18,8 +18,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   createProjectCredential,
+  deleteProjectCredential,
   migrateProjectCredentialGrants,
   projectAssetKey,
+  projectAssetVersionsKey,
   replaceProjectCredential,
   revokeProjectCredential,
   useProjectAssets,
@@ -37,6 +39,11 @@ import {
 
 import { useCurrentProject } from "../project-context";
 
+import {
+  CredentialDeleteDialog,
+  createCredentialDeleteSnapshot,
+  type CredentialDeleteSnapshot,
+} from "./credential-delete-dialog";
 import { ProjectAssetSection } from "./project-asset-section";
 import {
   projectAssetCanAuthor,
@@ -133,6 +140,7 @@ export function ProjectCredentialCatalogView({
   onReplace,
   onMigrate,
   onRevoke,
+  onDelete,
   renderDetails,
 }: {
   data: ProjectCredentialList;
@@ -141,6 +149,7 @@ export function ProjectCredentialCatalogView({
   onReplace?: (credential: ProjectCredentialItem) => void;
   onMigrate?: (credential: ProjectCredentialItem) => void;
   onRevoke?: (credential: ProjectCredentialItem) => void;
+  onDelete?: (credential: ProjectCredentialItem) => void;
   renderDetails?: (credential: ProjectCredentialItem) => React.ReactNode;
 }) {
   const [source, setSource] = useState<"system" | "project">(() =>
@@ -239,53 +248,66 @@ export function ProjectCredentialCatalogView({
                         </dd>
                       </div>
                     </dl>
-                    {credential.status === "active" &&
-                      credential.capabilities.includes(
-                        "mcp.credentials.approve",
-                      ) && (
-                        <div className="space-y-3">
-                          {credential.version > 1 && (
+                    {projectCredentialCanDelete(credential) && (
+                      <div className="space-y-3">
+                        {credential.status === "active" &&
+                          credential.version > 1 && (
                             <div
                               role="note"
                               className="border-border bg-muted/30 text-muted-foreground rounded-lg border px-3 py-2 text-xs"
                             >
-                              替换只创建新版本；既有 Grant 仍固定到 retired
-                              version，轮换需要显式迁移。
+                              替换只创建新版本；既有 MCP Grant 与 Skill
+                              环境变量绑定仍固定到旧版本，轮换需要显式迁移。
                             </div>
                           )}
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={pending}
-                              onClick={() => onReplace?.(credential)}
-                            >
-                              替换凭据
-                            </Button>
-                            {credential.version > 1 && (
+                        <div className="flex flex-wrap gap-2">
+                          {credential.status === "active" ? (
+                            <>
                               <Button
                                 type="button"
                                 size="sm"
                                 variant="outline"
                                 disabled={pending}
-                                onClick={() => onMigrate?.(credential)}
+                                onClick={() => onReplace?.(credential)}
                               >
-                                迁移兼容 Grant
+                                替换凭据
                               </Button>
-                            )}
+                              {credential.version > 1 && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={pending}
+                                  onClick={() => onMigrate?.(credential)}
+                                >
+                                  迁移兼容引用
+                                </Button>
+                              )}
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={pending}
+                                onClick={() => onRevoke?.(credential)}
+                              >
+                                撤销凭据
+                              </Button>
+                            </>
+                          ) : null}
+                          {onDelete ? (
                             <Button
                               type="button"
                               size="sm"
                               variant="destructive"
                               disabled={pending}
-                              onClick={() => onRevoke?.(credential)}
+                              onClick={() => onDelete(credential)}
                             >
-                              撤销凭据
+                              删除
                             </Button>
-                          </div>
+                          ) : null}
                         </div>
-                      )}
+                      </div>
+                    )}
                     {renderDetails?.(credential)}
                   </CardContent>
                 </Card>
@@ -295,6 +317,15 @@ export function ProjectCredentialCatalogView({
         </TabsContent>
       ))}
     </Tabs>
+  );
+}
+
+export function projectCredentialCanDelete(
+  credential: Pick<ProjectCredentialItem, "scope" | "capabilities">,
+): boolean {
+  return (
+    credential.scope === "project" &&
+    credential.capabilities.includes("mcp.credentials.approve")
   );
 }
 
@@ -429,12 +460,14 @@ function useSecureProjectCredentialWrite(accountId: string, projectId: string) {
   async function run(
     operation: () => Promise<unknown>,
     successMessage?: string,
+    onSuccess?: () => void,
   ): Promise<boolean> {
     setPending(true);
     setErrorMessage(null);
     setNoticeMessage(null);
     try {
       await operation();
+      onSuccess?.();
       await queryClient.invalidateQueries({
         queryKey: projectAssetKey(accountId, projectId, "credentials"),
       });
@@ -501,6 +534,7 @@ export function ProjectCredentialsWorkspace({
   projectId: string;
 }) {
   const project = useCurrentProject();
+  const queryClient = useQueryClient();
   const query = useProjectAssets(accountId, projectId, "credentials");
   const secureWrite = useSecureProjectCredentialWrite(accountId, projectId);
   const [createOpen, setCreateOpen] = useState(false);
@@ -510,6 +544,8 @@ export function ProjectCredentialsWorkspace({
     useState<ProjectCredentialItem | null>(null);
   const [credentialToMigrate, setCredentialToMigrate] =
     useState<ProjectCredentialItem | null>(null);
+  const [credentialDeleteSnapshot, setCredentialDeleteSnapshot] =
+    useState<CredentialDeleteSnapshot | null>(null);
 
   if (query.isLoading) return <Skeleton className="h-72 w-full" />;
   if (query.error) return <ErrorNotice error={query.error} />;
@@ -560,6 +596,12 @@ export function ProjectCredentialsWorkspace({
           secureWrite.clearError();
           setCredentialToRevoke(credential);
         }}
+        onDelete={(credential) => {
+          secureWrite.clearError();
+          setCredentialDeleteSnapshot(
+            createCredentialDeleteSnapshot(credential, Date.now()),
+          );
+        }}
         renderDetails={(credential) =>
           projectCredentialShowsHistory(credential) ? (
             <CredentialHistory
@@ -608,7 +650,7 @@ export function ProjectCredentialsWorkspace({
                       expected_credential_version: credentialToMigrate.version,
                     },
                   ),
-                "已完成兼容 Grant 迁移；没有待迁移 Grant 时不会更改授权。",
+                "已完成兼容引用迁移；没有待迁移的 MCP Grant 或 Skill 环境变量绑定时不会更改授权。",
               )
               .then((success) => success && setCredentialToMigrate(null));
           }}
@@ -631,6 +673,54 @@ export function ProjectCredentialsWorkspace({
           }}
         />
       )}
+      {credentialDeleteSnapshot ? (
+        <CredentialDeleteDialog
+          key={`${credentialDeleteSnapshot.credentialId}:${credentialDeleteSnapshot.startedAt}`}
+          snapshot={credentialDeleteSnapshot}
+          pending={secureWrite.pending}
+          errorMessage={secureWrite.errorMessage}
+          onOpenChange={(open) => !open && setCredentialDeleteSnapshot(null)}
+          onConfirm={() => {
+            const snapshot = credentialDeleteSnapshot;
+            void secureWrite
+              .run(
+                () =>
+                  deleteProjectCredential(project.id, snapshot.credentialId, {
+                    expected_credential_version:
+                      snapshot.expectedCredentialVersion,
+                  }),
+                undefined,
+                () => {
+                  queryClient.setQueryData<ProjectCredentialList>(
+                    projectAssetKey(accountId, projectId, "credentials"),
+                    (current) =>
+                      current
+                        ? {
+                            ...current,
+                            system_items: current.system_items.filter(
+                              (item) => item.id !== snapshot.credentialId,
+                            ),
+                            project_items: current.project_items.filter(
+                              (item) => item.id !== snapshot.credentialId,
+                            ),
+                          }
+                        : current,
+                  );
+                  queryClient.removeQueries({
+                    queryKey: projectAssetVersionsKey(
+                      accountId,
+                      projectId,
+                      "credentials",
+                      snapshot.credentialId,
+                    ),
+                    exact: true,
+                  });
+                },
+              )
+              .then((success) => success && setCredentialDeleteSnapshot(null));
+          }}
+        />
+      ) : null}
     </>
   );
 }

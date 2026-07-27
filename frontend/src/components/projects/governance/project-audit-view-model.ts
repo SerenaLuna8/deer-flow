@@ -70,6 +70,10 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "zh-CN": "已撤销资产凭据",
     "en-US": "Asset credential revoked",
   },
+  "asset.credential_deleted": {
+    "zh-CN": "已删除资产凭据",
+    "en-US": "Asset credential deleted",
+  },
   "asset.credential_grants_migrated": {
     "zh-CN": "已迁移凭据授权",
     "en-US": "Credential grants migrated",

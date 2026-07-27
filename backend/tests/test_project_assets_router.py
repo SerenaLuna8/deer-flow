@@ -1019,6 +1019,9 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
         assert credential_replace == {"$ref": "#/components/schemas/CredentialVersionResponse"}
         credential_migration = openapi["paths"][f"{prefix}/credentials/{{credential_id}}/migrate-grants"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
         assert credential_migration == {"$ref": "#/components/schemas/CredentialGrantMigrationResponse"}
+        credential_delete = openapi["paths"][f"{prefix}/credentials/{{credential_id}}"]["delete"]
+        assert credential_delete["responses"]["204"]["description"] == "Successful Response"
+        assert credential_delete["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/CredentialDeleteRequest"}
 
     for prefix in mutable_prefixes:
         agent_versions_path = f"{prefix}/agents/{{asset_id}}/versions"
@@ -1070,6 +1073,7 @@ def test_version_routes_register_kind_specific_strict_openapi_contracts() -> Non
     } & set(credential_item["properties"])
     assert components["CredentialGrantMigrationRequest"]["additionalProperties"] is False
     assert components["CredentialGrantMigrationResponse"]["additionalProperties"] is False
+    assert components["CredentialDeleteRequest"]["additionalProperties"] is False
 
     skill_file = components["SkillFileRequest"]["properties"]
     assert skill_file["path"]["maxLength"] == 1024
@@ -1182,6 +1186,35 @@ def test_credential_grant_migration_route_is_strict_and_secret_storage_safe() ->
     assert actor.project_id == PROJECT_ID
     assert requested_credential_id == credential_id
     assert service.migrate_grants.await_args.kwargs == {"expected_credential_version": 3}
+
+
+def test_credential_delete_route_is_strict_and_returns_no_deleted_metadata() -> None:
+    service = AsyncMock()
+    credential_id = uuid.uuid4()
+    client = _client(credential_service=service)
+
+    response = client.request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/credentials/{credential_id}",
+        json={"expected_credential_version": 3},
+    )
+    invalid = client.request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/credentials/{credential_id}",
+        json={
+            "expected_credential_version": 3,
+            "credential_version_id": str(uuid.uuid4()),
+        },
+    )
+
+    assert response.status_code == 204
+    assert not response.content
+    assert invalid.status_code == 422
+    service.delete.assert_awaited_once()
+    actor, requested_credential_id = service.delete.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert requested_credential_id == credential_id
+    assert service.delete.await_args.kwargs == {"expected_credential_version": 3}
 
 
 @pytest.mark.parametrize(

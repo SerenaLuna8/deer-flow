@@ -54,6 +54,8 @@ from app.shared_assets import (
     McpService,
     SharedAssetError,
     SkillArchiveFile,
+    SkillCredentialBindingInput,
+    SkillCredentialBindingService,
     SkillFileChange,
     SkillService,
     WorkflowStatus,
@@ -332,6 +334,10 @@ class CredentialRevokeRequest(_StrictModel):
     expected_credential_version: int = Field(ge=1)
 
 
+class CredentialDeleteRequest(_StrictModel):
+    expected_credential_version: int = Field(ge=1)
+
+
 class CredentialGrantMigrationRequest(_StrictModel):
     expected_credential_version: int = Field(ge=1)
 
@@ -360,6 +366,44 @@ class AgentVersionItemResponse(_StrictModel):
 class SkillSecretRequirementResponse(_StrictModel):
     name: str
     optional: bool
+
+
+class EligibleSkillCredentialResponse(_StrictModel):
+    credential_id: uuid.UUID
+    credential_version_id: uuid.UUID
+    display_name: str
+    version_number: int
+
+
+class SkillCredentialRequirementResponse(_StrictModel):
+    name: str
+    optional: bool
+    configured: bool
+    credential_id: uuid.UUID | None
+    credential_version_id: uuid.UUID | None
+    credential_display_name: str | None
+    credential_version_number: int | None
+    eligible_credentials: list[EligibleSkillCredentialResponse]
+
+
+class SkillCredentialBindingSetResponse(_StrictModel):
+    skill_id: uuid.UUID
+    skill_version_id: uuid.UUID
+    revision: int = Field(ge=0)
+    requirements: list[SkillCredentialRequirementResponse]
+    request_id: str
+
+
+class SkillCredentialBindingRequest(_StrictModel):
+    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=255)
+    credential_version_id: uuid.UUID
+
+
+class SkillCredentialBindingReplaceRequest(_StrictModel):
+    expected_revision: int = Field(ge=0)
+    bindings: list[SkillCredentialBindingRequest] = Field(
+        max_length=256,
+    )
 
 
 class SkillFileResponse(_StrictModel):
@@ -661,6 +705,15 @@ def get_credential_service(request: Request) -> CredentialService:
 
 def get_binding_service(request: Request) -> BindingService:
     return BindingService(_factory(), governance_sink=_governance_sink(request))
+
+
+def get_skill_credential_binding_service(
+    request: Request,
+) -> SkillCredentialBindingService:
+    return SkillCredentialBindingService(
+        _factory(),
+        governance_sink=_governance_sink(request),
+    )
 
 
 def _asset_item(view) -> AssetItemResponse:
@@ -1110,6 +1163,17 @@ def register_asset_routes(
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
+    async def delete_credential(credential_id: uuid.UUID, body: CredentialDeleteRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
+        try:
+            await service.delete(
+                actor,
+                credential_id,
+                expected_credential_version=body.expected_credential_version,
+            )
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     async def migrate_credential_grants(credential_id: uuid.UUID, body: CredentialGrantMigrationRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
         try:
             view = await service.migrate_grants(
@@ -1148,6 +1212,7 @@ def register_asset_routes(
         ("/credentials/{credential_id}/replace", replace_credential, ["POST"], CredentialVersionResponse, 200),
         ("/credentials/{credential_id}/revoke", revoke_credential, ["POST"], CredentialMutationResponse, 200),
         ("/credentials/{credential_id}/migrate-grants", migrate_credential_grants, ["POST"], CredentialGrantMigrationResponse, 200),
+        ("/credentials/{credential_id}", delete_credential, ["DELETE"], None, status.HTTP_204_NO_CONTENT),
     )
     routes = (*read_routes, *credential_routes)
     if include_shared_asset_mutations:
@@ -1270,6 +1335,70 @@ async def import_project_skill_archive(
                 _response_data(result.version),
             ),
             request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+def _skill_credential_binding_response(
+    value,
+    request_id: str,
+) -> SkillCredentialBindingSetResponse:
+    return SkillCredentialBindingSetResponse(
+        **_response_data(value),
+        request_id=request_id,
+    )
+
+
+@project_router.get(
+    "/skills/{skill_id}/credential-bindings",
+    response_model=SkillCredentialBindingSetResponse,
+)
+async def get_project_skill_credential_bindings(
+    skill_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[
+        SkillCredentialBindingService,
+        Depends(get_skill_credential_binding_service),
+    ],
+):
+    try:
+        return _skill_credential_binding_response(
+            await service.get(context, skill_id),
+            context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.put(
+    "/skills/{skill_id}/credential-bindings",
+    response_model=SkillCredentialBindingSetResponse,
+)
+async def replace_project_skill_credential_bindings(
+    skill_id: uuid.UUID,
+    body: SkillCredentialBindingReplaceRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[
+        SkillCredentialBindingService,
+        Depends(get_skill_credential_binding_service),
+    ],
+):
+    try:
+        return _skill_credential_binding_response(
+            await service.replace(
+                context,
+                skill_id,
+                tuple(
+                    SkillCredentialBindingInput(
+                        item.name,
+                        item.credential_version_id,
+                    )
+                    for item in body.bindings
+                ),
+                expected_revision=body.expected_revision,
+            ),
+            context.request_id,
         )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)

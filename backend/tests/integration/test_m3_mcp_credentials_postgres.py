@@ -478,6 +478,29 @@ async def test_credential_grant_migration_is_explicit_and_revoke_invalidates_all
             assert "integration-key" not in rendered
             assert "old-secret" not in rendered
             assert "new-secret" not in rendered
+
+        await credential_service.delete(
+            admin,
+            credential.id,
+            expected_credential_version=3,
+        )
+        with pytest.raises(AssetNotFound):
+            await credential_service.get(admin, credential.id)
+        with pytest.raises(AssetNotFound):
+            await credential_service.get_version_history(admin, credential.id)
+        with pytest.raises(AssetNotFound):
+            await credential_service.delete(
+                admin,
+                credential.id,
+                expected_credential_version=4,
+            )
+        assert credential.id not in {item.id for item in await credential_service.list_visible(admin)}
+        async with factory() as session:
+            deleted = await session.get(CredentialRow, credential.id)
+        assert deleted is not None
+        assert deleted.is_delete is True
+        assert deleted.status == "revoked"
+        assert deleted.version == 4
     finally:
         await engine.dispose()
 

@@ -1106,9 +1106,52 @@ class TestFromConfig:
         mw = LoopDetectionMiddleware.from_config(config)
         assert mw._tool_freq_overrides == {"bash": (50, 100)}
 
-    def test_empty_overrides(self):
+    def test_default_web_tool_overrides(self):
         mw = LoopDetectionMiddleware.from_config(self._config())
-        assert mw._tool_freq_overrides == {}
+        assert mw._tool_freq_overrides == {
+            "web_fetch": (6, 10),
+            "web_search": (6, 10),
+        }
+
+    def test_default_web_fetch_override_forces_stop_before_global_limit(self):
+        mw = LoopDetectionMiddleware.from_config(self._config())
+        runtime = _make_runtime()
+
+        for index in range(9):
+            result = mw._apply(
+                _make_state(
+                    tool_calls=[
+                        {
+                            "name": "web_fetch",
+                            "args": {"url": f"https://example.com/{index}"},
+                            "id": f"fetch-{index}",
+                            "type": "tool_call",
+                        }
+                    ]
+                ),
+                runtime,
+            )
+            assert result is None
+
+        result = mw._apply(
+            _make_state(
+                tool_calls=[
+                    {
+                        "name": "web_fetch",
+                        "args": {"url": "https://example.com/9"},
+                        "id": "fetch-9",
+                        "type": "tool_call",
+                    }
+                ]
+            ),
+            runtime,
+        )
+
+        assert result is not None
+        message = result["messages"][0]
+        assert isinstance(message, AIMessage)
+        assert message.tool_calls == []
+        assert "web_fetch called 10 times" in message.content
 
     def test_constructed_middleware_queues_loop_warning(self):
         mw = LoopDetectionMiddleware.from_config(self._config(warn_threshold=2, hard_limit=4))

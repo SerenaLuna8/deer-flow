@@ -150,3 +150,31 @@ export function projectSkillVersionFileKey(
     requireKeyPart(path, "Skill file path"),
   ] as const;
 }
+
+export function projectSkillCredentialBindingsKey(
+  accountId: string,
+  projectId: string,
+  skillId: string,
+) {
+  return [
+    ...projectAssetVersionsKey(
+      accountId,
+      projectId,
+      "skills",
+      assetIdSchema.parse(skillId),
+    ),
+    "credential-bindings",
+  ] as const;
+}
+
+export function projectSkillCredentialBindingsMutationKey(
+  accountId: string,
+  projectId: string,
+  skillId: string,
+) {
+  return [
+    ...projectSkillCredentialBindingsKey(accountId, projectId, skillId),
+    "mutation",
+    "replace",
+  ] as const;
+}

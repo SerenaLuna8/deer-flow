@@ -19,6 +19,9 @@ import {
   createProjectAsset,
   createProjectAssetVersion,
   createProjectCredential,
+  deleteAdminCredential,
+  deleteAdminProjectCredential,
+  deleteProjectCredential,
   deleteProjectAgent,
   deleteProjectSkill,
   disableProjectSystemBinding,
@@ -609,6 +612,55 @@ describe("shared asset api", () => {
         signal,
       },
     );
+  });
+
+  test("logically deletes Credential metadata through each scoped route", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const signal = new AbortController().signal;
+    const input = { expected_credential_version: 9 };
+
+    await expect(
+      deleteProjectCredential(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toBeUndefined();
+    await expect(
+      deleteAdminProjectCredential(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toBeUndefined();
+    await expect(
+      deleteAdminCredential(asset.id, input, signal),
+    ).resolves.toBeUndefined();
+
+    expect(mockedFetch.mock.calls).toEqual([
+      [
+        `/backend/api/projects/${PROJECT_ID}/credentials/${asset.id}`,
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          signal,
+        },
+      ],
+      [
+        `/backend/api/admin/projects/${PROJECT_ID}/assets/credentials/${asset.id}`,
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          signal,
+        },
+      ],
+      [
+        `/backend/api/admin/assets/credentials/${asset.id}`,
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+          signal,
+        },
+      ],
+    ]);
   });
 
   test("activates and suspends a project Skill through explicit status actions", async () => {

@@ -21,6 +21,7 @@ from scripts.rotate_credentials import (
     RotationLedger,
     build_rotation_parser,
     build_rotation_pending_selection,
+    build_rotation_plan_count,
     build_rotation_selection,
     keyring_for_target,
     validate_payload_schema,
@@ -79,6 +80,28 @@ def test_empty_skip_locked_batch_requires_authoritative_pending_barrier() -> Non
     assert "FOR UPDATE" in normalized
     assert "LIMIT 1" in normalized
     assert "CREDENTIAL_ENVELOPES.KEY_ID != 'NEXT'" in normalized
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        build_rotation_selection(
+            target_key_id="next",
+            cursor=None,
+            batch_size=17,
+        ),
+        build_rotation_pending_selection(target_key_id="next"),
+        build_rotation_plan_count(target_key_id="next"),
+    ),
+)
+def test_rotation_queries_exclude_logically_deleted_credentials(statement) -> None:
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "credentials.is_delete IS false" in sql
 
 
 def test_resume_cursor_requires_uuid_and_batch_is_bounded() -> None:

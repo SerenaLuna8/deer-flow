@@ -131,6 +131,70 @@ class RunMcpGrantSnapshotRow(Base):
     )
 
 
+class RunSkillCredentialSnapshotRow(Base):
+    """Secret-free, immutable Skill credential references admitted for one Run."""
+
+    __tablename__ = "run_skill_credential_snapshots"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    skill_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    skill_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    secret_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    skill_credential_binding_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        nullable=False,
+    )
+    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    credential_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "project_id",
+            "owner_user_id",
+            "run_id",
+            "skill_version_id",
+            "secret_name",
+            name="pk_run_skill_credential_snapshots",
+        ),
+        *_scope_constraints("run_skill_credential_snapshots"),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id", "run_id"],
+            ["runs.project_id", "runs.owner_user_id", "runs.thread_id", "runs.run_id"],
+            name="fk_run_skill_credential_snapshots_private_run",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "secret_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
+            name="ck_run_skill_credential_snapshots_secret_name",
+        ),
+        CheckConstraint(
+            "binding_revision >= 1",
+            name="ck_run_skill_credential_snapshots_binding_revision",
+        ),
+        Index(
+            "ix_run_skill_credential_snapshots_binding",
+            skill_credential_binding_id,
+        ),
+        Index(
+            "ix_run_skill_credential_snapshots_private_run",
+            project_id,
+            owner_user_id,
+            thread_id,
+            run_id,
+        ),
+    )
+
+
 class PrivateFileRow(Base):
     __tablename__ = "files"
 

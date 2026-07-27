@@ -338,14 +338,18 @@ describe("admin asset access and credential safety", () => {
         onReplace: () => undefined,
         onRevoke: () => undefined,
         onMigrate: () => undefined,
+        onDelete: () => undefined,
       }),
     );
 
     expect(html).toContain("GitHub Token");
     expect(html).toContain("替换凭据");
     expect(html).toContain("撤销凭据");
-    expect(html).toContain("迁移兼容 Grant");
-    expect(html).toContain("既有 Grant 仍固定到 retired version");
+    expect(html).toContain("迁移兼容引用");
+    expect(html).toContain(">删除<");
+    expect(html).toContain(
+      "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
+    );
     expect(html).not.toContain("显示明文");
     expect(html).not.toContain("复制密钥");
     expect(html).not.toContain("plaintext");

@@ -25,6 +25,7 @@ import type {
   AssetVersion,
   ProjectAssetItem,
   ProjectAssetList,
+  ProjectCredentialItem,
   ProjectCredentialList,
 } from "@/core/shared-assets";
 
@@ -403,13 +404,20 @@ describe("project shared asset pages", () => {
       request_id: "req-credentials",
     };
     const html = renderToStaticMarkup(
-      <ProjectCredentialCatalogView data={data} onMigrate={() => undefined} />,
+      <ProjectCredentialCatalogView
+        data={data}
+        onMigrate={() => undefined}
+        onDelete={() => undefined}
+      />,
     );
 
     expect(html).toContain("替换凭据");
     expect(html).toContain("撤销凭据");
-    expect(html).toContain("迁移兼容 Grant");
-    expect(html).toContain("既有 Grant 仍固定到 retired version");
+    expect(html).toContain("迁移兼容引用");
+    expect(html).toContain(">删除<");
+    expect(html).toContain(
+      "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
+    );
     expect(html).toContain('role="tablist"');
     expect(html).toContain("系统提供");
     expect(html).toContain("项目自建");
@@ -418,6 +426,52 @@ describe("project shared asset pages", () => {
     expect(html).not.toContain("显示明文");
     expect(html).not.toContain("复制密钥");
     expect(html).not.toContain("ciphertext");
+  });
+
+  test("Credential delete stays capability and project-scope gated", () => {
+    const projectCredential: ProjectCredentialItem = {
+      id: PROJECT_ASSET_ID,
+      scope: "project" as const,
+      project_id: PROJECT_ID,
+      name: "github",
+      display_name: "GitHub",
+      credential_type: "token",
+      status: "revoked" as const,
+      current_version_id: VERSION_ID,
+      version: 2,
+      created_by_user_id: "user-1",
+      created_at: "2026-07-14T00:00:00Z",
+      updated_at: "2026-07-14T00:00:00Z",
+      capabilities: ["shared_assets.read", "mcp.credentials.approve"],
+    };
+    const deletable = renderToStaticMarkup(
+      <ProjectCredentialCatalogView
+        data={{
+          system_items: [],
+          project_items: [projectCredential],
+          request_id: "req-deletable",
+        }}
+        onDelete={() => undefined}
+      />,
+    );
+    const readOnly = renderToStaticMarkup(
+      <ProjectCredentialCatalogView
+        data={{
+          system_items: [],
+          project_items: [
+            {
+              ...projectCredential,
+              capabilities: ["shared_assets.read"],
+            },
+          ],
+          request_id: "req-read-only",
+        }}
+        onDelete={() => undefined}
+      />,
+    );
+
+    expect(deletable).toContain(">删除<");
+    expect(readOnly).not.toContain(">删除<");
   });
 
   test("MCP approval selector keeps project and system Credential scopes exact", () => {

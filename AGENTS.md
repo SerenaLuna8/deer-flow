@@ -87,16 +87,19 @@ Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENT
 
 For a new installation, provision an empty PostgreSQL database, run `make setup-db`, then run
 `make start`. The immutable `0001_project_saas_baseline` remains the frozen ancestor; the single
-current head is `0002_skill_design_builder`, which adds private Skill Builder sessions, pinned
-system `skill-creator` versions, idempotent operations, and durable candidate files. Setup applies
-the complete linear chain, seeds the packaged system catalog, initializes the LangGraph schema,
-and bootstraps the default project.
+current head is `0004_credential_soft_delete`. `0002_skill_design_builder` adds private Skill
+Builder sessions, pinned system `skill-creator` versions, idempotent operations, and durable
+candidate files; `0003_skill_credentials` adds version-scoped Skill Credential bindings and
+secret-free Run snapshots; `0004` adds Credential logical deletion and active-row uniqueness.
+Setup applies the complete linear chain, seeds the packaged system catalog, initializes the
+LangGraph schema, and bootstraps the default project.
 
-An existing database for the current release must either match the exact current `0002` catalog
-or the exact frozen `0001` catalog. For the latter, stop application processes, run
-`make migrate-db`, run `make check-db`, and then restart. Migration never creates a database,
-seeds the catalog, initializes LangGraph, or bootstraps a project. Runtime startup and `check-db`
-are read-only schema consumers and never create, migrate, stamp, or repair database objects.
+An existing database for the current release must either match the exact current `0004` catalog
+or one of the exact frozen `0001`/`0002`/`0003` catalogs. For any ancestor, stop application
+processes, run `make migrate-db`, run `make check-db`, and then restart. Migration never creates
+a database, seeds the catalog, initializes LangGraph, or bootstraps a project. Runtime startup
+and `check-db` are read-only schema consumers and never create, migrate, stamp, or repair
+database objects.
 
 An unknown revision, an unversioned nonempty schema, or catalog drift is rejected without
 automatic repair. Downgrade, manual stamp, automatic deletion, and destructive reset are
@@ -187,8 +190,10 @@ These apply repo-wide; module guides own the module-specific detail.
   Chromium E2E、构建与安全检查的唯一 CI 编排。不要为这些命令再新增独立重复 workflow；Replay E2E、
   发布、容器、Helm Chart 和版本检查仍保持专用 workflow。
 - **Forward-only schema migrations** — `0001_project_saas_baseline.py` 是禁止改写的冻结基线；
-  当前单一 head `0002_skill_design_builder.py` 线性增加 Skill Builder 会话、操作和候选文件表。
-  未来 schema 变化从 `0003` 起继续线性追加 revision，绝不重写、压缩或 stamp 历史。
+  `0002_skill_design_builder.py` 是禁止改写的冻结 Skill Builder 祖先；
+  `0003_skill_credentials.py` 是禁止改写的冻结 Skill Credential 祖先；当前单一 head
+  `0004_credential_soft_delete.py` 增加 Credential 逻辑删除与仅针对未删除记录的名称唯一约束。
+  未来 schema 变化从 `0005` 起继续线性追加 revision，绝不重写、压缩或 stamp 历史。
   `make setup-db` 在空库应用当前 head 并初始化 builtin catalog、LangGraph schema 与 default
   project；`make migrate-db` 保留给未来已提交 revision，且不执行这些 bootstrap side effects；
   运行时和 `make check-db` 只读校验。未知 revision 或 catalog drift 拒绝自动处理。真实测试只准
@@ -197,4 +202,6 @@ These apply repo-wide; module guides own the module-specific detail.
   404。Credential create/replace 使用 imperative authenticated API，不得把 secret-bearing input
   放入 TanStack Query/Mutation cache；MCP Credential slot 只能走 submit/approve。轮换状态 GET
   使用 rotation CLI 相同 eligibility，只返回 eligible/current/pending 聚合与状态，不返回 key ID、
-  nonce、ciphertext 或 storage locator。
+  nonce、ciphertext 或 storage locator。Skill 详情只绑定现有项目 Credential 版本；API 和 Run
+  snapshot 只保存引用，Worker 在精确准入闭包校验后才解密，并仅向当前激活 Skill 的 sandbox
+  subprocess 注入对应环境变量。

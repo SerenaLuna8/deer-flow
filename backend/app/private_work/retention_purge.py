@@ -17,6 +17,7 @@ from deerflow.persistence.private_work.model import (
     PrivateFileRow,
     RunAssetVersionRow,
     RunMcpGrantSnapshotRow,
+    RunSkillCredentialSnapshotRow,
     UserProjectMemoryFactRow,
     UserProjectMemoryRow,
 )
@@ -466,6 +467,12 @@ async def purge_private_scope(
         )
     )
     await session.execute(
+        delete(RunSkillCredentialSnapshotRow).where(
+            RunSkillCredentialSnapshotRow.project_id == project_id,
+            *(() if owner_user_id is None else (RunSkillCredentialSnapshotRow.owner_user_id == owner_user_id,)),
+        )
+    )
+    await session.execute(
         delete(RunAssetVersionRow).where(
             RunAssetVersionRow.project_id == project_id,
             *(() if owner_user_id is None else (RunAssetVersionRow.owner_user_id == owner_user_id,)),
@@ -653,11 +660,21 @@ async def purge_project_shared_scope(
             parameters,
         )
 
+    # Run Skill credential snapshots were removed with private work. Removing
+    # the project-local config now cascades both active and revoked binding
+    # history, including configurations for packaged System Skills.
+    await session.execute(
+        text("DELETE FROM project_skill_credential_configs WHERE project_id=:project_id"),
+        parameters,
+    )
+
     await session.execute(
         text("DELETE FROM project_invitations WHERE project_id=:project_id"),
         parameters,
     )
 
+    # Retention is a physical purge boundary, so it intentionally traverses
+    # both visible and logically deleted Credentials.
     project_credential_versions = """SELECT version.id
         FROM credential_versions AS version
         JOIN credentials AS asset ON asset.id=version.credential_id

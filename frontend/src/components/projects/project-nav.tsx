@@ -18,7 +18,6 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -29,6 +28,11 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   projectPrivateWorkEntryEnabled,
@@ -157,8 +161,8 @@ export function projectNavigationItems(
     items.push({
       href: `${base}/credentials`,
       icon: KeyRoundIcon,
-      label: "Credential",
-      section: "capabilities",
+      label: "项目凭证",
+      section: "management",
     });
   }
   if (project.capabilities.includes("project.members.manage")) {
@@ -209,27 +213,19 @@ function ProjectBrand() {
 
 function ProjectIdentity({ project }: { project: Project }) {
   return (
-    <div className="flex min-w-0 items-center gap-3">
-      <div className="bg-primary/10 text-primary flex size-10 shrink-0 items-center justify-center rounded-xl">
+    <div className="flex min-h-11 min-w-0 items-center gap-3">
+      <div className="bg-primary/10 text-primary flex size-11 shrink-0 items-center justify-center rounded-xl">
         {project.icon === "folder" ? (
-          <FolderKanbanIcon aria-hidden className="size-5" />
+          <FolderKanbanIcon aria-hidden className="size-6" />
         ) : (
-          <span aria-hidden className="text-lg">
+          <span aria-hidden className="text-xl">
             {project.icon}
           </span>
         )}
       </div>
-      <div className="min-w-0">
-        <p className="truncate text-sm font-semibold">{project.display_name}</p>
-        <div className="mt-1 flex min-w-0 items-center gap-2">
-          <span className="text-muted-foreground truncate font-mono text-xs">
-            {project.slug}
-          </span>
-          <Badge variant="secondary" className="shrink-0 text-[10px]">
-            {project.role}
-          </Badge>
-        </div>
-      </div>
+      <p className="min-w-0 truncate text-base font-semibold">
+        {project.display_name}
+      </p>
     </div>
   );
 }
@@ -330,10 +326,20 @@ function ProjectNavigationLinksContent({
         {!iconOnly && visibleLabel}
       </Link>
     );
-    return mobile ? (
-      <SheetClose key={href} asChild>
-        {link}
-      </SheetClose>
+    if (mobile) {
+      return (
+        <SheetClose key={href} asChild>
+          {link}
+        </SheetClose>
+      );
+    }
+    return iconOnly ? (
+      <Tooltip key={href}>
+        <TooltipTrigger asChild>{link}</TooltipTrigger>
+        <TooltipContent side="right" align="center">
+          {visibleLabel}
+        </TooltipContent>
+      </Tooltip>
     ) : (
       link
     );
@@ -351,6 +357,16 @@ function ProjectNavigationLinksContent({
       <ArrowLeftIcon aria-hidden className="size-4" />
       {!collapsed && "返回工作空间"}
     </Link>
+  );
+  const visibleWorkspaceLink = collapsed ? (
+    <Tooltip>
+      <TooltipTrigger asChild>{workspaceLink}</TooltipTrigger>
+      <TooltipContent side="right" align="center">
+        返回工作空间
+      </TooltipContent>
+    </Tooltip>
+  ) : (
+    workspaceLink
   );
   return (
     <nav
@@ -385,7 +401,7 @@ function ProjectNavigationLinksContent({
         {mobile ? (
           <SheetClose asChild>{workspaceLink}</SheetClose>
         ) : (
-          workspaceLink
+          visibleWorkspaceLink
         )}
       </div>
     </nav>
@@ -434,7 +450,7 @@ export function ProjectDesktopNav({
         </>
       ) : (
         <>
-          <div className="border-border/70 border-b px-4 py-5">
+          <div className="border-foreground/15 border-b px-4 py-5">
             <div className="flex items-start justify-between gap-2">
               <ProjectBrand />
               <Button
@@ -487,7 +503,7 @@ export function ProjectMobileNav({
           side="left"
           className="bg-sidebar w-[min(20rem,85vw)] p-0"
         >
-          <SheetHeader className="border-border/70 border-b p-4 text-left">
+          <SheetHeader className="border-foreground/15 border-b p-4 text-left">
             <SheetTitle className="sr-only">项目导航</SheetTitle>
             <ProjectBrand />
             <div className="pt-3">
@@ -503,9 +519,8 @@ export function ProjectMobileNav({
         </SheetContent>
       </Sheet>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-semibold">{project.display_name}</p>
-        <p className="text-muted-foreground truncate font-mono text-xs">
-          {project.slug}
+        <p className="truncate text-base font-semibold">
+          {project.display_name}
         </p>
       </div>
       {account}

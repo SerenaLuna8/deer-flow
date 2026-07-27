@@ -8,6 +8,8 @@ import {
   useSkillBuilderSessions,
 } from "@/core/skill-builder";
 
+import { useCurrentProject } from "../project-context";
+
 import { ProjectAssetPageShell } from "./project-asset-page-shell";
 import { SkillAssetDetail } from "./skill-asset-detail";
 
@@ -32,6 +34,8 @@ export function ProjectSkillsPage({
 }: {
   selectedAssetId?: string | null;
 }) {
+  const project = useCurrentProject();
+
   return (
     <ProjectAssetPageShell
       kind="skills"
@@ -54,6 +58,10 @@ export function ProjectSkillsPage({
               onEditingChange: context.onEditingChange,
               onDirtyChange: context.onDirtyChange,
               onVersionCreated: context.onVersionCreated,
+              canManageCredentials: project.capabilities.includes(
+                "mcp.credentials.approve",
+              ),
+              credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
             }}
           />
         ) : (

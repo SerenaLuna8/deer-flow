@@ -57,6 +57,13 @@ from app.shared_assets.resolver import (
     materialize_mcp_secrets,
     resolve_project_asset_snapshot,
 )
+from app.shared_assets.skill_credential_service import (
+    EligibleSkillCredentialView,
+    SkillCredentialBindingInput,
+    SkillCredentialBindingService,
+    SkillCredentialBindingSetView,
+    SkillCredentialRequirementView,
+)
 from app.shared_assets.skill_service import (
     CreateSkill,
     ProjectSkillArchiveCreateResult,
@@ -117,6 +124,10 @@ __all__ = [
     "SharedAssetGovernanceEventSink",
     "SkillArchiveFile",
     "SkillArchivePreview",
+    "SkillCredentialBindingInput",
+    "SkillCredentialBindingService",
+    "SkillCredentialBindingSetView",
+    "SkillCredentialRequirementView",
     "SkillAssetView",
     "SkillFileChange",
     "SkillFileContentView",
@@ -124,6 +135,7 @@ __all__ = [
     "SkillSecretRequirementView",
     "SkillService",
     "SkillVersionView",
+    "EligibleSkillCredentialView",
     "SystemAssetGovernanceContext",
     "SystemAssetBinding",
     "WorkflowStatus",

@@ -39,6 +39,7 @@ class CredentialRow(Base):
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     credential_type: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
+    is_delete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
     source_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -56,6 +57,11 @@ class CredentialRow(Base):
         CheckConstraint("status IN ('active', 'revoked')", name="ck_credentials_status"),
         CheckConstraint("version >= 1", name="ck_credentials_version"),
         UniqueConstraint("id", "scope", name="uq_credentials_id_scope"),
+        UniqueConstraint(
+            "project_id",
+            "id",
+            name="uq_credentials_project_asset_id",
+        ),
         UniqueConstraint("source_key", name="uq_credentials_source_key"),
         ForeignKeyConstraint(
             ["id", "current_version_id"],
@@ -67,14 +73,20 @@ class CredentialRow(Base):
             "uq_credentials_system_name",
             func.lower(name),
             unique=True,
-            postgresql_where=text("scope = 'system'"),
+            postgresql_where=text("scope = 'system' AND is_delete = false"),
         ),
         Index(
             "uq_credentials_project_name",
             project_id,
             func.lower(name),
             unique=True,
-            postgresql_where=text("scope = 'project'"),
+            postgresql_where=text("scope = 'project' AND is_delete = false"),
+        ),
+        Index(
+            "ix_credentials_scope_project_is_delete",
+            scope,
+            project_id,
+            is_delete,
         ),
     )
 

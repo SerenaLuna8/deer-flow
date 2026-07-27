@@ -189,6 +189,14 @@ type AssetMock = {
     sourceVersionId: string;
   }>;
   agentInstructionRequests: () => AgentInstructionsInput[];
+  skillCredentialRequests: () => Array<{
+    expected_revision: number;
+    bindings: Array<{
+      name: string;
+      credential_version_id: string;
+    }>;
+  }>;
+  credentialDeleteExpectedVersions: () => number[];
 };
 
 async function mockProjectAssets(
@@ -196,6 +204,7 @@ async function mockProjectAssets(
   options: {
     agentLifecycle?: boolean;
     skillFileWorkflow?: boolean;
+    skillCredentialWorkflow?: boolean;
   } = {},
 ): Promise<AssetMock> {
   let systemAgent = asset(
@@ -245,9 +254,20 @@ async function mockProjectAssets(
     version_number: 1,
     workflow_status: "published",
     description: "Immutable source Skill",
-    frontmatter: {},
+    frontmatter: options.skillCredentialWorkflow
+      ? {
+          "required-secrets": [
+            {
+              name: "API_TOKEN",
+              optional: false,
+            },
+          ],
+        }
+      : {},
     compatibility: null,
-    secret_requirements: [],
+    secret_requirements: options.skillCredentialWorkflow
+      ? [{ name: "API_TOKEN", optional: false }]
+      : [],
     scan_decision: "allow",
     scan_rule_ids: [],
     scan_summary: {},
@@ -264,9 +284,10 @@ async function mockProjectAssets(
     created_by_user_id: "user-1",
     created_at: now,
   };
-  let skillVersions: SkillVersion[] = options.skillFileWorkflow
-    ? [sourceSkillVersion]
-    : [];
+  let skillVersions: SkillVersion[] =
+    options.skillFileWorkflow || options.skillCredentialWorkflow
+      ? [sourceSkillVersion]
+      : [];
   let createdSkillVersions: SkillVersion[] = [];
   let mcpVersions: McpVersion[] = [];
   let credential: ProjectCredentialItem | null = null;
@@ -285,11 +306,21 @@ async function mockProjectAssets(
     body: SkillFileForkInput;
     sourceVersionId: string;
   }> = [];
+  const skillCredentialRequests: Array<{
+    expected_revision: number;
+    bindings: Array<{
+      name: string;
+      credential_version_id: string;
+    }>;
+  }> = [];
+  const credentialDeleteExpectedVersions: number[] = [];
+  let skillCredentialRevision = 0;
+  let skillCredentialVersionId: string | null = null;
   const skillFileContents = new Map<string, string>([
     [SKILL_SOURCE_VERSION_ID, SKILL_SOURCE_CONTENT],
   ]);
 
-  if (options.skillFileWorkflow) {
+  if (options.skillFileWorkflow || options.skillCredentialWorkflow) {
     projectSkill = {
       ...projectSkill,
       current_published_version_id: SKILL_SOURCE_VERSION_ID,
@@ -537,6 +568,104 @@ async function mockProjectAssets(
         system_items: [systemCredential],
         project_items: credential ? [credential] : [],
         request_id: "request-credentials",
+      });
+      return;
+    }
+
+    if (
+      path.endsWith(
+        `/api/projects/${PROJECT_ID}/skills/${PROJECT_SKILL_ID}/credential-bindings`,
+      ) &&
+      method === "GET"
+    ) {
+      await json(route, {
+        skill_id: PROJECT_SKILL_ID,
+        skill_version_id: SKILL_SOURCE_VERSION_ID,
+        revision: skillCredentialRevision,
+        requirements: [
+          {
+            name: "API_TOKEN",
+            optional: false,
+            configured: skillCredentialVersionId !== null,
+            credential_id:
+              skillCredentialVersionId === null ? null : CREDENTIAL_ID,
+            credential_version_id: skillCredentialVersionId,
+            credential_display_name:
+              skillCredentialVersionId === null ? null : "Project API",
+            credential_version_number:
+              skillCredentialVersionId === null ? null : 1,
+            eligible_credentials: [
+              {
+                credential_id: CREDENTIAL_ID,
+                credential_version_id: CREDENTIAL_VERSION_ID,
+                display_name: "Project API",
+                version_number: 1,
+              },
+            ],
+          },
+        ],
+        request_id: "request-skill-credential-bindings",
+      });
+      return;
+    }
+    if (
+      path.endsWith(
+        `/api/projects/${PROJECT_ID}/skills/${PROJECT_SKILL_ID}/credential-bindings`,
+      ) &&
+      method === "PUT"
+    ) {
+      const body = request.postDataJSON() as {
+        expected_revision: number;
+        bindings: Array<{
+          name: string;
+          credential_version_id: string;
+        }>;
+      };
+      skillCredentialRequests.push(body);
+      if (
+        body.expected_revision !== skillCredentialRevision ||
+        body.bindings.length !== 1 ||
+        body.bindings[0]?.name !== "API_TOKEN" ||
+        body.bindings[0]?.credential_version_id !== CREDENTIAL_VERSION_ID
+      ) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_validation_failed",
+              request_id: "request-skill-credential-invalid",
+            },
+          },
+          422,
+        );
+        return;
+      }
+      skillCredentialRevision += 1;
+      skillCredentialVersionId = CREDENTIAL_VERSION_ID;
+      await json(route, {
+        skill_id: PROJECT_SKILL_ID,
+        skill_version_id: SKILL_SOURCE_VERSION_ID,
+        revision: skillCredentialRevision,
+        requirements: [
+          {
+            name: "API_TOKEN",
+            optional: false,
+            configured: true,
+            credential_id: CREDENTIAL_ID,
+            credential_version_id: CREDENTIAL_VERSION_ID,
+            credential_display_name: "Project API",
+            credential_version_number: 1,
+            eligible_credentials: [
+              {
+                credential_id: CREDENTIAL_ID,
+                credential_version_id: CREDENTIAL_VERSION_ID,
+                display_name: "Project API",
+                version_number: 1,
+              },
+            ],
+          },
+        ],
+        request_id: "request-skill-credential-bindings-updated",
       });
       return;
     }
@@ -1363,6 +1492,29 @@ async function mockProjectAssets(
       });
       return;
     }
+    if (
+      path.endsWith(`/credentials/${CREDENTIAL_ID}`) &&
+      method === "DELETE" &&
+      credential
+    ) {
+      const body = request.postDataJSON() as {
+        expected_credential_version: number;
+      };
+      credentialDeleteExpectedVersions.push(body.expected_credential_version);
+      if (
+        !(await requireExpectedVersion(
+          route,
+          body.expected_credential_version,
+          credential.version,
+        ))
+      ) {
+        return;
+      }
+      credential = null;
+      credentialVersions = [];
+      await route.fulfill({ status: 204 });
+      return;
+    }
 
     await json(
       route,
@@ -1380,6 +1532,10 @@ async function mockProjectAssets(
     skillFileRequests: () => [...skillFileRequests],
     skillForkRequests: () => [...skillForkRequests],
     agentInstructionRequests: () => [...agentInstructionRequests],
+    skillCredentialRequests: () => [...skillCredentialRequests],
+    credentialDeleteExpectedVersions: () => [
+      ...credentialDeleteExpectedVersions,
+    ],
   };
 }
 
@@ -1504,6 +1660,63 @@ test("Skill list shows descriptions and keeps quick binding separate from detail
 
   expect(mock.validatedMutations()).toBe(2);
   expect(mock.staleConflicts()).toBe(0);
+});
+
+test("Skill Credential binding stays metadata-only and version-scoped", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const mock = await mockProjectAssets(page, {
+    skillCredentialWorkflow: true,
+  });
+
+  await page.goto("/projects/research-lab/skills");
+  await page.getByRole("button", { name: "查看 Review Skill 详情" }).click();
+
+  const detail = page.getByRole("dialog", {
+    name: "Review Skill",
+    exact: true,
+  });
+  await expect(detail.getByRole("heading", { name: "环境变量" })).toBeVisible();
+  await expect(
+    detail
+      .getByLabel("选择 Skill 环境变量")
+      .locator('option[value="API_TOKEN"]'),
+  ).toHaveText("API_TOKEN（必需）");
+  await detail.getByLabel("选择 Skill 环境变量").selectOption("API_TOKEN");
+  await expect(detail.getByLabel("选择 Credential")).toBeEnabled();
+  await expect(
+    detail
+      .getByLabel("选择 Credential")
+      .locator(`option[value="${CREDENTIAL_VERSION_ID}"]`),
+  ).toHaveText("Project API · 版本 1");
+  await detail
+    .getByLabel("选择 Credential")
+    .selectOption(CREDENTIAL_VERSION_ID);
+  await detail.getByRole("button", { name: "添加", exact: true }).click();
+  await expect(detail.getByText("API_TOKEN", { exact: true })).toBeVisible();
+  await expect(detail.getByText("必需", { exact: true })).toBeVisible();
+  await detail.getByRole("button", { name: "保存配置" }).click();
+
+  await expect(
+    detail.getByRole("paragraph").filter({
+      hasText: "Project API · 版本 1",
+    }),
+  ).toBeVisible();
+  expect(mock.skillCredentialRequests()).toEqual([
+    {
+      expected_revision: 0,
+      bindings: [
+        {
+          name: "API_TOKEN",
+          credential_version_id: CREDENTIAL_VERSION_ID,
+        },
+      ],
+    },
+  ]);
+  expect(JSON.stringify(mock.skillCredentialRequests())).not.toMatch(
+    /secret|token_value|credential_value/iu,
+  );
 });
 
 test("project Skill delete waits five seconds and removes the whole package", async ({
@@ -1784,7 +1997,7 @@ test("project Credential replace requires explicit grant migration and confirmed
   page,
 }) => {
   mockLangGraphAPI(page);
-  await mockProjectAssets(page);
+  const mock = await mockProjectAssets(page);
 
   await page.goto("/projects/research-lab/credentials");
   await page.getByRole("tab", { name: /项目自建/u }).click();
@@ -1808,16 +2021,16 @@ test("project Credential replace requires explicit grant migration and confirmed
     "rotated-project-secret",
   );
   await expect(page.getByRole("note")).toContainText(
-    "既有 Grant 仍固定到 retired version",
+    "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
   );
 
-  await page.getByRole("button", { name: "迁移兼容 Grant" }).click();
+  await page.getByRole("button", { name: "迁移兼容引用" }).click();
   const migrationDialog = page.getByRole("dialog", {
-    name: "迁移 Credential Grant",
+    name: "迁移 Credential 兼容引用",
   });
   await expect(migrationDialog).toContainText("字段结构完全兼容");
-  await migrationDialog.getByRole("button", { name: "确认迁移 Grant" }).click();
-  await expect(page.getByRole("status")).toContainText("已完成兼容 Grant 迁移");
+  await migrationDialog.getByRole("button", { name: "确认迁移引用" }).click();
+  await expect(page.getByRole("status")).toContainText("已完成兼容引用迁移");
 
   await page.getByRole("button", { name: "撤销凭据" }).click();
   const revokeDialog = page.getByRole("dialog", {
@@ -1832,6 +2045,20 @@ test("project Credential replace requires explicit grant migration and confirmed
     .getByRole("button", { name: "确认永久撤销" })
     .click();
   await expect(page.getByText("已撤销", { exact: true })).toHaveCount(3);
+
+  await page.getByRole("button", { name: "删除", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", {
+    name: "删除 Credential？",
+  });
+  await expect(deleteDialog).toContainText("仅审计记录保留");
+  const confirmDelete = deleteDialog.getByRole("button", {
+    name: /确认删除/u,
+  });
+  await expect(confirmDelete).toBeDisabled();
+  await expect(confirmDelete).toBeEnabled({ timeout: 6_000 });
+  await confirmDelete.click();
+  await expect(page.getByText("GitHub", { exact: true })).toHaveCount(0);
+  expect(mock.credentialDeleteExpectedVersions()).toEqual([3]);
 });
 
 test("project asset authoring, approval, Credential safety, and scope switch", async ({
@@ -1998,15 +2225,15 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   await page.getByRole("button", { name: "替换凭据" }).last().click();
   await expect(page.locator("body")).not.toContainText("rotated-secret");
   await expect(credentialCard).toContainText(
-    "既有 Grant 仍固定到 retired version",
+    "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
   );
-  await page.getByRole("button", { name: "迁移兼容 Grant" }).click();
+  await page.getByRole("button", { name: "迁移兼容引用" }).click();
   const migrationDialog = page.getByRole("dialog", {
-    name: "迁移 Credential Grant",
+    name: "迁移 Credential 兼容引用",
   });
   await expect(migrationDialog).toContainText("字段结构完全兼容");
-  await migrationDialog.getByRole("button", { name: "确认迁移 Grant" }).click();
-  await expect(page.getByRole("status")).toContainText("已完成兼容 Grant 迁移");
+  await migrationDialog.getByRole("button", { name: "确认迁移引用" }).click();
+  await expect(page.getByRole("status")).toContainText("已完成兼容引用迁移");
 
   await page.getByRole("button", { name: "撤销凭据" }).click();
   const revokeDialog = page.getByRole("dialog", {

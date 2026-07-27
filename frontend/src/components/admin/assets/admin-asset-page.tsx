@@ -13,13 +13,20 @@ import { useState } from "react";
 
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
+import {
+  CredentialDeleteDialog,
+  createCredentialDeleteSnapshot,
+  type CredentialDeleteSnapshot,
+} from "@/components/projects/assets/credential-delete-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
   adminAssetKey,
+  adminAssetVersionsKey,
   createAdminCredential,
+  deleteAdminCredential,
   migrateAdminCredentialGrants,
   replaceAdminCredential,
   revokeAdminCredential,
@@ -206,12 +213,14 @@ export function CredentialMetadataCard({
   onReplace,
   onMigrate,
   onRevoke,
+  onDelete,
 }: {
   credential: CredentialMetadata;
   pending?: boolean;
   onReplace: () => void;
   onMigrate: () => void;
   onRevoke: () => void;
+  onDelete: () => void;
 }) {
   return (
     <Card>
@@ -251,8 +260,8 @@ export function CredentialMetadataCard({
                 role="note"
                 className="border-border bg-muted/30 text-muted-foreground rounded-lg border px-3 py-2 text-xs"
               >
-                替换只创建新版本；既有 Grant 仍固定到 retired
-                version，轮换需要显式迁移。
+                替换只创建新版本；既有 MCP Grant 与 Skill
+                环境变量绑定仍固定到旧版本，轮换需要显式迁移。
               </div>
             )}
             <div className="flex flex-wrap gap-2">
@@ -273,7 +282,7 @@ export function CredentialMetadataCard({
                   disabled={pending}
                   onClick={onMigrate}
                 >
-                  迁移兼容 Grant
+                  迁移兼容引用
                 </Button>
               )}
               <Button
@@ -288,6 +297,15 @@ export function CredentialMetadataCard({
             </div>
           </div>
         )}
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          disabled={pending}
+          onClick={onDelete}
+        >
+          删除
+        </Button>
       </CardContent>
     </Card>
   );
@@ -302,12 +320,14 @@ function useSecureCredentialWrite(accountId: string) {
   async function run(
     operation: () => Promise<unknown>,
     successMessage?: string,
+    onSuccess?: () => void,
   ): Promise<boolean> {
     setPending(true);
     setErrorMessage(null);
     setNoticeMessage(null);
     try {
       await operation();
+      onSuccess?.();
       await queryClient.invalidateQueries({
         queryKey: adminAssetKey(accountId, "credentials"),
       });
@@ -345,6 +365,9 @@ function CredentialCardWithHistory({
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [migrationOpen, setMigrationOpen] = useState(false);
+  const [deleteSnapshot, setDeleteSnapshot] =
+    useState<CredentialDeleteSnapshot | null>(null);
+  const queryClient = useQueryClient();
   const history = useAdminAssetVersions(
     accountId,
     "credentials",
@@ -367,6 +390,12 @@ function CredentialCardWithHistory({
         onRevoke={() => {
           secureWrite.clearError();
           setRevokeOpen(true);
+        }}
+        onDelete={() => {
+          secureWrite.clearError();
+          setDeleteSnapshot(
+            createCredentialDeleteSnapshot(credential, Date.now()),
+          );
         }}
       />
       <div className="border-border/70 rounded-xl border p-4">
@@ -408,7 +437,7 @@ function CredentialCardWithHistory({
                 migrateAdminCredentialGrants(credential.id, {
                   expected_credential_version: credential.version,
                 }),
-              "已完成兼容 Grant 迁移；没有待迁移 Grant 时不会更改授权。",
+              "已完成兼容引用迁移；没有待迁移的 MCP Grant 或 Skill 环境变量绑定时不会更改授权。",
             )
             .then((success) => success && setMigrationOpen(false));
         }}
@@ -428,6 +457,50 @@ function CredentialCardWithHistory({
             .then((success) => success && setRevokeOpen(false));
         }}
       />
+      {deleteSnapshot ? (
+        <CredentialDeleteDialog
+          key={`${deleteSnapshot.credentialId}:${deleteSnapshot.startedAt}`}
+          snapshot={deleteSnapshot}
+          pending={secureWrite.pending}
+          errorMessage={secureWrite.errorMessage}
+          onOpenChange={(open) => !open && setDeleteSnapshot(null)}
+          onConfirm={() => {
+            const snapshot = deleteSnapshot;
+            void secureWrite
+              .run(
+                () =>
+                  deleteAdminCredential(snapshot.credentialId, {
+                    expected_credential_version:
+                      snapshot.expectedCredentialVersion,
+                  }),
+                undefined,
+                () => {
+                  queryClient.setQueryData<AdminCredentialList>(
+                    adminAssetKey(accountId, "credentials"),
+                    (current) =>
+                      current
+                        ? {
+                            ...current,
+                            items: current.items.filter(
+                              (item) => item.id !== snapshot.credentialId,
+                            ),
+                          }
+                        : current,
+                  );
+                  queryClient.removeQueries({
+                    queryKey: adminAssetVersionsKey(
+                      accountId,
+                      "credentials",
+                      snapshot.credentialId,
+                    ),
+                    exact: true,
+                  });
+                },
+              )
+              .then((success) => success && setDeleteSnapshot(null));
+          }}
+        />
+      ) : null}
     </div>
   );
 }

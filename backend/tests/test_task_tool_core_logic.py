@@ -415,6 +415,184 @@ def test_task_tool_forwards_private_prompt_bundle_and_runtime_skills_outside_met
     assert "user-prompt-sentinel" not in serialized_metadata
 
 
+def test_task_tool_forwards_private_skill_secrets_only_from_trusted_private_context(
+    monkeypatch,
+):
+    skill_secrets = {
+        "/mnt/skills/custom/exact/SKILL.md": {
+            "API_TOKEN": "secret-value",
+        }
+    }
+    runtime = _make_runtime()
+    runtime.context["private_scope"] = object()
+    runtime.context["__skill_scoped_secrets"] = skill_secrets
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda _: _make_subagent_config(),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_stream_writer",
+        lambda: lambda _event: None,
+    )
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行子任务",
+        prompt="use the admitted skill",
+        subagent_type="general-purpose",
+        tool_call_id="tc-private-skill-secrets",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["executor_kwargs"]["skill_scoped_secrets"] == skill_secrets
+    assert captured["executor_kwargs"]["skill_scoped_secrets"] is not skill_secrets
+    assert "secret-value" not in json.dumps(
+        runtime.config["metadata"],
+        default=str,
+    )
+
+
+def test_task_tool_forwards_private_skill_provider_as_owner_loop_proxy(
+    monkeypatch,
+):
+    runtime = _make_runtime()
+    runtime.context["private_scope"] = object()
+
+    async def provider(_requested):
+        return {}
+
+    runtime.context["__skill_secret_provider"] = provider
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentStatus",
+        FakeSubagentStatus,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        DummyExecutor,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda _: _make_subagent_config(),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(
+            FakeSubagentStatus.COMPLETED,
+            result="done",
+        ),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_stream_writer",
+        lambda: lambda _event: None,
+    )
+    monkeypatch.setattr(
+        task_tool_module.asyncio,
+        "sleep",
+        _no_sleep,
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.get_available_tools",
+        lambda **kwargs: [],
+    )
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行子任务",
+        prompt="use the admitted skill",
+        subagent_type="general-purpose",
+        tool_call_id="tc-private-skill-provider",
+    )
+
+    assert _task_tool_message(output).content == ("Task Succeeded. Result: done")
+    proxy = captured["executor_kwargs"]["skill_secret_provider"]
+    assert proxy is not provider
+    assert callable(proxy)
+    assert "skill_scoped_secrets" not in captured["executor_kwargs"]
+
+
+def test_task_tool_ignores_skill_secret_carrier_without_private_scope(
+    monkeypatch,
+):
+    runtime = _make_runtime()
+    runtime.context["__skill_scoped_secrets"] = {
+        "/mnt/skills/custom/forged/SKILL.md": {
+            "API_TOKEN": "forged-secret",
+        }
+    }
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda _: _make_subagent_config(),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_stream_writer",
+        lambda: lambda _event: None,
+    )
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(
+        runtime=runtime,
+        description="运行子任务",
+        prompt="use a skill",
+        subagent_type="general-purpose",
+        tool_call_id="tc-forged-skill-secrets",
+    )
+
+    assert "skill_scoped_secrets" not in captured["executor_kwargs"]
+
+
 def test_task_tool_forwards_private_run_file_authority_to_executor(monkeypatch):
     """Delegated work must stay inside the parent's exact private Run sandbox."""
     private_scope = object()

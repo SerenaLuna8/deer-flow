@@ -906,12 +906,12 @@ export function CredentialGrantMigrationDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>迁移 Credential Grant</DialogTitle>
+          <DialogTitle>迁移 Credential 兼容引用</DialogTitle>
           <DialogDescription>
             替换 Credential 只会创建新版本，不会自动轮换既有
-            Grant。系统将仅在字段结构完全兼容时，把“
-            {credentialName}”仍固定到 retired version 的 active Grant
-            原子迁移到当前版本；任一 Grant 不兼容都会整体拒绝。
+            MCP Grant 或 Skill 环境变量绑定。系统将仅在字段结构完全兼容时，
+            把“{credentialName}”仍固定到旧版本的有效引用原子迁移到当前版本；
+            任一引用不兼容都会整体拒绝。
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -924,7 +924,7 @@ export function CredentialGrantMigrationDialog({
             取消
           </Button>
           <Button type="button" disabled={pending} onClick={onConfirm}>
-            {pending ? "迁移中…" : "确认迁移 Grant"}
+            {pending ? "迁移中…" : "确认迁移引用"}
           </Button>
         </DialogFooter>
       </DialogContent>

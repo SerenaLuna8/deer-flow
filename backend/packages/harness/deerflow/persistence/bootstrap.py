@@ -23,10 +23,14 @@ from deerflow.persistence.final_schema_contract import (
     inventory_user_schema_objects,
     verify_m7_baseline_catalog,
     verify_m7_catalog,
+    verify_m7_skill_builder_catalog,
+    verify_m7_skill_credential_catalog,
 )
 
 BASELINE_SCHEMA_REVISION = "0001_project_saas_baseline"
-CURRENT_SCHEMA_REVISION = "0002_skill_design_builder"
+SKILL_BUILDER_SCHEMA_REVISION = "0002_skill_design_builder"
+SKILL_CREDENTIAL_SCHEMA_REVISION = "0003_skill_credentials"
+CURRENT_SCHEMA_REVISION = "0004_credential_soft_delete"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
@@ -126,6 +130,14 @@ async def classify_database(
         raise M7RecreateRequired()
     if revision == BASELINE_SCHEMA_REVISION:
         if await verify_m7_baseline_catalog(connection):
+            return "upgradeable"
+        raise M7RecreateRequired()
+    if revision == SKILL_BUILDER_SCHEMA_REVISION:
+        if await verify_m7_skill_builder_catalog(connection):
+            return "upgradeable"
+        raise M7RecreateRequired()
+    if revision == SKILL_CREDENTIAL_SCHEMA_REVISION:
+        if await verify_m7_skill_credential_catalog(connection):
             return "upgradeable"
         raise M7RecreateRequired()
     raise M7RecreateRequired()
@@ -243,6 +255,8 @@ async def _run_alembic_offload(function, *args) -> None:
 __all__ = [
     "BASELINE_SCHEMA_REVISION",
     "CURRENT_SCHEMA_REVISION",
+    "SKILL_BUILDER_SCHEMA_REVISION",
+    "SKILL_CREDENTIAL_SCHEMA_REVISION",
     "M7RecreateRequired",
     "M7_FINAL_SCHEMA_REVISION",
     "SchemaMigrationRequired",

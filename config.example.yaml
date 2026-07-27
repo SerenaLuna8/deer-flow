@@ -1,4 +1,4 @@
-config_version: 27
+config_version: 28
 log_level: info
 logging:
   enhance:
@@ -119,6 +119,13 @@ loop_detection:
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
+  tool_freq_overrides:
+    web_search:
+      warn: 6
+      hard_limit: 10
+    web_fetch:
+      warn: 6
+      hard_limit: 10
 read_before_write:
   enabled: true
 safety_finish_reason:

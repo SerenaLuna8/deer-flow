@@ -61,6 +61,7 @@ class AuditAction(StrEnum):
     ASSET_CREDENTIAL_CREATED = "asset.credential_created"
     ASSET_CREDENTIAL_REPLACED = "asset.credential_replaced"
     ASSET_CREDENTIAL_REVOKED = "asset.credential_revoked"
+    ASSET_CREDENTIAL_DELETED = "asset.credential_deleted"
     ASSET_CREDENTIAL_GRANTS_MIGRATED = "asset.credential_grants_migrated"
     AUTOMATION_CREATED = "automation.created"
     AUTOMATION_UPDATED = "automation.updated"
@@ -218,6 +219,7 @@ for _action in (
     AuditAction.ASSET_CREDENTIAL_CREATED,
     AuditAction.ASSET_CREDENTIAL_REPLACED,
     AuditAction.ASSET_CREDENTIAL_REVOKED,
+    AuditAction.ASSET_CREDENTIAL_DELETED,
     AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
 ):
     _ACTION_CONTRACTS[_action] = AuditActionContract(
@@ -729,6 +731,7 @@ for _action in (
     AuditAction.ASSET_CREDENTIAL_CREATED,
     AuditAction.ASSET_CREDENTIAL_REPLACED,
     AuditAction.ASSET_CREDENTIAL_REVOKED,
+    AuditAction.ASSET_CREDENTIAL_DELETED,
     AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
 ):
     _AUDIT_METADATA_MODELS[_action] = AssetAuditMetadata

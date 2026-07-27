@@ -923,6 +923,12 @@ class SkillDesignService:
                     operation.status = "completed"
                     operation.result_revision = row.revision
                     await session.flush()
+                    # PostgreSQL's shared ``updated_at`` trigger is authoritative.
+                    # Refresh before building the response so the first result and
+                    # an idempotent replay expose the same committed timestamp.
+                    refresh = getattr(session, "refresh", None)
+                    if refresh is not None:
+                        await refresh(row)
                     return self._session_view(context, row, ())
         except SharedAssetError:
             raise

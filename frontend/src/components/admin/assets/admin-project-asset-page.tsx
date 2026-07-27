@@ -14,6 +14,11 @@ import {
 } from "@/components/admin/assets/admin-asset-dialogs";
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
+import {
+  CredentialDeleteDialog,
+  createCredentialDeleteSnapshot,
+  type CredentialDeleteSnapshot,
+} from "@/components/projects/assets/credential-delete-dialog";
 import { settleMcpApproval } from "@/components/projects/assets/mcp-approval-dialog";
 import {
   ProjectAssetCatalogView,
@@ -26,7 +31,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
   adminProjectAssetKey,
+  adminProjectAssetVersionsKey,
   createAdminProjectCredential,
+  deleteAdminProjectCredential,
   migrateAdminProjectCredentialGrants,
   replaceAdminProjectCredential,
   revokeAdminProjectCredential,
@@ -318,12 +325,14 @@ function useSecureAdminProjectCredentialWrite(
   async function run(
     operation: () => Promise<unknown>,
     successMessage?: string,
+    onSuccess?: () => void,
   ): Promise<boolean> {
     setPending(true);
     setErrorMessage(null);
     setNoticeMessage(null);
     try {
       await operation();
+      onSuccess?.();
       await queryClient.invalidateQueries({
         queryKey: adminProjectAssetKey(accountId, projectId, "credentials"),
       });
@@ -442,6 +451,7 @@ function AdminProjectCredentials({
   accountId: string;
   projectId: string;
 }) {
+  const queryClient = useQueryClient();
   const query = useAdminProjectAssets(accountId, projectId, "credentials");
   const secureWrite = useSecureAdminProjectCredentialWrite(
     accountId,
@@ -454,6 +464,8 @@ function AdminProjectCredentials({
     useState<ProjectCredentialItem | null>(null);
   const [revokeCredential, setRevokeCredential] =
     useState<ProjectCredentialItem | null>(null);
+  const [deleteSnapshot, setDeleteSnapshot] =
+    useState<CredentialDeleteSnapshot | null>(null);
 
   if (query.isLoading) return <Skeleton className="h-72 w-full" />;
   if (query.error || !query.data) return <ErrorNotice error={query.error} />;
@@ -501,6 +513,12 @@ function AdminProjectCredentials({
           secureWrite.clearMessage();
           setRevokeCredential(credential);
         }}
+        onDelete={(credential) => {
+          secureWrite.clearMessage();
+          setDeleteSnapshot(
+            createCredentialDeleteSnapshot(credential, Date.now()),
+          );
+        }}
         renderDetails={(credential) => (
           <AdminProjectCredentialHistory
             accountId={accountId}
@@ -547,7 +565,7 @@ function AdminProjectCredentials({
                       expected_credential_version: migrateCredential.version,
                     },
                   ),
-                "已完成兼容 Grant 迁移；没有待迁移 Grant 时不会更改授权。",
+                "已完成兼容引用迁移；没有待迁移的 MCP Grant 或 Skill 环境变量绑定时不会更改授权。",
               )
               .then((success) => success && setMigrateCredential(null));
           }}
@@ -567,6 +585,58 @@ function AdminProjectCredentials({
                 }),
               )
               .then((success) => success && setRevokeCredential(null));
+          }}
+        />
+      ) : null}
+      {deleteSnapshot ? (
+        <CredentialDeleteDialog
+          key={`${deleteSnapshot.credentialId}:${deleteSnapshot.startedAt}`}
+          snapshot={deleteSnapshot}
+          pending={secureWrite.pending}
+          errorMessage={secureWrite.errorMessage}
+          onOpenChange={(open) => !open && setDeleteSnapshot(null)}
+          onConfirm={() => {
+            const snapshot = deleteSnapshot;
+            void secureWrite
+              .run(
+                () =>
+                  deleteAdminProjectCredential(
+                    projectId,
+                    snapshot.credentialId,
+                    {
+                      expected_credential_version:
+                        snapshot.expectedCredentialVersion,
+                    },
+                  ),
+                undefined,
+                () => {
+                  queryClient.setQueryData<ProjectCredentialList>(
+                    adminProjectAssetKey(accountId, projectId, "credentials"),
+                    (current) =>
+                      current
+                        ? {
+                            ...current,
+                            system_items: current.system_items.filter(
+                              (item) => item.id !== snapshot.credentialId,
+                            ),
+                            project_items: current.project_items.filter(
+                              (item) => item.id !== snapshot.credentialId,
+                            ),
+                          }
+                        : current,
+                  );
+                  queryClient.removeQueries({
+                    queryKey: adminProjectAssetVersionsKey(
+                      accountId,
+                      projectId,
+                      "credentials",
+                      snapshot.credentialId,
+                    ),
+                    exact: true,
+                  });
+                },
+              )
+              .then((success) => success && setDeleteSnapshot(null));
           }}
         />
       ) : null}

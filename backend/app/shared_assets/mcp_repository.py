@@ -658,6 +658,7 @@ class McpRepository:
                 McpServerRow.project_id == context.project_id,
                 CredentialRow.scope == "project",
                 CredentialRow.project_id == context.project_id,
+                CredentialRow.is_delete.is_(False),
                 self._project_context_exists(context),
             )
         )
@@ -692,6 +693,7 @@ class McpRepository:
                 McpServerRow.project_id == context.project_id,
                 CredentialRow.scope == "project",
                 CredentialRow.project_id == context.project_id,
+                CredentialRow.is_delete.is_(False),
             )
         )
         result = (await self.session.execute(statement)).one_or_none()
@@ -725,6 +727,7 @@ class McpRepository:
                 McpServerRow.project_id.is_(None),
                 CredentialRow.scope == "system",
                 CredentialRow.project_id.is_(None),
+                CredentialRow.is_delete.is_(False),
             )
         )
         result = (await self.session.execute(statement)).one_or_none()

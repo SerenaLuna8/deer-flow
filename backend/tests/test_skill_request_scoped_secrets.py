@@ -9,6 +9,8 @@ Covers the full feature surface:
   - Slice 5: the five leak surfaces (prompt / trace / checkpoint / audit / stdout).
 """
 
+import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -18,6 +20,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
 
@@ -382,6 +385,21 @@ class TestSecretCarrier:
         assert extract_request_secrets({"secrets": "not-a-dict"}) == {}
         assert extract_request_secrets(None) == {}
 
+    def test_extract_skill_scoped_secrets_filters_malformed_entries_and_normalizes_paths(self):
+        from deerflow.runtime.secret_context import extract_skill_scoped_secrets
+
+        context = {
+            "__skill_scoped_secrets": {
+                "/mnt/skills/custom/erp/../erp/SKILL.md": {"API_TOKEN": "erp-value", "BAD": 123},
+                "/mnt/skills/custom/crm/SKILL.md": "not-a-mapping",
+                42: {"API_TOKEN": "ignored"},
+            }
+        }
+
+        assert extract_skill_scoped_secrets(context) == {
+            "/mnt/skills/custom/erp/SKILL.md": {"API_TOKEN": "erp-value"},
+        }
+
 
 def _make_secret_skill(tmp_path: Path, name: str, required_secrets, *, enabled: bool = True, secrets_autonomous: bool = True):
     skill_dir = tmp_path / name
@@ -622,6 +640,171 @@ class TestInContextBindsSecrets:
 
         assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
 
+    def test_skill_scoped_carrier_isolates_same_env_name_between_slash_activations(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        erp = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        crm = _make_secret_skill(tmp_path, "crm-sync", [SecretRequirement("API_TOKEN")])
+        context = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                erp.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value"},
+                crm.get_container_file_path("/mnt/skills"): {"API_TOKEN": "crm-value"},
+            }
+        }
+
+        middleware = self._run_call(tmp_path, monkeypatch, [erp, crm], context=context, message="/erp-report run")
+        assert read_active_secrets(context) == {"API_TOKEN": "erp-value"}
+
+        self._run_call(tmp_path, monkeypatch, [erp, crm], context=context, message="/crm-sync run", middleware=middleware)
+        assert read_active_secrets(context) == {"API_TOKEN": "crm-value"}
+
+    def test_skill_scoped_carrier_uses_exact_in_context_skill_path(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        erp = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        crm = _make_secret_skill(tmp_path, "crm-sync", [SecretRequirement("API_TOKEN")])
+        context = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                erp.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value"},
+                crm.get_container_file_path("/mnt/skills"): {"API_TOKEN": "crm-value"},
+            }
+        }
+
+        self._run_call(tmp_path, monkeypatch, [erp, crm], context=context, skill_context=[_skill_context_entry(crm)])
+
+        assert read_active_secrets(context) == {"API_TOKEN": "crm-value"}
+
+    def test_conflicting_in_context_values_for_same_env_fail_closed_and_audit_names_only(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        erp = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        crm = _make_secret_skill(tmp_path, "crm-sync", [SecretRequirement("API_TOKEN")])
+        journal = MagicMock()
+        context = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                erp.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value-secret"},
+                crm.get_container_file_path("/mnt/skills"): {"API_TOKEN": "crm-value-secret"},
+            },
+            "__run_journal": journal,
+        }
+
+        self._run_call(
+            tmp_path,
+            monkeypatch,
+            [erp, crm],
+            context=context,
+            skill_context=[_skill_context_entry(erp), _skill_context_entry(crm)],
+        )
+
+        assert read_active_secrets(context) == {}
+        bind_calls = [call for call in journal.record_middleware.call_args_list if call.kwargs.get("action") == "bind_secrets"]
+        assert len(bind_calls) == 1
+        assert bind_calls[0].kwargs["changes"]["conflicts"] == {
+            "API_TOKEN": ["crm-sync", "erp-report"],
+        }
+        assert "erp-value-secret" not in str(bind_calls[0])
+        assert "crm-value-secret" not in str(bind_calls[0])
+
+    def test_slash_value_wins_same_env_conflict_independent_of_skill_context_order(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        erp = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        crm = _make_secret_skill(tmp_path, "crm-sync", [SecretRequirement("API_TOKEN")])
+        entries = [_skill_context_entry(erp), _skill_context_entry(crm)]
+
+        for skill_context in (entries, list(reversed(entries))):
+            context = {
+                SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                    erp.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value-secret"},
+                    crm.get_container_file_path("/mnt/skills"): {"API_TOKEN": "crm-value-secret"},
+                }
+            }
+            self._run_call(
+                tmp_path,
+                monkeypatch,
+                [erp, crm],
+                context=context,
+                skill_context=skill_context,
+                message="/crm-sync run",
+            )
+
+            assert read_active_secrets(context) == {"API_TOKEN": "crm-value-secret"}
+
+    def test_skill_scoped_carrier_does_not_inject_for_unactivated_skill(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        context = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                skill.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value"},
+            }
+        }
+
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, message="ordinary request")
+
+        assert read_active_secrets(context) == {}
+
+    def test_skill_scoped_carrier_takes_precedence_over_legacy_flat_value(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        context = {
+            "secrets": {"API_TOKEN": "legacy-flat-value"},
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                skill.get_container_file_path("/mnt/skills"): {"API_TOKEN": "scoped-value"},
+            },
+        }
+
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, message="/erp-report run")
+
+        assert read_active_secrets(context) == {"API_TOKEN": "scoped-value"}
+
+    def test_explicit_empty_scoped_entry_does_not_fall_back_to_flat_value(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        context = {
+            "secrets": {"API_TOKEN": "legacy-flat-value"},
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                skill.get_container_file_path("/mnt/skills"): {},
+            },
+        }
+
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, message="/erp-report run")
+
+        assert read_active_secrets(context) == {}
+
+    def test_skill_without_scoped_entry_keeps_legacy_flat_compatibility(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")])
+        context = {"secrets": {"API_TOKEN": "legacy-flat-value"}}
+
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, message="/erp-report run")
+
+        assert read_active_secrets(context) == {"API_TOKEN": "legacy-flat-value"}
+
+    def test_skill_scoped_carrier_respects_autonomous_opt_out_but_allows_slash(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("API_TOKEN")], secrets_autonomous=False)
+        carrier = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                skill.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value"},
+            }
+        }
+
+        self._run_call(tmp_path, monkeypatch, [skill], context=carrier, skill_context=[_skill_context_entry(skill)])
+        assert read_active_secrets(carrier) == {}
+
+        slash_context = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                skill.get_container_file_path("/mnt/skills"): {"API_TOKEN": "erp-value"},
+            }
+        }
+        self._run_call(tmp_path, monkeypatch, [skill], context=slash_context, message="/erp-report run")
+        assert read_active_secrets(slash_context) == {"API_TOKEN": "erp-value"}
+
     def test_binding_clears_when_skill_evicted_from_context(self, tmp_path, monkeypatch):
         """Long-lived binding follows skill_context membership exactly: once the
         entry is evicted (capacity) the injection disappears on the next call."""
@@ -805,6 +988,29 @@ class TestInContextBindsSecrets:
         # Values must never reach the audit journal.
         assert "tok-secret-value" not in str(bind_calls[0])
 
+    def test_skill_scoped_binding_audit_records_names_only(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        journal = MagicMock()
+        context = {
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {
+                skill.get_container_file_path("/mnt/skills"): {"ERP_TOKEN": "scoped-secret-value"},
+            },
+            "__run_journal": journal,
+        }
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+
+        bind_calls = [call for call in journal.record_middleware.call_args_list if call.kwargs.get("action") == "bind_secrets"]
+        assert len(bind_calls) == 1
+        assert bind_calls[0].kwargs["changes"] == {
+            "skills": ["erp-report"],
+            "secrets": ["ERP_TOKEN"],
+            "missing": {},
+            "conflicts": {},
+        }
+        assert "scoped-secret-value" not in str(bind_calls[0])
+
     def test_slash_binding_persists_across_model_calls_in_same_run(self, tmp_path, monkeypatch):
         """#3861 semantics preserved under per-call recompute: after the single
         activation call, the tool loop issues more model calls without a fresh
@@ -885,7 +1091,7 @@ class TestBashToolInjectsActiveSecrets:
 
         class FakeSandbox:
             def execute_command(self, command, env=None, timeout=None):
-                captured["env"] = env
+                captured["env"] = dict(env) if env else env
                 captured["timeout"] = timeout
                 return "done"
 
@@ -907,6 +1113,39 @@ class TestBashToolInjectsActiveSecrets:
         out, captured = self._run_bash({})
         assert captured["env"] in (None, {})
 
+    @pytest.mark.parametrize(
+        "error_factory",
+        [
+            lambda value: SandboxError(f"sandbox rejected PIN={value}"),
+            lambda value: PermissionError(f"permission rejected PIN={value}"),
+            lambda value: RuntimeError(f"unexpected failure PIN={value}"),
+        ],
+    )
+    def test_failure_surfaces_mask_short_active_secret(
+        self,
+        error_factory,
+    ):
+        from deerflow.sandbox import tools as tools_mod
+
+        secret = "1234"
+        runtime = SimpleNamespace(
+            context={"__active_skill_secrets": {"PIN": secret}},
+            state={},
+        )
+        with patch.object(
+            tools_mod,
+            "ensure_sandbox_initialized",
+            side_effect=error_factory(secret),
+        ):
+            result = tools_mod.bash_tool.func(
+                runtime,
+                "run skill",
+                "echo hi",
+            )
+
+        assert secret not in result
+        assert "[redacted]" in result
+
     def test_local_bash_forwards_env_and_timeout(self, monkeypatch):
         from deerflow.sandbox import tools as tools_mod
 
@@ -915,7 +1154,7 @@ class TestBashToolInjectsActiveSecrets:
         class FakeSandbox:
             def execute_command(self, command, env=None, timeout=None):
                 captured["command"] = command
-                captured["env"] = env
+                captured["env"] = dict(env) if env else env
                 captured["timeout"] = timeout
                 return "done"
 
@@ -942,6 +1181,249 @@ class TestBashToolInjectsActiveSecrets:
         assert captured["command"] == "echo hi"
         assert captured["env"] == {"ERP_TOKEN": "tok-456"}
         assert captured["timeout"] == 42
+
+    @pytest.mark.anyio
+    async def test_private_provider_refreshes_one_command_and_cleans_context(
+        self,
+    ):
+        from deerflow.sandbox import tools as tools_mod
+
+        skill_path = "/mnt/skills/custom/exact/SKILL.md"
+        carrier = {
+            skill_path: {
+                "ERP_TOKEN": "fresh-private-value",
+                "UNUSED": "must-not-inject",
+            }
+        }
+        captured = {}
+
+        async def provider(requested):
+            captured["requested"] = requested
+            return carrier
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["env"] = dict(env) if env else env
+                return "done"
+
+        context = {
+            "private_scope": object(),
+            "__skill_secret_provider": provider,
+            "__active_skill_secret_sources": (
+                (
+                    "exact",
+                    skill_path,
+                    ("ERP_TOKEN",),
+                    True,
+                ),
+            ),
+        }
+        runtime = SimpleNamespace(
+            context=context,
+            state={"sandbox": {"sandbox_id": "aio:private"}},
+        )
+        sandbox = FakeSandbox()
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized_async",
+                return_value=sandbox,
+            ),
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized",
+                return_value=sandbox,
+            ),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(
+                tools_mod,
+                "ensure_thread_directories_exist",
+                return_value=None,
+            ),
+        ):
+            result = await tools_mod.bash_tool.coroutine(
+                runtime,
+                "run exact skill",
+                "echo ok",
+            )
+
+        assert result == "done"
+        assert captured["requested"] == {skill_path: frozenset({"ERP_TOKEN"})}
+        assert captured["env"] == {"ERP_TOKEN": "fresh-private-value"}
+        assert carrier == {}
+        assert "__active_skill_secrets" not in context
+        assert "__skill_secret_exec_ready" not in context
+        assert "fresh-private-value" not in str(context)
+
+    @pytest.mark.anyio
+    async def test_private_provider_failure_never_executes_or_reuses_stale_value(
+        self,
+    ):
+        from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+        executed = False
+
+        async def provider(_requested):
+            raise AuthorizationRevoked
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                nonlocal executed
+                executed = True
+                return "unexpected"
+
+        context = {
+            "private_scope": object(),
+            "__skill_secret_provider": provider,
+            "__active_skill_secrets": {"TOKEN": "stale"},
+            "__active_skill_secret_sources": (
+                (
+                    "exact",
+                    "/mnt/skills/custom/exact/SKILL.md",
+                    ("TOKEN",),
+                    True,
+                ),
+            ),
+        }
+        runtime = SimpleNamespace(context=context, state={})
+        sandbox = FakeSandbox()
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized_async",
+                return_value=sandbox,
+            ),
+            pytest.raises(AuthorizationRevoked),
+        ):
+            await tools_mod.bash_tool.coroutine(
+                runtime,
+                "run exact skill",
+                "echo should-not-run",
+            )
+
+        assert executed is False
+        assert context["__active_skill_secrets"] == {"TOKEN": "stale"}
+
+    @pytest.mark.anyio
+    async def test_private_bash_without_active_secret_source_skips_provider(
+        self,
+    ):
+        from deerflow.sandbox import tools as tools_mod
+
+        provider_called = False
+        captured = {}
+
+        async def provider(_requested):
+            nonlocal provider_called
+            provider_called = True
+            return {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["env"] = dict(env) if env else env
+                return "done"
+
+        context = {
+            "private_scope": object(),
+            "__skill_secret_provider": provider,
+            "__active_skill_secret_sources": (),
+        }
+        runtime = SimpleNamespace(context=context, state={})
+        sandbox = FakeSandbox()
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized_async",
+                return_value=sandbox,
+            ),
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized",
+                return_value=sandbox,
+            ),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(
+                tools_mod,
+                "ensure_thread_directories_exist",
+                return_value=None,
+            ),
+        ):
+            result = await tools_mod.bash_tool.coroutine(
+                runtime,
+                "ordinary command",
+                "echo ok",
+            )
+
+        assert result == "done"
+        assert provider_called is False
+        assert captured["env"] in (None, {})
+        assert "__skill_secret_exec_ready" not in context
+
+    @pytest.mark.anyio
+    async def test_parallel_private_bash_calls_use_isolated_per_call_carriers(
+        self,
+    ):
+        from deerflow.sandbox import tools as tools_mod
+
+        skill_path = "/mnt/skills/custom/exact/SKILL.md"
+        counter = 0
+        barrier = threading.Barrier(2)
+        captured: dict[str, dict[str, str] | None] = {}
+
+        async def provider(_requested):
+            nonlocal counter
+            counter += 1
+            return {skill_path: {"TOKEN": f"value-{counter}"}}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                barrier.wait(timeout=5)
+                captured[command] = dict(env) if env else env
+                return command
+
+        context = {
+            "private_scope": object(),
+            "__skill_secret_provider": provider,
+            "__active_skill_secret_sources": (("exact", skill_path, ("TOKEN",), True),),
+        }
+        runtime = SimpleNamespace(context=context, state={})
+        sandbox = FakeSandbox()
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized_async",
+                return_value=sandbox,
+            ),
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized",
+                return_value=sandbox,
+            ),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(
+                tools_mod,
+                "ensure_thread_directories_exist",
+                return_value=None,
+            ),
+        ):
+            results = await asyncio.gather(
+                tools_mod.bash_tool.coroutine(
+                    runtime,
+                    "first",
+                    "first",
+                ),
+                tools_mod.bash_tool.coroutine(
+                    runtime,
+                    "second",
+                    "second",
+                ),
+            )
+
+        assert sorted(results) == ["first", "second"]
+        assert {env["TOKEN"] for env in captured.values() if env is not None} == {"value-1", "value-2"}
+        assert "__active_skill_secrets" not in context
+        assert "__skill_secret_exec_ready" not in context
 
 
 _SECRET = "sk-erp-9f3c-DO-NOT-LEAK"
@@ -997,9 +1479,14 @@ class TestLeakSurfaces:
         assert _SECRET not in str(config.get("configurable", {}))
 
     def test_redact_helper_strips_secret_keys(self):
-        from deerflow.runtime.secret_context import redact_secret_context_keys
+        from deerflow.runtime.secret_context import SKILL_SCOPED_SECRETS_CONTEXT_KEY, redact_secret_context_keys
 
-        ctx = {"thread_id": "t", "secrets": {"ERP_TOKEN": _SECRET}, "__active_skill_secrets": {"ERP_TOKEN": _SECRET}}
+        ctx = {
+            "thread_id": "t",
+            "secrets": {"ERP_TOKEN": _SECRET},
+            "__active_skill_secrets": {"ERP_TOKEN": _SECRET},
+            SKILL_SCOPED_SECRETS_CONTEXT_KEY: {"/mnt/skills/custom/erp/SKILL.md": {"ERP_TOKEN": _SECRET}},
+        }
         redacted = redact_secret_context_keys(ctx)
         assert redacted == {"thread_id": "t"}
         assert _SECRET not in str(redacted)
@@ -1033,17 +1520,20 @@ class TestLeakSurfaces:
         assert _SECRET not in masked
         assert "[redacted]" in masked
 
-    def test_short_secret_values_not_masked(self):
-        """Values below the minimum length floor are skipped — redacting a 2-char
-        value would shred unrelated bytes (exit codes, timestamps, sizes) of tool
-        output. The secret is still injected into the subprocess; only the output
-        mask skips it."""
+    @pytest.mark.parametrize("secret", ["4", "42", "1234", "12345", "123456"])
+    def test_short_secret_values_are_masked(self, secret):
+        """Short PINs must receive the same confidentiality guarantee as tokens.
+
+        Literal masking may hide an identical benign number in the output, but
+        once a value is admitted as a Credential we must not guess which
+        occurrence is harmless.
+        """
         from deerflow.sandbox.tools import mask_secret_values
 
-        # A short value must not be replaced everywhere in the output.
-        out = "exit code: 42\nrows: 42\n"
-        masked = mask_secret_values(out, {"REGION": "42"})
-        assert masked == out  # unchanged — short value left intact
+        out = f'plain:{secret}\nPIN={secret}\njson={{"pin":"{secret}"}}\nhttps://example.test/{secret}/suffix\nprefix{secret}suffix\n'
+        masked = mask_secret_values(out, {"PIN": secret})
+        assert secret not in masked
+        assert "[redacted]" in masked
 
         # A long value is still redacted as before.
         long_secret = "sk-erp-long-enough-token-value"

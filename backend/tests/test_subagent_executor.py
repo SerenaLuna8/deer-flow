@@ -3071,6 +3071,106 @@ class TestSubagentGuardrailAttribution:
         assert context.get("__run_read_only_mounts") is run_mounts
 
     @pytest.mark.anyio
+    async def test_aexecute_propagates_detached_private_skill_secret_copy(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        source = {
+            "/mnt/skills/custom/exact/SKILL.md": {
+                "API_TOKEN": "secret-value",
+            }
+        }
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="Private Skill Credential inheritance test agent",
+                system_prompt="Use the inherited Skill.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            thread_id="thread-private-skill-1",
+            trace_id="trace-private-skill-1",
+            private_scope=object(),
+            skill_scoped_secrets=source,
+        )
+        source["/mnt/skills/custom/exact/SKILL.md"]["API_TOKEN"] = "mutated-after-construction"
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(
+            executor,
+            "_build_initial_state",
+            self._noop_build_initial_state,
+        )
+        monkeypatch.setattr(
+            executor,
+            "_create_agent",
+            lambda *a, **kw: fake_agent,
+        )
+
+        await executor._aexecute("use the admitted Skill")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context["__skill_scoped_secrets"] == {
+            "/mnt/skills/custom/exact/SKILL.md": {
+                "API_TOKEN": "secret-value",
+            }
+        }
+        assert context["__skill_scoped_secrets"] is not source
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_opaque_private_skill_secret_provider(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+
+        async def provider(_requested):
+            return {}
+
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="Private Skill provider inheritance test agent",
+                system_prompt="Use the inherited Skill.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            thread_id="thread-private-skill-provider",
+            trace_id="trace-private-skill-provider",
+            private_scope=object(),
+            skill_secret_provider=provider,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(
+            executor,
+            "_build_initial_state",
+            self._noop_build_initial_state,
+        )
+        monkeypatch.setattr(
+            executor,
+            "_create_agent",
+            lambda *a, **kw: fake_agent,
+        )
+
+        await executor._aexecute("use the admitted Skill")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context["__skill_secret_provider"] is provider
+        assert "__skill_scoped_secrets" not in context
+
+    @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(
         self,
         classes,

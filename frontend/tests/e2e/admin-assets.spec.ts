@@ -118,7 +118,15 @@ async function mockAdminAssets(
       credential_versions: Record<string, string>;
       expected_active_grant_versions: Record<string, number>;
     } | null;
-  } = { submit: null, approve: null, grants: null };
+    credentialDelete: {
+      expected_credential_version: number;
+    } | null;
+  } = {
+    submit: null,
+    approve: null,
+    grants: null,
+    credentialDelete: null,
+  };
   let agentState = structuredClone(agent);
   let agents = [agentState];
   let agentVersions: AgentVersion[] = [];
@@ -646,6 +654,18 @@ async function mockAdminAssets(
       });
       return;
     }
+    if (
+      path.endsWith(`/api/admin/assets/credentials/${CREDENTIAL_ID}`) &&
+      method === "DELETE" &&
+      credential
+    ) {
+      mcpWorkflowRequests.credentialDelete =
+        request.postDataJSON() as typeof mcpWorkflowRequests.credentialDelete;
+      credential = null;
+      credentialVersions = [];
+      await route.fulfill({ status: 204 });
+      return;
+    }
 
     await json(
       route,
@@ -711,6 +731,7 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
       },
       expected_active_grant_versions: {},
     },
+    credentialDelete: null,
   });
 
   await page.getByRole("link", { name: "Credential" }).first().click();
@@ -724,7 +745,7 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
 test("system admin manages the separate system Credential lifecycle", async ({
   page,
 }) => {
-  await mockAdminAssets(page);
+  const state = await mockAdminAssets(page);
 
   await page.goto("/admin/assets/credentials");
   await expect(page.getByText("轮换正常", { exact: true })).toBeVisible();
@@ -752,15 +773,15 @@ test("system admin manages the separate system Credential lifecycle", async ({
   await expect(replaceCredential).toHaveCount(0);
   expect(await page.content()).not.toContain("replace-secret-sentinel");
   await expect(credentialCard).toContainText(
-    "既有 Grant 仍固定到 retired version",
+    "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
   );
-  await credentialCard.getByRole("button", { name: "迁移兼容 Grant" }).click();
+  await credentialCard.getByRole("button", { name: "迁移兼容引用" }).click();
   const migrationDialog = page.getByRole("dialog", {
-    name: "迁移 Credential Grant",
+    name: "迁移 Credential 兼容引用",
   });
   await expect(migrationDialog).toContainText("字段结构完全兼容");
-  await migrationDialog.getByRole("button", { name: "确认迁移 Grant" }).click();
-  await expect(page.getByRole("status")).toContainText("已完成兼容 Grant 迁移");
+  await migrationDialog.getByRole("button", { name: "确认迁移引用" }).click();
+  await expect(page.getByRole("status")).toContainText("已完成兼容引用迁移");
 
   await credentialCard.getByRole("button", { name: "撤销凭据" }).click();
   const revokeDialog = page.getByRole("dialog", {
@@ -782,4 +803,20 @@ test("system admin manages the separate system Credential lifecycle", async ({
   await expect(
     credentialCard.getByRole("button", { name: "替换凭据" }),
   ).toHaveCount(0);
+  await credentialCard
+    .getByRole("button", { name: "删除", exact: true })
+    .click();
+  const deleteDialog = page.getByRole("dialog", {
+    name: "删除 Credential？",
+  });
+  const confirmDelete = deleteDialog.getByRole("button", {
+    name: /确认删除/u,
+  });
+  await expect(confirmDelete).toBeDisabled();
+  await expect(confirmDelete).toBeEnabled({ timeout: 6_000 });
+  await confirmDelete.click();
+  await expect(credentialCard).toHaveCount(0);
+  expect(state.credentialDelete).toEqual({
+    expected_credential_version: 3,
+  });
 });

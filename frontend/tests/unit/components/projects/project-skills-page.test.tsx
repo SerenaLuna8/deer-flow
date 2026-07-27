@@ -1,7 +1,10 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { SkillAssetDetail } from "@/components/projects/assets/skill-asset-detail";
+import {
+  SkillAssetDetail,
+  skillCredentialBindingsVisible,
+} from "@/components/projects/assets/skill-asset-detail";
 import type { AssetVersion } from "@/core/shared-assets";
 
 const version: Extract<AssetVersion, { skill_id: string }> = {
@@ -31,6 +34,17 @@ const version: Extract<AssetVersion, { skill_id: string }> = {
 };
 
 describe("Skill asset detail", () => {
+  test("shows Credential bindings only for the selected current published version", () => {
+    expect(skillCredentialBindingsVisible(version.id, version.id)).toBe(true);
+    expect(
+      skillCredentialBindingsVisible(
+        "33333333-3333-4333-8333-333333333333",
+        version.id,
+      ),
+    ).toBe(false);
+    expect(skillCredentialBindingsVisible(version.id, null)).toBe(false);
+  });
+
   test("shows scan, compatibility and file metadata without pretending file content is readable", () => {
     const html = renderToStaticMarkup(<SkillAssetDetail version={version} />);
 

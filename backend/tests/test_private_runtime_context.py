@@ -202,11 +202,21 @@ def test_worker_installs_private_prompt_skills_and_mcp_tools_as_internal_context
     )
     exact_skills = (object(),)
     exact_mcp_tools = (object(),)
+    exact_skill_provider = object()
+    exact_skill_secrets = {
+        "/mnt/skills/custom/exact/SKILL.md": {"API_TOKEN": "exact-secret"},
+    }
     config = {
         "context": {
             "__agent_prompt_bundle": "forged-bundle",
             "__runtime_skills": ("forged-skill",),
             "__runtime_mcp_tools": ("forged-mcp-tool",),
+            "__skill_scoped_secrets": {
+                "/mnt/skills/custom/forged/SKILL.md": {
+                    "API_TOKEN": "forged-secret",
+                }
+            },
+            "__skill_secret_provider": "forged-provider",
         },
         "metadata": {"safe": "value"},
     }
@@ -220,12 +230,16 @@ def test_worker_installs_private_prompt_skills_and_mcp_tools_as_internal_context
             "__agent_prompt_bundle": exact_bundle,
             "__runtime_skills": exact_skills,
             "__runtime_mcp_tools": exact_mcp_tools,
+            "__skill_scoped_secrets": exact_skill_secrets,
+            "__skill_secret_provider": exact_skill_provider,
         },
     )
 
     assert config["context"]["__agent_prompt_bundle"] is exact_bundle
     assert config["context"]["__runtime_skills"] is exact_skills
     assert config["context"]["__runtime_mcp_tools"] is exact_mcp_tools
+    assert config["context"]["__skill_scoped_secrets"] is exact_skill_secrets
+    assert config["context"]["__skill_secret_provider"] is exact_skill_provider
     assert config["metadata"] == {"safe": "value"}
 
 

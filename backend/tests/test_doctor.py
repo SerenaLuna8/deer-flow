@@ -68,8 +68,8 @@ class TestCheckPostgres:
             host="db.internal",
             port=5432,
             database="deerflow",
-            current_revision="0002_skill_design_builder",
-            head_revision="0002_skill_design_builder",
+            current_revision="0004_credential_soft_delete",
+            head_revision="0004_credential_soft_delete",
             revision_matches=True,
             schema_state="ready",
         )
@@ -99,8 +99,8 @@ class TestCheckPostgres:
                 "host": "db.internal",
                 "port": 5432,
                 "database": "deerflow",
-                "current_revision": "0002_skill_design_builder",
-                "head_revision": "0002_skill_design_builder",
+                "current_revision": "0004_credential_soft_delete",
+                "head_revision": "0004_credential_soft_delete",
                 "missing_tables": (),
             },
         )

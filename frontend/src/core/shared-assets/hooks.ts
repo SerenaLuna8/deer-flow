@@ -29,6 +29,7 @@ import {
   enableAdminProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
+  getProjectSkillCredentialBindings,
   getProjectSkillVersionFile,
   getAdminCredentialRotationStatus,
   importProjectSkillArchive,
@@ -48,6 +49,7 @@ import {
   submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
   updateProjectAgentInstructions,
+  updateProjectSkillCredentialBindings,
   upgradeAdminProjectSystemBinding,
   upgradeProjectSystemBinding,
   type ProjectAssetStatusAction,
@@ -61,6 +63,8 @@ import {
   projectAssetKey,
   projectAssetMutationKey,
   projectAssetVersionsKey,
+  projectSkillCredentialBindingsKey,
+  projectSkillCredentialBindingsMutationKey,
   projectSkillVersionFileKey,
   systemCatalogKey,
 } from "./query-keys";
@@ -84,6 +88,8 @@ import type {
   RevokeCredentialInput,
   SkillVersionInput,
   SkillFileForkInput,
+  SkillCredentialBindingsInput,
+  SkillCredentialBindingsResponse,
   SkillVersionFileContentResponse,
   VersionHistoryResponse,
 } from "./types";
@@ -310,6 +316,47 @@ export function useProjectSkillVersionFile(
     enabled: enabled && path !== "",
     staleTime: 0,
     gcTime: 0,
+  });
+}
+
+export function useProjectSkillCredentialBindings(
+  accountId: string,
+  projectId: string,
+  skillId: string,
+  enabled = true,
+) {
+  return useQuery<SkillCredentialBindingsResponse>({
+    queryKey: projectSkillCredentialBindingsKey(accountId, projectId, skillId),
+    queryFn: ({ signal }) =>
+      getProjectSkillCredentialBindings(projectId, skillId, signal),
+    enabled,
+  });
+}
+
+export function useUpdateProjectSkillCredentialBindings(
+  accountId: string,
+  projectId: string,
+  skillId: string,
+) {
+  const queryClient = useQueryClient();
+  const key = projectSkillCredentialBindingsKey(accountId, projectId, skillId);
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectSkillCredentialBindingsMutationKey(
+      accountId,
+      projectId,
+      skillId,
+    ),
+    mutationFn: (input: SkillCredentialBindingsInput) =>
+      runMutation((signal) =>
+        updateProjectSkillCredentialBindings(projectId, skillId, input, signal),
+      ),
+    onSuccess: whenActive((response: SkillCredentialBindingsResponse) => {
+      queryClient.setQueryData(key, response);
+    }),
   });
 }
 

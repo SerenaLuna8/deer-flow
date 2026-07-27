@@ -9,6 +9,7 @@ import threading
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -20,6 +21,7 @@ from app.private_work.asset_runtime import (
     PrivateAgentManifest,
     PrivateAgentRuntime,
     PrivateAssetRuntime,
+    PrivateSkillManifest,
 )
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkUnavailable
 from app.private_work.run_admission import PrivateRunAdmissionService
@@ -35,6 +37,11 @@ from app.shared_assets.models import (
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.skills.types import (
+    SecretRequirement,
+    Skill,
+    SkillCategory,
+)
 
 _TEST_PROJECT_MCP_ENDPOINT = "https://private-runtime-mcp.example.test/exact"
 _TEST_PROJECT_MCP_ENDPOINT_POLICY = ExactMcpEndpointPolicy(frozenset({_TEST_PROJECT_MCP_ENDPOINT}))
@@ -87,6 +94,370 @@ def test_private_agent_runtime_exposes_redacted_immutable_prompt_bundle(
             "user-prompt-sentinel",
         ):
             assert sentinel not in rendered
+
+
+@pytest.mark.anyio
+async def test_private_agent_runtime_does_not_retain_skill_plaintext_and_closes_provider(
+    tmp_path: Path,
+) -> None:
+    skill_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    runtime_root = tmp_path / "private-run"
+    skill_root = runtime_root / "custom" / skill_id.hex
+    skill_root.mkdir(parents=True)
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text("---\nname: exact-skill\n---\n", encoding="utf-8")
+    skill = Skill(
+        name="exact-skill",
+        description="",
+        license=None,
+        skill_dir=skill_root,
+        skill_file=skill_file,
+        relative_path=Path(skill_id.hex),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        runtime_read_only=True,
+    )
+    manifest = PrivateAgentManifest(
+        agent_asset_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        checksum="a" * 64,
+        catalog_generation=1,
+        description="",
+        payload_schema_version=2,
+        agents_instructions="",
+        soul="",
+        identity="",
+        user_context="",
+        model_ref="test-model",
+        tool_groups=(),
+        skills=(
+            PrivateSkillManifest(
+                asset_id=skill_id,
+                version_id=version_id,
+                relative_root=skill_id.hex,
+            ),
+        ),
+        mcps=(),
+    )
+    runtime = PrivateAgentRuntime(
+        context=SimpleNamespace(request_id="request-skill-secret"),  # type: ignore[arg-type]
+        run_id="exact-run",
+        resolver=object(),  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        safe_manifest=manifest,
+        skill_root=runtime_root,
+        skills=(skill,),
+        mcp_snapshots=(),
+        authorization_boundary=object(),
+    )
+
+    assert not hasattr(runtime, "_skill_secrets_by_version")
+
+    await runtime.aclose()
+
+    with pytest.raises(PrivateWorkAssetStale):
+        await runtime.materialize_skill_scoped_secrets(
+            "/mnt/skills",
+            {},
+        )
+    assert not runtime_root.exists()
+
+
+@pytest.mark.anyio
+async def test_skill_secret_provider_revalidates_each_request_and_decrypts_only_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+    from app.private_work.snapshot_repository import (
+        RunSkillCredentialSnapshot,
+    )
+
+    project_id = uuid.uuid4()
+    skill_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    other_skill_id = uuid.uuid4()
+    other_version_id = uuid.uuid4()
+    binding_id = uuid.uuid4()
+    credential_id = uuid.uuid4()
+    credential_version_id = uuid.uuid4()
+    runtime_root = tmp_path / "private-provider"
+    skill_root = runtime_root / "custom" / skill_id.hex
+    skill_root.mkdir(parents=True)
+    skill_file = skill_root / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: exact-skill\nrequired-secrets:\n  - API_TOKEN\n---\n",
+        encoding="utf-8",
+    )
+    skill = Skill(
+        name="exact-skill",
+        description="",
+        license=None,
+        skill_dir=skill_root,
+        skill_file=skill_file,
+        relative_path=Path(skill_id.hex),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        runtime_read_only=True,
+        required_secrets=(SecretRequirement("API_TOKEN"),),
+    )
+    other_skill_root = runtime_root / "custom" / other_skill_id.hex
+    other_skill_root.mkdir(parents=True)
+    other_skill_file = other_skill_root / "SKILL.md"
+    other_skill_file.write_text(
+        "---\nname: other-skill\nrequired-secrets:\n  - OTHER_TOKEN\n---\n",
+        encoding="utf-8",
+    )
+    other_skill = Skill(
+        name="other-skill",
+        description="",
+        license=None,
+        skill_dir=other_skill_root,
+        skill_file=other_skill_file,
+        relative_path=Path(other_skill_id.hex),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        runtime_read_only=True,
+        required_secrets=(SecretRequirement("OTHER_TOKEN"),),
+    )
+    manifest = PrivateAgentManifest(
+        agent_asset_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        checksum="a" * 64,
+        catalog_generation=1,
+        description="",
+        payload_schema_version=2,
+        agents_instructions="",
+        soul="",
+        identity="",
+        user_context="",
+        model_ref="test-model",
+        tool_groups=(),
+        skills=(
+            PrivateSkillManifest(
+                asset_id=skill_id,
+                version_id=version_id,
+                relative_root=skill_id.hex,
+            ),
+            PrivateSkillManifest(
+                asset_id=other_skill_id,
+                version_id=other_version_id,
+                relative_root=other_skill_id.hex,
+            ),
+        ),
+        mcps=(),
+    )
+    context = SimpleNamespace(
+        project_id=project_id,
+        user_id=uuid.uuid4(),
+        resource_scope=object(),
+        request_id="request-skill-provider",
+    )
+    reference = RunSkillCredentialSnapshot(
+        skill_id=skill_id,
+        skill_version_id=version_id,
+        secret_name="API_TOKEN",
+        skill_credential_binding_id=binding_id,
+        binding_revision=1,
+        credential_id=credential_id,
+        credential_version_id=credential_version_id,
+    )
+    other_reference = RunSkillCredentialSnapshot(
+        skill_id=other_skill_id,
+        skill_version_id=other_version_id,
+        secret_name="OTHER_TOKEN",
+        skill_credential_binding_id=uuid.uuid4(),
+        binding_revision=1,
+        credential_id=uuid.uuid4(),
+        credential_version_id=uuid.uuid4(),
+    )
+    skill_asset = SimpleNamespace(
+        asset_kind=AssetKind.SKILL.value,
+        asset_id=skill_id,
+        version_id=version_id,
+    )
+    other_skill_asset = SimpleNamespace(
+        asset_kind=AssetKind.SKILL.value,
+        asset_id=other_skill_id,
+        version_id=other_version_id,
+    )
+    state = {
+        "active": True,
+        "current_by_version": {
+            version_id: reference,
+            other_version_id: other_reference,
+        },
+        "decrypt_calls": 0,
+    }
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def begin(self):
+            return self
+
+    class SessionFactory:
+        def __call__(self):
+            return Session()
+
+    class SnapshotRepository:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def list_assets_in_session(self, *_args, **_kwargs):
+            return (skill_asset, other_skill_asset)
+
+        async def list_skill_credentials_in_session(
+            self,
+            *_args,
+            **_kwargs,
+        ):
+            return (reference, other_reference)
+
+        async def current_skill_credentials_in_session(
+            self,
+            *_args,
+            **_kwargs,
+        ):
+            skill_assets = _args[-1]
+            return tuple(state["current_by_version"][asset.version_id] for asset in skill_assets if asset.version_id in state["current_by_version"])
+
+    class RunRepository:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get(self, *_args, **_kwargs):
+            return SimpleNamespace(status="running")
+
+    envelope = SimpleNamespace(
+        key_id="test-key",
+        nonce=b"n" * 12,
+        ciphertext=b"ciphertext",
+    )
+    material = SimpleNamespace(
+        envelope=envelope,
+        env_name="API_TOKEN",
+        credential_field_group="env",
+        credential_field_name="API_TOKEN",
+        credential_version_id=credential_version_id,
+    )
+    other_material = SimpleNamespace(
+        envelope=envelope,
+        env_name="OTHER_TOKEN",
+        credential_field_group="env",
+        credential_field_name="OTHER_TOKEN",
+        credential_version_id=other_reference.credential_version_id,
+    )
+
+    async def lock_closures(_session, _project_id, targets, **_kwargs):
+        target_ids = {target.skill_version_id for target in targets}
+        return {target_id: SimpleNamespace(materials=(material if target_id == version_id else other_material,)) for target_id in target_ids}
+
+    def decrypt(
+        _envelope,
+        _scope,
+        _project_id,
+        exact_credential_version_id,
+        _keyring,
+    ):
+        state["decrypt_calls"] += 1
+        return {"env": {"API_TOKEN": "fresh-secret"}} if exact_credential_version_id == credential_version_id else {"env": {"OTHER_TOKEN": "other-secret"}}
+
+    async def is_active(*_args, **_kwargs):
+        return state["active"]
+
+    monkeypatch.setattr(
+        runtime_module,
+        "RunSnapshotRepository",
+        SnapshotRepository,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "PrivateRunRepository",
+        RunRepository,
+    )
+    monkeypatch.setattr(
+        runtime_module.PrivateRunAuthorizationService,
+        "is_active",
+        is_active,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "resolve_project_context_in_transaction",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "lock_skill_credential_closures",
+        lock_closures,
+    )
+    monkeypatch.setattr(
+        runtime_module.CredentialKeyring,
+        "from_environment",
+        staticmethod(lambda: object()),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "decrypt_credential_payload",
+        decrypt,
+    )
+    runtime = PrivateAgentRuntime(
+        context=context,  # type: ignore[arg-type]
+        run_id="exact-run",
+        resolver=object(),  # type: ignore[arg-type]
+        session_factory=SessionFactory(),  # type: ignore[arg-type]
+        safe_manifest=manifest,
+        skill_root=runtime_root,
+        skills=(skill, other_skill),
+        mcp_snapshots=(),
+        authorization_boundary=object(),
+    )
+    path = f"/mnt/skills/custom/{skill_id.hex}/SKILL.md"
+    other_path = f"/mnt/skills/custom/{other_skill_id.hex}/SKILL.md"
+
+    assert (
+        await runtime.materialize_skill_scoped_secrets(
+            "/mnt/skills",
+            {},
+        )
+        == {}
+    )
+    assert state["decrypt_calls"] == 0
+
+    assert await runtime.materialize_skill_scoped_secrets(
+        "/mnt/skills",
+        {path: frozenset({"API_TOKEN"})},
+    ) == {path: {"API_TOKEN": "fresh-secret"}}
+    assert state["decrypt_calls"] == 1
+    assert "fresh-secret" not in repr(runtime)
+
+    state["current_by_version"].pop(version_id)
+    assert await runtime.materialize_skill_scoped_secrets(
+        "/mnt/skills",
+        {other_path: frozenset({"OTHER_TOKEN"})},
+    ) == {other_path: {"OTHER_TOKEN": "other-secret"}}
+    assert state["decrypt_calls"] == 2
+
+    with pytest.raises(PrivateWorkAssetStale):
+        await runtime.materialize_skill_scoped_secrets(
+            "/mnt/skills",
+            {path: frozenset({"API_TOKEN"})},
+        )
+    assert state["decrypt_calls"] == 2
+
+    state["current_by_version"][version_id] = reference
+    state["active"] = False
+    with pytest.raises(AuthorizationRevoked):
+        await runtime.materialize_skill_scoped_secrets(
+            "/mnt/skills",
+            {path: frozenset({"API_TOKEN"})},
+        )
+    assert state["decrypt_calls"] == 2
 
 
 def _private_mcp_runtime(

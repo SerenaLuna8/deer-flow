@@ -52,8 +52,12 @@ from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-CURRENT_REVISION = "0002_skill_design_builder"
+SKILL_BUILDER_REVISION = "0002_skill_design_builder"
+SKILL_CREDENTIAL_REVISION = "0003_skill_credentials"
+CURRENT_REVISION = "0004_credential_soft_delete"
 FROZEN_BASELINE_SHA256 = "60cc71df98cbd345a338e54820dde05861e061cb76546fec1279060a04c108a6"
+FROZEN_SKILL_BUILDER_SHA256 = "8fefe03ee6159e458f95a32e29a4e491a8f3790df143433c262c67bdc708eb96"
+FROZEN_SKILL_CREDENTIAL_SHA256 = "6ba0005ff0fb7ddae85c03bf8ec2b6d0a7eb656a646d8f942d34c665addab293"
 
 LEGACY_RELATIONS = {
     "automation_cutover_state",
@@ -405,8 +409,12 @@ def test_migration_history_preserves_frozen_0001_and_has_one_linear_head() -> No
     assert [path.name for path in revision_files] == [
         "0001_project_saas_baseline.py",
         "0002_skill_design_builder.py",
+        "0003_skill_credentials.py",
+        "0004_credential_soft_delete.py",
     ]
     assert hashlib.sha256(revision_files[0].read_bytes()).hexdigest() == FROZEN_BASELINE_SHA256
+    assert hashlib.sha256(revision_files[1].read_bytes()).hexdigest() == FROZEN_SKILL_BUILDER_SHA256
+    assert hashlib.sha256(revision_files[2].read_bytes()).hexdigest() == FROZEN_SKILL_CREDENTIAL_SHA256
 
     baseline_spec = importlib.util.spec_from_file_location("m7_final_baseline", revision_files[0])
     assert baseline_spec is not None and baseline_spec.loader is not None
@@ -425,10 +433,40 @@ def test_migration_history_preserves_frozen_0001_and_has_one_linear_head() -> No
     assert current_spec is not None and current_spec.loader is not None
     current_module = importlib.util.module_from_spec(current_spec)
     current_spec.loader.exec_module(current_module)
-    assert current_module.revision == CURRENT_REVISION
+    assert current_module.revision == SKILL_BUILDER_REVISION
     assert current_module.down_revision == BASELINE_REVISION
     with pytest.raises(RuntimeError, match="Skill Builder downgrade is unsupported"):
         current_module.downgrade()
+
+    skill_credential_spec = importlib.util.spec_from_file_location(
+        "skill_credentials",
+        revision_files[2],
+    )
+    assert skill_credential_spec is not None and skill_credential_spec.loader is not None
+    skill_credential_module = importlib.util.module_from_spec(skill_credential_spec)
+    skill_credential_spec.loader.exec_module(skill_credential_module)
+    assert skill_credential_module.revision == SKILL_CREDENTIAL_REVISION
+    assert skill_credential_module.down_revision == SKILL_BUILDER_REVISION
+    with pytest.raises(
+        RuntimeError,
+        match="Skill Credential downgrade is unsupported",
+    ):
+        skill_credential_module.downgrade()
+
+    head_spec = importlib.util.spec_from_file_location(
+        "credential_soft_delete",
+        revision_files[3],
+    )
+    assert head_spec is not None and head_spec.loader is not None
+    head_module = importlib.util.module_from_spec(head_spec)
+    head_spec.loader.exec_module(head_module)
+    assert head_module.revision == CURRENT_REVISION
+    assert head_module.down_revision == SKILL_CREDENTIAL_REVISION
+    with pytest.raises(
+        RuntimeError,
+        match="Credential soft-delete downgrade is unsupported",
+    ):
+        head_module.downgrade()
 
 
 def test_final_metadata_and_contract_have_no_staged_relations() -> None:
@@ -474,6 +512,97 @@ async def test_empty_database_installs_current_forward_head(
                 "payload_schema_version",
                 "user_context",
             } <= agent_version_columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_exact_skill_builder_ancestor_migrates_to_current_head(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module._run_alembic_offload(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            SKILL_BUILDER_REVISION,
+        )
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == SKILL_BUILDER_REVISION
+            assert await bootstrap_module.classify_database(connection) == "upgradeable"
+            assert await connection.scalar(text("SELECT to_regclass('project_skill_credential_configs')")) is None
+
+        await bootstrap_module.migrate_schema(engine)
+
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+            assert await bootstrap_module.classify_database(connection) == "current"
+            relations = {
+                await connection.scalar(
+                    text("SELECT to_regclass(:relation)"),
+                    {"relation": relation},
+                )
+                for relation in (
+                    "project_skill_credential_configs",
+                    "project_skill_credential_bindings",
+                    "run_skill_credential_snapshots",
+                )
+            }
+            assert relations == {
+                "project_skill_credential_configs",
+                "project_skill_credential_bindings",
+                "run_skill_credential_snapshots",
+            }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_exact_skill_credential_ancestor_migrates_to_soft_delete(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_module._run_alembic_offload(
+            bootstrap_module._upgrade,
+            bootstrap_module._get_alembic_config(engine),
+            SKILL_CREDENTIAL_REVISION,
+        )
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == SKILL_CREDENTIAL_REVISION
+            assert await bootstrap_module.classify_database(connection) == "upgradeable"
+            assert (
+                await connection.scalar(
+                    text(
+                        """SELECT column_name
+                           FROM information_schema.columns
+                           WHERE table_schema=current_schema()
+                             AND table_name='credentials'
+                             AND column_name='is_delete'"""
+                    )
+                )
+                is None
+            )
+
+        await bootstrap_module.migrate_schema(engine)
+
+        async with engine.connect() as connection:
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == CURRENT_REVISION
+            assert await bootstrap_module.classify_database(connection) == "current"
+            assert (
+                await connection.scalar(
+                    text(
+                        """SELECT column_name
+                           FROM information_schema.columns
+                           WHERE table_schema=current_schema()
+                             AND table_name='credentials'
+                             AND column_name='is_delete'"""
+                    )
+                )
+                == "is_delete"
+            )
     finally:
         await engine.dispose()
 

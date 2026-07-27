@@ -15,7 +15,14 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.file_authority import require_private_file_authority
-from deerflow.runtime.secret_context import read_active_secrets
+from deerflow.runtime.secret_context import (
+    ACTIVE_SECRETS_CONTEXT_KEY,
+    SKILL_SECRET_EXEC_READY_CONTEXT_KEY,
+    SKILL_SECRET_PROVIDER_CONTEXT_KEY,
+    active_provider_secret_request,
+    read_active_secrets,
+    resolve_provider_active_secrets,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -1316,7 +1323,52 @@ async def _run_sync_tool_after_async_sandbox_init(
             authorization_operation,
         )
 
-    return await asyncio.to_thread(func, runtime, *args)
+    context = getattr(runtime, "context", None)
+    private_skill_provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if (authorization_operation == "before_sandbox_exec" and isinstance(context, dict) and "private_scope" in context) else None
+    call_runtime = runtime
+    call_context: dict | None = None
+    if callable(private_skill_provider):
+        # Each command gets an isolated context overlay. Parallel bash calls
+        # must never clear or replace one another's ready marker or carrier.
+        call_context = dict(context)
+        call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+        requested = active_provider_secret_request(call_context)
+        fresh_scoped = await private_skill_provider(requested) if requested else {}
+        try:
+            active = resolve_provider_active_secrets(
+                call_context,
+                fresh_scoped,
+            )
+        finally:
+            if isinstance(fresh_scoped, dict):
+                for values in fresh_scoped.values():
+                    if isinstance(values, dict):
+                        values.clear()
+                fresh_scoped.clear()
+        if active:
+            call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
+        call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
+        call_runtime = _RuntimeContextOverlay(runtime, call_context)
+
+    try:
+        return await asyncio.to_thread(func, call_runtime, *args)
+    finally:
+        if call_context is not None:
+            call_context.pop(SKILL_SECRET_EXEC_READY_CONTEXT_KEY, None)
+            active = call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+            if isinstance(active, dict):
+                active.clear()
+
+
+class _RuntimeContextOverlay:
+    """Delegate Runtime state/config while replacing only per-call context."""
+
+    def __init__(self, target: Runtime, context: dict) -> None:
+        self._target = target
+        self.context = context
+
+    def __getattr__(self, name: str):
+        return getattr(self._target, name)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
@@ -1367,14 +1419,6 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
 
 _SECRET_REDACTION = "[redacted]"
 
-# Values shorter than this are not redacted from bash output. A short secret
-# value (a 2-char region code, a numeric id, a PIN) would otherwise shred
-# unrelated bytes of tool output — exit codes, timestamps, sizes, paths —
-# corrupting the result the model reads back. The redaction of a value this
-# short is more likely noise than genuine leak protection; the secret is still
-# injected into the subprocess, only the output mask skips it.
-_MIN_MASK_LENGTH = 8
-
 
 def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     """Redact injected secret values from bash output before it re-enters context.
@@ -1382,16 +1426,21 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     Skill scripts receive request-scoped secrets as env vars (#3861). If a script
     echoes one (debugging, ``set -x``, an error dump), the value would otherwise
     flow into the tool result — and thus into the prompt and the trace. This is
-    the skill-specific fifth leak surface (the bash tool returns subprocess stdout,
-    unlike MCP tools). Replace each non-empty secret value with a redaction marker.
-    Longest values first so a value that is a substring of another is not partially
-    revealed. Values shorter than ``_MIN_MASK_LENGTH`` are skipped — a redacted
-    3-char token is more likely to corrupt unrelated output than to protect a
-    real secret.
+    the skill-specific fifth leak surface (the bash tool returns subprocess
+    stdout, unlike MCP tools). Replace every non-empty secret value with a
+    redaction marker, including short PINs. A short value can cause false-positive
+    masking in otherwise benign output, but confidentiality takes precedence:
+    once a value has been admitted as a Credential there is no reliable way to
+    distinguish an echoed secret from an identical ordinary token. Longest
+    values are replaced first so overlapping values are never partially exposed.
     """
     if not injected_env or not output:
         return output
-    for value in sorted((v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH), key=len, reverse=True):
+    for value in sorted(
+        {value for value in injected_env.values() if value},
+        key=len,
+        reverse=True,
+    ):
         output = output.replace(value, _SECRET_REDACTION)
     return output
 
@@ -1582,13 +1631,20 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         command: The bash command to execute. Always use absolute paths for files and directories.
     """
+    # Resolve the request-scoped carrier before sandbox initialization so even
+    # initialization/permission failures can be scrubbed with the same values.
+    # Never return an exception-derived string without passing this redactor.
+    runtime_context = getattr(runtime, "context", None)
+    private_skill_provider = runtime_context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if isinstance(runtime_context, dict) and "private_scope" in runtime_context else None
+    if callable(private_skill_provider) and runtime_context.get(SKILL_SECRET_EXEC_READY_CONTEXT_KEY) is not True:
+        return "Error: Skill credential material is unavailable"
+    injected_env = read_active_secrets(runtime_context) or None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
         # short-lived GitHub App installation token threaded through by the
         # GitHub channel. Both are injected as per-call env into the subprocess,
         # never placed in the command string.
-        injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
         if github_env:
@@ -1631,11 +1687,17 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             max_chars = 20000
         return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", injected_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", injected_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(
+            f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}",
+            injected_env,
+        )
+    finally:
+        if injected_env and callable(private_skill_provider):
+            injected_env.clear()
 
 
 async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:

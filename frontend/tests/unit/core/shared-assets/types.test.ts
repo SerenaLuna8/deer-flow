@@ -9,6 +9,7 @@ import {
   credentialPayloadSchema,
   credentialVersionSchema,
   credentialMetadataSchema,
+  deleteCredentialInputSchema,
   mcpVersionSchema,
   mcpVersionInputSchema,
   projectAssetListSchema,
@@ -351,6 +352,25 @@ describe("shared asset contracts", () => {
     ]) {
       expect(() => credentialPayloadSchema.parse(payload)).toThrow();
     }
+  });
+
+  test("strictly validates Credential delete revisions", () => {
+    expect(
+      deleteCredentialInputSchema.parse({
+        expected_credential_version: 7,
+      }),
+    ).toEqual({ expected_credential_version: 7 });
+    expect(
+      deleteCredentialInputSchema.safeParse({
+        expected_credential_version: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      deleteCredentialInputSchema.safeParse({
+        expected_credential_version: 7,
+        secret: "must-never-be-sent",
+      }).success,
+    ).toBe(false);
   });
 
   test("restricts Credential version field schemas to supported payload sections", () => {

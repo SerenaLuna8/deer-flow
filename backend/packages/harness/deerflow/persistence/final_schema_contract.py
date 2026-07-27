@@ -15,6 +15,8 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.final_schema_digest import (
     M7_BASELINE_CANONICAL_SCHEMA_DIGEST,
     M7_CANONICAL_SCHEMA_DIGEST,
+    M7_SKILL_BUILDER_CANONICAL_SCHEMA_DIGEST,
+    M7_SKILL_CREDENTIAL_CANONICAL_SCHEMA_DIGEST,
 )
 
 FINAL_APP_TABLES = frozenset(Base.metadata.tables)
@@ -104,9 +106,12 @@ FROZEN_M7_BASELINE_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
 }
 
-# The current catalog is generated from the complete forward-only migration
-# chain. Values are filled from a disposable PostgreSQL installation.
-FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+# The exact 0002 catalog remains an accepted, verified migration ancestor.
+# Never rewrite these values when adding a later revision.
+FROZEN_M7_SKILL_BUILDER_CATALOG_SIGNATURE: dict[
+    str,
+    CatalogInvariant,
+] = {
     "relations": CatalogInvariant(
         count=56,
         digest="5e75a42fba6261dc4bc28a6a6545791a92de334412fd35bfd96ee87e92441636",
@@ -133,6 +138,67 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
 }
 
+# The exact 0003 catalog remains an accepted, verified migration ancestor.
+# Never rewrite these values when adding a later revision.
+FROZEN_M7_SKILL_CREDENTIAL_CATALOG_SIGNATURE: dict[
+    str,
+    CatalogInvariant,
+] = {
+    "relations": CatalogInvariant(
+        count=59,
+        digest="8b968a3ae832a579d934127bd739e2a0e0f11d34d41d924a9c72f2508f587d12",
+    ),
+    "columns": CatalogInvariant(
+        count=719,
+        digest="0a51c613b88490f522aa2d11d550715f35fdc4c3b38c0ad9ec9735c215edf204",
+    ),
+    "constraints": CatalogInvariant(
+        count=479,
+        digest="4a0f4b7cf5ab110b9ea223411dd2dcf29e72e4189f7593ef5f197dc97f7e7b16",
+    ),
+    "indexes": CatalogInvariant(
+        count=195,
+        digest="f6408497e95f78c48ad1eda0762d57ca6e6cc7148d6a2018f3b35ab34e139a77",
+    ),
+    "functions": CatalogInvariant(
+        count=10,
+        digest="0fbb322b08fe552383069830ffbf733692eb6a76a71f1340cbbb43ad2328d8d7",
+    ),
+    "triggers": CatalogInvariant(
+        count=70,
+        digest="7a6eff839dfd748840d15a8e2997c835ec4acf615dfd0409b41a1c4286ea2a4f",
+    ),
+}
+
+# The current catalog is generated from the complete forward-only migration
+# chain. Values are read from PostgreSQL after applying the new head.
+FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+    "relations": CatalogInvariant(
+        count=59,
+        digest="8b968a3ae832a579d934127bd739e2a0e0f11d34d41d924a9c72f2508f587d12",
+    ),
+    "columns": CatalogInvariant(
+        count=720,
+        digest="eca120ad59a640529165e84e0d23ccf40ca91ec993b329dc1eddc5c9391904ee",
+    ),
+    "constraints": CatalogInvariant(
+        count=479,
+        digest="4a0f4b7cf5ab110b9ea223411dd2dcf29e72e4189f7593ef5f197dc97f7e7b16",
+    ),
+    "indexes": CatalogInvariant(
+        count=196,
+        digest="f74b3de228f86604f99a931dd53feceb64ae3f51516d51963d9f5a7db3a1ecbf",
+    ),
+    "functions": CatalogInvariant(
+        count=10,
+        digest="0fbb322b08fe552383069830ffbf733692eb6a76a71f1340cbbb43ad2328d8d7",
+    ),
+    "triggers": CatalogInvariant(
+        count=70,
+        digest="86217c5113c7098cfd47ff9bf7424ef62fd9761ee79fad94bbb9f264ff1a149e",
+    ),
+}
+
 
 def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
     payload = {category: {"count": invariant.count, "digest": invariant.digest} for category, invariant in sorted(signature.items())}
@@ -150,6 +216,16 @@ if M7_BASELINE_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(  # pragma: 
     FROZEN_M7_BASELINE_CATALOG_SIGNATURE
 ):
     raise RuntimeError("M7 baseline schema digest does not match its frozen catalog signature")
+
+if M7_SKILL_BUILDER_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(  # pragma: no cover - import-time release invariant
+    FROZEN_M7_SKILL_BUILDER_CATALOG_SIGNATURE
+):
+    raise RuntimeError("M7 Skill Builder schema digest does not match its frozen catalog signature")
+
+if M7_SKILL_CREDENTIAL_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(  # pragma: no cover - import-time release invariant
+    FROZEN_M7_SKILL_CREDENTIAL_CATALOG_SIGNATURE
+):
+    raise RuntimeError("M7 Skill Credential schema digest does not match its frozen catalog signature")
 
 if M7_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(FINAL_M7_CATALOG_SIGNATURE):  # pragma: no cover - import-time release invariant
     raise RuntimeError("M7 canonical schema digest does not match its catalog signature")
@@ -287,6 +363,24 @@ async def verify_m7_baseline_catalog(connection: AsyncConnection) -> bool:
 
     signature = await read_m7_catalog_signature(connection)
     return signature == FROZEN_M7_BASELINE_CATALOG_SIGNATURE
+
+
+async def verify_m7_skill_builder_catalog(
+    connection: AsyncConnection,
+) -> bool:
+    """Return whether the database is the exact frozen 0002 ancestor."""
+
+    signature = await read_m7_catalog_signature(connection)
+    return signature == FROZEN_M7_SKILL_BUILDER_CATALOG_SIGNATURE
+
+
+async def verify_m7_skill_credential_catalog(
+    connection: AsyncConnection,
+) -> bool:
+    """Return whether the database is the exact frozen 0003 ancestor."""
+
+    signature = await read_m7_catalog_signature(connection)
+    return signature == FROZEN_M7_SKILL_CREDENTIAL_CATALOG_SIGNATURE
 
 
 _USER_SCHEMA_INVENTORY_SQL = """
@@ -527,8 +621,12 @@ __all__ = [
     "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
     "FROZEN_M7_BASELINE_CATALOG_SIGNATURE",
+    "FROZEN_M7_SKILL_BUILDER_CATALOG_SIGNATURE",
+    "FROZEN_M7_SKILL_CREDENTIAL_CATALOG_SIGNATURE",
     "M7_BASELINE_CANONICAL_SCHEMA_DIGEST",
     "M7_CANONICAL_SCHEMA_DIGEST",
+    "M7_SKILL_BUILDER_CANONICAL_SCHEMA_DIGEST",
+    "M7_SKILL_CREDENTIAL_CANONICAL_SCHEMA_DIGEST",
     "LANGGRAPH_INDEXES",
     "LANGGRAPH_ROOT_OBJECTS",
     "LANGGRAPH_SEQUENCES",
@@ -539,4 +637,6 @@ __all__ = [
     "read_m7_catalog_signature",
     "verify_m7_baseline_catalog",
     "verify_m7_catalog",
+    "verify_m7_skill_builder_catalog",
+    "verify_m7_skill_credential_catalog",
 ]

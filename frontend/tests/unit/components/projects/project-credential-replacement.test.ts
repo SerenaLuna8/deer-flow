@@ -74,4 +74,21 @@ describe("project Credential replacement", () => {
     expect(route).toContain("ProjectCredentialPage");
     expect(route).not.toContain('ProjectAssetsPage kind="credentials"');
   });
+
+  test("does not render redundant explanatory copy above the Credential list", () => {
+    const page = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/credentials/project-credential-page.tsx",
+      ),
+      "utf8",
+    );
+    expect(page).toContain('title="项目凭证"');
+    expect(page).toContain(
+      'description="管理项目运行所需的环境变量、请求头和 OAuth 字段。"',
+    );
+    expect(page).not.toContain("管理 MCP 连接所需");
+    expect(page).not.toContain("敏感值只写入一次");
+    expect(page).not.toContain("凭据值提交后不会回显");
+  });
 });

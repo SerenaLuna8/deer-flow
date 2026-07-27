@@ -180,6 +180,8 @@ async def _ensure_builtin_principal(session: AsyncSession) -> None:
     if membership is not None:
         raise BootstrapConflict("builtin asset principal cannot have project membership")
 
+    # Principal-integrity verification intentionally includes logically deleted
+    # Credentials: deletion must not hide a forbidden builtin-principal link.
     credential_actor_columns = (
         (CredentialRow, (CredentialRow.created_by_user_id, CredentialRow.revoked_by_user_id)),
         (

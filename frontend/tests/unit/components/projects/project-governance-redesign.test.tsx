@@ -206,6 +206,27 @@ describe("project governance redesign", () => {
         metadata: [{ label: "资产类型", value: "Skill" }],
       }),
     );
+
+    const credentialDeleted = describeAuditItem(
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        occurred_at: "2026-07-27T10:00:00Z",
+        actor: "user",
+        action: "asset.credential_deleted",
+        target_kind: "asset",
+        outcome: "success",
+        public_error_code: null,
+        metadata: { asset_kind: "mcp" },
+      },
+      "zh-CN",
+    );
+    expect(credentialDeleted).toEqual(
+      expect.objectContaining({
+        action: "已删除资产凭据",
+        target: "资产",
+        metadata: [{ label: "资产类型", value: "MCP" }],
+      }),
+    );
   });
 
   test("renders localized audit events without inventing actor or target names", () => {

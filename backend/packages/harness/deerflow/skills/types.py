@@ -24,9 +24,9 @@ class SkillCategory(StrEnum):
 class SecretRequirement:
     """A request-scoped secret a skill declares it needs (issue #3861).
 
-    ``name`` is both the key looked up in the request's ``context.secrets`` and
-    the environment variable name injected into the skill's sandbox subprocess
-    when the skill is activated.
+    ``name`` is both the key looked up in the Skill-scoped internal secret
+    carrier (or the legacy flat ``context.secrets`` carrier) and the environment
+    variable name injected into the Skill's sandbox subprocess when activated.
     """
 
     name: str

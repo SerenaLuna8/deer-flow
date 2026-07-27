@@ -84,7 +84,10 @@ def build_rotation_selection(*, target_key_id: str, cursor: RotationCursor | Non
             (CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id) & CredentialEnvelopeRow.is_active.is_(True),
         )
         .where(CredentialEnvelopeRow.key_id != target_key_id, CredentialVersionRow.status != "revoked")
-        .where(CredentialRow.status == "active")
+        .where(
+            CredentialRow.status == "active",
+            CredentialRow.is_delete.is_(False),
+        )
     )
     # ``SKIP LOCKED`` may temporarily omit a smaller UUID.  Completion is
     # therefore proved by the target-key predicate, never by a UUID high-water
@@ -120,6 +123,7 @@ def build_rotation_pending_selection(*, target_key_id: str):
             CredentialEnvelopeRow.key_id != target_key_id,
             CredentialVersionRow.status != "revoked",
             CredentialRow.status == "active",
+            CredentialRow.is_delete.is_(False),
         )
         .order_by(CredentialVersionRow.id)
         .limit(1)
@@ -140,6 +144,7 @@ def build_rotation_plan_count(*, target_key_id: str):
             CredentialEnvelopeRow.key_id != target_key_id,
             CredentialVersionRow.status != "revoked",
             CredentialRow.status == "active",
+            CredentialRow.is_delete.is_(False),
         )
     )
 

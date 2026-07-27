@@ -8,6 +8,19 @@ import {
   zonedLocalToUtcIso,
   type CronParts,
 } from "@/core/project-automations/schedule/cron";
+import { RECIPES } from "@/core/project-automations/schedule/recipes";
+
+describe("automation recipes", () => {
+  test("GitHub Trending uses bounded search-only fallback instructions", () => {
+    const recipe = RECIPES.find((item) => item.id === "trending");
+
+    expect(recipe).toBeDefined();
+    expect(recipe?.prompt).toContain("at most 3 web_search calls");
+    expect(recipe?.prompt).toContain("do not use web_fetch");
+    expect(recipe?.prompt).toContain("state the limitation");
+    expect(recipe?.prompt).toContain("do not keep retrying");
+  });
+});
 
 describe("serializeCron", () => {
   test("hourly emits minute + star fields", () => {

@@ -29,12 +29,22 @@ from app.shared_assets.credential_closure import (
 )
 from app.shared_assets.model_refs import ExactModelRefResolver, ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetScope, ResolvedAgentSnapshot
+from app.shared_assets.skill_credential_closure import (
+    LockedSkillCredentialClosure,
+    SkillCredentialClosureInvalid,
+    SkillCredentialClosureTarget,
+    lock_skill_credential_closures,
+)
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
     McpEndpointPolicy,
     validate_project_mcp_definition,
 )
-from deerflow.persistence.private_work.model import RunAssetVersionRow, RunMcpGrantSnapshotRow
+from deerflow.persistence.private_work.model import (
+    RunAssetVersionRow,
+    RunMcpGrantSnapshotRow,
+    RunSkillCredentialSnapshotRow,
+)
 from deerflow.persistence.shared_assets.agent_model import (
     AgentRow,
     AgentVersionMcpRefRow,
@@ -70,6 +80,17 @@ class RunMcpGrantSnapshot:
     mcp_version_id: uuid.UUID
     credential_slot_id: uuid.UUID
     credential_grant_id: uuid.UUID
+    credential_version_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class RunSkillCredentialSnapshot:
+    skill_id: uuid.UUID
+    skill_version_id: uuid.UUID
+    secret_name: str
+    skill_credential_binding_id: uuid.UUID
+    binding_revision: int
+    credential_id: uuid.UUID
     credential_version_id: uuid.UUID
 
 
@@ -382,7 +403,12 @@ class RunSnapshotRepository:
             multitask_strategy="reject",
             model_name=exact_model_name,
         )
-        skills, mcps, closures = await self.validate_agent_closure_in_session(
+        (
+            skills,
+            mcps,
+            closures,
+            skill_credential_closures,
+        ) = await self.validate_agent_closure_in_session(
             session,
             context,
             resolved_agent,
@@ -457,6 +483,23 @@ class RunSnapshotRepository:
             for _asset, version in mcps
             for material in closures[uuid.UUID(str(version.id))].materials
         )
+        session.add_all(
+            RunSkillCredentialSnapshotRow(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                thread_id=thread_id,
+                run_id=run.run_id,
+                skill_id=material.skill_id,
+                skill_version_id=material.skill_version_id,
+                secret_name=material.env_name,
+                skill_credential_binding_id=material.binding_id,
+                binding_revision=material.binding_revision,
+                credential_id=material.credential_id,
+                credential_version_id=material.credential_version_id,
+            )
+            for _asset, version in skills
+            for material in skill_credential_closures[uuid.UUID(str(version.id))].materials
+        )
         await session.flush()
         return run
 
@@ -469,6 +512,7 @@ class RunSnapshotRepository:
         list[tuple[SkillRow, SkillVersionRow]],
         list[tuple[McpServerRow, McpServerVersionRow]],
         dict[uuid.UUID, LockedMcpCredentialClosure],
+        dict[uuid.UUID, LockedSkillCredentialClosure],
     ]:
         """Lock and validate an Agent plus its exact credential-grant closure."""
 
@@ -487,6 +531,22 @@ class RunSnapshotRepository:
             resolved_agent.payload.skill_version_ids,
             project_id,
         )
+        try:
+            skill_credential_closures = await lock_skill_credential_closures(
+                session,
+                project_id,
+                tuple(
+                    SkillCredentialClosureTarget(
+                        skill_id=uuid.UUID(str(asset.id)),
+                        skill_version_id=uuid.UUID(str(version.id)),
+                    )
+                    for asset, version in skills
+                ),
+                load_envelopes=False,
+                require_required=True,
+            )
+        except SkillCredentialClosureInvalid:
+            raise RunSnapshotAssetStale from None
         mcps = await self._mcps(
             session,
             resolved_agent.payload.mcp_version_ids,
@@ -499,7 +559,7 @@ class RunSnapshotRepository:
             closures,
             endpoint_policy=self._endpoint_policy,
         )
-        return skills, mcps, closures
+        return skills, mcps, closures, skill_credential_closures
 
     async def list_assets(
         self,
@@ -641,6 +701,126 @@ class RunSnapshotRepository:
                     item.mcp_version_id.int,
                     item.credential_slot_id.int,
                     item.credential_grant_id.int,
+                    item.credential_version_id.int,
+                ),
+            )
+        )
+
+    async def list_skill_credentials(
+        self,
+        context: PrivateWorkContext,
+        run_id: str,
+    ) -> tuple[RunSkillCredentialSnapshot, ...]:
+        context = require_issued_private_work_context(context)
+        try:
+            async with self._session_factory() as session:
+                return await self.list_skill_credentials_in_session(
+                    session,
+                    context,
+                    run_id,
+                )
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def list_skill_credentials_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        run_id: str,
+        *,
+        lock: bool = False,
+    ) -> tuple[RunSkillCredentialSnapshot, ...]:
+        context = require_issued_private_work_context(context)
+        statement = (
+            select(RunSkillCredentialSnapshotRow)
+            .where(
+                RunSkillCredentialSnapshotRow.project_id == context.project_id,
+                RunSkillCredentialSnapshotRow.owner_user_id == str(context.user_id),
+                RunSkillCredentialSnapshotRow.run_id == run_id,
+            )
+            .order_by(
+                RunSkillCredentialSnapshotRow.skill_version_id,
+                RunSkillCredentialSnapshotRow.secret_name,
+            )
+        )
+        if lock:
+            statement = statement.with_for_update(
+                of=RunSkillCredentialSnapshotRow,
+            )
+        rows = (await session.execute(statement)).scalars()
+        return tuple(
+            RunSkillCredentialSnapshot(
+                skill_id=row.skill_id,
+                skill_version_id=row.skill_version_id,
+                secret_name=row.secret_name,
+                skill_credential_binding_id=(row.skill_credential_binding_id),
+                binding_revision=row.binding_revision,
+                credential_id=row.credential_id,
+                credential_version_id=row.credential_version_id,
+            )
+            for row in rows
+        )
+
+    async def current_skill_credentials_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        skill_assets: tuple[RunAssetSnapshot, ...],
+    ) -> tuple[RunSkillCredentialSnapshot, ...]:
+        """Lock the current Skill Credential closure and return secret-free IDs."""
+
+        context = require_issued_private_work_context(context)
+        if any(asset.asset_kind != AssetKind.SKILL.value for asset in skill_assets):
+            raise RunSnapshotAssetStale
+        skills = await self._skills(
+            session,
+            tuple(asset.version_id for asset in skill_assets),
+            context.project_id,
+        )
+        by_version = {uuid.UUID(str(version.id)): (asset, version) for asset, version in skills}
+        for persisted in skill_assets:
+            row = by_version.get(persisted.version_id)
+            if row is None:
+                raise RunSnapshotAssetStale
+            asset, version = row
+            if asset.id != persisted.asset_id or asset.scope != persisted.asset_scope or version.payload_checksum != persisted.payload_checksum:
+                raise RunSnapshotAssetStale
+        try:
+            closures = await lock_skill_credential_closures(
+                session,
+                context.project_id,
+                tuple(
+                    SkillCredentialClosureTarget(
+                        skill_id=uuid.UUID(str(asset.id)),
+                        skill_version_id=uuid.UUID(str(version.id)),
+                    )
+                    for asset, version in skills
+                ),
+                load_envelopes=False,
+                require_required=True,
+            )
+        except SkillCredentialClosureInvalid:
+            raise RunSnapshotAssetStale from None
+        current = [
+            RunSkillCredentialSnapshot(
+                skill_id=material.skill_id,
+                skill_version_id=material.skill_version_id,
+                secret_name=material.env_name,
+                skill_credential_binding_id=material.binding_id,
+                binding_revision=material.binding_revision,
+                credential_id=material.credential_id,
+                credential_version_id=material.credential_version_id,
+            )
+            for _asset, version in skills
+            for material in closures[uuid.UUID(str(version.id))].materials
+        ]
+        return tuple(
+            sorted(
+                current,
+                key=lambda item: (
+                    item.skill_version_id.int,
+                    item.secret_name,
+                    item.skill_credential_binding_id.int,
                     item.credential_version_id.int,
                 ),
             )

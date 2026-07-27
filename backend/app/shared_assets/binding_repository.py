@@ -16,6 +16,10 @@ from app.shared_assets.credential_closure import (
 )
 from app.shared_assets.errors import AssetForbidden, AssetNotFound, AssetValidationFailed
 from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
+from app.shared_assets.skill_credential_closure import (
+    SkillCredentialClosureInvalid,
+    lock_skill_credential_closure,
+)
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
@@ -270,6 +274,17 @@ class BindingRepository:
             raise AssetValidationFailed(context.request_id)
         if selection.kind is AssetKind.MCP:
             await self._validate_mcp_versions((selection.version_id,), context.request_id)
+            return
+        if selection.kind is AssetKind.SKILL:
+            try:
+                await lock_skill_credential_closure(
+                    self.session,
+                    self._project_id(context),
+                    selection.asset_id,
+                    selection.version_id,
+                )
+            except SkillCredentialClosureInvalid:
+                raise AssetValidationFailed(context.request_id) from None
             return
         if selection.kind is not AssetKind.AGENT:
             return

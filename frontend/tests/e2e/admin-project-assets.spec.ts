@@ -19,6 +19,8 @@ async function mockAdminProjectAssets(page: Page) {
   const requestedPaths: string[] = [];
   let bindingEnabled = false;
   let bindingRequest: unknown = null;
+  let credentialVisible = true;
+  let credentialDeleteRequest: unknown = null;
 
   page.on("request", (request) => {
     requestedPaths.push(new URL(request.url()).pathname);
@@ -168,25 +170,37 @@ async function mockAdminProjectAssets(page: Page) {
     if (pathname === `${base}/credentials` && method === "GET") {
       await json(route, {
         system_items: [],
-        project_items: [
-          {
-            id: PROJECT_CREDENTIAL_ID,
-            scope: "project",
-            project_id: PROJECT_ID,
-            name: "github-token",
-            display_name: "Project GitHub Token",
-            credential_type: "token",
-            status: "active",
-            current_version_id: PROJECT_CREDENTIAL_VERSION_ID,
-            version: 1,
-            created_by_user_id: "project-owner",
-            created_at: NOW,
-            updated_at: NOW,
-            capabilities: ["shared_assets.read", "mcp.credentials.approve"],
-          },
-        ],
+        project_items: credentialVisible
+          ? [
+              {
+                id: PROJECT_CREDENTIAL_ID,
+                scope: "project",
+                project_id: PROJECT_ID,
+                name: "github-token",
+                display_name: "Project GitHub Token",
+                credential_type: "token",
+                status: "active",
+                current_version_id: PROJECT_CREDENTIAL_VERSION_ID,
+                version: 1,
+                created_by_user_id: "project-owner",
+                created_at: NOW,
+                updated_at: NOW,
+                capabilities: ["shared_assets.read", "mcp.credentials.approve"],
+              },
+            ]
+          : [],
         request_id: "admin-project-credentials",
       });
+      return;
+    }
+
+    if (
+      pathname === `${base}/credentials/${PROJECT_CREDENTIAL_ID}` &&
+      method === "DELETE"
+    ) {
+      credentialDeleteRequest = request.postDataJSON();
+      credentialVisible = false;
+      await route.fulfill({ status: 204 });
       return;
     }
 
@@ -229,6 +243,7 @@ async function mockAdminProjectAssets(page: Page) {
   return {
     requestedPaths,
     bindingRequest: () => bindingRequest,
+    credentialDeleteRequest: () => credentialDeleteRequest,
   };
 }
 
@@ -300,6 +315,22 @@ test("system admin selects one project and governs only its shared assets", asyn
   ).toBeVisible();
   await expect(page.getByText("显示明文")).toHaveCount(0);
   await expect(page.getByText("复制密钥")).toHaveCount(0);
+  await page.getByRole("button", { name: "删除", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", {
+    name: "删除 Credential？",
+  });
+  const confirmDelete = deleteDialog.getByRole("button", {
+    name: /确认删除/u,
+  });
+  await expect(confirmDelete).toBeDisabled();
+  await expect(confirmDelete).toBeEnabled({ timeout: 6_000 });
+  await confirmDelete.click();
+  await expect(
+    page.getByText("Project GitHub Token", { exact: true }),
+  ).toHaveCount(0);
+  expect(state.credentialDeleteRequest()).toEqual({
+    expected_credential_version: 1,
+  });
 
   expect(
     await page.evaluate(

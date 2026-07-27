@@ -182,6 +182,104 @@ export const agentVersionSchema = z
 const skillSecretRequirementSchema = z
   .object({ name: z.string().min(1), optional: z.boolean() })
   .strict();
+const skillSecretNameSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+const eligibleSkillCredentialSchema = z
+  .object({
+    credential_id: assetIdSchema,
+    credential_version_id: assetIdSchema,
+    display_name: z.string().min(1),
+    version_number: z.number().int().positive(),
+  })
+  .strict();
+const skillCredentialRequirementBaseSchema = z.object({
+  name: skillSecretNameSchema,
+  optional: z.boolean(),
+  eligible_credentials: z.array(eligibleSkillCredentialSchema),
+});
+const configuredSkillCredentialRequirementSchema =
+  skillCredentialRequirementBaseSchema
+    .extend({
+      configured: z.literal(true),
+      credential_id: assetIdSchema,
+      credential_version_id: assetIdSchema,
+      credential_display_name: z.string().min(1),
+      credential_version_number: z.number().int().positive(),
+    })
+    .strict();
+const unconfiguredSkillCredentialRequirementSchema =
+  skillCredentialRequirementBaseSchema
+    .extend({
+      configured: z.literal(false),
+      credential_id: z.null(),
+      credential_version_id: z.null(),
+      credential_display_name: z.null(),
+      credential_version_number: z.null(),
+    })
+    .strict();
+
+export const skillCredentialRequirementSchema = z.discriminatedUnion(
+  "configured",
+  [
+    configuredSkillCredentialRequirementSchema,
+    unconfiguredSkillCredentialRequirementSchema,
+  ],
+);
+export const skillCredentialBindingsResponseSchema = z
+  .object({
+    skill_id: assetIdSchema,
+    skill_version_id: assetIdSchema,
+    revision: z.number().int().nonnegative(),
+    requirements: z.array(skillCredentialRequirementSchema),
+    request_id: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const names = value.requirements.map((requirement) => requirement.name);
+    if (new Set(names).size !== names.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill Credential requirement names must be unique",
+        path: ["requirements"],
+      });
+    }
+    value.requirements.forEach((requirement, requirementIndex) => {
+      const versionIds = requirement.eligible_credentials.map(
+        (credential) => credential.credential_version_id,
+      );
+      if (new Set(versionIds).size !== versionIds.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Eligible Credential versions must be unique",
+          path: ["requirements", requirementIndex, "eligible_credentials"],
+        });
+      }
+    });
+  });
+const skillCredentialBindingInputSchema = z
+  .object({
+    name: skillSecretNameSchema,
+    credential_version_id: assetIdSchema,
+  })
+  .strict();
+export const skillCredentialBindingsInputSchema = z
+  .object({
+    expected_revision: z.number().int().nonnegative(),
+    bindings: z.array(skillCredentialBindingInputSchema).max(256),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      new Set(value.bindings.map((binding) => binding.name)).size ===
+      value.bindings.length,
+    {
+      message: "Skill Credential binding names must be unique",
+      path: ["bindings"],
+    },
+  );
 const skillFileViewSchema = z
   .object({
     path: z.string().min(1),
@@ -643,6 +741,9 @@ export const replaceCredentialInputSchema = z
 export const revokeCredentialInputSchema = z
   .object({ expected_credential_version: z.number().int().positive() })
   .strict();
+export const deleteCredentialInputSchema = z
+  .object({ expected_credential_version: z.number().int().positive() })
+  .strict();
 export const migrateCredentialGrantsInputSchema = z
   .object({ expected_credential_version: z.number().int().positive() })
   .strict();
@@ -739,6 +840,15 @@ export type SkillVersionFileContentResponse = z.infer<
 >;
 export type SkillFileChange = z.input<typeof skillFileChangeSchema>;
 export type SkillFileForkInput = z.input<typeof skillFileForkInputSchema>;
+export type SkillCredentialRequirement = z.infer<
+  typeof skillCredentialRequirementSchema
+>;
+export type SkillCredentialBindingsResponse = z.infer<
+  typeof skillCredentialBindingsResponseSchema
+>;
+export type SkillCredentialBindingsInput = z.input<
+  typeof skillCredentialBindingsInputSchema
+>;
 export type McpVersionInput = z.input<typeof mcpVersionInputSchema>;
 export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<
@@ -748,6 +858,7 @@ export type ReplaceCredentialInput = z.input<
   typeof replaceCredentialInputSchema
 >;
 export type RevokeCredentialInput = z.input<typeof revokeCredentialInputSchema>;
+export type DeleteCredentialInput = z.input<typeof deleteCredentialInputSchema>;
 export type MigrateCredentialGrantsInput = z.input<
   typeof migrateCredentialGrantsInputSchema
 >;

@@ -274,22 +274,7 @@ class CredentialService:
             self._require_expected_version(actor, credential, expected_credential_version)
             if credential.status == "revoked":
                 raise AssetConflict(actor.request_id)
-            now = datetime.now(UTC)
-            versions = await repository.lock_all_versions(credential)
-            active_grants = await repository.lock_active_grants(credential)
-            for version in versions:
-                if version.status != "revoked":
-                    version.status = "revoked"
-                    version.revoked_at = now
-                    version.revoked_by_user_id = str(actor.user_id)
-            await repository.revoke_grants(
-                tuple(item.grant for item in active_grants),
-                user_id=actor.user_id,
-                revoked_at=now,
-            )
-            credential.status = "revoked"
-            credential.revoked_at = now
-            credential.revoked_by_user_id = str(actor.user_id)
+            await self._revoke_runtime_references(repository, actor, credential)
             credential.version += 1
             await repository.session.flush()
             return self._credential_view(credential)
@@ -303,6 +288,54 @@ class CredentialService:
                 credential_id,
                 result.current_version_id,
                 "credential.revoke",
+            ),
+        )
+
+    async def delete(
+        self,
+        actor: _Actor,
+        credential_id: uuid.UUID,
+        *,
+        expected_credential_version: int,
+    ) -> None:
+        self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+
+        async def operation(repository: CredentialRepository) -> uuid.UUID | None:
+            credential = await self._get_credential(
+                repository,
+                actor,
+                credential_id,
+                for_update=True,
+            )
+            self._require_expected_version(
+                actor,
+                credential,
+                expected_credential_version,
+            )
+            if credential.status == "active":
+                await self._revoke_runtime_references(
+                    repository,
+                    actor,
+                    credential,
+                )
+            elif credential.status != "revoked":
+                raise AssetConflict(actor.request_id)
+            current_version_id = credential.current_version_id
+            await repository.mark_deleted(
+                credential,
+                request_id=actor.request_id,
+            )
+            return current_version_id
+
+        await self._execute(
+            actor,
+            operation,
+            governance=lambda session, version_id: self._record_governance(
+                session,
+                actor,
+                credential_id,
+                version_id,
+                "credential.delete",
             ),
         )
 
@@ -325,6 +358,8 @@ class CredentialService:
                 raise AssetConflict(actor.request_id)
             active_grants = await repository.lock_active_grants(credential)
             stale_grants = tuple(item for item in active_grants if item.grant.credential_version_id != current.id)
+            active_skill_bindings = await repository.lock_active_skill_bindings(credential)
+            stale_skill_bindings = tuple(item for item in active_skill_bindings if item.binding.credential_id == credential.id and item.binding.credential_version_id != current.id)
             target_schema = {key: tuple(values) for key, values in current.payload_schema.items()}
             for item in stale_grants:
                 if item.mcp_server.scope != credential.scope or item.mcp_server.project_id != credential.project_id:
@@ -332,16 +367,28 @@ class CredentialService:
                 slot_schema = {key: tuple(values) for key, values in item.slot.payload_schema.items()}
                 if slot_schema != target_schema:
                     raise AssetValidationFailed(actor.request_id)
+            target_env = target_schema.get("env", ())
+            for item in stale_skill_bindings:
+                if credential.scope != "project" or credential.project_id != item.binding.project_id or item.binding.secret_name not in target_env:
+                    raise AssetValidationFailed(actor.request_id)
+            migrated_at = datetime.now(UTC)
             await repository.migrate_grants(
                 stale_grants,
                 current,
                 user_id=actor.user_id,
-                migrated_at=datetime.now(UTC),
+                migrated_at=migrated_at,
+            )
+            await repository.migrate_skill_bindings(
+                active_skill_bindings,
+                current,
+                credential_id=credential.id,
+                user_id=actor.user_id,
+                migrated_at=migrated_at,
             )
             return CredentialGrantMigrationView(
                 credential_id=credential.id,
                 credential_version_id=current.id,
-                migrated_count=len(stale_grants),
+                migrated_count=len(stale_grants) + len(stale_skill_bindings),
             )
 
         return await self._execute(
@@ -497,6 +544,14 @@ class CredentialService:
                 names = tuple(sorted(values))
                 if any(not isinstance(name, str) or not name or len(name) > 255 for name in names):
                     raise ValueError
+                # Credential fields are write-only text values in the public
+                # API. In particular, Skill env bindings are injected into a
+                # subprocess environment and therefore cannot safely accept
+                # JSON scalars such as null, booleans, or numbers. Reject them
+                # at creation/replacement instead of allowing configuration to
+                # succeed and failing only when a Worker materializes a Run.
+                if any(not isinstance(values[name], str) or not values[name] for name in names):
+                    raise ValueError
                 schema[section] = names
             return MappingProxyType(schema)
         except (RecursionError, TypeError, ValueError):
@@ -530,6 +585,37 @@ class CredentialService:
     def _require_expected_version(actor: _Actor, row: CredentialRow, expected: int) -> None:
         if not isinstance(expected, int) or isinstance(expected, bool) or row.version != expected:
             raise AssetConflict(actor.request_id)
+
+    @staticmethod
+    async def _revoke_runtime_references(
+        repository: CredentialRepository,
+        actor: _Actor,
+        credential: CredentialRow,
+    ) -> None:
+        now = datetime.now(UTC)
+        versions = await repository.lock_all_versions(credential)
+        active_grants = await repository.lock_active_grants(credential)
+        active_skill_bindings = await repository.lock_active_skill_bindings(credential)
+        for version in versions:
+            if version.status == "revoked":
+                continue
+            version.status = "revoked"
+            version.revoked_at = now
+            version.revoked_by_user_id = str(actor.user_id)
+        await repository.revoke_grants(
+            tuple(item.grant for item in active_grants),
+            user_id=actor.user_id,
+            revoked_at=now,
+        )
+        await repository.revoke_skill_bindings(
+            active_skill_bindings,
+            credential_id=credential.id,
+            user_id=actor.user_id,
+            revoked_at=now,
+        )
+        credential.status = "revoked"
+        credential.revoked_at = now
+        credential.revoked_by_user_id = str(actor.user_id)
 
     @staticmethod
     def _credential_view(row: CredentialRow) -> CredentialView:

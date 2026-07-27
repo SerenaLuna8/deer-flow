@@ -117,6 +117,7 @@ def test_system_asset_admin_routes_are_read_only_while_credentials_remain_mutabl
     assert "POST" in methods_by_path["/api/admin/assets/credentials"]
     assert "POST" in methods_by_path["/api/admin/assets/credentials/{credential_id}/replace"]
     assert "POST" in methods_by_path["/api/admin/assets/credentials/{credential_id}/revoke"]
+    assert "DELETE" in methods_by_path["/api/admin/assets/credentials/{credential_id}"]
 
 
 def test_admin_project_asset_lifecycle_routes_keep_kind_specific_boundaries() -> None:

@@ -20,7 +20,7 @@ export const RECIPES: Recipe[] = [
     icon: "🔥",
     titleKey: "trending",
     prompt:
-      "Use web_search to open today's GitHub Trending page, then summarize the top 10 repositories. For each: name, primary language, today's star delta, and a one-line description of what it is and why it's trending. Output as a markdown list.",
+      "Use web_search only (do not use web_fetch) to find today's GitHub Trending repositories. Make at most 3 web_search calls. Summarize up to 10 verified repositories; for each include the name, primary language, today's star delta when available, and a one-line description of what it is and why it is trending. If GitHub Trending or the exact daily star delta cannot be verified, state the limitation, summarize the best verified results available, and do not keep retrying. Never invent missing values. Output as a markdown list.",
     schedule: {
       schedule_type: "cron",
       schedule_spec: { cron: "0 9 * * *" },

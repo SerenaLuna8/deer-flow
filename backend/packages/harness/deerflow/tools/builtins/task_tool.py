@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -97,6 +98,22 @@ class _OwnerLoopCheckerProxy:
         return await _invoke_on_owner_loop(self._owner_loop, self._target)
 
 
+class _OwnerLoopSkillSecretProviderProxy:
+    """Marshal private Skill secret refresh back to the owner Worker loop."""
+
+    def __init__(self, target, owner_loop: asyncio.AbstractEventLoop):
+        self._target = target
+        self._owner_loop = owner_loop
+
+    async def __call__(self, *args, **kwargs):
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target,
+            *args,
+            **kwargs,
+        )
+
+
 def _trusted_private_mcp_tools(
     parent_context: dict[str, Any],
 ) -> tuple[BaseTool, ...]:
@@ -184,6 +201,41 @@ def _trusted_agent_prompt_bundle(parent_context: dict[str, Any]) -> object | Non
     if bundle is None or not all(hasattr(bundle, name) for name in required):
         return None
     return bundle
+
+
+def _trusted_skill_scoped_secrets(
+    parent_context: dict[str, Any],
+) -> dict[str, dict[str, str]] | None:
+    """Copy only the Worker-installed private Skill secret carrier.
+
+    Private request preparation strips every double-underscore and secret-like
+    client key. Requiring the opaque private scope here keeps a non-private
+    caller from manufacturing this internal inheritance channel.
+    """
+
+    if "private_scope" not in parent_context:
+        return None
+    raw = parent_context.get("__skill_scoped_secrets")
+    if not isinstance(raw, Mapping):
+        return None
+    copied: dict[str, dict[str, str]] = {}
+    for path, values in raw.items():
+        if (
+            not isinstance(path, str)
+            or not path
+            or not isinstance(
+                values,
+                Mapping,
+            )
+        ):
+            return None
+        env: dict[str, str] = {}
+        for name, value in values.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                return None
+            env[name] = value
+        copied[path] = env
+    return copied
 
 
 async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
@@ -547,6 +599,14 @@ async def task_tool(
                 authorization_checker,
                 owner_loop,
             )
+        skill_secret_provider = parent_context.get(
+            "__skill_secret_provider",
+        )
+        if callable(skill_secret_provider):
+            executor_kwargs["skill_secret_provider"] = _OwnerLoopSkillSecretProviderProxy(
+                skill_secret_provider,
+                owner_loop,
+            )
     run_read_only_mounts = parent_context.get("__run_read_only_mounts")
     if isinstance(run_read_only_mounts, tuple):
         executor_kwargs["run_read_only_mounts"] = run_read_only_mounts
@@ -556,6 +616,10 @@ async def task_tool(
     runtime_skills = parent_context.get("__runtime_skills")
     if isinstance(runtime_skills, tuple):
         executor_kwargs["runtime_skills"] = runtime_skills
+    if "skill_secret_provider" not in executor_kwargs:
+        skill_scoped_secrets = _trusted_skill_scoped_secrets(parent_context)
+        if skill_scoped_secrets is not None:
+            executor_kwargs["skill_scoped_secrets"] = skill_scoped_secrets
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     executor = SubagentExecutor(**executor_kwargs)

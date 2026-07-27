@@ -153,7 +153,16 @@ async def lock_mcp_credential_closures(
     )
     credentials: dict[uuid.UUID, CredentialRow] = {}
     for credential_id in credential_ids:
-        credential = (await session.execute(select(CredentialRow).where(CredentialRow.id == credential_id).with_for_update(read=True, of=CredentialRow))).scalar_one_or_none()
+        credential = (
+            await session.execute(
+                select(CredentialRow)
+                .where(
+                    CredentialRow.id == credential_id,
+                    CredentialRow.is_delete.is_(False),
+                )
+                .with_for_update(read=True, of=CredentialRow)
+            )
+        ).scalar_one_or_none()
         if credential is None:
             raise McpCredentialClosureInvalid
         credentials[credential_id] = credential
@@ -286,6 +295,7 @@ async def lock_mcp_credential_closures(
                 or uuid.UUID(str(grant.credential_slot_id)) != slot_id
                 or uuid.UUID(str(grant.credential_version_id)) != credential_version_id
                 or credential.status != "active"
+                or credential.is_delete
                 or credential_version.status not in {"active", "retired"}
                 or not scope_matches
                 or _normalized_schema(slot.payload_schema) != _normalized_schema(credential_version.payload_schema)

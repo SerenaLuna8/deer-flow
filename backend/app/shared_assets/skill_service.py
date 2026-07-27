@@ -40,6 +40,10 @@ from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_FILES,
     load_skill_archive_package,
 )
+from app.shared_assets.skill_credential_closure import (
+    SkillCredentialClosureInvalid,
+    lock_skill_credential_closure,
+)
 from app.shared_assets.skill_repository import (
     SkillRepository,
     SkillVersionFileMetadataRecord,
@@ -1244,6 +1248,19 @@ class SkillService:
             )
             if current.row.workflow_status != WorkflowStatus.PUBLISHED.value:
                 raise AssetConflict(actor.request_id)
+            project_id = getattr(actor, "project_id", None)
+            if not isinstance(project_id, uuid.UUID):
+                raise AssetForbidden(actor.request_id)
+            if current.row.secret_requirements:
+                try:
+                    await lock_skill_credential_closure(
+                        repository.session,
+                        project_id,
+                        asset.id,
+                        current.row.id,
+                    )
+                except SkillCredentialClosureInvalid:
+                    raise AssetValidationFailed(actor.request_id) from None
             asset.status = "active"
             asset.version += 1
             await repository.session.flush()

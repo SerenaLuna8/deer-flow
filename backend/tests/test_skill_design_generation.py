@@ -90,6 +90,42 @@ async def test_skill_design_generation_uses_pinned_skill_creator_and_returns_str
 
 
 @pytest.mark.asyncio
+async def test_skill_design_generation_protocol_declares_secret_names_without_values() -> None:
+    caller = _CapturingCaller(
+        json.dumps(
+            {
+                "decision": "candidate",
+                "files": [
+                    {
+                        "path": "SKILL.md",
+                        "media_type": "text/markdown",
+                        "content": "---\nname: api-client\ndescription: Call an API.\n---\n\n# Workflow",
+                    }
+                ],
+                "summary": "Created the Skill package.",
+            }
+        )
+    )
+    service = SkillDesignGenerationService(model_caller=caller)
+
+    await service.generate(
+        SkillDesignGenerationRequest(
+            skill_slug="api-client",
+            skill_name="API Client",
+            brief="Create a Skill that calls an authenticated API.",
+        ),
+        skill_creator_content="# Skill Creator",
+    )
+
+    system_instruction, _ = caller.calls[0]
+    assert "required-secrets" in system_instruction
+    assert "environment-variable name" in system_instruction
+    assert "{name, optional}" in system_instruction
+    assert "Never include, infer, ask" in system_instruction
+    assert "credential values" in system_instruction
+
+
+@pytest.mark.asyncio
 async def test_skill_design_generation_accepts_only_one_strict_json_object() -> None:
     caller = _CapturingCaller(
         """```json

@@ -3,6 +3,7 @@ import type { ComponentProps } from "react";
 import { Badge } from "@/components/ui/badge";
 import type { AssetVersion } from "@/core/shared-assets";
 
+import { SkillCredentialBindings } from "./skill-credential-bindings";
 import { SkillVersionWorkbench } from "./skill-version-workbench";
 
 export type SkillAssetVersion = Extract<AssetVersion, { skill_id: string }>;
@@ -25,7 +26,20 @@ export const SKILL_FILE_SNAPSHOT_LIMIT = 20;
 type SkillWorkspaceProps = Omit<
   ComponentProps<typeof SkillVersionWorkbench>,
   "version"
->;
+> & {
+  canManageCredentials: boolean;
+  credentialsHref: string;
+};
+
+export function skillCredentialBindingsVisible(
+  selectedVersionId: string,
+  currentPublishedVersionId: string | null,
+): boolean {
+  return (
+    currentPublishedVersionId !== null &&
+    selectedVersionId === currentPublishedVersionId
+  );
+}
 
 function SkillMetadata({ version }: { version: SkillAssetVersion }) {
   const snapshotFiles = version.file_views.slice(0, SKILL_FILE_SNAPSHOT_LIMIT);
@@ -146,9 +160,25 @@ export function SkillAssetDetail({
 }) {
   if (!workspace) return <SkillMetadata version={version} />;
 
+  const { canManageCredentials, credentialsHref, ...workbench } = workspace;
   return (
     <div className="space-y-8">
-      <SkillVersionWorkbench {...workspace} version={version} />
+      <SkillVersionWorkbench {...workbench} version={version} />
+      {skillCredentialBindingsVisible(
+        version.id,
+        workspace.item.current_published_version_id,
+      ) ? (
+        <SkillCredentialBindings
+          accountId={workspace.accountId}
+          projectId={workspace.projectId}
+          skillId={workspace.item.id}
+          currentPublishedVersionId={
+            workspace.item.current_published_version_id
+          }
+          canManage={canManageCredentials}
+          credentialsHref={credentialsHref}
+        />
+      ) : null}
       <details className="border-border/70 rounded-xl border px-4 py-3">
         <summary className="cursor-pointer text-sm font-medium">
           版本说明与检查结果

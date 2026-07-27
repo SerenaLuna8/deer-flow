@@ -16,6 +16,10 @@ class TestLoopDetectionConfig:
         assert config.max_tracked_threads == 100
         assert config.tool_freq_warn == 30
         assert config.tool_freq_hard_limit == 50
+        assert {name: (override.warn, override.hard_limit) for name, override in config.tool_freq_overrides.items()} == {
+            "web_fetch": (6, 10),
+            "web_search": (6, 10),
+        }
 
     def test_accepts_custom_values(self):
         config = LoopDetectionConfig(

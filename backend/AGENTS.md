@@ -85,23 +85,26 @@ project-Skill package hard deletion, case-insensitive project-local Skill name u
 the four logical Agent documents (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md`), and
 private owner-scoped Agent Builder sessions plus idempotent operations.
 
-The single current head is `0002_skill_design_builder.py`. It adds owner-private Skill Builder
-sessions, idempotent operations, durable candidate files, and exact immutable pins to the
-packaged System `skill-creator`. Every subsequent change starts at `0003` and continues that
-forward-only chain; never edit, squash, restamp, or replace the frozen baseline or a committed
-later revision.
+`0002_skill_design_builder.py` is the frozen Skill Builder ancestor. It adds owner-private Skill
+Builder sessions, idempotent operations, durable candidate files, and exact immutable pins to the
+packaged System `skill-creator`. `0003_skill_credentials.py` is the frozen Skill Credential
+ancestor; it adds version-scoped project Skill Credential configurations, immutable binding
+history, and secret-free per-Run references. The single current head is
+`0004_credential_soft_delete.py`, which adds Credential logical deletion and active-row
+uniqueness. Every subsequent change starts at `0005` and continues that forward-only chain;
+never edit, squash, restamp, or replace a committed revision.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the
 named empty target if needed, applies the complete current migration chain,
 seeds the packaged system asset catalog, initializes the LangGraph checkpointer/store schema,
 and bootstraps the default project. The application role must be an ordinary non-superuser.
 
-An existing database for the current release must exactly match either the current `0002` catalog
-or the frozen `0001` catalog. `make migrate-db` uses only `DATABASE_URL`; while application
-processes are stopped it upgrades the exact frozen ancestor through head. It never creates the
-database and never seeds the catalog, initializes LangGraph, or bootstraps a default project.
-Runtime startup only performs read-only validation. An unknown revision, unversioned nonempty
-schema, or catalog drift fails closed without DDL or repair.
+An existing database for the current release must exactly match the current `0004` catalog or one
+of the frozen `0001`/`0002`/`0003` catalogs. `make migrate-db` uses only `DATABASE_URL`; while
+application processes are stopped it upgrades an exact frozen ancestor through head. It never
+creates the database and never seeds the catalog, initializes LangGraph, or bootstraps a default
+project. Runtime startup only performs read-only validation. An unknown revision, unversioned
+nonempty schema, or catalog drift fails closed without DDL or repair.
 
 `make check-db` is also read-only. It reports current/head revision, required application and
 LangGraph relations, and whether setup, migration, or operator intervention is required without
@@ -202,9 +205,18 @@ System Credential lifecycle routes and project-scoped admin overrides remain ind
 mutable.
 
 Runtime processes use PostgreSQL as the only catalog authority. Gateway admission persists
-the exact secret-free Agent/Skill/MCP and Credential-grant snapshot for a Run. Worker reloads
-that exact snapshot and materializes system Skill bytes below `/mnt/skills/public/<name>` and
-project Skill bytes below `/mnt/skills/custom/<asset_uuid>` in a run-owned read-only tree.
+the exact secret-free Agent/Skill/MCP, MCP Credential-grant, and Skill Credential-reference
+snapshot for a Run. Worker reloads and revalidates that exact closure, decrypts Skill Credential
+fields only inside Worker memory, and materializes system Skill bytes below
+`/mnt/skills/public/<name>` and project Skill bytes below `/mnt/skills/custom/<asset_uuid>` in a
+run-owned read-only tree. Skill Credential configuration is scoped by project, Skill, and exact
+Skill version so a newly published version cannot overwrite bindings used by an older pinned
+Agent. Each activated Skill execution revalidates and decrypts its exact closure, then injects
+plaintext only into that sandbox subprocess environment; platform code does not intentionally
+serialize it into prompts, version payloads, snapshots, API responses, logs, or traces, and masks
+literal command output. This masking is an accidental-leak guard, not DLP: a Skill granted a
+Credential is trusted code and could transform, persist, or exfiltrate the value. Subagents inherit
+only the internal path-scoped reference carrier and perform the same execution-boundary validation.
 New project Skills are created in `suspended` state. Authors may create, fork, replace, and
 publish versions while suspended; activation is a separate capability-checked transition that
 requires a published version. Resolution and runtime materialization accept only active,
@@ -299,6 +311,11 @@ holds the raw lease token only in memory; PostgreSQL stores its hash. Durable st
 validate the exact current lease in the same transaction, use thread-monotonic sequence IDs,
 and persist one terminal outcome. Gateway only reads scoped durable frames and honors
 `Last-Event-ID` after restart.
+
+Loop detection keeps the higher global frequency allowance for local file and shell workflows,
+but applies lower default frequency bounds to `web_search` and `web_fetch`. Varying remote
+queries must receive a stop warning and hard-stop before a private Run can exhaust its default
+LangGraph recursion ceiling.
 
 The durable top-level `message` journal is a lead-Agent conversation projection. Lead AI
 messages and their exact `tool_call_id` results belong there; subagent and middleware AI/tool

@@ -23,6 +23,7 @@ import {
   credentialVersionHistoryResponseSchema,
   credentialVersionResponseSchema,
   disableSystemBindingInputSchema,
+  deleteCredentialInputSchema,
   enableSystemBindingInputSchema,
   expectedAssetVersionInputSchema,
   moveSystemBindingInputSchema,
@@ -35,6 +36,8 @@ import {
   projectSkillImportResponseSchema,
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
+  skillCredentialBindingsInputSchema,
+  skillCredentialBindingsResponseSchema,
   skillVersionHistoryResponseSchema,
   skillFileForkInputSchema,
   skillFilePathSchema,
@@ -56,6 +59,7 @@ import {
   type CredentialGrantMigrationResponse,
   type CredentialMutationResponse,
   type CredentialRotationStatus,
+  type DeleteCredentialInput,
   type DisableSystemBindingInput,
   type EnableSystemBindingInput,
   type ExpectedAssetVersionInput,
@@ -67,6 +71,8 @@ import {
   type ProjectSkillImportResponse,
   type ReplaceCredentialInput,
   type RevokeCredentialInput,
+  type SkillCredentialBindingsInput,
+  type SkillCredentialBindingsResponse,
   type SkillVersionInput,
   type SkillFileForkInput,
   type SkillVersionFileContentResponse,
@@ -681,6 +687,62 @@ export async function deleteProjectAgent(
   if (!response.ok) await throwResponseError(response);
 }
 
+async function deleteCredential(
+  url: string,
+  input: DeleteCredentialInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const body = parseInput(deleteCredentialInputSchema, input);
+  const response = await request(url, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) await throwResponseError(response);
+}
+
+export function deleteProjectCredential(
+  projectId: string,
+  credentialId: string,
+  input: DeleteCredentialInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return deleteCredential(
+    `${projectAssetUrl(projectId, "credentials")}/${id}`,
+    input,
+    signal,
+  );
+}
+
+export function deleteAdminCredential(
+  credentialId: string,
+  input: DeleteCredentialInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return deleteCredential(
+    `${adminAssetUrl("credentials")}/${id}`,
+    input,
+    signal,
+  );
+}
+
+export function deleteAdminProjectCredential(
+  projectId: string,
+  credentialId: string,
+  input: DeleteCredentialInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return deleteCredential(
+    `${adminProjectAssetUrl(projectId, "credentials")}/${id}`,
+    input,
+    signal,
+  );
+}
+
 export async function listProjectAssetVersions(
   projectId: string,
   kind: AssetListKind,
@@ -736,6 +798,39 @@ export async function getProjectSkillVersionFile(
     { signal },
   );
   return parseResponse(response, skillVersionFileContentResponseSchema);
+}
+
+export async function getProjectSkillCredentialBindings(
+  projectId: string,
+  skillId: string,
+  signal?: AbortSignal,
+): Promise<SkillCredentialBindingsResponse> {
+  const skill = parseInput(assetIdSchema, skillId);
+  const response = await request(
+    `${projectAssetUrl(projectId, "skills")}/${skill}/credential-bindings`,
+    { signal },
+  );
+  return parseResponse(response, skillCredentialBindingsResponseSchema);
+}
+
+export async function updateProjectSkillCredentialBindings(
+  projectId: string,
+  skillId: string,
+  input: SkillCredentialBindingsInput,
+  signal?: AbortSignal,
+): Promise<SkillCredentialBindingsResponse> {
+  const skill = parseInput(assetIdSchema, skillId);
+  const body = parseInput(skillCredentialBindingsInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "skills")}/${skill}/credential-bindings`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(response, skillCredentialBindingsResponseSchema);
 }
 
 async function postVersionMutation<T>(

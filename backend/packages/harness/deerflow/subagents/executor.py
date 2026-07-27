@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -457,6 +457,12 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         runtime_skills: tuple[Skill, ...] = (),
         agent_prompt_bundle: object | None = None,
+        skill_scoped_secrets: Mapping[
+            str,
+            Mapping[str, str],
+        ]
+        | None = None,
+        skill_secret_provider: Callable[..., object] | None = None,
     ):
         """Initialize the executor.
 
@@ -496,6 +502,11 @@ class SubagentExecutor:
             agent_prompt_bundle: Exact immutable Agent instruction fields
                 admitted for the parent Run. The object is never logged or
                 copied into trace metadata.
+            skill_scoped_secrets: Exact Worker-admitted Skill-path environment
+                bindings. Values remain only in runtime context and are copied
+                so parent and child execution cannot mutate one another.
+            skill_secret_provider: Opaque owner-loop proxy that revalidates and
+                decrypts one short-lived Skill carrier for each sandbox command.
         """
         self.config = config
         self.app_config = app_config
@@ -530,6 +541,8 @@ class SubagentExecutor:
         self.deerflow_trace_id = deerflow_trace_id
         self._runtime_skills = tuple(runtime_skills)
         self._agent_prompt_bundle = agent_prompt_bundle
+        self._skill_scoped_secrets = {path: dict(values) for path, values in (skill_scoped_secrets or {}).items()}
+        self._skill_secret_provider = skill_secret_provider
 
         self._base_tools = _filter_tools(
             tools,
@@ -870,6 +883,10 @@ class SubagentExecutor:
                 context["__authorization_checker"] = self.authorization_checker
             if self.run_read_only_mounts:
                 context["__run_read_only_mounts"] = self.run_read_only_mounts
+            if self._skill_scoped_secrets:
+                context["__skill_scoped_secrets"] = {path: dict(values) for path, values in self._skill_scoped_secrets.items()}
+            if self.private_scope is not None and callable(self._skill_secret_provider):
+                context["__skill_secret_provider"] = self._skill_secret_provider
             if self.channel_user_id:
                 context["channel_user_id"] = self.channel_user_id
             if self.deerflow_trace_id:

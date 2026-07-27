@@ -80,7 +80,7 @@ function renderCollapsedDesktopNav(project: Project) {
 }
 
 describe("project shell navigation", () => {
-  test("keeps overview standalone, groups Memory under capabilities, and names project members", () => {
+  test("keeps overview standalone and groups project governance destinations", () => {
     const items = projectNavigationItems(
       adminProject,
       true,
@@ -95,6 +95,11 @@ describe("project shell navigation", () => {
     );
     expect(items).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          href: "/projects/alpha/credentials",
+          label: "项目凭证",
+          section: "management",
+        }),
         expect.objectContaining({
           href: "/projects/alpha/members",
           label: "项目成员",
@@ -143,7 +148,7 @@ describe("project shell navigation", () => {
       "Agent",
       "Skill",
       "MCP",
-      "Credential",
+      "项目凭证",
       "返回工作空间",
       "账户",
     ]) {
@@ -184,7 +189,7 @@ describe("project shell navigation", () => {
       "Agent",
       "Skill",
       "MCP",
-      "Credential",
+      "项目凭证",
       "项目成员",
       "项目设置",
       "返回工作空间",
@@ -258,8 +263,8 @@ describe("project shell navigation", () => {
     expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
     expect(renderShell(sharedAssetReader)).toContain("Agent");
-    expect(renderShell(sharedAssetReader)).not.toContain("Credential");
+    expect(renderShell(sharedAssetReader)).not.toContain("项目凭证");
     expect(renderShell(memberManager)).toContain("项目成员");
-    expect(renderShell(credentialApprover)).toContain("Credential");
+    expect(renderShell(credentialApprover)).toContain("项目凭证");
   });
 });

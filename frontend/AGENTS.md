@@ -228,6 +228,21 @@ never plaintext, ciphertext, nonce, key ID, storage locator, secret hash, or raw
 payload. MCP versions with required Credential slots use submit/approve rather than direct
 publish.
 
+Credential deletion is available from the project, admin-project, and system Credential detail
+surfaces, never from list rows. It uses a five-second delayed destructive confirmation and sends
+the visible Credential revision for optimistic concurrency. Success removes the Credential from
+ordinary lists and details because deletion is logical; only the append-only audit event remains
+visible. A deleted name may be reused, and no browser cache may retain deleted Credential
+metadata, grants, or Skill bindings.
+
+The Skill detail Credential section is reference-only. It renders the selected published
+version's declared environment-variable requirements, lets an authorized member bind an eligible
+existing project Credential version, and submits the complete binding set with
+`expected_revision`. Query keys include account, project, and Skill; a `409` preserves the local
+draft and asks the user to reload. The UI never accepts or reads a secret value on this surface,
+and a Skill version with no declared requirements shows an explanatory empty state rather than a
+secret editor.
+
 Project MCP authoring exposes only `http` and `sse`. The URL is required and described as a
 Worker-reachable, operator-approved exact HTTPS endpoint; project `stdio` and
 `streamable_http` are never offered for new versions. Literal env/header and OAuth editors are
@@ -256,6 +271,8 @@ changes only. Equivalent once timestamps such as `Z` and `+00:00` do not count a
 change. Pure cron/once validation and recipes live under
 `core/project-automations/schedule/` and contain no URL, fetch, auth, or query-key behavior.
 Manual trigger uses a UUID idempotency key and the same durable admission path as Scheduler.
+Remote-data starter recipes bound their tool attempts and require an explicit partial-result
+fallback instead of retrying an unavailable provider until the Run recursion ceiling.
 
 ## Project governance and system administration
 

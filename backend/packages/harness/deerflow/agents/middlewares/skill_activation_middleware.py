@@ -21,8 +21,11 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SECRET_SOURCE_KEY,
+    ACTIVE_SECRET_SOURCES_CONTEXT_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
+    SKILL_SECRET_PROVIDER_CONTEXT_KEY,
     extract_request_secrets,
+    extract_skill_scoped_secrets,
 )
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
@@ -300,11 +303,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
         The set is recomputed and REPLACED each call, so a skill evicted from
         skill_context, or a caller that stops supplying a value, loses its
-        injection on the next call automatically. Injected values always come
-        from the caller's request (``context.secrets``) — never the host
-        environment, which ``env_policy.build_sandbox_env`` scrubs before
-        injection — so a skill can never harvest a host platform credential.
-        Secret *values* are never logged; the audit journal records names only.
+        injection on the next call automatically. Injected values come from the
+        exact admitted Skill-path carrier supplied by the private Worker,
+        falling back to the legacy caller request carrier
+        (``context.secrets``) only when that Skill has no scoped entry. They
+        never come from the host environment, which
+        ``env_policy.build_sandbox_env`` scrubs before injection. Secret
+        *values* are never logged; the audit journal records names only. If
+        autonomous Skills claim the same env name with incompatible bindings,
+        that name fails closed. The current explicit slash Skill takes
+        deterministic precedence for names it declares.
         """
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
@@ -320,29 +328,84 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             context[_SLASH_SECRET_SOURCE_KEY] = {"path": activation.container_file_path}
 
         request_secrets = extract_request_secrets(context)
-        sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
-        if request_secrets:
+        skill_scoped_secrets = extract_skill_scoped_secrets(context)
+        private_provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if "private_scope" in context else None
+        sources: list[tuple[str, str, tuple[SecretRequirement, ...], bool]] = []
+        if request_secrets or skill_scoped_secrets or callable(private_provider):
             registry = self._load_skill_registry_by_path()
             if registry is not None:
+                # In-context sources are collected first. An explicit slash
+                # activation is the current user-selected Skill and therefore
+                # takes precedence if two active Skills declare the same env
+                # name with different scoped values.
+                sources.extend(self._in_context_secret_sources(request, registry))
+
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
                 slash_source = context.get(_SLASH_SECRET_SOURCE_KEY)
                 slash_path = slash_source.get("path") if isinstance(slash_source, dict) else None
                 slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
-                    sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
-                sources.extend(self._in_context_secret_sources(request, registry))
+                    sources.append((slash_skill.name, posixpath.normpath(slash_path), tuple(slash_skill.required_secrets), True))
 
+        if callable(private_provider):
+            # Private Skill Credential values are deliberately absent during
+            # model calls.  Persist only the validated name/path activation plan
+            # so the async bash boundary can select values from a freshly
+            # revalidated one-command carrier.
+            context[ACTIVE_SECRET_SOURCES_CONTEXT_KEY] = tuple(
+                (
+                    skill_name,
+                    skill_path,
+                    tuple(requirement.name for requirement in requirements),
+                    is_explicit,
+                )
+                for skill_name, skill_path, requirements, is_explicit in sources
+            )
+            context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+            return
+
+        context.pop(ACTIVE_SECRET_SOURCES_CONTEXT_KEY, None)
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
         missing: dict[str, list[str]] = {}
-        for skill_name, requirements in sources:
+        claims: dict[str, list[tuple[str, str | None, bool, bool]]] = {}
+        for skill_name, skill_path, requirements, is_explicit in sources:
+            source_secrets = skill_scoped_secrets[skill_path] if skill_path in skill_scoped_secrets else request_secrets
             for req in requirements:
-                if req.name in request_secrets:
-                    injected[req.name] = request_secrets[req.name]
+                if req.name in source_secrets:
+                    claims.setdefault(req.name, []).append((skill_name, source_secrets[req.name], True, is_explicit))
+                else:
+                    claims.setdefault(req.name, []).append((skill_name, None, False, is_explicit))
+                    if not req.optional:
+                        missing.setdefault(skill_name, []).append(req.name)
+
+        conflicts: dict[str, list[str]] = {}
+        for secret_name, secret_claims in claims.items():
+            explicit_claims = [claim for claim in secret_claims if claim[3]]
+            if explicit_claims:
+                # At most one slash Skill is current. Its declaration reserves
+                # this env name even when its value is absent, preventing a
+                # loaded autonomous Skill's value from crossing into it.
+                skill_name, value, supplied, _ = explicit_claims[-1]
+                if supplied:
+                    injected[secret_name] = value or ""
                     bound_skills.add(skill_name)
-                elif not req.optional:
-                    missing.setdefault(skill_name, []).append(req.name)
+                continue
+
+            skill_names = sorted({claim[0] for claim in secret_claims})
+            supplied_values = {claim[1] for claim in secret_claims if claim[2]}
+            all_supplied = all(claim[2] for claim in secret_claims)
+            if len(skill_names) > 1 and (not all_supplied or len(supplied_values) > 1):
+                # A flat subprocess env cannot safely represent two active
+                # autonomous Skills that claim the same name with different
+                # (or partially missing) scoped bindings. Drop that name rather
+                # than expose one Skill's Credential to another.
+                conflicts[secret_name] = skill_names
+                continue
+            if all_supplied and supplied_values:
+                injected[secret_name] = next(iter(supplied_values)) or ""
+                bound_skills.update(skill_names)
 
         if injected:
             context[ACTIVE_SECRETS_CONTEXT_KEY] = injected
@@ -353,18 +416,25 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             "skills": sorted(bound_skills),
             "secrets": sorted(injected),
             "missing": {name: sorted(values) for name, values in sorted(missing.items())},
+            "conflicts": {name: values for name, values in sorted(conflicts.items())},
         }
         previous = context.get(_SECRETS_BINDING_AUDIT_KEY)
         if previous == audit_state:
             return
-        if previous is None and not injected and not missing:
+        if previous is None and not injected and not missing and not conflicts:
             return
         context[_SECRETS_BINDING_AUDIT_KEY] = audit_state
         for skill_name, names in sorted(missing.items()):
             logger.warning(
-                "Skill %s is active but required secrets are missing from the request context: %s",
+                "Skill %s is active but required secrets are missing from the runtime carrier: %s",
                 skill_name,
                 ", ".join(names),
+            )
+        for secret_name, skill_names in sorted(conflicts.items()):
+            logger.warning(
+                "Active Skills have conflicting runtime bindings for secret %s; injection was suppressed for: %s",
+                secret_name,
+                ", ".join(skill_names),
             )
         self._record_secret_binding(context, audit_state, hook=hook)
 
@@ -415,7 +485,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
         return skill
 
-    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill]) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
+    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill]) -> list[tuple[str, str, tuple[SecretRequirement, ...], bool]]:
         """Map ``ThreadState.skill_context`` entries to declared-secret sources.
 
         Entries are references to skills the model actually loaded in this
@@ -429,16 +499,17 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         except AttributeError:
             return []
 
-        sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
+        sources: list[tuple[str, str, tuple[SecretRequirement, ...], bool]] = []
         seen: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            skill = self._resolve_registry_skill(registry, entry.get("path"), require_autonomous=True)
+            path = entry.get("path")
+            skill = self._resolve_registry_skill(registry, path, require_autonomous=True)
             if skill is None or skill.name in seen:
                 continue
             seen.add(skill.name)
-            sources.append((skill.name, tuple(skill.required_secrets)))
+            sources.append((skill.name, posixpath.normpath(path), tuple(skill.required_secrets), False))
         return sources
 
     @staticmethod

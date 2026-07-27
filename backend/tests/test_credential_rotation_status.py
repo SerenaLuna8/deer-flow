@@ -43,6 +43,7 @@ async def test_rotation_status_repository_matches_rotate_script_eligibility() ->
     )
     sql = str(compiled)
     assert "credentials.status = 'active'" in sql
+    assert "credentials.is_delete IS false" in sql
     assert "credential_versions.status != 'revoked'" in sql
     assert "credential_envelopes.is_active IS true" in sql
     assert "credential_envelopes.key_id = 'active-key'" in sql

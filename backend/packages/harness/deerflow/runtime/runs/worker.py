@@ -22,7 +22,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Literal, Protocol, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
@@ -141,6 +141,11 @@ class PrivateAgentRuntime(Protocol):
     skills: tuple[Any, ...]
     prompt_bundle: Any
 
+    async def materialize_skill_scoped_secrets(
+        self,
+        container_path: str,
+        requested: object,
+    ) -> dict[str, dict[str, str]]: ...
     async def aclose(self) -> None: ...
 
 
@@ -196,6 +201,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "__agent_prompt_bundle",
             "__runtime_skills",
             "__runtime_mcp_tools",
+            "__skill_scoped_secrets",
+            "__skill_secret_provider",
         ):
             if key in runtime_context:
                 existing_context[key] = runtime_context[key]
@@ -590,6 +597,17 @@ async def run_agent(
                 runtime_ctx["__agent_prompt_bundle"] = prompt_bundle
             runtime_ctx["__runtime_skills"] = tuple(getattr(ctx.private_agent_runtime, "skills", ()))
             runtime_ctx["__runtime_mcp_tools"] = tuple(getattr(ctx.private_agent_runtime, "mcp_tools", ()))
+            skill_secret_provider = getattr(
+                ctx.private_agent_runtime,
+                "materialize_skill_scoped_secrets",
+                None,
+            )
+            skill_container_path = getattr(ctx.app_config.skills, "container_path", None) if ctx.app_config is not None else None
+            if callable(skill_secret_provider) and isinstance(skill_container_path, str):
+                runtime_ctx["__skill_secret_provider"] = partial(
+                    skill_secret_provider,
+                    skill_container_path,
+                )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
         if deerflow_trace_id:

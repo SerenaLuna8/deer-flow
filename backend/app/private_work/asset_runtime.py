@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import posixpath
 import re
 import shutil
 import tempfile
@@ -34,12 +35,18 @@ from app.private_work.run_repository import PrivateRunRepository
 from app.private_work.snapshot_repository import RunSnapshotAssetStale, RunSnapshotRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
+from app.shared_assets.crypto import (
+    CredentialDecryptFailed,
+    EncryptedEnvelope,
+    decrypt_credential_payload,
+)
 from app.shared_assets.errors import (
     AssetForbidden,
     AssetResolutionUnavailable,
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
+from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from app.shared_assets.models import (
     AssetKind,
     AssetScope,
@@ -49,6 +56,11 @@ from app.shared_assets.models import (
     ResolvedSkillSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.shared_assets.skill_credential_closure import (
+    SkillCredentialClosureInvalid,
+    SkillCredentialClosureTarget,
+    lock_skill_credential_closures,
+)
 from deerflow.agents.lead_agent.prompt import AgentPromptBundle
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
 from deerflow.mcp_definition_policy import (
@@ -674,6 +686,7 @@ class PrivateAgentRuntime:
     __slots__ = (
         "_authorization_boundary",
         "_closed",
+        "_closing",
         "_context",
         "_discovery_timeout_seconds",
         "_endpoint_policy",
@@ -717,6 +730,7 @@ class PrivateAgentRuntime:
         self._discovery_timeout_seconds = _validated_mcp_runtime_timeout(discovery_timeout_seconds)
         self._tool_call_timeout_seconds = _validated_mcp_runtime_timeout(tool_call_timeout_seconds)
         self._closed = False
+        self._closing = False
         self.safe_manifest = safe_manifest
         self.skill_root = skill_root
         self.skills = skills
@@ -762,6 +776,190 @@ class PrivateAgentRuntime:
     @property
     def mcp_tools(self) -> tuple[object, ...]:
         return self._mcp_tools
+
+    async def materialize_skill_scoped_secrets(
+        self,
+        container_path: str,
+        requested: object,
+    ) -> dict[str, dict[str, str]]:
+        """Revalidate and decrypt one short-lived sandbox-command carrier."""
+
+        if self._closed or getattr(self, "_closing", False) or not isinstance(container_path, str) or not isinstance(requested, Mapping):
+            raise PrivateWorkAssetStale(self._context.request_id)
+        skill_by_path = {
+            posixpath.normpath(skill.get_container_file_path(container_path)): (manifest, skill)
+            for manifest, skill in zip(
+                self.safe_manifest.skills,
+                self.skills,
+                strict=True,
+            )
+        }
+        requested_by_path: dict[str, frozenset[str]] = {}
+        for raw_path, raw_names in requested.items():
+            if not isinstance(raw_path, str) or not isinstance(raw_names, frozenset) or any(not isinstance(name, str) or not name for name in raw_names):
+                raise PrivateWorkAssetStale(self._context.request_id)
+            path = posixpath.normpath(raw_path)
+            pair = skill_by_path.get(path)
+            if pair is None:
+                raise PrivateWorkAssetStale(self._context.request_id)
+            _manifest, skill = pair
+            declared = {requirement.name for requirement in skill.required_secrets}
+            if raw_names != declared:
+                raise PrivateWorkAssetStale(self._context.request_id)
+            requested_by_path[path] = raw_names
+        if not requested_by_path:
+            return {}
+        requested_manifests = tuple(manifest for path, (manifest, _skill) in skill_by_path.items() if path in requested_by_path)
+        requested_version_ids = {manifest.version_id for manifest in requested_manifests}
+        repository = RunSnapshotRepository(
+            self._session_factory,
+            endpoint_policy=self._endpoint_policy,
+        )
+        values_by_version: dict[uuid.UUID, dict[str, str]] = {manifest.version_id: {} for manifest in requested_manifests}
+        try:
+            async with self._session_factory() as session, session.begin():
+                active = await PrivateRunAuthorizationService.is_active(
+                    session,
+                    project_id=self._context.project_id,
+                    owner_user_id=str(self._context.user_id),
+                    run_id=self._run_id,
+                    lock=False,
+                )
+                if not active:
+                    raise AuthorizationRevoked
+                await resolve_project_context_in_transaction(
+                    session,
+                    self._context.user_id,
+                    self._context.project_id,
+                    self._context.request_id,
+                    lock=True,
+                )
+                run = await PrivateRunRepository(session).get(
+                    scope=self._context.resource_scope,
+                    run_id=self._run_id,
+                    lock=True,
+                )
+                if run is None or run.status not in {"pending", "running"}:
+                    raise RunSnapshotAssetStale
+                assets = await repository.list_assets_in_session(
+                    session,
+                    self._context,
+                    self._run_id,
+                    lock=True,
+                )
+                skill_assets = tuple(asset for asset in assets if (asset.asset_kind == AssetKind.SKILL.value and asset.version_id in requested_version_ids))
+                if tuple((asset.asset_id, asset.version_id) for asset in skill_assets) != tuple((manifest.asset_id, manifest.version_id) for manifest in requested_manifests):
+                    raise RunSnapshotAssetStale
+                persisted = tuple(
+                    sorted(
+                        (
+                            item
+                            for item in await repository.list_skill_credentials_in_session(
+                                session,
+                                self._context,
+                                self._run_id,
+                                lock=True,
+                            )
+                            if item.skill_version_id in requested_version_ids
+                        ),
+                        key=lambda item: (
+                            item.skill_version_id.int,
+                            item.secret_name,
+                            item.skill_credential_binding_id.int,
+                            item.credential_version_id.int,
+                        ),
+                    )
+                )
+                current = await repository.current_skill_credentials_in_session(
+                    session,
+                    self._context,
+                    skill_assets,
+                )
+                if current != persisted:
+                    raise RunSnapshotAssetStale
+                try:
+                    closures = await lock_skill_credential_closures(
+                        session,
+                        self._context.project_id,
+                        tuple(
+                            SkillCredentialClosureTarget(
+                                skill_id=manifest.asset_id,
+                                skill_version_id=manifest.version_id,
+                            )
+                            for manifest in requested_manifests
+                        ),
+                        load_envelopes=True,
+                        require_required=True,
+                    )
+                except SkillCredentialClosureInvalid:
+                    raise RunSnapshotAssetStale from None
+                credential_keyring: CredentialKeyring | None = None
+                for manifest in requested_manifests:
+                    skill_path = next(path for path, (candidate, _skill) in skill_by_path.items() if candidate.version_id == manifest.version_id)
+                    requested_names = requested_by_path.get(
+                        skill_path,
+                        frozenset(),
+                    )
+                    for material in closures[manifest.version_id].materials:
+                        if material.env_name not in requested_names:
+                            continue
+                        envelope = material.envelope
+                        if envelope is None:
+                            raise RunSnapshotAssetStale
+                        if credential_keyring is None:
+                            try:
+                                credential_keyring = CredentialKeyring.from_environment()
+                            except CredentialKeyringInvalid:
+                                raise AssetStorageUnavailable(self._context.request_id) from None
+                        payload: dict[str, object] | None = None
+                        try:
+                            payload = await asyncio.to_thread(
+                                decrypt_credential_payload,
+                                EncryptedEnvelope(
+                                    key_id=envelope.key_id,
+                                    nonce=bytes(envelope.nonce),
+                                    ciphertext=bytes(envelope.ciphertext),
+                                ),
+                                AssetScope.PROJECT,
+                                self._context.project_id,
+                                material.credential_version_id,
+                                credential_keyring,
+                            )
+                            env = payload.get(material.credential_field_group)
+                            value = env.get(material.credential_field_name) if isinstance(env, Mapping) else None
+                            if not isinstance(value, str):
+                                raise RunSnapshotAssetStale
+                            values_by_version[manifest.version_id][material.env_name] = value
+                        finally:
+                            if isinstance(payload, dict):
+                                for group in payload.values():
+                                    if isinstance(group, dict):
+                                        group.clear()
+                                payload.clear()
+            result = {path: dict(values_by_version[manifest.version_id]) for path, (manifest, _skill) in skill_by_path.items() if path in requested_by_path}
+            return result
+        except (
+            RunSnapshotAssetStale,
+            AssetResolutionUnavailable,
+            AssetValidationFailed,
+            AssetForbidden,
+            SkillCredentialClosureInvalid,
+        ):
+            raise PrivateWorkAssetStale(self._context.request_id) from None
+        except AssetStorageUnavailable:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+        except CredentialDecryptFailed:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+        except PrivateWorkError as error:
+            raise type(error)(self._context.request_id) from None
+        except AuthorizationRevoked:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+        finally:
+            for values in values_by_version.values():
+                values.clear()
+            values_by_version.clear()
 
     def set_authorization_boundary(self, boundary: object) -> None:
         self._authorization_boundary = boundary
@@ -1373,10 +1571,21 @@ class PrivateAgentRuntime:
             raise PrivateWorkUnavailable(self._context.request_id) from None
 
     async def aclose(self) -> None:
-        if self._closed:
+        if getattr(self, "_closed", False):
             return
-        await asyncio.to_thread(_remove_private_skill_tree, self.skill_root)
+        if getattr(self, "_closing", False):
+            raise PrivateRuntimeCleanupError("Private runtime cleanup is already in progress")
+        self._closing = True
+        try:
+            await asyncio.to_thread(
+                _remove_private_skill_tree,
+                self.skill_root,
+            )
+        except Exception:
+            self._closing = False
+            raise
         self._closed = True
+        self._closing = False
 
 
 class PrivateAssetRuntime:
@@ -1465,6 +1674,12 @@ class PrivateAssetRuntime:
                     run.run_id,
                     lock=True,
                 )
+                skill_credentials = await self._snapshots.list_skill_credentials_in_session(
+                    session,
+                    context,
+                    run.run_id,
+                    lock=True,
+                )
                 if not assets or assets[0].asset_kind != AssetKind.AGENT.value:
                     raise RunSnapshotAssetStale
                 persisted_generation = assets[0].catalog_generation
@@ -1518,6 +1733,25 @@ class PrivateAssetRuntime:
                     )
                 )
                 if current_grants != persisted_grants:
+                    raise RunSnapshotAssetStale
+                skill_assets = tuple(asset for asset in assets if asset.asset_kind == AssetKind.SKILL.value)
+                current_skill_credentials = await self._snapshots.current_skill_credentials_in_session(
+                    session,
+                    context,
+                    skill_assets,
+                )
+                persisted_skill_credentials = tuple(
+                    sorted(
+                        skill_credentials,
+                        key=lambda item: (
+                            item.skill_version_id.int,
+                            item.secret_name,
+                            item.skill_credential_binding_id.int,
+                            item.credential_version_id.int,
+                        ),
+                    )
+                )
+                if current_skill_credentials != persisted_skill_credentials:
                     raise RunSnapshotAssetStale
         except (RunSnapshotAssetStale, AssetResolutionUnavailable, AssetValidationFailed, AssetForbidden):
             raise PrivateWorkAssetStale(context.request_id) from None
