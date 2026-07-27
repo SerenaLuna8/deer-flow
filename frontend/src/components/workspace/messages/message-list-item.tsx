@@ -116,10 +116,14 @@ function MessageImage({
   );
   if (!src) return null;
 
-  const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
+  const imageProps = {
+    ...props,
+    className: cn("max-w-full overflow-hidden rounded-lg", props.className),
+    style: { ...props.style, maxWidth },
+  };
 
   if (typeof src !== "string") {
-    return <img className={imgClassName} src={src} alt={alt} {...props} />;
+    return <img src={src} alt={alt} {...imageProps} />;
   }
 
   const url = src.startsWith("/mnt/") ? projectURL : src;
@@ -127,7 +131,7 @@ function MessageImage({
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
-      <img className={imgClassName} src={url} alt={alt} {...props} />
+      <img src={url} alt={alt} {...imageProps} />
     </a>
   );
 }
@@ -246,11 +250,8 @@ function MessageContent_({
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
-      if (rawContent.includes("<uploaded_files>")) {
-        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
-        return parseUploadedFiles(rawContent);
-      }
-      return null;
+      const parsedFiles = parseUploadedFiles(rawContent);
+      return parsedFiles.length > 0 ? parsedFiles : null;
     }
     return files as FileInMessage[];
   }, [message.additional_kwargs?.files, rawContent]);

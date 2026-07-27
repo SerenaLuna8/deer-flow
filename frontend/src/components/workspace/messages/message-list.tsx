@@ -33,6 +33,7 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
+import { filterLeadAgentStreamMessages } from "@/core/messages/lead-stream-visibility";
 import {
   buildTokenDebugSteps,
   type TokenUsageInlineMode,
@@ -313,7 +314,14 @@ export function MessageList({
     }
     prevIsLoading.current = thread.isLoading;
   }, [thread.isLoading]);
-  const messages = thread.messages;
+  const messages = useMemo(
+    () =>
+      filterLeadAgentStreamMessages(
+        thread.messages,
+        thread.getMessagesMetadata,
+      ),
+    [thread.getMessagesMetadata, thread.messages],
+  );
   const writeArtifactSelections = useMemo(
     () => extractWriteArtifactSelections(messages),
     [messages],

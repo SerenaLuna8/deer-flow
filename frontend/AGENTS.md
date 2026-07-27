@@ -124,11 +124,14 @@ order. Legacy rows without a Run ID are isolated to one Human turn. Never attach
 orphan tool result to the most recent or final assistant group, and always synthesize a stable
 non-empty group key when legacy messages have no ID.
 
-During a live project Run, successful `write_file` and `str_replace` tool calls select the
-written file in the artifact preview, open the right-hand file panel, and collapse the desktop
-project navigation. `present_files` remains the explicit publication boundary for rendering
-downloadable file cards inside the conversation. Terminal Run handling must invalidate the
-project Thread file list so finalized UUID-backed file routes are available without a reload.
+During a live project Run, successful lead-Agent `write_file` and `str_replace` tool calls select
+the written file in the artifact preview, open the right-hand file panel, and collapse the desktop
+project navigation. Trusted stream messages tagged `subagent:<name>` are internal progress and
+must be excluded from the lead conversation projection: their steps render only in the matching
+SubtaskCard, and their temporary file writes never select or open artifact preview. `present_files`
+remains the explicit publication boundary for rendering downloadable file cards inside the
+conversation. Terminal Run handling must invalidate the project Thread file list so finalized
+UUID-backed file routes are available without a reload.
 
 Input polish is project-scoped and never runs without `private_work.create` plus
 `shared_assets.execute`. The server revalidates the current Thread Agent snapshot and

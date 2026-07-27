@@ -13,7 +13,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -25,11 +25,11 @@ import {
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { indexToolCallData } from "@/core/messages/tool-call-index";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
-  findToolCallResult,
   isClarificationOnlyProcessingGroup,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
@@ -489,6 +489,49 @@ function ToolCall({
       fallback
     );
 
+  useEffect(() => {
+    if (
+      !artifactsEnabled ||
+      (name !== "write_file" && name !== "str_replace") ||
+      !isLoading ||
+      !isLast ||
+      !autoOpen ||
+      !autoSelect ||
+      typeof args.path !== "string" ||
+      !args.path ||
+      result
+    ) {
+      return;
+    }
+
+    const path = args.path;
+    const timeout = window.setTimeout(() => {
+      const url = new URL(
+        `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+      ).toString();
+      if (selectedArtifact !== url) {
+        select(url, true);
+      }
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    args.path,
+    artifactsEnabled,
+    autoOpen,
+    autoSelect,
+    id,
+    isLast,
+    isLoading,
+    messageId,
+    name,
+    result,
+    select,
+    selectedArtifact,
+    setOpen,
+  ]);
+
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
@@ -637,27 +680,6 @@ function ToolCall({
       description = t.toolCalls.writeFile;
     }
     const path: string | undefined = (args as { path: string })?.path;
-    if (
-      artifactsEnabled &&
-      isLoading &&
-      isLast &&
-      autoOpen &&
-      autoSelect &&
-      path &&
-      !result
-    ) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
-
     return (
       <ChainOfThoughtStep
         key={id}
@@ -762,6 +784,7 @@ type CoTStep = CoTReasoningStep | CoTToolCallStep;
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
+  const { toolCallResults } = indexToolCallData(messages);
   for (const message of messages) {
     if (message.type === "ai") {
       const reasoning = extractReasoningContentFromMessage(message);
@@ -790,7 +813,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
+          const toolCallResult = toolCallResults.get(toolCallId);
           if (toolCallResult) {
             try {
               const json = JSON.parse(toolCallResult);

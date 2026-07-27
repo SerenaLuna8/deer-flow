@@ -538,6 +538,7 @@ export function ScopedChatPage({
                       )}
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
+                      draftConversationScope={isNewThread ? "new" : threadId}
                       autoFocus={isWelcomeMode}
                       status={
                         thread.error

@@ -406,6 +406,10 @@ export function extractTextFromMessage(message: Message) {
 
 const THINK_OPEN_TAG = "<think>";
 const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
+const inlineReasoningCache = new WeakMap<
+  Message,
+  { source: string; result: ReturnType<typeof splitInlineReasoning> }
+>();
 
 function splitInlineReasoning(content: string) {
   const reasoningParts: string[] = [];
@@ -448,7 +452,13 @@ function splitInlineReasoningFromAIMessage(message: Message) {
   if (message.type !== "ai" || typeof message.content !== "string") {
     return null;
   }
-  return splitInlineReasoning(message.content);
+  const cached = inlineReasoningCache.get(message);
+  if (cached?.source === message.content) {
+    return cached.result;
+  }
+  const result = splitInlineReasoning(message.content);
+  inlineReasoningCache.set(message, { source: message.content, result });
+  return result;
 }
 
 export function extractContentFromMessage(message: Message) {
@@ -497,7 +507,7 @@ export function extractReasoningContentFromMessage(message: Message) {
     }
   }
   if (typeof message.content === "string") {
-    return splitInlineReasoning(message.content).reasoning;
+    return splitInlineReasoningFromAIMessage(message)?.reasoning ?? null;
   }
   return null;
 }
@@ -635,14 +645,18 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
+  if (message.additional_kwargs?.hide_from_ui === true) return true;
+  if (
+    typeof message.name === "string" &&
+    HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name)
+  ) {
+    return true;
+  }
+  if (message.type !== "human") return false;
   const content = extractTextFromMessage(message);
   return (
-    message.additional_kwargs?.hide_from_ui === true ||
-    (typeof message.name === "string" &&
-      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name)) ||
-    (message.type === "human" &&
-      content.includes("<slash_skill_activation>") &&
-      stripUploadedFilesTag(content).length === 0)
+    content.includes("<slash_skill_activation>") &&
+    stripUploadedFilesTag(content).length === 0
   );
 }
 
@@ -664,7 +678,10 @@ export interface FileInMessage {
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
-    .replace(/<(uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
+    .replace(
+      /<(uploaded_files|current_uploads|slash_skill_activation)>[\s\S]*?<\/\1>/g,
+      "",
+    )
     .trim();
 }
 
@@ -689,6 +706,7 @@ export function stripUploadedFilesTag(content: string): string {
  */
 export const INTERNAL_MARKER_TAGS = [
   "uploaded_files",
+  "current_uploads",
   "slash_skill_activation",
   "system-reminder",
   "memory",
@@ -715,8 +733,8 @@ export function stripInternalMarkers(content: string): string {
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {
-  // Match <uploaded_files>...</uploaded_files> tag
-  const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
+  const uploadedFilesRegex =
+    /<(?:uploaded_files|current_uploads)>([\s\S]*?)<\/(?:uploaded_files|current_uploads)>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
@@ -745,10 +763,27 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
     files.push({
       filename: fileMatch[1].trim(),
-      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
+      size: parseHumanFileSize(fileMatch[2].trim()),
       path: fileMatch[3].trim(),
     });
   }
 
   return files;
+}
+
+function parseHumanFileSize(value: string) {
+  const match = /^([\d.]+)\s*(B|KB|MB|GB|TB)?$/i.exec(value.trim());
+  if (!match) return 0;
+  const amount = Number.parseFloat(match[1] ?? "");
+  if (!Number.isFinite(amount)) return 0;
+  const unit = (match[2] ?? "B").toUpperCase();
+  const multiplier =
+    {
+      B: 1,
+      KB: 1024,
+      MB: 1024 ** 2,
+      GB: 1024 ** 3,
+      TB: 1024 ** 4,
+    }[unit] ?? 1;
+  return Math.round(amount * multiplier);
 }

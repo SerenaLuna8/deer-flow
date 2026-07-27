@@ -15,6 +15,8 @@ import {
   hasReasoning,
   isClarificationOnlyProcessingGroup,
   isAssistantMessageGroupStreaming,
+  isHiddenFromUIMessage,
+  parseUploadedFiles,
   stripUploadedFilesTag,
 } from "@/core/messages/utils";
 
@@ -327,6 +329,36 @@ describe("human message internal context stripping", () => {
       "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";
 
     expect(stripUploadedFilesTag(content)).toBe("real user task");
+  });
+
+  test("supports the current_uploads compatibility marker and human sizes", () => {
+    const content =
+      "<current_uploads>\n- report.pdf (1.5 MB)\n  Path: /mnt/data/report.pdf\n</current_uploads>\nReview it";
+
+    expect(stripUploadedFilesTag(content)).toBe("Review it");
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "report.pdf",
+        size: 1_572_864,
+        path: "/mnt/data/report.pdf",
+      },
+    ]);
+  });
+
+  test("does not read message content for already hidden control messages", () => {
+    let reads = 0;
+    const hidden = {
+      id: "hidden",
+      type: "human",
+      name: "summary",
+      get content() {
+        reads += 1;
+        return "private context";
+      },
+    } as unknown as Message;
+
+    expect(isHiddenFromUIMessage(hidden)).toBe(true);
+    expect(reads).toBe(0);
   });
 
   test("hides leaked slash skill activation messages with no user text", () => {

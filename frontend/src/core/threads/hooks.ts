@@ -44,6 +44,7 @@ import {
   fetchThreadTokenUsage,
   type RunMessagesPageResponse,
 } from "./api";
+import { useCoalescedStreamMessages } from "./coalesce";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -86,10 +87,9 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Invoked exactly once after the upload and thread submission succeed. It
+   * never fires for a dropped concurrent send or a failed submission, so
+   * callers can safely clear recoverable one-time composer state.
    */
   onSent?: () => void;
 };
@@ -1267,6 +1267,7 @@ export function useThreadStream({
     threadId: onStreamThreadId,
     reconnectOnMount: privateWork.reconnectOnMount,
     fetchStateHistory: { limit: 1 },
+    throttle: true,
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
@@ -1551,6 +1552,10 @@ export function useThreadStream({
         : [],
     [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages],
   );
+  const renderMessages = useCoalescedStreamMessages(
+    persistedMessages,
+    thread.isLoading,
+  );
   const visibleHistory = useMemo(
     () => (threadId ? history : []),
     [history, threadId],
@@ -1666,10 +1671,6 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
-
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
 
       const text = message.text.trim();
       const humanMessageId = `human-${crypto.randomUUID()}`;
@@ -1849,6 +1850,7 @@ export function useThreadStream({
             },
           },
         );
+        options?.onSent?.();
         void queryClient.invalidateQueries({
           queryKey: scopedThreadQueryKey(
             privateWork.scope,
@@ -2059,7 +2061,7 @@ export function useThreadStream({
     }
   }
   const runScopedPersistedMessages = attachRunIdToNewMessages(
-    persistedMessages,
+    renderMessages,
     activeRunId,
     runBaselineMessageIds,
   );
