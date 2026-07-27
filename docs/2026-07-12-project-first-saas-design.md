@@ -9,7 +9,8 @@
 
 ## 1. 文档目的
 
-本文档是 DeerFlow 项目优先、多用户 SaaS V1 的唯一设计基线。当前实现事实以代码、已提交的 PostgreSQL Alembic 单一当前 head 和自动化发布门禁为准。
+本文档是 DeerFlow 项目优先、多用户 SaaS V1 的唯一设计基线。当前实现事实以代码、PostgreSQL
+`full_schema_v1` 完整快照和自动化发布门禁为准。
 
 M1–M8 已正式完成。M7 已收敛为 PostgreSQL schema 基线、project/admin API、project-scoped
 frontend、独立 Worker/Scheduler、durable SSE/quota/audit 和运行时只读 schema 边界；M8 进一步完成完整
@@ -231,7 +232,7 @@ authenticated user
 - LangGraph checkpointer；
 - 运行事件；
 - Scheduler 和 Worker；
-- Alembic migration；
+- 完整 schema 初始化器；
 - 文件和向量数据。
 
 宿主机运行 DeerFlow 时连接 `127.0.0.1:5432`。容器内运行时使用 Docker Compose 服务名，不能使用容器自身的 `127.0.0.1`。
@@ -242,16 +243,16 @@ authenticated user
 
 仓库提供：
 
-- `make setup-db`：检查 PostgreSQL、创建空的 `deerflow` 目标库、安装当前 Alembic head、初始化基础数据；
-- `make migrate-db`：保留给未来已提交 revision，只执行 pending Alembic migrations 到 head，不执行 catalog、LangGraph 或默认项目 bootstrap；
-- `make check-db`：只读检查连接、current/head revision、扩展、必需对象和 migration 状态。
+- `make setup-db`：检查 PostgreSQL、创建空的 `deerflow` 目标库、原子执行 `full_schema.sql`，再初始化 catalog、LangGraph schema 和默认项目；
+- `make check-db`：只读检查连接、`full_schema_v1` marker、扩展和必需对象。
 
-脚本必须幂等、脱敏错误，并且不提供删除数据库或清空数据功能。Gateway、Worker 和 Scheduler 启动不得执行 DDL、Alembic upgrade、stamp 或 schema repair。
+脚本必须幂等、脱敏错误，并且不提供删除数据库或清空数据功能。Gateway、Worker 和 Scheduler
+启动不得执行 DDL、schema 安装或自动修复。
 
 ### 7.3 数据库账号
 
 - `deerflow_app`：API、Worker 和 Scheduler 的日常读写；
-- `deerflow_migrator`：schema migration；
+- PostgreSQL 管理员：仅供显式 `setup-db` 创建空目标库，不参与应用运行；
 - PostgreSQL 超级用户不用于应用运行。
 
 本地开发初期允许通过现有 `postgres` 用户执行初始化，但应用部署规格仍以最小权限账号为目标。
@@ -384,22 +385,18 @@ V1 初始默认值：
 - 已注册接收者可以在工作区通知面板中接受邀请。接受操作使用服务端认证账号和通知绑定的邀请引用完成校验，不信任客户端提供的邮箱或用户 ID；邀请过期、撤销、已兑换或版本冲突时返回稳定错误且不创建重复成员关系。
 - 通知读取、未读计数和标记已读均持久化到 PostgreSQL。接受邀请成功后，对应通知进入已处理状态并从待处理计数中移除；同一邀请通过链接先行兑换、过期或被撤销时，通知也不得继续提供可执行操作。
 
-## 16. 向前迁移策略
+## 16. 完整 Schema 初始化策略
 
-`0001_project_saas_baseline` 是冻结且不可改写的合并基线，也是单一当前 head。它已经包含项目
-Skill 整包硬删除与项目内大小写不敏感名字唯一所需的 schema 和约束、Agent 的 `AGENTS.md`、
-`SOUL.md`、`IDENTITY.md`、`USER.md` 四个逻辑文档，以及私有 Agent Builder 会话和幂等操作表。
-未来第一次 schema 变化从 `0002` 起新增线性 Alembic revision；后续继续沿同一 forward-only
-chain 追加，已经提交的 migration 不得修改、压缩或重新 stamp。
+`backend/packages/harness/deerflow/persistence/full_schema.sql` 是唯一业务 Schema 初始化快照，
+marker 为 `full_schema_v1`。它直接描述当前所需的表、索引、约束、函数和触发器，不存在
+Alembic revision 链或增量升级入口。
 
-新安装顺序是：创建空数据库 → `make setup-db` → `make check-db` → `make start`。Setup 从空库执行
-单一当前 baseline，然后初始化 packaged system asset catalog、LangGraph schema 和 default project。
+新安装顺序是：创建空数据库 → `make setup-db` → `make check-db` → `make start`。Setup 原子执行
+完整快照，然后初始化 packaged system asset catalog、LangGraph schema 和 default project。
 
-当前版本的已有数据库必须精确匹配 `0001_project_saas_baseline` catalog。`make migrate-db` 保留给未来
-已提交的 revision；届时仅从迁移图中已验证且 catalog 匹配的旧 head 执行 pending migrations，
-且不执行 setup bootstrap side effects。运行时启动和 `check-db` 始终只读；未知 revision、未纳管
-非空 schema 或 catalog drift 拒绝自动处理。系统不执行隐式 upgrade、manual stamp、自动 repair、
-清空、删除或 downgrade。
+已有数据库只有在 marker 与 catalog 均精确匹配 `full_schema_v1` 时才可继续使用。旧 marker、
+未纳管非空 schema 或 catalog drift 均拒绝自动处理，必须在停服、备份并由操作者确认目标后重建。
+运行时启动和 `check-db` 始终只读；系统不执行隐式升级、自动修复、清空或删除。
 
 ## 17. 安全和错误语义
 

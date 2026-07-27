@@ -1,4 +1,4 @@
-"""Explicit PostgreSQL migrations and read-only runtime schema validation."""
+"""Atomic full-schema initialization and read-only runtime validation."""
 
 from __future__ import annotations
 
@@ -8,9 +8,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from alembic import command as alembic_command
-from alembic.config import Config as AlembicConfig
-from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -21,21 +18,14 @@ from deerflow.persistence.final_schema_contract import (
     LANGGRAPH_TABLES,
     inventory_is_m7_allowed,
     inventory_user_schema_objects,
-    verify_m7_baseline_catalog,
     verify_m7_catalog,
-    verify_m7_skill_builder_catalog,
-    verify_m7_skill_credential_catalog,
 )
 
-BASELINE_SCHEMA_REVISION = "0001_project_saas_baseline"
-SKILL_BUILDER_SCHEMA_REVISION = "0002_skill_design_builder"
-SKILL_CREDENTIAL_SCHEMA_REVISION = "0003_skill_credentials"
-CURRENT_SCHEMA_REVISION = "0004_credential_soft_delete"
+CURRENT_SCHEMA_REVISION = "full_schema_v1"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
-_MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
-_HEAD_REVISION: str | None = None
+_FULL_SCHEMA_PATH = Path(__file__).resolve().parent / "full_schema.sql"
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _PG_LOCK_POLL_SECONDS = 0.1
 
@@ -45,21 +35,12 @@ _FINAL_ALLOWED_RELATIONS = _FINAL_APP_TABLES | _LANGGRAPH_TABLES | {"alembic_ver
 
 
 class M7RecreateRequired(RuntimeError):
-    """The existing database is not a recognized, safely migratable schema."""
+    """The existing database is not the exact supported full-schema snapshot."""
 
     code = "M7_RECREATE_REQUIRED"
 
     def __init__(self) -> None:
-        super().__init__("M7_RECREATE_REQUIRED: unknown revision or schema catalog drift requires manual operator review")
-
-
-class SchemaMigrationRequired(RuntimeError):
-    """A known older schema must be upgraded explicitly before runtime starts."""
-
-    code = "DATABASE_MIGRATION_REQUIRED"
-
-    def __init__(self) -> None:
-        super().__init__("DATABASE_MIGRATION_REQUIRED: run `make migrate-db` before starting DeerFlow")
+        super().__init__("M7_RECREATE_REQUIRED: nonempty database is not the exact full_schema_v1 catalog and must be recreated")
 
 
 class SchemaSetupRequired(RuntimeError):
@@ -69,34 +50,6 @@ class SchemaSetupRequired(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("DATABASE_SETUP_REQUIRED: run `make setup-db` before starting DeerFlow")
-
-
-def _escape_url_for_alembic(url: str) -> str:
-    return url.replace("%", "%%")
-
-
-def _alembic_safe_url(engine: AsyncEngine) -> str:
-    return _escape_url_for_alembic(engine.url.render_as_string(hide_password=False))
-
-
-def _get_alembic_config(engine_or_url: AsyncEngine | str) -> AlembicConfig:
-    config = AlembicConfig(str(_MIGRATIONS_DIR / "alembic.ini"))
-    config.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    url = _alembic_safe_url(engine_or_url) if hasattr(engine_or_url, "url") else _escape_url_for_alembic(str(engine_or_url))
-    config.set_main_option("sqlalchemy.url", url)
-    return config
-
-
-def _get_head_revision() -> str:
-    global _HEAD_REVISION
-    if _HEAD_REVISION is None:
-        config = AlembicConfig()
-        config.set_main_option("script_location", str(_MIGRATIONS_DIR))
-        heads = ScriptDirectory.from_config(config).get_heads()
-        if heads != [CURRENT_SCHEMA_REVISION]:
-            raise RuntimeError("migration graph must contain exactly one declared current head")
-        _HEAD_REVISION = heads[0]
-    return _HEAD_REVISION
 
 
 async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
@@ -114,8 +67,12 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
 
 async def classify_database(
     connection: AsyncConnection,
-) -> Literal["empty", "upgradeable", "current"]:
-    """Classify a database without mutation before any migration can run."""
+) -> Literal["empty", "current"]:
+    """Classify a database without mutation.
+
+    Only an empty schema or the exact ``full_schema_v1`` catalog is accepted.
+    Every other nonempty schema requires explicit recreation.
+    """
 
     objects = await inventory_user_schema_objects(connection)
     if not objects:
@@ -123,28 +80,10 @@ async def classify_database(
     if not inventory_is_m7_allowed(objects) or "relation:r:alembic_version" not in objects:
         raise M7RecreateRequired()
 
-    revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-    if revision == CURRENT_SCHEMA_REVISION:
-        if await verify_m7_catalog(connection):
-            return "current"
+    markers = tuple(str(value) for value in (await connection.execute(text("SELECT version_num FROM alembic_version ORDER BY version_num"))).scalars())
+    if markers != (CURRENT_SCHEMA_REVISION,) or not await verify_m7_catalog(connection):
         raise M7RecreateRequired()
-    if revision == BASELINE_SCHEMA_REVISION:
-        if await verify_m7_baseline_catalog(connection):
-            return "upgradeable"
-        raise M7RecreateRequired()
-    if revision == SKILL_BUILDER_SCHEMA_REVISION:
-        if await verify_m7_skill_builder_catalog(connection):
-            return "upgradeable"
-        raise M7RecreateRequired()
-    if revision == SKILL_CREDENTIAL_SCHEMA_REVISION:
-        if await verify_m7_skill_credential_catalog(connection):
-            return "upgradeable"
-        raise M7RecreateRequired()
-    raise M7RecreateRequired()
-
-
-def _upgrade(config: AlembicConfig, revision: str = "head") -> None:
-    alembic_command.upgrade(config, revision)
+    return "current"
 
 
 @asynccontextmanager
@@ -177,41 +116,45 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
         await lock_engine.dispose()
 
 
-async def migrate_schema(engine: AsyncEngine) -> None:
-    """Explicitly migrate a future verified ancestor database to head."""
+def _read_full_schema_sql() -> str:
+    payload = _FULL_SCHEMA_PATH.read_text(encoding="utf-8")
+    expected_marker = "INSERT INTO alembic_version (version_num) VALUES ('full_schema_v1');"
+    if not payload.startswith("BEGIN;\n") or not payload.rstrip().endswith("COMMIT;") or payload.count(expected_marker) != 1 or "-- Running upgrade" in payload or "UPDATE alembic_version" in payload:
+        raise RuntimeError("full schema SQL snapshot is invalid")
+    return payload
 
-    if not isinstance(engine, AsyncEngine):
-        raise TypeError("migrate_schema() requires an AsyncEngine")
-    _get_head_revision()
-    async with _postgres_lock(engine):
-        async with engine.connect() as connection:
-            state = await classify_database(connection)
-        if state == "empty":
-            raise SchemaSetupRequired()
-        if state == "upgradeable":
-            await _run_alembic_offload(_upgrade, _get_alembic_config(engine), "head")
-        async with engine.connect() as connection:
-            if await classify_database(connection) != "current":
-                raise M7RecreateRequired()
+
+async def _install_full_schema(engine: AsyncEngine) -> None:
+    """Execute the complete snapshot as one PostgreSQL transaction."""
+
+    payload = await asyncio.to_thread(_read_full_schema_sql)
+    async with engine.connect() as connection:
+        raw_connection = await connection.get_raw_connection()
+        driver_connection = raw_connection.driver_connection
+        try:
+            # asyncpg's no-argument execute path uses PostgreSQL's simple-query
+            # protocol, which accepts this complete BEGIN/COMMIT SQL batch.
+            await driver_connection.execute(payload)
+        except BaseException:
+            try:
+                await driver_connection.execute("ROLLBACK")
+            except Exception:
+                # Closing the owning SQLAlchemy connection is the final
+                # rollback/cleanup boundary for a failed initialization.
+                pass
+            raise
 
 
 async def bootstrap_schema(engine: AsyncEngine) -> None:
-    """Install an empty schema or verify an already-current schema."""
+    """Install an empty schema or verify the exact full-schema marker."""
 
     if not isinstance(engine, AsyncEngine):
         raise TypeError("bootstrap_schema() requires an AsyncEngine")
-    _get_head_revision()
     async with _postgres_lock(engine):
         async with engine.connect() as connection:
             state = await classify_database(connection)
-        if state == "upgradeable":
-            raise SchemaMigrationRequired()
         if state == "empty":
-            await _run_alembic_offload(
-                _upgrade,
-                _get_alembic_config(engine),
-                "head",
-            )
+            await _install_full_schema(engine)
         async with engine.connect() as connection:
             if await classify_database(connection) != "current":
                 raise M7RecreateRequired()
@@ -222,48 +165,20 @@ async def validate_schema(engine: AsyncEngine) -> None:
 
     if not isinstance(engine, AsyncEngine):
         raise TypeError("validate_schema() requires an AsyncEngine")
-    _get_head_revision()
     async with engine.connect() as connection:
         state = await classify_database(connection)
     if state == "current":
         return
-    if state == "upgradeable":
-        raise SchemaMigrationRequired()
     raise SchemaSetupRequired()
 
 
-async def _run_alembic_offload(function, *args) -> None:
-    """Keep the advisory lock until synchronous Alembic work settles on cancellation."""
-
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
-    pending_cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError as exc:
-            if pending_cancellation is None:
-                pending_cancellation = exc
-        except Exception:
-            if pending_cancellation is None:
-                raise
-            raise pending_cancellation
-    if pending_cancellation is not None:
-        raise pending_cancellation
-
-
 __all__ = [
-    "BASELINE_SCHEMA_REVISION",
     "CURRENT_SCHEMA_REVISION",
-    "SKILL_BUILDER_SCHEMA_REVISION",
-    "SKILL_CREDENTIAL_SCHEMA_REVISION",
     "M7RecreateRequired",
     "M7_FINAL_SCHEMA_REVISION",
-    "SchemaMigrationRequired",
     "SchemaSetupRequired",
     "bootstrap_schema",
     "classify_database",
     "list_user_relations",
-    "migrate_schema",
     "validate_schema",
 ]

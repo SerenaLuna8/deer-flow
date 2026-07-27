@@ -195,6 +195,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
 
     async def bootstrap(_engine):
         calls.append("orm")
+        return "full_schema_v1"
 
     async def langgraph(_database_url):
         calls.append("langgraph")
@@ -209,9 +210,8 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", builtin)
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_project_schema", projects)
-    monkeypatch.setattr(setup_postgres, "_get_head_revision", lambda: "head")
 
-    assert await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc") == "head"
+    assert await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc") == "full_schema_v1"
     assert calls == [
         "lock:enter",
         "SELECT 1",
@@ -223,72 +223,6 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
         "dispose",
     ]
     connection_context.__aexit__.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_migrate_existing_runs_only_committed_schema_chain(monkeypatch) -> None:
-    calls = []
-    connection = AsyncMock()
-
-    async def execute(statement):
-        calls.append(str(statement))
-
-    connection.execute.side_effect = execute
-    connection_context = MagicMock()
-    connection_context.__aenter__ = AsyncMock(return_value=connection)
-    connection_context.__aexit__ = AsyncMock(return_value=None)
-    engine = MagicMock()
-    engine.connect.return_value = connection_context
-    engine.dispose = AsyncMock(side_effect=lambda: calls.append("dispose"))
-    monkeypatch.setattr(setup_postgres, "_create_setup_engine", lambda _config: engine)
-
-    @asynccontextmanager
-    async def coordination_lock(_database_url):
-        calls.append("lock:enter")
-        try:
-            yield
-        finally:
-            calls.append("lock:exit")
-
-    migrate = AsyncMock(side_effect=lambda _engine: calls.append("migrate"))
-    monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
-    monkeypatch.setattr(setup_postgres, "migrate_schema", migrate)
-    monkeypatch.setattr(
-        setup_postgres,
-        "bootstrap_schema",
-        AsyncMock(side_effect=AssertionError("setup path must not run")),
-    )
-    monkeypatch.setattr(
-        setup_postgres,
-        "_bootstrap_builtin_catalog",
-        AsyncMock(side_effect=AssertionError("catalog seed must not run")),
-    )
-    monkeypatch.setattr(
-        setup_postgres,
-        "_bootstrap_langgraph_schemas",
-        AsyncMock(side_effect=AssertionError("LangGraph setup must not run")),
-    )
-    monkeypatch.setattr(
-        setup_postgres,
-        "_bootstrap_default_project_schema",
-        AsyncMock(side_effect=AssertionError("default project setup must not run")),
-    )
-    monkeypatch.setattr(setup_postgres, "_get_head_revision", lambda: "head")
-
-    result = await setup_postgres._bootstrap_existing(
-        "postgresql://owner:private-password@localhost/deerflow_test_1_abc",
-        migrate_only=True,
-    )
-
-    assert result == "head"
-    migrate.assert_awaited_once_with(engine)
-    assert calls == [
-        "lock:enter",
-        "SELECT 1",
-        "migrate",
-        "lock:exit",
-        "dispose",
-    ]
 
 
 @pytest.mark.asyncio
@@ -349,33 +283,15 @@ async def test_bootstrap_existing_rejects_unknown_schema_without_mutation(monkey
         await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
 
     assert str(exc_info.value).startswith("M7_RECREATE_REQUIRED:")
-    assert "catalog 已漂移" in str(exc_info.value)
-    assert "不会自动删除、覆盖或修复" in str(exc_info.value)
+    assert "full_schema_v1" in str(exc_info.value)
+    assert "重建目标数据库" in str(exc_info.value)
     assert "private-password" not in str(exc_info.value)
     engine.dispose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("migrate_only", "schema_error", "expected_message"),
-    [
-        (
-            False,
-            setup_postgres.SchemaMigrationRequired(),
-            "DATABASE_MIGRATION_REQUIRED: 目标库版本落后；请运行 `make migrate-db` 完成向前迁移",
-        ),
-        (
-            True,
-            setup_postgres.SchemaSetupRequired(),
-            "DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`",
-        ),
-    ],
-)
-async def test_bootstrap_existing_preserves_actionable_schema_state(
+async def test_bootstrap_existing_preserves_setup_required_state(
     monkeypatch,
-    migrate_only: bool,
-    schema_error: RuntimeError,
-    expected_message: str,
 ) -> None:
     connection = AsyncMock()
     connection_context = MagicMock()
@@ -393,17 +309,14 @@ async def test_bootstrap_existing_preserves_actionable_schema_state(
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(
         setup_postgres,
-        "migrate_schema" if migrate_only else "bootstrap_schema",
-        AsyncMock(side_effect=schema_error),
+        "bootstrap_schema",
+        AsyncMock(side_effect=setup_postgres.SchemaSetupRequired()),
     )
 
     with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
-        await setup_postgres._bootstrap_existing(
-            "postgresql://owner:private-password@localhost/deerflow_test_1_abc",
-            migrate_only=migrate_only,
-        )
+        await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
 
-    assert str(exc_info.value) == expected_message
+    assert str(exc_info.value) == "DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`"
     assert "private-password" not in str(exc_info.value)
     engine.dispose.assert_awaited_once()
 
@@ -691,22 +604,7 @@ async def test_setup_validates_explicit_database_and_always_closes_engine(monkey
         )
     assert "secret" not in str(exc_info.value)
     bootstrap.assert_awaited_once()
-    assert bootstrap.await_args.kwargs == {"migrate_only": False}
-
-
-@pytest.mark.asyncio
-async def test_migrate_uses_existing_database_only_path(monkeypatch) -> None:
-    bootstrap = AsyncMock(return_value="0004_credential_soft_delete")
-    monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
-
-    result = await setup_postgres.migrate_postgres(
-        "postgresql://owner:secret@localhost/deerflow_test_1_abc",
-    )
-
-    assert result.created is False
-    assert result.revision == "0004_credential_soft_delete"
-    bootstrap.assert_awaited_once()
-    assert bootstrap.await_args.kwargs == {"migrate_only": True}
+    assert bootstrap.await_args.kwargs == {}
 
 
 @pytest.mark.asyncio
@@ -735,7 +633,7 @@ async def test_bootstrap_cleanup_failure_is_sanitized(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_two_concurrent_setup_calls_continue_to_bootstrap(monkeypatch) -> None:
     ensure = AsyncMock(side_effect=[True, False])
-    bootstrap = AsyncMock(return_value="0004_credential_soft_delete")
+    bootstrap = AsyncMock(return_value="full_schema_v1")
     monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
     monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
     args = (
@@ -765,13 +663,20 @@ def test_makefiles_expose_database_targets() -> None:
     root_makefile = setup_postgres.BACKEND_ROOT.parent.joinpath("Makefile").read_text()
     for target in (
         "setup-db:",
-        "migrate-db:",
         "check-db:",
     ):
         assert target in backend_makefile
         assert target in root_makefile
-    assert "setup_postgres.py --migrate-only" in backend_makefile
-    for removed in ("setup-m4-migration-db:", "migrate-sqlite:", "migrate-assets:", "migrate-private-work:", "migrate-automations:", "migrate-reliability:"):
+    for removed in (
+        "migrate-db:",
+        "--migrate-only",
+        "setup-m4-migration-db:",
+        "migrate-sqlite:",
+        "migrate-assets:",
+        "migrate-private-work:",
+        "migrate-automations:",
+        "migrate-reliability:",
+    ):
         assert removed not in backend_makefile
         assert removed not in root_makefile
 
@@ -809,7 +714,7 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
 
     assert {first.created, second.created} == {True, False}
     assert first.database == second.database == database
-    assert first.revision == second.revision == setup_postgres._get_head_revision()
+    assert first.revision == second.revision == "full_schema_v1"
     assert await setup_postgres.ensure_database(admin_url, database, owner_name=owner) is False
 
     admin_connection = await setup_postgres.asyncpg.connect(setup_postgres._asyncpg_url(admin_url))

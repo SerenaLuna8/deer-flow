@@ -222,11 +222,7 @@ async def test_project_skill_delete_settles_unattributed_storage_once(
     content = b"x" * 37
     sha256 = hashlib.sha256(content).hexdigest()
     try:
-        await asyncio.to_thread(
-            bootstrap_module._upgrade,
-            bootstrap_module._get_alembic_config(engine),
-            bootstrap_module.BASELINE_SCHEMA_REVISION,
-        )
+        await bootstrap_module.bootstrap_schema(engine)
         editor = await _seed_actor_and_project(
             engine,
             factory,
@@ -282,7 +278,6 @@ async def test_project_skill_delete_settles_unattributed_storage_once(
                     },
                 )
 
-        await bootstrap_module.migrate_schema(engine)
         service = _service(service_module, factory)
         await service.delete(
             editor,

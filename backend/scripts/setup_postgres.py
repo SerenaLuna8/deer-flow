@@ -22,12 +22,10 @@ from sqlalchemy.pool import NullPool
 from app.projects.errors import ProjectBootstrapFailed
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
+    CURRENT_SCHEMA_REVISION,
     M7RecreateRequired,
-    SchemaMigrationRequired,
     SchemaSetupRequired,
-    _get_head_revision,
     bootstrap_schema,
-    migrate_schema,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -217,8 +215,6 @@ async def _complete_bootstrap_lock(database_url: str):
 
 async def _bootstrap_existing(
     database_url: str,
-    *,
-    migrate_only: bool = False,
 ) -> str:
     engine = _create_setup_engine(DatabaseConfig(url=database_url))
     primary_error: BaseException | None = None
@@ -226,31 +222,26 @@ async def _bootstrap_existing(
         async with _complete_bootstrap_lock(database_url):
             async with engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
-            schema_operation = migrate_schema if migrate_only else bootstrap_schema
-            await schema_operation(engine)
-            if not migrate_only:
-                await _bootstrap_builtin_catalog(engine)
-                await _bootstrap_langgraph_schemas(database_url)
-                await _bootstrap_default_project_schema(engine)
-        return _get_head_revision()
+            await bootstrap_schema(engine)
+            await _bootstrap_builtin_catalog(engine)
+            await _bootstrap_langgraph_schemas(database_url)
+            await _bootstrap_default_project_schema(engine)
+        return CURRENT_SCHEMA_REVISION
     except ProjectBootstrapFailed as exc:
         primary_error = exc
         raise PostgresSetupError(exc.code) from None
     except M7RecreateRequired as exc:
         primary_error = exc
-        raise PostgresSetupError("M7_RECREATE_REQUIRED: 目标库 revision 未知或 schema catalog 已漂移；DeerFlow 不会自动删除、覆盖或修复现有数据") from None
-    except SchemaMigrationRequired as exc:
-        primary_error = exc
-        raise PostgresSetupError("DATABASE_MIGRATION_REQUIRED: 目标库版本落后；请运行 `make migrate-db` 完成向前迁移") from None
+        raise PostgresSetupError("M7_RECREATE_REQUIRED: 非空目标库不是完整的 full_schema_v1；请显式重建目标数据库") from None
     except SchemaSetupRequired as exc:
         primary_error = exc
         raise PostgresSetupError("DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`") from None
     except RuntimeError as exc:
         primary_error = exc
-        raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
+        raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和完整 schema 快照") from None
     except Exception as exc:
         primary_error = exc
-        raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和 migration 状态") from None
+        raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和完整 schema 快照") from None
     finally:
         try:
             await engine.dispose()
@@ -282,7 +273,7 @@ async def setup_postgres(
     *,
     expected_database: str | None = None,
 ) -> SetupResult:
-    """幂等创建目标数据库，并用现有 bootstrap/Alembic 升级到 head。"""
+    """幂等创建目标数据库，并安装或验证完整 schema 快照。"""
     parse_target(admin_url, maintenance=True)
     target = parse_target(database_url)
     if expected_database is not None:
@@ -294,7 +285,7 @@ async def setup_postgres(
         target.database,
         owner_name=target.username,
     )
-    revision = await _bootstrap_existing(database_url, migrate_only=False)
+    revision = await _bootstrap_existing(database_url)
     return SetupResult(
         host=target.host,
         port=target.port,
@@ -305,40 +296,17 @@ async def setup_postgres(
     )
 
 
-async def migrate_postgres(database_url: str, *, expected_database: str | None = None) -> SetupResult:
-    """Upgrade an existing database without using administrator credentials."""
-    target = parse_target(database_url)
-    if expected_database is not None:
-        expected_database = validate_identifier(expected_database, kind="database")
-        if target.database != expected_database:
-            raise ValueError("DATABASE_URL database does not match --database")
-    revision = await _bootstrap_existing(database_url, migrate_only=True)
-    return SetupResult(
-        host=target.host,
-        port=target.port,
-        database=target.database,
-        owner=target.username,
-        created=False,
-        revision=revision,
-    )
-
-
-def print_result(result: SetupResult, *, migrate_only: bool = False) -> None:
-    action = "已升级" if migrate_only else ("已创建并初始化" if result.created else "已存在并完成初始化")
+def print_result(result: SetupResult) -> None:
+    action = "已创建并初始化" if result.created else "已存在并完成初始化"
     print(f"PostgreSQL 数据库{action}")
     print(f"主机: {result.host}:{result.port}")
     print(f"数据库: {result.database}")
-    print(f"Alembic revision: {result.revision}")
+    print(f"Schema marker: {result.revision}")
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="初始化或升级 DeerFlow PostgreSQL 数据库")
+    parser = argparse.ArgumentParser(description="初始化 DeerFlow PostgreSQL 数据库")
     parser.add_argument("--database", help="必须与 DATABASE_URL 中的数据库名一致")
-    parser.add_argument(
-        "--migrate-only",
-        action="store_true",
-        help="仅升级已存在数据库，不读取 POSTGRES_ADMIN_URL，也不创建数据库",
-    )
     return parser
 
 
@@ -349,15 +317,18 @@ def main(argv: list[str] | None = None) -> int:
         print("错误: 必须显式设置 DATABASE_URL", file=sys.stderr)
         return 2
     try:
-        if args.migrate_only:
-            result = asyncio.run(migrate_postgres(database_url, expected_database=args.database))
-        else:
-            admin_url = os.getenv("POSTGRES_ADMIN_URL")
-            if not admin_url:
-                print("错误: setup-db 必须显式设置 POSTGRES_ADMIN_URL", file=sys.stderr)
-                return 2
-            result = asyncio.run(setup_postgres(admin_url, database_url, expected_database=args.database))
-        print_result(result, migrate_only=args.migrate_only)
+        admin_url = os.getenv("POSTGRES_ADMIN_URL")
+        if not admin_url:
+            print("错误: setup-db 必须显式设置 POSTGRES_ADMIN_URL", file=sys.stderr)
+            return 2
+        result = asyncio.run(
+            setup_postgres(
+                admin_url,
+                database_url,
+                expected_database=args.database,
+            )
+        )
+        print_result(result)
         return 0
     except (PostgresSetupError, ValueError) as exc:
         print(f"错误: {exc}", file=sys.stderr)

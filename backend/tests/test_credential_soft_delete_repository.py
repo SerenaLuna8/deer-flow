@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -124,9 +123,7 @@ class _ScalarsResult:
         return self.rows
 
 
-def test_credential_soft_delete_orm_and_migration_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_credential_soft_delete_orm_contract() -> None:
     table = CredentialRow.__table__
     assert table.c.is_delete.nullable is False
     assert str(table.c.is_delete.server_default.arg) == "false"
@@ -144,41 +141,6 @@ def test_credential_soft_delete_orm_and_migration_contract(
         predicate = str(indexes[name].dialect_options["postgresql"]["where"])
         assert f"scope = '{scope}'" in predicate
         assert "is_delete = false" in predicate
-
-    migration = importlib.import_module("deerflow.persistence.migrations.versions.0004_credential_soft_delete")
-    operations: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
-
-    class Operations:
-        def __getattr__(self, name: str):
-            def record(*args, **kwargs):
-                operations.append((name, args, kwargs))
-
-            return record
-
-    monkeypatch.setattr(migration, "op", Operations())
-    migration.upgrade()
-
-    assert migration.revision == "0004_credential_soft_delete"
-    assert migration.down_revision == "0003_skill_credentials"
-    add_column = next(args[1] for name, args, _kwargs in operations if name == "add_column" and args[0] == "credentials")
-    assert isinstance(add_column, sa.Column)
-    assert add_column.name == "is_delete"
-    assert add_column.nullable is False
-    assert str(add_column.server_default.arg) == "false"
-    dropped_indexes = {args[0] for name, args, _kwargs in operations if name == "drop_index"}
-    assert {
-        "uq_credentials_project_name",
-        "uq_credentials_system_name",
-    }.issubset(dropped_indexes)
-    created_indexes = {args[0]: kwargs for name, args, kwargs in operations if name == "create_index"}
-    assert "is_delete = false" in str(created_indexes["uq_credentials_project_name"]["postgresql_where"])
-    assert "is_delete = false" in str(created_indexes["uq_credentials_system_name"]["postgresql_where"])
-    assert "ix_credentials_scope_project_is_delete" in created_indexes
-    trigger_statements = {args[0] for name, args, _kwargs in operations if name == "execute"}
-    assert "DROP TRIGGER trg_credentials_generation ON credentials" in trigger_statements
-    assert any("AFTER UPDATE OF status, current_version_id, is_delete" in statement for statement in trigger_statements)
-    with pytest.raises(RuntimeError, match="Credential soft-delete downgrade is unsupported"):
-        migration.downgrade()
 
 
 @pytest.mark.asyncio

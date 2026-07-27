@@ -34,7 +34,6 @@ make check
 make install
 make config
 make setup-db
-make migrate-db
 make check-db
 make doctor
 make dev
@@ -48,15 +47,6 @@ The new-install order is:
 ```bash
 # DATABASE_URL names a new empty target; POSTGRES_ADMIN_URL names its maintenance DB.
 make setup-db
-make check-db
-make start
-```
-
-After future revisions are added, for an existing database at a verified older committed revision:
-
-```bash
-# DATABASE_URL names the existing target; no administrator URL is required.
-make migrate-db
 make check-db
 make start
 ```
@@ -77,39 +67,24 @@ make check-db
 `scheduler.enabled=false` leaves project Automation APIs and manual triggers available but
 does not acquire the Scheduler ownership lock or start polling.
 
-## Forward-only PostgreSQL migrations
+## PostgreSQL full-schema initialization
 
-`0001_project_saas_baseline.py` is the immutable merged baseline. It already contains the schema,
-relationships, and constraints required for controlled
-project-Skill package hard deletion, case-insensitive project-local Skill name uniqueness,
-the four logical Agent documents (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md`), and
-private owner-scoped Agent Builder sessions plus idempotent operations.
+`full_schema.sql` is the only complete application-schema source. The exact current marker is
+`full_schema_v1`; there is no Alembic revision chain or incremental upgrade path.
 
-`0002_skill_design_builder.py` is the frozen Skill Builder ancestor. It adds owner-private Skill
-Builder sessions, idempotent operations, durable candidate files, and exact immutable pins to the
-packaged System `skill-creator`. `0003_skill_credentials.py` is the frozen Skill Credential
-ancestor; it adds version-scoped project Skill Credential configurations, immutable binding
-history, and secret-free per-Run references. The single current head is
-`0004_credential_soft_delete.py`, which adds Credential logical deletion and active-row
-uniqueness. Every subsequent change starts at `0005` and continues that forward-only chain;
-never edit, squash, restamp, or replace a committed revision.
+`make setup-db` requires an explicit administrator URL and application URL. It creates the named
+empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
+system asset catalog, initializes the LangGraph checkpointer/store schema, and bootstraps the
+default project. The application role must be an ordinary non-superuser.
 
-`make setup-db` requires an explicit administrator URL and application URL. It creates the
-named empty target if needed, applies the complete current migration chain,
-seeds the packaged system asset catalog, initializes the LangGraph checkpointer/store schema,
-and bootstraps the default project. The application role must be an ordinary non-superuser.
+An existing legacy DeerFlow database is never upgraded in place. A legacy or unknown marker,
+unversioned nonempty schema, or catalog drift fails closed without DDL or repair. Operators must
+provision a new empty target and run `make setup-db`.
 
-An existing database for the current release must exactly match the current `0004` catalog or one
-of the frozen `0001`/`0002`/`0003` catalogs. `make migrate-db` uses only `DATABASE_URL`; while
-application processes are stopped it upgrades an exact frozen ancestor through head. It never
-creates the database and never seeds the catalog, initializes LangGraph, or bootstraps a default
-project. Runtime startup only performs read-only validation. An unknown revision, unversioned
-nonempty schema, or catalog drift fails closed without DDL or repair.
-
-`make check-db` is also read-only. It reports current/head revision, required application and
-LangGraph relations, and whether setup, migration, or operator intervention is required without
-printing credentials or full connection URLs. Downgrade, manual stamp, automatic repair,
-automatic deletion, and destructive reset are unsupported.
+`make check-db` is read-only. It reports the schema marker, required application and LangGraph
+relations, and whether setup or operator intervention is required without printing credentials
+or full connection URLs. Manual stamping, automatic repair, automatic deletion, and destructive
+reset are unsupported.
 
 ### Release PostgreSQL gate
 

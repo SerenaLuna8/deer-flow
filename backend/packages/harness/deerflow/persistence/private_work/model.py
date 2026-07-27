@@ -1,4 +1,4 @@
-"""Final-state ORM models for project-private work and M4 migration control."""
+"""Final-state ORM models for project-private work."""
 
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ class PrivateFileRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
     # Revision 0010 adds this column after the original 0008/0009 file catalog.
-    # Keep ORM create_all column order identical to the staged Alembic upgrade.
+    # Keep ORM create_all column order identical to the full schema snapshot.
     source_file_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
 
     __table_args__ = (

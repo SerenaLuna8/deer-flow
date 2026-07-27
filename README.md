@@ -86,7 +86,7 @@ make config
 
 ### 3. 初始化 PostgreSQL
 
-`0001_project_saas_baseline` 是不可改写的冻结基线，`0002_skill_design_builder` 是不可改写的 Skill Builder 祖先，`0003_skill_credentials` 是不可改写的 Skill Credential 祖先；单一当前 head 是 `0004_credential_soft_delete`。`0001` 已包含项目 Skill 整包硬删除与项目内大小写不敏感名字唯一、Agent 的 `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md` 四个逻辑文档，以及私有 Agent Builder 会话和幂等操作表；`0002` 增加私有 Skill Builder 会话、固定的系统 `skill-creator` 版本、幂等操作与持久化候选文件；`0003` 增加按项目和 Skill 版本隔离的 Credential 绑定、不可变绑定历史与无明文 Run 快照引用；`0004` 增加 Credential 逻辑删除，并让项目内或系统级名称唯一性只约束未删除记录。系统支持在全新 PostgreSQL 目标库中安装完整迁移链；运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v1`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 全新数据库
@@ -96,7 +96,7 @@ make setup-db
 make check-db
 ```
 
-`make setup-db` 从空库安装完整当前迁移链，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make check-db` 只读校验 current/head revision 与必需对象。当前版本的已有数据库必须精确匹配 `0004_credential_soft_delete` catalog；精确匹配冻结 `0001`、`0002` 或 `0003` catalog 的数据库可在停服后通过 `make migrate-db` 升级。迁移只执行 pending revisions，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化。未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
+`make check-db` 只读校验 `full_schema_v1` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 
@@ -145,7 +145,7 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 工作区顶部提供账号级通知铃铛和未读角标。向已注册邮箱发出的项目邀请会产生站内通知，接收者可在通知中直接接受并加入项目；通知列表、已读状态和接受操作严格绑定当前服务端认证账号。未注册邮箱不预建站内通知，仍通过不含服务端明文 token 的一次性邀请链接完成注册和兑换。通知 API 不返回邀请 token、token hash 或其他账号的通知数据。
 
-System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 时作为系统资产写入；`make migrate-db` 只执行 pending schema migrations，不重复 seed。Setup 不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
+System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 时作为系统资产写入。Setup 不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
 
 项目 MCP 采用默认拒绝的执行策略：项目不能直接启动 `stdio` 子进程，只能使用平台运维在 `mcp_security.project_remote_allowed_endpoints` 中批准的精确 HTTPS `http`/`sse` 地址。任意环境变量、静态请求头和 OAuth 配置不会作为普通版本字段保存，认证值必须通过加密 Credential 的 header slot 提供。Worker 对工具发现和每次调用重新校验快照与端点、禁用重定向和环境代理，并执行平台级硬超时；生产环境还应配置 `mcp_security.egress_proxy_url`，由受控出口独立阻断私网、链路本地和云元数据地址。历史不兼容版本仍可审计读取，但 Project API 只返回远程 HTTPS origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。
 
@@ -193,9 +193,8 @@ deer-flow/
 | `make support-bundle` | 生成脱敏诊断材料 |
 | `make dev` / `make start` | 启动本地全栈 |
 | `make gateway` / `make worker` / `make scheduler` | 单独启动后端进程 |
-| `make setup-db` | 在空库安装当前 head 并初始化 PostgreSQL |
-| `make migrate-db` | 未来新增 revision 后显式执行已提交的 pending migrations |
-| `make check-db` | 只读检查 PostgreSQL revision 与必需对象 |
+| `make setup-db` | 在空库执行完整 schema 并初始化 PostgreSQL |
+| `make check-db` | 只读检查 PostgreSQL marker 与必需对象 |
 | `cd backend && make lint && make test` | 后端格式、静态检查与测试 |
 | `cd frontend && pnpm check && pnpm test` | 前端 lint、类型检查与单元测试 |
 | `POSTGRES_TEST_URL=... make test-project-saas-postgres` | 运行真实 PostgreSQL 发布门禁；只能使用可丢弃测试实例 |

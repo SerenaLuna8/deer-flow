@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.bootstrap import M7RecreateRequired, _get_head_revision, classify_database
+from deerflow.persistence.bootstrap import (
+    CURRENT_SCHEMA_REVISION,
+    M7RecreateRequired,
+    classify_database,
+)
 
 try:
     from scripts.setup_postgres import parse_target
@@ -102,7 +106,6 @@ class PostgresCheckResult:
     missing_tables: tuple[str, ...] = ()
     schema_state: Literal[
         "ready",
-        "migration_required",
         "uninitialized",
         "recreate_required",
         "unavailable",
@@ -115,14 +118,14 @@ class PostgresCheckResult:
         return self.connected and self.schema_state == "ready" and self.revision_matches and not self.missing_tables and not self.error
 
 
-def get_head_revision() -> str:
-    return _get_head_revision()
+def get_schema_marker() -> str:
+    return CURRENT_SCHEMA_REVISION
 
 
 async def check_postgres(database_url: str) -> PostgresCheckResult:
-    """只读检查连接、PostgreSQL 版本、current/head revision 与必需表。"""
+    """只读检查连接、PostgreSQL 版本、schema marker 与必需表。"""
     target = parse_target(database_url)
-    head = get_head_revision()
+    expected_marker = get_schema_marker()
     engine = create_async_engine(
         DatabaseConfig(url=database_url).sqlalchemy_url,
         poolclass=NullPool,
@@ -151,9 +154,6 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                 if database_state == "current":
                     schema_state = "ready"
                     error = ""
-                elif database_state == "upgradeable":
-                    schema_state = "migration_required"
-                    error = "数据库版本落后；请运行 `make migrate-db` 完成向前迁移"
                 else:
                     schema_state = "uninitialized"
                     error = "数据库尚未初始化；请运行 `make setup-db`"
@@ -163,8 +163,8 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                 database=target.database,
                 server_version=str(server_version),
                 current_revision=current_revision,
-                head_revision=head,
-                revision_matches=current_revision == head,
+                head_revision=expected_marker,
+                revision_matches=current_revision == expected_marker,
                 missing_tables=missing_tables,
                 schema_state=schema_state,
                 error=error,
@@ -174,7 +174,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             host=target.host,
             port=target.port,
             database=target.database,
-            head_revision=head,
+            head_revision=expected_marker,
             schema_state="unavailable",
             connected=False,
             error="无法连接或读取 PostgreSQL；请检查 DATABASE_URL、数据库状态和访问权限",
@@ -197,8 +197,8 @@ def print_result(result: PostgresCheckResult) -> None:
     print(f"数据库: {result.database}")
     if result.server_version:
         print(f"版本: {result.server_version}")
-    print(f"当前 Alembic revision: {result.current_revision or '缺失'}")
-    print(f"目标 Alembic revision: {result.head_revision or '未知'}")
+    print(f"当前 Schema marker: {result.current_revision or '缺失'}")
+    print(f"目标 Schema marker: {result.head_revision or '未知'}")
     print(f"Schema 状态: {result.schema_state}")
     if result.missing_tables:
         print(f"缺失表: {', '.join(result.missing_tables)}")

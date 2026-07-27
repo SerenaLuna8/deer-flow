@@ -14,10 +14,7 @@ from deerflow.persistence.final_schema_contract import (
     FINAL_APP_SEQUENCES,
 )
 
-BASELINE_REVISION = "0001_project_saas_baseline"
-SKILL_BUILDER_REVISION = "0002_skill_design_builder"
-SKILL_CREDENTIAL_REVISION = "0003_skill_credentials"
-CURRENT_REVISION = "0004_credential_soft_delete"
+CURRENT_SCHEMA_MARKER = "full_schema_v1"
 
 
 def _exact_app_only_objects() -> frozenset[str]:
@@ -35,6 +32,12 @@ def _engine_with_connection(connection: AsyncMock) -> MagicMock:
     return engine
 
 
+def _set_schema_marker(connection: AsyncMock, marker: str) -> None:
+    rows = MagicMock()
+    rows.scalars.return_value = (marker,)
+    connection.execute.return_value = rows
+
+
 @pytest.mark.asyncio
 async def test_classify_database_accepts_only_truly_empty_schema(monkeypatch) -> None:
     connection = AsyncMock()
@@ -47,7 +50,7 @@ async def test_classify_database_accepts_only_truly_empty_schema(monkeypatch) ->
 @pytest.mark.asyncio
 async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> None:
     connection = AsyncMock()
-    connection.scalar.return_value = CURRENT_REVISION
+    _set_schema_marker(connection, CURRENT_SCHEMA_MARKER)
     monkeypatch.setattr(
         bootstrap,
         "inventory_user_schema_objects",
@@ -59,34 +62,9 @@ async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_classify_database_accepts_only_exact_baseline_as_upgradeable(
-    monkeypatch,
-) -> None:
+async def test_classify_database_rejects_drifted_current_schema(monkeypatch) -> None:
     connection = AsyncMock()
-    connection.scalar.return_value = BASELINE_REVISION
-    monkeypatch.setattr(
-        bootstrap,
-        "inventory_user_schema_objects",
-        AsyncMock(return_value=_exact_app_only_objects()),
-    )
-    baseline_catalog = AsyncMock(return_value=True)
-    current_catalog = AsyncMock(return_value=False)
-    monkeypatch.setattr(
-        bootstrap,
-        "verify_m7_baseline_catalog",
-        baseline_catalog,
-    )
-    monkeypatch.setattr(bootstrap, "verify_m7_catalog", current_catalog)
-
-    assert await bootstrap.classify_database(connection) == "upgradeable"
-    baseline_catalog.assert_awaited_once_with(connection)
-    current_catalog.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_classify_database_rejects_drifted_baseline(monkeypatch) -> None:
-    connection = AsyncMock()
-    connection.scalar.return_value = BASELINE_REVISION
+    _set_schema_marker(connection, CURRENT_SCHEMA_MARKER)
     monkeypatch.setattr(
         bootstrap,
         "inventory_user_schema_objects",
@@ -94,93 +72,7 @@ async def test_classify_database_rejects_drifted_baseline(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         bootstrap,
-        "verify_m7_baseline_catalog",
-        AsyncMock(return_value=False),
-    )
-
-    with pytest.raises(bootstrap.M7RecreateRequired):
-        await bootstrap.classify_database(connection)
-
-
-@pytest.mark.asyncio
-async def test_classify_database_accepts_exact_skill_builder_as_upgradeable(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    connection.scalar.return_value = SKILL_BUILDER_REVISION
-    monkeypatch.setattr(
-        bootstrap,
-        "inventory_user_schema_objects",
-        AsyncMock(return_value=_exact_app_only_objects()),
-    )
-    frozen_catalog = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        bootstrap,
-        "verify_m7_skill_builder_catalog",
-        frozen_catalog,
-    )
-
-    assert await bootstrap.classify_database(connection) == "upgradeable"
-    frozen_catalog.assert_awaited_once_with(connection)
-
-
-@pytest.mark.asyncio
-async def test_classify_database_rejects_drifted_skill_builder(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    connection.scalar.return_value = SKILL_BUILDER_REVISION
-    monkeypatch.setattr(
-        bootstrap,
-        "inventory_user_schema_objects",
-        AsyncMock(return_value=_exact_app_only_objects()),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "verify_m7_skill_builder_catalog",
-        AsyncMock(return_value=False),
-    )
-
-    with pytest.raises(bootstrap.M7RecreateRequired):
-        await bootstrap.classify_database(connection)
-
-
-@pytest.mark.asyncio
-async def test_classify_database_accepts_exact_skill_credential_as_upgradeable(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    connection.scalar.return_value = SKILL_CREDENTIAL_REVISION
-    monkeypatch.setattr(
-        bootstrap,
-        "inventory_user_schema_objects",
-        AsyncMock(return_value=_exact_app_only_objects()),
-    )
-    frozen_catalog = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        bootstrap,
-        "verify_m7_skill_credential_catalog",
-        frozen_catalog,
-    )
-
-    assert await bootstrap.classify_database(connection) == "upgradeable"
-    frozen_catalog.assert_awaited_once_with(connection)
-
-
-@pytest.mark.asyncio
-async def test_classify_database_rejects_drifted_skill_credential(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    connection.scalar.return_value = SKILL_CREDENTIAL_REVISION
-    monkeypatch.setattr(
-        bootstrap,
-        "inventory_user_schema_objects",
-        AsyncMock(return_value=_exact_app_only_objects()),
-    )
-    monkeypatch.setattr(
-        bootstrap,
-        "verify_m7_skill_credential_catalog",
+        "verify_m7_catalog",
         AsyncMock(return_value=False),
     )
 
@@ -190,24 +82,46 @@ async def test_classify_database_rejects_drifted_skill_credential(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "objects,revision",
+    "marker",
     [
-        ({"relation:r:alembic_version"}, "0015_project_reliability_finalize"),
-        ({"relation:r:alembic_version"}, "0005_agent_design_sessions"),
-        ({"relation:r:unknown_table"}, None),
-        (
-            set(_exact_app_only_objects()) | {"relation:r:unknown_table"},
-            CURRENT_REVISION,
-        ),
+        "0015_project_reliability_finalize",
+        "0001_project_saas_baseline",
+        "0002_skill_design_builder",
+        "0003_skill_credentials",
+        "0004_credential_soft_delete",
+        "0005_agent_design_sessions",
     ],
 )
-async def test_classify_database_rejects_old_or_unknown_nonempty_schema_before_mutation(
+async def test_classify_database_rejects_every_legacy_marker(
     monkeypatch,
-    objects: set[str] | frozenset[str],
-    revision: str | None,
+    marker: str,
 ) -> None:
     connection = AsyncMock()
-    connection.scalar.return_value = revision
+    _set_schema_marker(connection, marker)
+    monkeypatch.setattr(
+        bootstrap,
+        "inventory_user_schema_objects",
+        AsyncMock(return_value=_exact_app_only_objects()),
+    )
+
+    with pytest.raises(bootstrap.M7RecreateRequired) as captured:
+        await bootstrap.classify_database(connection)
+    assert captured.value.code == "M7_RECREATE_REQUIRED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "objects",
+    [
+        {"relation:r:unknown_table"},
+        set(_exact_app_only_objects()) | {"relation:r:unknown_table"},
+    ],
+)
+async def test_classify_database_rejects_unknown_nonempty_schema_before_mutation(
+    monkeypatch,
+    objects: set[str] | frozenset[str],
+) -> None:
+    connection = AsyncMock()
     monkeypatch.setattr(
         bootstrap,
         "inventory_user_schema_objects",
@@ -217,142 +131,23 @@ async def test_classify_database_rejects_old_or_unknown_nonempty_schema_before_m
     with pytest.raises(bootstrap.M7RecreateRequired) as captured:
         await bootstrap.classify_database(connection)
     assert captured.value.code == "M7_RECREATE_REQUIRED"
-
-
-def test_migration_graph_has_single_forward_head() -> None:
-    assert bootstrap._get_head_revision() == CURRENT_REVISION
+    connection.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_explicit_migrate_upgrades_exact_ancestor_to_head(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    engine = _engine_with_connection(connection)
-    config = object()
-    classify = AsyncMock(side_effect=["upgradeable", "current"])
-    offload = AsyncMock()
-
-    @asynccontextmanager
-    async def lock(_engine):
-        yield
-
-    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
-    monkeypatch.setattr(bootstrap, "classify_database", classify)
-    monkeypatch.setattr(bootstrap, "_get_alembic_config", lambda _engine: config)
-    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
-
-    await bootstrap.migrate_schema(engine)
-
-    offload.assert_awaited_once_with(bootstrap._upgrade, config, "head")
-    assert classify.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_explicit_migrate_rejects_empty_database(
+async def test_runtime_validation_rejects_empty_schema_without_mutation(
     monkeypatch,
 ) -> None:
     connection = AsyncMock()
     engine = _engine_with_connection(connection)
     classify = AsyncMock(return_value="empty")
-    offload = AsyncMock()
-
-    @asynccontextmanager
-    async def lock(_engine):
-        yield
-
-    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
-    monkeypatch.setattr(bootstrap, "classify_database", classify)
-    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
-
-    with pytest.raises(bootstrap.SchemaSetupRequired):
-        await bootstrap.migrate_schema(engine)
-    offload.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_explicit_setup_installs_empty_database_to_head(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    engine = _engine_with_connection(connection)
-    config = object()
-    classify = AsyncMock(side_effect=["empty", "current"])
-    offload = AsyncMock()
-
-    @asynccontextmanager
-    async def lock(_engine):
-        yield
-
-    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
-    monkeypatch.setattr(bootstrap, "classify_database", classify)
-    monkeypatch.setattr(bootstrap, "_get_alembic_config", lambda _engine: config)
-    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
-
-    await bootstrap.bootstrap_schema(engine)
-
-    offload.assert_awaited_once_with(bootstrap._upgrade, config, "head")
-    assert classify.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_explicit_migrate_is_noop_for_current_database(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    engine = _engine_with_connection(connection)
-    classify = AsyncMock(side_effect=["current", "current"])
-    offload = AsyncMock()
-
-    @asynccontextmanager
-    async def lock(_engine):
-        yield
-
-    monkeypatch.setattr(bootstrap, "_postgres_lock", lock)
-    monkeypatch.setattr(bootstrap, "classify_database", classify)
-    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
-
-    await bootstrap.migrate_schema(engine)
-
-    offload.assert_not_awaited()
-    assert classify.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_runtime_validation_rejects_empty_schema_without_running_alembic(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    engine = _engine_with_connection(connection)
-    classify = AsyncMock(return_value="empty")
-    offload = AsyncMock()
 
     monkeypatch.setattr(bootstrap, "classify_database", classify)
-    monkeypatch.setattr(bootstrap, "_run_alembic_offload", offload)
 
     with pytest.raises(bootstrap.SchemaSetupRequired) as captured:
         await bootstrap.validate_schema(engine)
 
     assert captured.value.code == "DATABASE_SETUP_REQUIRED"
-    offload.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_runtime_validation_requires_explicit_ancestor_migration(
-    monkeypatch,
-) -> None:
-    connection = AsyncMock()
-    engine = _engine_with_connection(connection)
-    monkeypatch.setattr(
-        bootstrap,
-        "classify_database",
-        AsyncMock(return_value="upgradeable"),
-    )
-
-    with pytest.raises(bootstrap.SchemaMigrationRequired) as captured:
-        await bootstrap.validate_schema(engine)
-
-    assert captured.value.code == "DATABASE_MIGRATION_REQUIRED"
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
-CURRENT_REVISION = "0004_credential_soft_delete"
+CURRENT_SCHEMA_MARKER = "full_schema_v1"
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:
@@ -31,7 +31,7 @@ def test_required_tables_exactly_cover_final_application_and_langgraph_schema() 
 
 def _connection(
     *,
-    revision: str | None = CURRENT_REVISION,
+    revision: str | None = CURRENT_SCHEMA_MARKER,
     present_tables=None,
 ):
     connection = AsyncMock()
@@ -60,7 +60,7 @@ async def test_check_is_read_only_parameterized_and_healthy(monkeypatch) -> None
     connection = _connection()
     monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
     monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="current"))
-    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: CURRENT_REVISION)
+    monkeypatch.setattr(check_postgres, "get_schema_marker", lambda: CURRENT_SCHEMA_MARKER)
 
     result = await check_postgres.check_postgres("postgresql://owner:p%40ss@127.0.0.1:5432/deerflow_test_1_abc")
 
@@ -81,7 +81,7 @@ async def test_check_distinguishes_missing_revision_and_tables(monkeypatch) -> N
     connection = _connection(revision=None, present_tables={"users"})
     monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
     monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="empty"))
-    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: CURRENT_REVISION)
+    monkeypatch.setattr(check_postgres, "get_schema_marker", lambda: CURRENT_SCHEMA_MARKER)
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
@@ -106,7 +106,7 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
         "classify_database",
         AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
     )
-    monkeypatch.setattr(check_postgres, "get_head_revision", lambda: CURRENT_REVISION)
+    monkeypatch.setattr(check_postgres, "get_schema_marker", lambda: CURRENT_SCHEMA_MARKER)
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
@@ -118,17 +118,12 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
 
 
 @pytest.mark.asyncio
-async def test_check_reports_exact_frozen_baseline_as_migration_required(
+async def test_check_reports_legacy_schema_as_recreate_required(
     monkeypatch,
 ) -> None:
-    missing = {
-        "skill_design_draft_files",
-        "skill_design_operations",
-        "skill_design_sessions",
-    }
     connection = _connection(
-        revision="0001_project_saas_baseline",
-        present_tables=set(check_postgres.REQUIRED_TABLES) - missing,
+        revision="0004_credential_soft_delete",
+        present_tables=set(check_postgres.REQUIRED_TABLES),
     )
     monkeypatch.setattr(
         check_postgres,
@@ -138,20 +133,20 @@ async def test_check_reports_exact_frozen_baseline_as_migration_required(
     monkeypatch.setattr(
         check_postgres,
         "classify_database",
-        AsyncMock(return_value="upgradeable"),
+        AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
     )
     monkeypatch.setattr(
         check_postgres,
-        "get_head_revision",
-        lambda: CURRENT_REVISION,
+        "get_schema_marker",
+        lambda: CURRENT_SCHEMA_MARKER,
     )
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
-    assert result.current_revision == "0001_project_saas_baseline"
-    assert result.head_revision == CURRENT_REVISION
-    assert result.schema_state == "migration_required"
-    assert set(result.missing_tables) == missing
+    assert result.current_revision == "0004_credential_soft_delete"
+    assert result.head_revision == CURRENT_SCHEMA_MARKER
+    assert result.schema_state == "recreate_required"
+    assert result.missing_tables == ()
     assert result.healthy is False
 
 
@@ -178,8 +173,8 @@ def test_check_result_contains_only_safe_connection_metadata() -> None:
         port=5432,
         database="deerflow_test_1_abc",
         server_version="PostgreSQL 17.5",
-        current_revision=CURRENT_REVISION,
-        head_revision=CURRENT_REVISION,
+        current_revision=CURRENT_SCHEMA_MARKER,
+        head_revision=CURRENT_SCHEMA_MARKER,
         revision_matches=True,
         missing_tables=(),
         schema_state="ready",

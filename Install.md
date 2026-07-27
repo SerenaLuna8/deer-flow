@@ -41,8 +41,8 @@ Consider the setup successful when all of the following are true:
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
-- Require an explicit PostgreSQL-only `DATABASE_URL`. Do not read or print its password. `0001_project_saas_baseline`, `0002_skill_design_builder`, and `0003_skill_credentials` are immutable ancestors and `0004_credential_soft_delete` is the single current head. If the target database does not exist, ask the user to provide `POSTGRES_ADMIN_URL` and run `make setup-db`; this installs the complete current chain and performs first-install bootstrap in an empty target. A database for the current release must exactly match the `0004` catalog, or exactly match frozen `0001`/`0002`/`0003` before an explicit stopped-service `make migrate-db`. Migration performs no catalog, LangGraph, or default-project bootstrap. Then run `make check-db`.
-- Never rely on application startup to migrate or repair PostgreSQL. Runtime startup and `make check-db` are read-only schema consumers. If an existing database has an unknown revision, is unversioned and nonempty, or has catalog drift, stop and report the operator intervention requirement instead of stamping, resetting, or repairing it.
+- Require an explicit PostgreSQL-only `DATABASE_URL`. Do not read or print its password. `make setup-db` is the only initialization entry point: it requires an empty target, executes the complete `full_schema.sql`, records `full_schema_v1`, and performs first-install bootstrap. Existing legacy, unknown, or nonempty unmanaged databases are not upgraded; provision a new empty target instead. If the target database does not exist, ask the user to provide `POSTGRES_ADMIN_URL`, run `make setup-db`, then run `make check-db`.
+- Never rely on application startup to initialize or repair PostgreSQL. Runtime startup and `make check-db` are read-only schema consumers. If an existing database has a legacy or unknown marker, is unmarked and nonempty, or has catalog drift, stop and require a new empty target instead of stamping, resetting, or repairing it.
 - The application compose stack does not provision PostgreSQL. When Docker is available, a standalone `postgres:17-alpine` container is acceptable, but use placeholders for credentials and keep the application role non-superuser. DeerFlow does not use RLS; project access is enforced by `ProjectContext` and scoped repositories.
 - If Docker is available:
   - Run `make docker-init`.
@@ -65,7 +65,7 @@ Use the lightest verification that matches the chosen setup path.
 
 For Docker setup:
 
-- Confirm explicit `make setup-db` or `make migrate-db` completed as appropriate, then confirm `make check-db` completed successfully before treating the environment as launchable.
+- Confirm explicit `make setup-db` completed against an empty target, then confirm `make check-db` completed successfully before treating the environment as launchable.
 - Confirm `make docker-init` completed successfully.
 - Confirm `config.yaml` exists.
 - State explicitly that Docker services were not started and `make docker-start` is still the first real launch step.
@@ -73,7 +73,7 @@ For Docker setup:
 
 For local setup:
 
-- Confirm explicit `make setup-db` or `make migrate-db` completed as appropriate, then confirm `make check-db` completed successfully.
+- Confirm explicit `make setup-db` completed against an empty target, then confirm `make check-db` completed successfully.
 - Confirm `make install` completed successfully.
 - Confirm `config.yaml` exists.
 - Do not leave background services running unless the user asked for that.
@@ -87,7 +87,7 @@ Return a short status report with:
 3. Files created or detected: for example `config.yaml`
 4. Remaining user action: model config, env var values, auth files, or nothing
 5. Exact next command to start DeerFlow
-6. PostgreSQL host/database and Alembic revision from redacted check output; never include the URL, username, or password
+6. PostgreSQL host/database and schema marker from redacted check output; never include the URL, username, or password
 
 ## EXECUTE NOW
 

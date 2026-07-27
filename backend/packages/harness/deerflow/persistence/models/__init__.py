@@ -1,7 +1,7 @@
 """ORM model registration entry point.
 
 Importing this module ensures all ORM models are registered with
-``Base.metadata`` so Alembic autogenerate detects every table.
+``Base.metadata`` so schema-parity checks cover every application table.
 
 The actual ORM classes have moved to entity-specific subpackages:
 - ``deerflow.persistence.thread_meta``

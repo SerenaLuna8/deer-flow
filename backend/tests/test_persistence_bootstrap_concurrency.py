@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.bootstrap import _PG_LOCK_KEY, _postgres_lock, bootstrap_schema
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
@@ -126,52 +124,13 @@ async def test_cancelled_lock_holder_releases_session_lock(postgres_database_url
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_count", [2, 5])
-async def test_repeatedly_cancelled_alembic_offload_keeps_lock_until_worker_finishes(
-    postgres_database_url: str,
-    monkeypatch,
-    cancel_count: int,
-) -> None:
-    engine = create_async_engine(postgres_database_url)
-    probe_engine = create_async_engine(postgres_database_url)
-    started = threading.Event()
-    release = threading.Event()
-    original_upgrade = bootstrap_module._upgrade
-
-    def blocking_upgrade(config, revision):
-        started.set()
-        release.wait(timeout=5)
-        original_upgrade(config, revision)
-
-    monkeypatch.setattr(bootstrap_module, "_upgrade", blocking_upgrade)
-    task = asyncio.create_task(bootstrap_schema(engine))
+async def test_runtime_validation_succeeds_with_single_connection_application_pool(postgres_database_url: str) -> None:
+    setup_engine = create_async_engine(postgres_database_url)
     try:
-        assert await asyncio.to_thread(started.wait, 2)
-        for _ in range(cancel_count):
-            task.cancel()
-            await asyncio.sleep(0.05)
-            assert not task.done()
-            async with probe_engine.connect() as probe:
-                assert await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}) is False
-
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        async with probe_engine.connect() as probe:
-            assert await probe.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}) is True
-            await probe.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_LOCK_KEY})
+        await bootstrap_schema(setup_engine)
     finally:
-        release.set()
-        if not task.done():
-            task.cancel()
-        await engine.dispose()
-        await probe_engine.dispose()
+        await setup_engine.dispose()
 
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
-async def test_bootstrap_succeeds_with_single_connection_application_pool(postgres_database_url: str) -> None:
     config = DatabaseConfig(
         url=postgres_database_url,
         pool_size=1,

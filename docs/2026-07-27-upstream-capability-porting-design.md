@@ -44,8 +44,8 @@ P0–P8 按从简单到困难排序。每个阶段必须可以独立评审、测
 9. 所有私有资源继续绑定 `project_id + owner_user_id`；资源 ID、thread ID、run ID 或 browser
    session ID 不能单独构成授权依据。
 10. 项目外访问和跨所有者私有访问继续返回公共 `404`；项目内能力不足继续返回 `403`。
-11. `0001_project_saas_baseline` 保持冻结。任何新增 schema 从 `0002` 起线性追加，不修改、压缩、
-    stamp 或重写历史。
+11. 数据库结构以 `full_schema.sql` 和唯一 marker `full_schema_v1` 为完整快照。新增 schema
+    必须同步更新 ORM、全量快照与 Catalog 签名；不恢复历史 revision 链，也不对非空旧库做原地升级。
 12. 运行时启动和 `make check-db` 继续只读 schema，不允许为移植能力隐式创建或修复数据库对象。
 13. 上游文件型 DeerMem 不作为目标仓库默认 Memory 存储。
 14. 上游按 `(agent_name, user_id)` 分桶的接口不能替代目标仓库的项目、所有者、namespace 和 thread
@@ -70,7 +70,7 @@ P0–P8 按从简单到困难排序。每个阶段必须可以独立评审、测
 26. 每个阶段使用独立分支和小型 PR；不得把 Browser、Memory、Checkpoint 和前端重构塞入一个
     不可拆分提交。
 27. 自动化生成的代码必须经过人工审查。ChatGPT Codex 可以加速对照、测试和实现，但不能替代
-    安全边界、迁移兼容性和发布证据的确认。
+    安全边界、数据库重建边界和发布证据的确认。
 
 ## 3. 产品和工程目标
 
@@ -96,7 +96,7 @@ P0–P8 按从简单到困难排序。每个阶段必须可以独立评审、测
 - 用文件系统替代项目 PostgreSQL Memory。
 - 在 Browser 工具基础阶段承诺跨 Worker、跨 Run 或跨进程会话连续性。
 - 在 Delta 模式首版支持任意 checkpoint 分叉语义。
-- 修改冻结的 `0001_project_saas_baseline`。
+- 恢复或新增历史增量迁移链。
 - 在一个阶段内同时完成所有性能优化、功能移植和架构清理。
 - 以 Codex 的代码生成结果、mock 测试或静态检查代替真实 PostgreSQL 和目标浏览器验证。
 
@@ -375,11 +375,12 @@ Gateway 和 Worker 只能使用短期、受作用域限制的内部凭证访问�
 - P4 replay gap 优先从现有 `run_events` retained interval 推导。
 - P5 Run-local Browser 不持久化 Cookie、DOM、页面正文或 browser storage。
 - P6 Delta 模式优先复用 LangGraph checkpoint 表，并通过 checkpoint metadata 标记模式。
-- P7 如需 Browser session 元数据、路由或 cleanup job，新增 `0002` 或后续线性 revision。
-- migration 必须 forward-only。
-- migration 不读取或写入 credential 明文。
-- migration 必须有空库 setup、旧 head upgrade、current/head check 和 unknown revision fail-closed 测试。
-- Gateway、Worker 和 Scheduler 启动不得执行 migration。
+- P7 如需 Browser session 元数据、路由或 cleanup job，同步更新 ORM、`full_schema.sql`
+  与 Catalog 签名。
+- Schema 安装只允许由 `make setup-db` 对空库执行；非空旧库必须备份后显式重建。
+- Schema 初始化不读取或写入 credential 明文。
+- 必须覆盖空库 setup、当前 marker 幂等检查、旧 marker/未知 schema fail-closed 测试。
+- Gateway、Worker 和 Scheduler 启动不得安装或修复 schema。
 
 ## 9. 安全和隐私边界
 
@@ -771,7 +772,7 @@ P5 不保证：
 
 ### 18.3 前端
 
-- `/api/features` 控制 Browser UI 是否显示。
+- 服务端返回的 project-scoped runtime capability 控制 Browser UI 是否显示，不恢复旧 feature 路由。
 - 项目 chat page 拥有 Browser trigger 和 panel。
 - Browser panel 与 Artifact、Sidecar 共用一个 ResizablePanelGroup。
 - URL bar、frame、pointer、wheel 和 keyboard。
@@ -849,7 +850,7 @@ P4、P6、P7：
 - Delta checkpoint 被 full 模式静默误读。
 - Browser 能访问未授权私网地址或泄露 Cookie/credential。
 - PostgreSQL gate 存在 skip。
-- `0001_project_saas_baseline` 被修改。
+- `full_schema.sql`、ORM metadata 与 Catalog 签名发生漂移，或重新引入历史迁移链。
 
 ## 20. PR 和交付拆分
 
@@ -931,7 +932,7 @@ Delta checkpoint 是否需要历史数据转换。
 - Browser feature 可以整体禁用；
 - Memory 新 signal 和 backpressure 可以用配置关闭，但不能绕过作用域；
 - frontend optimization 可以独立回滚；
-- 已执行的 schema migration 不 downgrade，通过后续 forward revision 修正。
+- 已部署的 schema 不做隐式 downgrade；如需回退，先恢复备份，再使用上一发布的完整快照重建。
 
 ## 24. 关键权衡
 
@@ -967,8 +968,8 @@ Delta checkpoint 是否需要历史数据转换。
 ## 26. 最终验收摘要
 
 本次移植完成后，DeerFlow 必须继续满足项目优先、多项目、私有工作按项目和所有者隔离、
-PostgreSQL-only、Gateway 不执行 graph、Worker 持租约执行、持久化 stream 和 forward-only schema
-基线。
+PostgreSQL-only、Gateway 不执行 graph、Worker 持租约执行、持久化 stream，以及只由
+`make setup-db` 安装完整 Schema 快照的基线。
 
 新增能力应表现为：前端流式渲染在长回答中保持稳定；Memory 能识别六类重要信号并在项目作用域内增量
 更新；lease 无法确认时执行 fail-stop；SSE 历史缺口可以显式恢复；Browser 工具受 SSRF、权限和运行

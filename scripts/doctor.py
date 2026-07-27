@@ -719,7 +719,7 @@ def check_postgres(project_root: Path) -> CheckResult:
         return CheckResult(
             "PostgreSQL",
             "fail",
-            "连接、Alembic revision 或必需表检查未通过",
+            "连接、Schema marker 或必需表检查未通过",
             fix="运行 make check-db 查看脱敏状态；旧 revision 或未知非空库必须创建全新的空数据库并运行 make setup-db",
         )
     detail = f"{result['host']}:{result['port']}/{result['database']}, revision {result['current_revision']}"

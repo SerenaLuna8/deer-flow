@@ -141,8 +141,8 @@ that production actually executes.
 
 The runtime anchors protect confirmed blocking-IO bug shapes:
 
-- PostgreSQL persistence bootstrap, including offloading synchronous Alembic
-  calls from the event loop.
+- PostgreSQL persistence bootstrap, including offloading synchronous schema
+  snapshot file reads from the event loop.
 - Subagent skill metadata loading through `SubagentExecutor._load_skills()`.
 - `JsonlRunEventStore` async API (`put` / `list_*` / `delete_*`): the JSONL
   run-event backend offloads its synchronous file IO via `asyncio.to_thread`
