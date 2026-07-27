@@ -155,6 +155,7 @@ function SystemAssetCard({
           ) : (
             <AssetVersionHistory
               kind={kind}
+              scope="system"
               versions={history.data?.data ?? []}
               pending={configureGrants.isPending}
               approvalCredentials={
@@ -377,6 +378,7 @@ function CredentialCardWithHistory({
         ) : (
           <AssetVersionHistory
             kind="credentials"
+            scope="system"
             versions={history.data?.data ?? []}
           />
         )}

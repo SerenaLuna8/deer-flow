@@ -30,6 +30,7 @@ from app.shared_assets.models import (
     AssetSelection,
     ResolvedMcpSnapshot,
 )
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 
 
 async def _seed_project(
@@ -727,7 +728,10 @@ async def test_resolver_reads_catalog_generation_after_snapshot_validation(
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_project(engine, factory, label="generation-last")
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://generation.example.test"})),
+    )
     resolver = ProjectAssetResolver(factory)
     try:
         asset = await mcp.create_asset(
@@ -822,7 +826,10 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
     )
     keyring = CredentialKeyring(active_key_id="test-key", _keys={"test-key": b"m" * 32})
     credentials = CredentialService(factory, keyring=keyring)
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     try:
         skill = await resolver.resolve_project_asset_snapshot(
@@ -845,7 +852,7 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
         credential = await credentials.create(
             admin,
             CreateCredential("erp", "ERP", "token"),
-            {"env": {"ERP_TOKEN": "short-lived-secret"}},
+            {"headers": {"X-ERP-Token": "short-lived-secret"}},
         )
         secondary_credential = await credentials.create(
             admin,
@@ -864,7 +871,7 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
                     McpCredentialSlot(
                         "primary",
                         "ERP authentication",
-                        {"env": ["ERP_TOKEN"]},
+                        {"headers": ["X-ERP-Token"]},
                     ),
                     McpCredentialSlot(
                         "secondary",
@@ -902,11 +909,11 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
         assert viewer_snapshot.version_id == snapshot.version_id
 
         materialized = await resolver.materialize_mcp_secrets(admin, snapshot)
-        assert materialized.by_slot["primary"]["env"]["ERP_TOKEN"] == "short-lived-secret"
+        assert materialized.by_slot["primary"]["headers"]["X-ERP-Token"] == "short-lived-secret"
         assert materialized.by_slot["secondary"]["headers"]["X_AUX_TOKEN"] == "secondary-secret"
         assert "short-lived-secret" not in repr(materialized)
         runner_materialized = await resolver.materialize_mcp_secrets(runner, snapshot)
-        assert runner_materialized.by_slot["primary"]["env"]["ERP_TOKEN"] == "short-lived-secret"
+        assert runner_materialized.by_slot["primary"]["headers"]["X-ERP-Token"] == "short-lived-secret"
 
         decrypt_calls = 0
         original_decrypt = resolver_module.decrypt_credential_payload
@@ -973,7 +980,7 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
         await credentials.replace(
             admin,
             credential.id,
-            {"env": {"ERP_TOKEN": "replacement-secret"}},
+            {"headers": {"X-ERP-Token": "replacement-secret"}},
             expected_credential_version=1,
         )
         with pytest.raises(AssetResolutionUnavailable):
@@ -987,7 +994,7 @@ async def test_project_current_pointer_and_mcp_secrets_recheck_revocation(
             admin,
             retired_snapshot,
         )
-        assert retired_materialized.by_slot["primary"]["env"]["ERP_TOKEN"] == "short-lived-secret"
+        assert retired_materialized.by_slot["primary"]["headers"]["X-ERP-Token"] == "short-lived-secret"
 
         outcomes = await asyncio.gather(
             resolver.materialize_mcp_secrets(admin, retired_snapshot),
@@ -1024,7 +1031,10 @@ async def test_system_mcp_binding_materializes_system_grant_and_rechecks_revoke(
     system = await _seed_system_admin(engine)
     keyring = CredentialKeyring(active_key_id="system-key", _keys={"system-key": b"s" * 32})
     credentials = CredentialService(factory, keyring=keyring)
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://system-mcp.example.test"})),
+    )
     bindings = BindingService(factory)
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     try:
@@ -1259,14 +1269,17 @@ async def test_binding_enable_serializes_with_system_credential_revoke(
         _keys={"binding-race-key": b"r" * 32},
     )
     credentials = CredentialService(factory, keyring=keyring)
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://binding-race.example.test"})),
+    )
     bindings = BindingService(factory)
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     try:
         credential = await credentials.create(
             system,
             CreateCredential("binding-race", "Binding Race", "token"),
-            {"env": {"RACE_TOKEN": "race-secret"}},
+            {"headers": {"X-Race-Token": "race-secret"}},
         )
         asset = await mcp.create_asset(
             system,
@@ -1283,7 +1296,7 @@ async def test_binding_enable_serializes_with_system_credential_revoke(
                     McpCredentialSlot(
                         "primary",
                         "Race credential",
-                        {"env": ["RACE_TOKEN"]},
+                        {"headers": ["X-Race-Token"]},
                     ),
                 ),
             ),
@@ -1417,7 +1430,18 @@ async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk
         _keys={"agent-two-mcp-key": b"g" * 32},
     )
     credentials = CredentialService(factory, keyring=keyring)
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(
+            frozenset(
+                {
+                    "https://agent-lock-bulk.example.test",
+                    "https://agent-lock-high.example.test",
+                    "https://agent-lock-low.example.test",
+                }
+            )
+        ),
+    )
     bindings = BindingService(factory)
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     approval_task: asyncio.Task | None = None
@@ -1427,12 +1451,12 @@ async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk
         first_credential = await credentials.create(
             system,
             CreateCredential("agent-lock-a", "Agent Lock A", "token"),
-            {"env": {"SHARED_TOKEN": "agent-lock-secret-a"}},
+            {"headers": {"X-Shared-Token": "agent-lock-secret-a"}},
         )
         second_credential = await credentials.create(
             system,
             CreateCredential("agent-lock-b", "Agent Lock B", "token"),
-            {"env": {"SHARED_TOKEN": "agent-lock-secret-b"}},
+            {"headers": {"X-Shared-Token": "agent-lock-secret-b"}},
         )
         credential_low, credential_high = sorted(
             (first_credential, second_credential),
@@ -1458,7 +1482,7 @@ async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk
                         McpCredentialSlot(
                             "primary",
                             "Shared credential",
-                            {"env": ["SHARED_TOKEN"]},
+                            {"headers": ["X-Shared-Token"]},
                         ),
                     ),
                 ),
@@ -1513,12 +1537,12 @@ async def test_agent_two_mcp_closure_uses_global_credential_lock_order_with_bulk
                     McpCredentialSlot(
                         "first",
                         "First shared credential",
-                        {"env": ["SHARED_TOKEN"]},
+                        {"headers": ["X-Shared-Token"]},
                     ),
                     McpCredentialSlot(
                         "second",
                         "Second shared credential",
-                        {"env": ["SHARED_TOKEN"]},
+                        {"headers": ["X-Shared-Token"]},
                     ),
                 ),
             ),
@@ -1649,7 +1673,10 @@ async def test_materializer_rejects_stale_repin_and_blocks_current_repin_after_r
         _keys={"grant-repin-key": b"p" * 32},
     )
     credentials = CredentialService(factory, keyring=keyring)
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://repin.example.test"})),
+    )
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     materialize_task: asyncio.Task | None = None
     repin_task: asyncio.Task | None = None
@@ -1658,12 +1685,12 @@ async def test_materializer_rejects_stale_repin_and_blocks_current_repin_after_r
         original_credential = await credentials.create(
             admin,
             CreateCredential("repin-original", "Repin Original", "token"),
-            {"env": {"REP_TOKEN": marker}},
+            {"headers": {"X-Repin-Token": marker}},
         )
         replacement_credential = await credentials.create(
             admin,
             CreateCredential("repin-replacement", "Repin Replacement", "token"),
-            {"env": {"REP_TOKEN": "replacement-value"}},
+            {"headers": {"X-Repin-Token": "replacement-value"}},
         )
         asset = await mcp.create_asset(
             admin,
@@ -1680,12 +1707,12 @@ async def test_materializer_rejects_stale_repin_and_blocks_current_repin_after_r
                     McpCredentialSlot(
                         "primary",
                         "Original slot",
-                        {"env": ["REP_TOKEN"]},
+                        {"headers": ["X-Repin-Token"]},
                     ),
                     McpCredentialSlot(
                         "alternate",
                         "Alternate slot",
-                        {"env": ["REP_TOKEN"]},
+                        {"headers": ["X-Repin-Token"]},
                         required=False,
                     ),
                 ),
@@ -1829,7 +1856,7 @@ async def test_materializer_rejects_stale_repin_and_blocks_current_repin_after_r
             admin,
             current_snapshot,
         )
-        assert current_materialized.by_slot["primary"]["env"]["REP_TOKEN"] == "replacement-value"
+        assert current_materialized.by_slot["primary"]["headers"]["X-Repin-Token"] == "replacement-value"
         assert decrypt_calls == 1
 
         materialize_task = asyncio.create_task(resolver.materialize_mcp_secrets(admin, current_snapshot))
@@ -1851,7 +1878,7 @@ async def test_materializer_rejects_stale_repin_and_blocks_current_repin_after_r
             asyncio.gather(materialize_task, repin_task),
             timeout=10,
         )
-        assert materialized.by_slot["primary"]["env"]["REP_TOKEN"] == "replacement-value"
+        assert materialized.by_slot["primary"]["headers"]["X-Repin-Token"] == "replacement-value"
         assert "alternate" not in materialized.by_slot
         assert decrypt_calls == 2
         assert not committed_while_materializer_open
@@ -1899,7 +1926,10 @@ async def test_materializer_blocks_new_optional_grant_after_reference_read(
         _keys={"optional-grant-key": b"o" * 32},
     )
     credentials = CredentialService(factory, keyring=keyring)
-    mcp = McpService(factory)
+    mcp = McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://optional-grant.example.test"})),
+    )
     resolver = ProjectAssetResolver(factory, keyring=keyring)
     materialize_task: asyncio.Task | None = None
     insert_task: asyncio.Task | None = None
@@ -1908,12 +1938,12 @@ async def test_materializer_blocks_new_optional_grant_after_reference_read(
         required_credential = await credentials.create(
             admin,
             CreateCredential("optional-required", "Optional Required", "token"),
-            {"env": {"OPTIONAL_TOKEN": "required-secret"}},
+            {"headers": {"X-Optional-Token": "required-secret"}},
         )
         optional_credential = await credentials.create(
             admin,
             CreateCredential("optional-late", "Optional Late", "token"),
-            {"env": {"OPTIONAL_TOKEN": "late-secret"}},
+            {"headers": {"X-Optional-Token": "late-secret"}},
         )
         asset = await mcp.create_asset(
             admin,
@@ -1930,12 +1960,12 @@ async def test_materializer_blocks_new_optional_grant_after_reference_read(
                     McpCredentialSlot(
                         "required",
                         "Required credential",
-                        {"env": ["OPTIONAL_TOKEN"]},
+                        {"headers": ["X-Optional-Token"]},
                     ),
                     McpCredentialSlot(
                         "optional",
                         "Late optional credential",
-                        {"env": ["OPTIONAL_TOKEN"]},
+                        {"headers": ["X-Optional-Token"]},
                         required=False,
                     ),
                 ),
@@ -2050,7 +2080,7 @@ async def test_materializer_blocks_new_optional_grant_after_reference_read(
             asyncio.gather(materialize_task, insert_task),
             timeout=10,
         )
-        assert materialized.by_slot["required"]["env"]["OPTIONAL_TOKEN"] == "required-secret"
+        assert materialized.by_slot["required"]["headers"]["X-Optional-Token"] == "required-secret"
         assert "optional" not in materialized.by_slot
         assert decrypt_calls == 1
         assert not committed_while_materializer_open

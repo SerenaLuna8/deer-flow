@@ -20,7 +20,10 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
-from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.private_work.snapshot_repository import (
+    RunSnapshotAssetStale,
+    RunSnapshotRepository,
+)
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.shared_assets.models import (
     AgentPayload,
@@ -28,6 +31,7 @@ from app.shared_assets.models import (
     AssetScope,
     ResolvedAgentSnapshot,
 )
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.persistence.run.model import RunRow
 
 
@@ -70,6 +74,13 @@ class SnapshotScenario:
             ),
         )
 
+    @property
+    def repository(self) -> RunSnapshotRepository:
+        return RunSnapshotRepository(
+            self.seed.factory,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://snapshot-mcp.example.test/exact"})),
+        )
+
 
 @pytest.mark.asyncio
 async def test_run_snapshot_skill_resolution_takes_shared_row_locks() -> None:
@@ -105,6 +116,208 @@ async def test_run_snapshot_skill_resolution_takes_shared_row_locks() -> None:
     assert session.statement is not None
     assert session.statement._for_update_arg is not None
     assert session.statement._for_update_arg.read is True
+
+
+@pytest.mark.asyncio
+async def test_run_snapshot_rejects_historical_project_stdio_mcp() -> None:
+    project_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = SimpleNamespace(
+        scope="project",
+        project_id=project_id,
+        status="active",
+    )
+    version = SimpleNamespace(
+        workflow_status="published",
+        transport="stdio",
+    )
+
+    class Result:
+        def one_or_none(self):
+            return asset, version
+
+    class Session:
+        async def execute(self, _statement):
+            return Result()
+
+    with pytest.raises(RunSnapshotAssetStale):
+        await RunSnapshotRepository._mcps(
+            Session(),
+            (version_id,),
+            project_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_snapshot_rejects_historical_project_remote_outside_operator_policy() -> None:
+    project_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = SimpleNamespace(
+        scope="project",
+        project_id=project_id,
+        status="active",
+    )
+    version = SimpleNamespace(
+        workflow_status="published",
+        transport="http",
+        url="https://blocked.example.test/mcp",
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+    )
+
+    class Result:
+        def one_or_none(self):
+            return asset, version
+
+    class Session:
+        async def execute(self, _statement):
+            return Result()
+
+    with pytest.raises(RunSnapshotAssetStale):
+        await RunSnapshotRepository._mcps(
+            Session(),
+            (version_id,),
+            project_id,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://allowed.example.test/mcp"})),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_snapshot_accepts_project_remote_in_operator_policy() -> None:
+    project_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    endpoint = "https://allowed.example.test/mcp"
+    asset = SimpleNamespace(
+        scope="project",
+        project_id=project_id,
+        status="active",
+    )
+    version = SimpleNamespace(
+        workflow_status="published",
+        transport="http",
+        url=endpoint,
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+    )
+
+    class Result:
+        def one_or_none(self):
+            return asset, version
+
+    class Session:
+        statement = None
+
+        async def execute(self, _statement):
+            self.statement = _statement
+            return Result()
+
+    session = Session()
+    rows = await RunSnapshotRepository._mcps(
+        session,
+        (version_id,),
+        project_id,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({endpoint})),
+    )
+
+    assert rows == [(asset, version)]
+    assert session.statement is not None
+    assert session.statement._for_update_arg is not None
+    assert session.statement._for_update_arg.read is True
+
+
+@pytest.mark.asyncio
+async def test_run_snapshot_rejects_project_remote_when_policy_is_not_injected() -> None:
+    project_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    asset = SimpleNamespace(
+        scope="project",
+        project_id=project_id,
+        status="active",
+    )
+    version = SimpleNamespace(
+        workflow_status="published",
+        transport="http",
+        url="https://allowed.example.test/mcp",
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+    )
+
+    class Result:
+        def one_or_none(self):
+            return asset, version
+
+    class Session:
+        async def execute(self, _statement):
+            return Result()
+
+    with pytest.raises(RunSnapshotAssetStale):
+        await RunSnapshotRepository._mcps(
+            Session(),
+            (version_id,),
+            project_id,
+        )
+
+
+def test_run_snapshot_rejects_historical_project_non_header_credential_slot() -> None:
+    endpoint = "https://allowed.example.test/mcp"
+    version_id = uuid.uuid4()
+    asset = SimpleNamespace(scope="project")
+    version = SimpleNamespace(
+        id=version_id,
+        transport="http",
+        url=endpoint,
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+    )
+    closures = {
+        version_id: SimpleNamespace(
+            slots=(SimpleNamespace(payload_schema={"env": ["TOKEN"]}),),
+        )
+    }
+
+    with pytest.raises(RunSnapshotAssetStale):
+        RunSnapshotRepository._validate_project_mcp_credential_slots(
+            [(asset, version)],
+            closures,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset({endpoint})),
+        )
+
+
+def test_run_snapshot_rejects_cross_slot_credential_header_collisions() -> None:
+    endpoint = "https://allowed.example.test/mcp"
+    version_id = uuid.uuid4()
+    asset = SimpleNamespace(scope="project")
+    version = SimpleNamespace(
+        id=version_id,
+        transport="http",
+        url=endpoint,
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+    )
+    closures = {
+        version_id: SimpleNamespace(
+            slots=(
+                SimpleNamespace(
+                    payload_schema={"headers": ["Authorization"]},
+                ),
+                SimpleNamespace(
+                    payload_schema={"headers": ["authorization"]},
+                ),
+            ),
+        )
+    }
+
+    with pytest.raises(RunSnapshotAssetStale):
+        RunSnapshotRepository._validate_project_mcp_credential_slots(
+            [(asset, version)],
+            closures,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset({endpoint})),
+        )
 
 
 @pytest_asyncio.fixture()
@@ -191,9 +404,10 @@ async def snapshot_scenario(migrated_postgres_database_url):
             text(
                 """INSERT INTO mcp_server_versions
                 (id,mcp_server_id,version_number,workflow_status,description,transport,
-                 command,args,non_secret_env,non_secret_headers,oauth_metadata,routing,
+                 command,args,url,non_secret_env,non_secret_headers,oauth_metadata,routing,
                  tool_overrides,timeout_seconds,payload_checksum,created_by_user_id)
-                VALUES (:id,:asset_id,1,'draft','','stdio','snapshot-command','[]'::jsonb,
+                VALUES (:id,:asset_id,1,'draft','','http',NULL,'[]'::jsonb,
+                        'https://snapshot-mcp.example.test/exact',
                         '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
                         30,:checksum,:owner)"""
             ),
@@ -215,7 +429,8 @@ async def snapshot_scenario(migrated_postgres_database_url):
             text(
                 """INSERT INTO credential_versions
                 (id,credential_id,version_number,status,payload_schema_version,payload_schema,created_by_user_id)
-                VALUES (:id,:credential_id,1,'active',1,'{}'::jsonb,:owner)"""
+                VALUES (:id,:credential_id,1,'active',1,
+                        '{"headers":["Authorization"]}'::jsonb,:owner)"""
             ),
             {"id": credential_version_id, "credential_id": credential_id, "owner": owner_id},
         )
@@ -242,7 +457,8 @@ async def snapshot_scenario(migrated_postgres_database_url):
             text(
                 """INSERT INTO mcp_version_credential_slots
                 (id,mcp_server_version_id,name,purpose,payload_schema,required)
-                VALUES (:id,:version_id,'token','auth','{}'::jsonb,true)"""
+                VALUES (:id,:version_id,'token','auth',
+                        '{"headers":["Authorization"]}'::jsonb,true)"""
             ),
             {"id": slot_id, "version_id": mcp_version_id},
         )
@@ -250,7 +466,8 @@ async def snapshot_scenario(migrated_postgres_database_url):
             text(
                 """INSERT INTO mcp_version_credential_slots
                 (id,mcp_server_version_id,name,purpose,payload_schema,required)
-                VALUES (:id,:version_id,'alternate','alternate auth','{}'::jsonb,false)"""
+                VALUES (:id,:version_id,'alternate','alternate auth',
+                        '{"headers":["Authorization"]}'::jsonb,false)"""
             ),
             {"id": alternate_slot_id, "version_id": mcp_version_id},
         )
@@ -330,7 +547,7 @@ async def snapshot_scenario(migrated_postgres_database_url):
 @pytest.mark.anyio
 async def test_run_snapshot_is_exact_ordered_and_secret_free(snapshot_scenario: SnapshotScenario) -> None:
     scenario = snapshot_scenario
-    repository = RunSnapshotRepository(scenario.seed.factory)
+    repository = scenario.repository
     request = PrivateRunCreate(metadata={"source": "snapshot-test"}, kwargs={"input": "hello"})
 
     run = await repository.create_run_with_snapshot(
@@ -380,7 +597,7 @@ async def test_snapshot_transaction_rolls_back_stale_or_secret_bearing_admission
     snapshot_scenario: SnapshotScenario,
 ) -> None:
     scenario = snapshot_scenario
-    repository = RunSnapshotRepository(scenario.seed.factory)
+    repository = scenario.repository
     stale_run_id = str(uuid.uuid4())
     stale = dataclasses.replace(scenario.resolved_agent, checksum="d" * 64)
     with pytest.raises(PrivateWorkAssetStale) as stale_error:
@@ -440,7 +657,7 @@ async def test_snapshot_true_run_conflict_uses_context_request_id(
     scenario = snapshot_scenario
 
     with pytest.raises(PrivateWorkConflict) as captured:
-        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        await scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             f"missing-{uuid.uuid4()}",
             PrivateRunCreate(),
@@ -473,7 +690,7 @@ async def test_snapshot_database_unavailable_is_stable_and_sanitized(
     monkeypatch.setattr(RunSnapshotRepository, "_agent", unavailable)
 
     with pytest.raises(PrivateWorkUnavailable) as captured:
-        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        await scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(),
@@ -606,7 +823,7 @@ async def test_snapshot_accepts_active_grant_pinned_to_retired_version(
         scenario.resolved_agent,
         catalog_generation=await _current_generation(scenario),
     )
-    repository = RunSnapshotRepository(scenario.seed.factory)
+    repository = scenario.repository
 
     run = await repository.create_run_with_snapshot(
         scenario.seed.owner_a,
@@ -637,7 +854,7 @@ async def test_snapshot_rejects_inactive_or_missing_active_envelope(
     )
 
     with pytest.raises(PrivateWorkAssetStale) as captured:
-        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        await scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(run_id=run_id),
@@ -672,7 +889,7 @@ async def test_snapshot_rejects_credential_scope_mismatch(
     )
 
     with pytest.raises(PrivateWorkAssetStale) as captured:
-        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        await scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(),
@@ -705,7 +922,7 @@ async def test_snapshot_rejects_slot_payload_schema_mismatch(
     )
 
     with pytest.raises(PrivateWorkAssetStale) as captured:
-        await RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        await scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(),
@@ -764,7 +981,7 @@ async def test_snapshot_credential_closure_locks_serialize_repin(
         repin_committed.set()
 
     snapshot_task = asyncio.create_task(
-        RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(),
@@ -784,7 +1001,7 @@ async def test_snapshot_credential_closure_locks_serialize_repin(
             asyncio.gather(snapshot_task, repin_task),
             timeout=10,
         )
-        grants = await RunSnapshotRepository(scenario.seed.factory).list_mcp_grants(scenario.seed.owner_a, run.run_id)
+        grants = await scenario.repository.list_mcp_grants(scenario.seed.owner_a, run.run_id)
         assert tuple(row.credential_slot_id for row in grants) == (scenario.slot_id,)
     finally:
         release_snapshot.set()
@@ -836,7 +1053,7 @@ async def test_snapshot_credential_closure_locks_serialize_revoke(
         revoke_committed.set()
 
     snapshot_task = asyncio.create_task(
-        RunSnapshotRepository(scenario.seed.factory).create_run_with_snapshot(
+        scenario.repository.create_run_with_snapshot(
             scenario.seed.owner_a,
             scenario.thread_id,
             PrivateRunCreate(),
@@ -856,7 +1073,7 @@ async def test_snapshot_credential_closure_locks_serialize_revoke(
             asyncio.gather(snapshot_task, revoke_task),
             timeout=10,
         )
-        assert await RunSnapshotRepository(scenario.seed.factory).list_mcp_grants(
+        assert await scenario.repository.list_mcp_grants(
             scenario.seed.owner_a,
             run.run_id,
         )

@@ -4,6 +4,7 @@ import dataclasses
 import importlib
 import inspect
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import InvalidRequestError
@@ -15,6 +16,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetForbidden, AssetValidationFailed
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 
 
 def _context(role: ProjectRole = ProjectRole.EDITOR) -> ProjectContext:
@@ -34,10 +36,16 @@ def _safe_definition(service_module):
         description="Issue tracker",
         transport="http",
         url="https://mcp.example.test",
-        env={"NODE_ENV": "production"},
-        headers={"Accept": "application/json"},
-        oauth={"enabled": True, "client_id": "public-client"},
+        oauth={
+            "enabled": True,
+            "token_url": "https://identity.example.test/oauth/token",
+            "client_id": "public-client",
+        },
     )
+
+
+def _endpoint_policy(*endpoints: str) -> ExactMcpEndpointPolicy:
+    return ExactMcpEndpointPolicy(frozenset(endpoints))
 
 
 def _system_context() -> SystemAssetGovernanceContext:
@@ -536,56 +544,9 @@ async def test_mcp_definition_rejects_compact_or_undashed_secret_carrier_before_
         ),
         pytest.param(
             {
-                "description": "Local command with public endpoint",
-                "transport": "stdio",
-                "command": "/usr/local/bin/mcp",
-                "args": (
-                    "--verbose",
-                    "--endpoint=https://api.example.test/v1?mode=read",
-                ),
-                "env": {"AUTH_MODE": "oauth", "LOG_LEVEL": "info"},
-            },
-            id="ordinary-command-args-env",
-        ),
-        pytest.param(
-            {
-                "description": "Local command with ordinary controls",
-                "transport": "stdio",
-                "command": "mcp --port 8080 --auth-mode oauth",
-            },
-            id="ordinary-command-controls",
-        ),
-        pytest.param(
-            {
-                "description": "Local args with ordinary controls",
-                "transport": "stdio",
-                "command": "mcp",
-                "args": (
-                    "--port",
-                    "8080",
-                    "--auth-mode",
-                    "oauth",
-                    "--authentication_mode",
-                    "oauth",
-                    "--OAUTH-MODE",
-                    "public",
-                ),
-            },
-            id="ordinary-args-controls",
-        ),
-        pytest.param(
-            {
                 "description": "Remote tools",
                 "transport": "http",
                 "url": "https://mcp.test/tools",
-                "headers": {"X-Request-ID": "public-request", "Accept": "application/json"},
-                "oauth": {
-                    "enabled": True,
-                    "token_url": "https://identity.example.test/oauth/token",
-                    "grant_type": "client_credentials",
-                    "client_id": "public-client",
-                    "token_field": "access_token",
-                },
                 "routing": {
                     "strategy": "round_robin",
                     "fallback": "https://route.test/api?mode=read",
@@ -594,7 +555,7 @@ async def test_mcp_definition_rejects_compact_or_undashed_secret_carrier_before_
                     "search": {"enabled": True, "description": "ordinary public search"},
                 },
             },
-            id="ordinary-oauth-routing-overrides",
+            id="ordinary-routing-overrides",
         ),
     ],
 )
@@ -606,6 +567,7 @@ def test_mcp_definition_field_complete_scan_allows_nonsecret_metadata(
     normalized = service_module.McpService._validate_definition(
         _context(),
         service_module.McpDefinition(**definition),
+        endpoint_policy=_endpoint_policy(str(definition["url"])),
     )
 
     assert normalized.description == definition["description"]
@@ -717,11 +679,15 @@ def test_mcp_definition_rejects_nested_secret_config(field_update: dict[str, obj
     definition = dataclasses.replace(_safe_definition(service_module), **field_update)
 
     with pytest.raises(AssetValidationFailed) as exc_info:
-        service_module.McpService._validate_definition(_context(), definition)
+        service_module.McpService._validate_definition(
+            _context(),
+            definition,
+            endpoint_policy=_endpoint_policy(str(definition.url)),
+        )
     assert "never-log-me" not in str(exc_info.value)
 
 
-def test_mcp_definition_accepts_nonsecret_oauth_protocol_metadata() -> None:
+def test_mcp_definition_rejects_project_oauth_until_private_runtime_supports_it() -> None:
     service_module = importlib.import_module("app.shared_assets.mcp_service")
     definition = dataclasses.replace(
         _safe_definition(service_module),
@@ -736,8 +702,156 @@ def test_mcp_definition_accepts_nonsecret_oauth_protocol_metadata() -> None:
         },
     )
 
-    normalized = service_module.McpService._validate_definition(_context(), definition)
+    with pytest.raises(AssetValidationFailed):
+        service_module.McpService._validate_definition(
+            _context(),
+            definition,
+            endpoint_policy=_endpoint_policy(str(definition.url)),
+        )
+
+
+def test_mcp_definition_keeps_packaged_system_oauth_read_compatible() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    definition = dataclasses.replace(
+        _safe_definition(service_module),
+        oauth={
+            "enabled": True,
+            "token_url": "https://identity.example.test/oauth/token",
+            "grant_type": "client_credentials",
+            "client_id": "public-client",
+            "token_field": "access_token",
+        },
+    )
+
+    normalized = service_module.McpService._validate_definition(
+        _system_context(),
+        definition,
+    )
+
     assert normalized.oauth["token_url"] == "https://identity.example.test/oauth/token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["submit_approval", "approve", "publish"])
+async def test_mcp_transition_revalidates_historical_project_definition(
+    transition: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.ADMIN)
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    slot = service_module.McpCredentialSlot(
+        "primary",
+        "Authorization header",
+        {"headers": ("Authorization",)},
+    )
+    slots = (
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            name=slot.name,
+            purpose=slot.purpose,
+            payload_schema={"headers": ["Authorization"]},
+            required=True,
+        ),
+    )
+    definition = service_module.McpDefinition(
+        transport="http",
+        url="https://historical.example.test/mcp",
+        credential_slots=(slot,) if transition != "publish" else (),
+    )
+    row = SimpleNamespace(
+        id=version_id,
+        mcp_server_id=asset_id,
+        workflow_status=("pending_approval" if transition == "approve" else "draft"),
+        description=definition.description,
+        transport=definition.transport,
+        command=definition.command,
+        args=list(definition.args),
+        url=definition.url,
+        non_secret_env=dict(definition.env),
+        non_secret_headers=dict(definition.headers),
+        oauth_metadata=dict(definition.oauth),
+        routing=dict(definition.routing),
+        tool_overrides=dict(definition.tool_overrides),
+        timeout_seconds=definition.timeout_seconds,
+        payload_checksum=service_module.McpService._checksum(definition),
+    )
+    record = SimpleNamespace(
+        row=row,
+        slots=slots if transition != "publish" else (),
+        grants=(),
+    )
+    asset = SimpleNamespace(status="active", version=1)
+
+    class Session:
+        async def flush(self) -> None:
+            return None
+
+    class Repository:
+        session = Session()
+
+        async def get_project_asset(
+            self,
+            _actor,
+            _asset_id,
+            *,
+            for_update: bool,
+        ):
+            assert for_update is True
+            return asset
+
+        async def lock_project(self, _actor) -> None:
+            return None
+
+        async def _get_project_asset_after_lock(self, _actor, _asset_id):
+            return asset
+
+        async def get_project_version(
+            self,
+            _actor,
+            _asset_id,
+            _version_id,
+            *,
+            for_update: bool,
+        ):
+            assert for_update is True
+            return record
+
+    service = service_module.McpService(
+        lambda: None,
+        endpoint_policy=_endpoint_policy("https://allowed.example.test/mcp"),
+    )
+
+    async def execute(_actor, operation, governance=None):
+        del governance
+        return await operation(Repository())
+
+    service._execute = execute
+    service._version_view = lambda value: value
+
+    with pytest.raises(AssetValidationFailed):
+        if transition == "submit_approval":
+            await service.submit_approval(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=1,
+            )
+        elif transition == "approve":
+            await service.approve(
+                actor,
+                asset_id,
+                version_id,
+                {"primary": uuid.uuid4()},
+                expected_asset_version=1,
+            )
+        else:
+            await service.publish(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=1,
+            )
 
 
 @pytest.mark.asyncio

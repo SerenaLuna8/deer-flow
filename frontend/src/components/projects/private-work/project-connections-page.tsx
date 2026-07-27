@@ -5,6 +5,10 @@ import { LoaderCircleIcon, UnplugIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import {
+  useAgentMcpDependencyRuntime,
+  type AgentMcpDependencyAssessment,
+} from "@/components/projects/assets/use-mcp-dependency-runtime";
 import { ChannelProviderIcon } from "@/components/projects/private-work/channel-provider-icon";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -36,6 +40,23 @@ import {
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
 
+export function connectionAgentRuntimeOptions(
+  agents: readonly ExecutableProjectAgent[],
+  assessments: readonly AgentMcpDependencyAssessment[],
+): {
+  readyAgents: ExecutableProjectAgent[];
+  blockedAgents: ExecutableProjectAgent[];
+} {
+  return {
+    readyAgents: agents.filter(
+      (_agent, index) => assessments[index]?.status === "ready",
+    ),
+    blockedAgents: agents.filter(
+      (_agent, index) => assessments[index]?.status === "blocked",
+    ),
+  };
+}
+
 export function ProjectConnectionsPage({ project }: { project: Project }) {
   const { user } = useAuth();
   const privateWork = usePrivateWorkAccess();
@@ -63,6 +84,16 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
       executableProjectAgents(agentsQuery.data as ProjectAssetList | undefined),
     [agentsQuery.data],
   );
+  const mcpDependencyRuntime = useAgentMcpDependencyRuntime({
+    accountId: user?.id ?? "",
+    projectId: project.id,
+    agents,
+    enabled: canManage && Boolean(user),
+  });
+  const { readyAgents, blockedAgents } = connectionAgentRuntimeOptions(
+    agents,
+    mcpDependencyRuntime.assessments,
+  );
   const [selectedProvider, setSelectedProvider] =
     useState<ChannelProviderId | null>(null);
   const [pendingProvider, setPendingProvider] =
@@ -71,7 +102,17 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
 
   const handleAgentSelect = async (agent: ExecutableProjectAgent) => {
     const provider = selectedProvider;
-    if (!provider || pendingProvider) return;
+    const index = agents.findIndex(
+      (candidate) =>
+        candidate.id === agent.id && candidate.scope === agent.scope,
+    );
+    if (
+      !provider ||
+      pendingProvider ||
+      mcpDependencyRuntime.assessments[index]?.status !== "ready"
+    ) {
+      return;
+    }
     const connectWindow = prepareConnectWindow();
     setPendingProvider(provider);
     try {
@@ -227,10 +268,18 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
 
       <AgentSelectorDialog
         open={selectedProvider !== null}
-        agents={agents}
+        agents={readyAgents}
+        blockedRuntimeAgents={blockedAgents}
         isCreating={pendingProvider !== null}
-        isLoading={agentsQuery.isLoading}
-        error={agentsQuery.error}
+        isLoading={agentsQuery.isLoading || mcpDependencyRuntime.isLoading}
+        error={
+          agentsQuery.error ??
+          (mcpDependencyRuntime.error instanceof Error
+            ? mcpDependencyRuntime.error
+            : mcpDependencyRuntime.error
+              ? new Error("无法验证 Agent 的 MCP 依赖")
+              : null)
+        }
         onOpenChange={(open) => {
           if (!open && pendingProvider === null) setSelectedProvider(null);
         }}

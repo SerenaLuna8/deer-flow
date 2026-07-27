@@ -22,6 +22,7 @@ import {
   type AssetListKind,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
+import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 import { adminAssetErrorMessage } from "./admin-asset-view-model";
 
@@ -78,6 +79,34 @@ export function AdminProjectSystemBindingDialog({
       ),
     [history.data],
   );
+  const bindablePublished = useMemo(
+    () =>
+      published.filter(
+        (version) =>
+          kind !== "mcp-servers" ||
+          !("mcp_server_id" in version) ||
+          mcpVersionRuntimeBlockReason(version, item.scope) === null,
+      ),
+    [item.scope, kind, published],
+  );
+  const firstRuntimeBlockReason = useMemo(
+    () =>
+      kind === "mcp-servers"
+        ? (published
+            .filter(
+              (version) =>
+                "mcp_server_id" in version &&
+                mcpVersionRuntimeBlockReason(version, item.scope) !== null,
+            )
+            .map((version) =>
+              "mcp_server_id" in version
+                ? mcpVersionRuntimeBlockReason(version, item.scope)
+                : null,
+            )
+            .find((reason): reason is string => reason !== null) ?? null)
+        : null,
+    [item.scope, kind, published],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -104,6 +133,7 @@ export function AdminProjectSystemBindingDialog({
     !history.error &&
     !pending &&
     Boolean(target) &&
+    bindablePublished.some((version) => version.id === selectedVersionId) &&
     selectedVersionId !==
       (item.binding?.enabled ? item.binding.version_id : "");
 
@@ -174,18 +204,36 @@ export function AdminProjectSystemBindingDialog({
             >
               <option value="">请选择版本</option>
               {published.map((version) => (
-                <option key={version.id} value={version.id}>
+                <option
+                  key={version.id}
+                  value={version.id}
+                  disabled={
+                    kind === "mcp-servers" &&
+                    "mcp_server_id" in version &&
+                    mcpVersionRuntimeBlockReason(version, item.scope) !== null
+                  }
+                >
                   版本 {version.version_number}
+                  {kind === "mcp-servers" &&
+                  "mcp_server_id" in version &&
+                  mcpVersionRuntimeBlockReason(version, item.scope) !== null
+                    ? "（不可用）"
+                    : ""}
                 </option>
               ))}
             </select>
-            {published.length === 0 ? (
+            {bindablePublished.length === 0 ? (
               <span className="text-muted-foreground text-xs">
                 当前没有可绑定的已发布版本。
               </span>
             ) : null}
           </label>
         )}
+        {firstRuntimeBlockReason ? (
+          <p role="alert" className="text-destructive text-sm">
+            {firstRuntimeBlockReason}
+          </p>
+        ) : null}
         <p className="text-muted-foreground text-sm">
           当前项目：{pinned ? `版本 ${pinned.version_number}` : "未启用"}
         </p>

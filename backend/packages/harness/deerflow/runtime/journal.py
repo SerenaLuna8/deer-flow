@@ -120,6 +120,8 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._tool_call_callers: dict[str, str] = {}
+        self._tool_run_callers: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
 
     # -- Lifecycle callbacks --
@@ -131,6 +133,8 @@ class RunJournal(BaseCallbackHandler):
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
+        if caller not in (None, "lead_agent"):
+            return
         self._msg_count += 1
 
         # ``last_ai_message`` should represent the lead agent's user-facing
@@ -295,7 +299,7 @@ class RunJournal(BaseCallbackHandler):
             # Trace event: llm_response (OpenAI completion format)
             self._put(
                 event_type="llm.ai.response",
-                category="message",
+                category="message" if caller == "lead_agent" else "trace",
                 content=message.model_dump(),
                 metadata={
                     "caller": caller,
@@ -346,27 +350,29 @@ class RunJournal(BaseCallbackHandler):
         self._put(event_type="llm.error", category="trace", content=str(error))
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
-        """Handle tool start event, cache tool call ID for later correlation"""
-        tool_call_id = str(run_id)
-        logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
+        """Cache the exact callback-run caller for later tool-result correlation."""
+        tool_run_id = str(run_id)
+        self._tool_run_callers[tool_run_id] = self._identify_caller(tags)
+        logger.debug("Tool start for node %s, tool_run_id=%s, tags=%s", run_id, tool_run_id, tags)
 
-    def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
+    def on_tool_end(self, output, *, run_id, parent_run_id=None, tags=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
-                self._persist_tool_result_message(msg)
+                self._persist_tool_result_message(msg, caller=self._tool_message_caller(msg, run_id=run_id, tags=tags))
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
                 for message in messages:
                     if isinstance(message, BaseMessage):
-                        self._persist_tool_result_message(message)
+                        self._persist_tool_result_message(message, caller=self._tool_message_caller(message, run_id=run_id, tags=tags))
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
+            self._tool_run_callers.pop(str(run_id), None)
             logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --
@@ -388,8 +394,6 @@ class RunJournal(BaseCallbackHandler):
         return getattr(tool_call, key, None)
 
     def _remember_current_run_tool_calls(self, message: AnyMessage, *, caller: str) -> None:
-        if caller != "lead_agent":
-            return
         is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
         if not is_ai_message:
             return
@@ -400,15 +404,34 @@ class RunJournal(BaseCallbackHandler):
             tool_call_id = self._tool_call_value(tool_call, "id")
             if not isinstance(tool_call_id, str) or not tool_call_id:
                 continue
+            self._tool_call_callers[tool_call_id] = caller
             name = self._tool_call_value(tool_call, "name")
-            self._current_run_tool_call_names[tool_call_id] = str(name or "")
+            if caller == "lead_agent":
+                self._current_run_tool_call_names[tool_call_id] = str(name or "")
 
-    def _persist_tool_result_message(self, message: BaseMessage) -> None:
-        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
-        identity = self._message_identity(message)
-        if identity:
-            self._persisted_tool_message_identities.add(identity)
-        self._record_message_summary(message)
+    def _tool_message_caller(self, message: BaseMessage, *, run_id: UUID, tags: list[str] | None) -> str:
+        caller = self._tool_run_callers.get(str(run_id))
+        if caller is not None:
+            return caller
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if isinstance(tool_call_id, str) and tool_call_id:
+            caller = self._tool_call_callers.get(tool_call_id)
+            if caller is not None:
+                return caller
+        return self._identify_caller(tags)
+
+    def _persist_tool_result_message(self, message: BaseMessage, *, caller: str = "lead_agent") -> None:
+        self._put(
+            event_type="llm.tool.result",
+            category="message" if caller == "lead_agent" else "trace",
+            content=message.model_dump(),
+            metadata={"caller": caller},
+        )
+        if caller == "lead_agent":
+            identity = self._message_identity(message)
+            if identity:
+                self._persisted_tool_message_identities.add(identity)
+        self._record_message_summary(message, caller=caller)
 
     def _final_output_messages(self, outputs: Any) -> list[Any]:
         if isinstance(outputs, Mapping):
@@ -436,7 +459,7 @@ class RunJournal(BaseCallbackHandler):
             if not isinstance(message, ToolMessage):
                 continue
             if self._should_reconcile_tool_message(message):
-                self._persist_tool_result_message(message)
+                self._persist_tool_result_message(message, caller="lead_agent")
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         self._buffer.append(
@@ -505,8 +528,10 @@ class RunJournal(BaseCallbackHandler):
     def _identify_caller(self, tags: list[str] | None) -> str:
         _tags = tags or []
         for tag in _tags:
-            if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:") or tag == "lead_agent"):
+            if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:")):
                 return tag
+        if "lead_agent" in _tags:
+            return "lead_agent"
         # Default to lead_agent: the main agent graph does not inject
         # callback tags, while subagents and middleware explicitly tag
         # themselves.

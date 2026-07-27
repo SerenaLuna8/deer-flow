@@ -11,21 +11,985 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 from test_private_run_snapshot import SnapshotScenario, snapshot_scenario  # noqa: F401
 
-from app.private_work.asset_runtime import PrivateAssetRuntime
+from app.private_work.asset_runtime import (
+    PrivateAgentManifest,
+    PrivateAgentRuntime,
+    PrivateAssetRuntime,
+)
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkUnavailable
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.shared_assets.crypto import encrypt_credential_payload
 from app.shared_assets.keyring import CredentialKeyring
-from app.shared_assets.models import AssetScope
+from app.shared_assets.models import (
+    AssetKind,
+    AssetScope,
+    ResolvedMcpSnapshot,
+)
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+_TEST_PROJECT_MCP_ENDPOINT = "https://private-runtime-mcp.example.test/exact"
+_TEST_PROJECT_MCP_ENDPOINT_POLICY = ExactMcpEndpointPolicy(frozenset({_TEST_PROJECT_MCP_ENDPOINT}))
+
+
+def _private_mcp_runtime(
+    tmp_path: Path,
+    *,
+    definition: dict[str, object],
+    endpoint_policy: object | None = None,
+    http_client_factory: object | None = None,
+    discovery_timeout_seconds: int = 1,
+    tool_call_timeout_seconds: int = 1,
+    scope: AssetScope = AssetScope.PROJECT,
+) -> PrivateAgentRuntime:
+    snapshot = ResolvedMcpSnapshot(
+        kind=AssetKind.MCP,
+        scope=scope,
+        asset_id=uuid.uuid4(),
+        version_id=uuid.uuid4(),
+        checksum="b" * 64,
+        catalog_generation=1,
+        dependency_version_ids=(),
+        definition=definition,
+        credential_grant_ids=(),
+    )
+    manifest = PrivateAgentManifest(
+        agent_asset_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        checksum="a" * 64,
+        catalog_generation=1,
+        description="",
+        soul="",
+        model_ref="test-model",
+        tool_groups=(),
+        skills=(),
+        mcps=(),
+    )
+    return PrivateAgentRuntime(
+        context=SimpleNamespace(request_id="request-mcp-policy"),  # type: ignore[arg-type]
+        run_id="run-mcp-policy",
+        resolver=object(),  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        safe_manifest=manifest,
+        skill_root=tmp_path,
+        skills=(),
+        mcp_snapshots=(snapshot,),
+        authorization_boundary=None,
+        endpoint_policy=endpoint_policy,
+        http_client_factory=http_client_factory,
+        discovery_timeout_seconds=discovery_timeout_seconds,
+        tool_call_timeout_seconds=tool_call_timeout_seconds,
+    )
+
+
+class _PolicyTestArgs(BaseModel):
+    value: str
+
+
+class _PolicyTestRemoteTool:
+    name = "policy_echo"
+    description = "Echo through the policy test MCP."
+    args_schema = _PolicyTestArgs
+
+    def __init__(self, *, hang: bool = False) -> None:
+        self._hang = hang
+
+    async def ainvoke(self, arguments: dict[str, object]) -> dict[str, object]:
+        if self._hang:
+            await asyncio.Event().wait()
+        return {"echo": arguments["value"]}
+
+
+def _policy_test_http_client_factory(*_args, **_kwargs):
+    raise AssertionError("the fake MCP client must not open a real HTTP connection")
+
+
+def _project_mcp_asset_runtime(session_factory, **kwargs) -> PrivateAssetRuntime:
+    return PrivateAssetRuntime(
+        session_factory,
+        endpoint_policy=_TEST_PROJECT_MCP_ENDPOINT_POLICY,
+        http_client_factory=_policy_test_http_client_factory,
+        **kwargs,
+    )
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_project_stdio_before_constructing_mcp_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    constructed = 0
+    materialized = 0
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal constructed
+            constructed += 1
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return []
+
+        async def aclose(self):
+            return None
+
+    async def materialize(_self, _snapshot):
+        nonlocal materialized
+        materialized += 1
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        definition={
+            "transport": "stdio",
+            "command": "/bin/sh",
+            "args": ["-c", "worker-command-sentinel"],
+            "timeout_seconds": 1,
+        },
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await runtime.discover_mcp_tools()
+
+    assert captured.value.request_id == "request-mcp-policy"
+    assert constructed == 0
+    assert materialized == 0
+    assert "worker-command-sentinel" not in str(captured.value)
+
+
+@pytest.mark.anyio
+async def test_worker_checks_remote_endpoint_before_every_discovery_and_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://mcp-policy.example.test/exact"
+
+    class Policy:
+        def __init__(self) -> None:
+            self.checked: list[str] = []
+
+        def allows(self, candidate: str) -> bool:
+            self.checked.append(candidate)
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [_PolicyTestRemoteTool()]
+
+        async def aclose(self):
+            return None
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    policy = Policy()
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=policy,
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 1,
+            "routing": {
+                "mode": "prefer",
+                "priority": 1,
+                "keywords": ["fallback"],
+            },
+            "tool_overrides": {
+                "policy_echo": {
+                    "routing": {
+                        "mode": "prefer",
+                        "priority": 9,
+                        "keywords": ["exact echo"],
+                    }
+                }
+            },
+        },
+    )
+
+    await runtime.discover_mcp_tools()
+    assert await runtime.mcp_tools[0].ainvoke({"value": "hello"}) == {"echo": "hello"}
+    assert runtime.mcp_tools[0].metadata == {
+        "deerflow_mcp": True,
+        "deerflow_mcp_routing": {
+            "mode": "prefer",
+            "priority": 9,
+            "keywords": ["exact echo"],
+        },
+        "deerflow_private_mcp": True,
+    }
+    assert policy.checked == [endpoint, endpoint]
+
+
+@pytest.mark.anyio
+async def test_worker_converts_real_adapter_json_schema_to_bounded_pydantic_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+    from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+    from mcp.types import Tool as McpTool
+
+    endpoint = "https://json-schema.example.test/exact"
+    version_id = uuid.uuid4()
+    server_name = f"project_{version_id.hex[:16]}"
+    remote = convert_mcp_tool_to_langchain_tool(
+        None,
+        McpTool(
+            name="lookup",
+            description="Look up one record.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "maxLength": 200},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        ),
+        connection={"transport": "http", "url": endpoint},
+        server_name=server_name,
+        tool_name_prefix=True,
+    )
+    assert isinstance(remote.args_schema, dict)
+
+    async def invoke_remote(**arguments):
+        return {"echo": arguments}, None
+
+    remote.coroutine = invoke_remote
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [remote]
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 1,
+        },
+    )
+    runtime._mcp_snapshots = (dataclasses.replace(runtime._mcp_snapshots[0], version_id=version_id),)
+
+    await runtime.discover_mcp_tools()
+
+    proxy = runtime.mcp_tools[0]
+    assert isinstance(proxy.args_schema, type)
+    assert issubclass(proxy.args_schema, BaseModel)
+    assert set(proxy.args_schema.model_fields) == {"query", "limit"}
+    assert proxy.args_schema.model_validate({"query": "needle", "limit": 2}).model_dump(exclude_none=True) == {"query": "needle", "limit": 2}
+    with pytest.raises(ValidationError):
+        proxy.args_schema.model_validate({"query": "needle", "extra": True})
+    assert await proxy.ainvoke({"query": "needle", "limit": 2}) == {"echo": {"query": "needle", "limit": 2}}
+    assert await proxy.ainvoke({"query": "needle"}) == {"echo": {"query": "needle"}}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "unsafe_schema",
+    [
+        {
+            "type": "object",
+            "properties": {"node": {"$ref": "#"}},
+        },
+        {
+            "type": "object",
+            "properties": {"model_config": {"type": "string"}},
+        },
+    ],
+)
+async def test_worker_rejects_reference_and_reserved_json_tool_schemas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_schema: dict[str, object],
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://unsafe-schema.example.test/exact"
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Remote:
+        name = "unsafe"
+        description = "Unsafe schema."
+        args_schema = unsafe_schema
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [Remote()]
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 1,
+        },
+    )
+
+    with pytest.raises(PrivateWorkAssetStale):
+        await runtime.discover_mcp_tools()
+
+
+def test_worker_rejects_cyclic_json_tool_schema_before_model_construction() -> None:
+    from app.private_work.asset_runtime import _safe_mcp_args_model
+
+    cyclic_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {},
+    }
+    properties = cyclic_schema["properties"]
+    assert isinstance(properties, dict)
+    properties["child"] = cyclic_schema
+
+    with pytest.raises(ValueError, match="mapping is invalid"):
+        _safe_mcp_args_model(cyclic_schema, model_name="CyclicMcpArgs")
+
+
+def test_worker_enforces_typed_additional_json_tool_properties() -> None:
+    from app.private_work.asset_runtime import _safe_mcp_args_model
+
+    model = _safe_mcp_args_model(
+        {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": {"type": "string"},
+        },
+        model_name="TypedAdditionalMcpArgs",
+    )
+
+    assert model.model_validate({"region": "west"}).model_dump() == {"region": "west"}
+    with pytest.raises(ValidationError):
+        model.model_validate({"region": {"nested": "wrong"}})
+
+
+def test_worker_supports_bounded_local_refs_and_json_property_names() -> None:
+    from app.private_work.asset_runtime import _safe_mcp_args_model
+
+    model = _safe_mcp_args_model(
+        {
+            "$defs": {
+                "SearchPayload": {
+                    "type": "object",
+                    "properties": {
+                        "search-query": {"type": "string"},
+                    },
+                    "required": ["search-query"],
+                    "additionalProperties": False,
+                }
+            },
+            "type": "object",
+            "properties": {
+                "payload": {"$ref": "#/$defs/SearchPayload"},
+            },
+            "required": ["payload"],
+            "additionalProperties": False,
+        },
+        model_name="LocalRefMcpArgs",
+    )
+
+    assert model.model_validate({"payload": {"search-query": "needle"}}).model_dump() == {"payload": {"search-query": "needle"}}
+    with pytest.raises(ValidationError):
+        model.model_validate({"payload": {"search-query": 1}})
+
+
+def test_worker_rejects_recursive_local_json_schema_refs() -> None:
+    from app.private_work.asset_runtime import _safe_mcp_args_model
+
+    with pytest.raises(ValueError, match="reference"):
+        _safe_mcp_args_model(
+            {
+                "$defs": {
+                    "Node": {
+                        "type": "object",
+                        "properties": {
+                            "child": {"$ref": "#/$defs/Node"},
+                        },
+                    }
+                },
+                "type": "object",
+                "properties": {"node": {"$ref": "#/$defs/Node"}},
+            },
+            model_name="RecursiveRefMcpArgs",
+        )
+
+
+@pytest.mark.anyio
+async def test_worker_injects_only_configured_http_client_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://factory-policy.example.test/exact"
+    captured_connections: list[dict[str, dict[str, object]]] = []
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, connections, **_kwargs):
+            captured_connections.append(connections)
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return []
+
+        async def aclose(self):
+            return None
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 86_400,
+        },
+    )
+
+    await runtime.discover_mcp_tools()
+
+    assert len(captured_connections) == 1
+    connection = next(iter(captured_connections[0].values()))
+    assert connection["httpx_client_factory"] is _policy_test_http_client_factory
+
+
+@pytest.mark.anyio
+async def test_worker_injects_system_oauth_credentials_for_discovery_and_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    from deerflow.mcp.oauth import OAuthTokenManager
+
+    oauth_secret = "system-oauth-client-secret"
+    derived_access_token = "derived-system-access-token"
+    captured_connections: list[dict[str, dict[str, object]]] = []
+    captured_interceptors: list[tuple[object, ...]] = []
+
+    async def authorization_header(
+        self: OAuthTokenManager,
+        server_name: str,
+    ) -> str:
+        oauth = self._oauth_by_server[server_name]
+        assert oauth.client_id == "system-client"
+        assert oauth.client_secret == oauth_secret
+        return f"Bearer {derived_access_token}"
+
+    class Client:
+        def __init__(self, connections, *, tool_interceptors=(), **_kwargs):
+            captured_connections.append(connections)
+            captured_interceptors.append(tuple(tool_interceptors))
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [_PolicyTestRemoteTool()]
+
+        async def aclose(self):
+            return None
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(
+            by_slot={
+                "oauth": {
+                    "oauth": {
+                        "client_secret": oauth_secret,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(
+        OAuthTokenManager,
+        "get_authorization_header",
+        authorization_header,
+    )
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_materialize_mcp_call",
+        materialize,
+    )
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        scope=AssetScope.SYSTEM,
+        definition={
+            "transport": "http",
+            "url": "https://system-oauth.example.test/mcp",
+            "env": {},
+            "headers": {},
+            "oauth": {
+                "enabled": True,
+                "token_url": "https://identity.example.test/token",
+                "grant_type": "client_credentials",
+                "client_id": "system-client",
+            },
+            "credential_slots": (
+                {
+                    "name": "oauth",
+                    "purpose": "System OAuth",
+                    "payload_schema": {"oauth": ["client_secret"]},
+                    "required": True,
+                },
+            ),
+            "timeout_seconds": 30,
+        },
+    )
+
+    await runtime.discover_mcp_tools()
+    result = await runtime.mcp_tools[0].ainvoke({"value": "hello"})
+
+    assert result == {"echo": "hello"}
+    assert len(captured_connections) == 2
+    assert all(next(iter(connections.values()))["headers"]["Authorization"] == f"Bearer {derived_access_token}" for connections in captured_connections)
+    assert all(interceptors for interceptors in captured_interceptors)
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_derived_system_oauth_token_in_tool_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    from deerflow.mcp.oauth import OAuthTokenManager
+
+    derived_access_token = "derived-system-access-token"
+
+    async def authorization_header(
+        _self: OAuthTokenManager,
+        _server_name: str,
+    ) -> str:
+        return f"Bearer {derived_access_token}"
+
+    class Remote:
+        name = "oauth_echo"
+        description = "OAuth result policy test."
+        args_schema = _PolicyTestArgs
+
+        async def ainvoke(self, _arguments):
+            return {"leak": derived_access_token}
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [Remote()]
+
+        async def aclose(self):
+            return None
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(
+            by_slot={
+                "oauth": {
+                    "oauth": {
+                        "client_secret": "system-oauth-client-secret",
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr(
+        OAuthTokenManager,
+        "get_authorization_header",
+        authorization_header,
+    )
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_materialize_mcp_call",
+        materialize,
+    )
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        scope=AssetScope.SYSTEM,
+        definition={
+            "transport": "http",
+            "url": "https://system-oauth.example.test/mcp",
+            "env": {},
+            "headers": {},
+            "oauth": {
+                "enabled": True,
+                "token_url": "https://identity.example.test/token",
+                "grant_type": "client_credentials",
+                "client_id": "system-client",
+            },
+            "credential_slots": (
+                {
+                    "name": "oauth",
+                    "purpose": "System OAuth",
+                    "payload_schema": {"oauth": ["client_secret"]},
+                    "required": True,
+                },
+            ),
+            "timeout_seconds": 30,
+        },
+    )
+
+    await runtime.discover_mcp_tools()
+
+    with pytest.raises(PrivateWorkUnavailable):
+        await runtime.mcp_tools[0].ainvoke({"value": "leak"})
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_project_remote_without_http_client_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://missing-factory.example.test/exact"
+    constructed = 0
+    materialized = 0
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal constructed
+            constructed += 1
+
+    async def materialize(_self, _snapshot):
+        nonlocal materialized
+        materialized += 1
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 30,
+        },
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await runtime.discover_mcp_tools()
+
+    assert captured.value.request_id == "request-mcp-policy"
+    assert constructed == 0
+    assert materialized == 0
+    assert endpoint not in str(captured.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "unsafe_definition",
+    [
+        {"oauth": {"client_id": "historical-oauth-client"}},
+        {
+            "credential_slots": (
+                {
+                    "name": "legacy-env",
+                    "purpose": "legacy",
+                    "payload_schema": {"env": ["TOKEN"]},
+                    "required": True,
+                },
+            )
+        },
+        {
+            "credential_slots": (
+                {
+                    "name": "legacy-oauth",
+                    "purpose": "legacy",
+                    "payload_schema": {"oauth": ["client_secret"]},
+                    "required": True,
+                },
+            )
+        },
+    ],
+)
+async def test_worker_rejects_project_remote_oauth_and_non_header_slots_before_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_definition: dict[str, object],
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://legacy-auth.example.test/exact"
+    constructed = 0
+    materialized = 0
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal constructed
+            constructed += 1
+
+    async def materialize(_self, _snapshot):
+        nonlocal materialized
+        materialized += 1
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 30,
+            **unsafe_definition,
+        },
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await runtime.discover_mcp_tools()
+
+    assert captured.value.request_id == "request-mcp-policy"
+    assert constructed == 0
+    assert materialized == 0
+    assert endpoint not in str(captured.value)
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_denied_remote_endpoint_before_materialization_or_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://denied-mcp.example.test/private"
+    constructed = 0
+    materialized = 0
+
+    class DenyPolicy:
+        def allows(self, candidate: str) -> bool:
+            assert candidate == endpoint
+            return False
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal constructed
+            constructed += 1
+
+    async def materialize(_self, _snapshot):
+        nonlocal materialized
+        materialized += 1
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=DenyPolicy(),
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 1,
+        },
+    )
+
+    with pytest.raises(PrivateWorkAssetStale) as captured:
+        await runtime.discover_mcp_tools()
+
+    assert captured.value.request_id == "request-mcp-policy"
+    assert constructed == 0
+    assert materialized == 0
+    assert endpoint not in str(captured.value)
+
+
+@pytest.mark.anyio
+async def test_worker_bounds_mcp_discovery_timeout_without_endpoint_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://discovery-timeout.example.test/private-path"
+    closed = 0
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            nonlocal closed
+            closed += 1
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 86_400,
+        },
+    )
+
+    with pytest.raises(PrivateWorkUnavailable) as captured:
+        await asyncio.wait_for(runtime.discover_mcp_tools(), timeout=1.5)
+
+    assert captured.value.request_id == "request-mcp-policy"
+    assert closed == 1
+    assert endpoint not in str(captured.value)
+    assert endpoint not in caplog.text
+
+
+@pytest.mark.anyio
+async def test_worker_bounds_mcp_tool_timeout_without_endpoint_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://tool-timeout.example.test/private-path"
+    clients = 0
+    closed = 0
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal clients
+            clients += 1
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [_PolicyTestRemoteTool(hang=clients > 1)]
+
+        async def aclose(self):
+            nonlocal closed
+            closed += 1
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 86_400,
+        },
+    )
+    await runtime.discover_mcp_tools()
+
+    with pytest.raises(PrivateWorkUnavailable) as captured:
+        await asyncio.wait_for(
+            runtime.mcp_tools[0].ainvoke({"value": "timeout"}),
+            timeout=1.5,
+        )
+
+    assert captured.value.request_id == "request-mcp-policy"
+    assert clients == 2
+    assert closed == 2
+    assert endpoint not in str(captured.value)
+    assert endpoint not in caplog.text
 
 
 async def _prepare_exact_dependencies(
@@ -59,7 +1023,12 @@ async def _prepare_exact_dependencies(
     credential_version_id = uuid.uuid4()
     envelope_id = uuid.uuid4()
     envelope = encrypt_credential_payload(
-        {"env": {"client_secret": sentinel, "key_id": "public-key-name"}},
+        {
+            "headers": {
+                "X-Client-Secret": sentinel,
+                "X-Key-Id": "public-key-name",
+            }
+        },
         AssetScope.PROJECT,
         scenario.seed.owner_a.project_id,
         credential_version_id,
@@ -127,7 +1096,7 @@ async def _prepare_exact_dependencies(
                 (id,credential_id,version_number,status,payload_schema_version,
                  payload_schema,created_by_user_id)
                 VALUES (:id,:credential_id,2,'active',1,
-                        '{"env":["client_secret","key_id"]}'::jsonb,:owner)"""
+                        '{"headers":["X-Client-Secret","X-Key-Id"]}'::jsonb,:owner)"""
             ),
             {
                 "id": credential_version_id,
@@ -163,15 +1132,16 @@ async def _prepare_exact_dependencies(
             text(
                 """INSERT INTO mcp_server_versions
                 (id,mcp_server_id,version_number,workflow_status,description,transport,
-                 command,args,non_secret_env,non_secret_headers,oauth_metadata,routing,
+                 command,args,url,non_secret_env,non_secret_headers,oauth_metadata,routing,
                  tool_overrides,timeout_seconds,payload_checksum,created_by_user_id)
-                VALUES (:id,:mcp_id,2,'draft','','stdio','snapshot-command','[]'::jsonb,
+                VALUES (:id,:mcp_id,2,'draft','','http',NULL,'[]'::jsonb,:url,
                         '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
                         30,:checksum,:owner)"""
             ),
             {
                 "id": mcp_version_id,
                 "mcp_id": scenario.mcp_id,
+                "url": _TEST_PROJECT_MCP_ENDPOINT,
                 "checksum": "d" * 64,
                 "owner": str(scenario.seed.owner_a.user_id),
             },
@@ -181,7 +1151,7 @@ async def _prepare_exact_dependencies(
                 """INSERT INTO mcp_version_credential_slots
                 (id,mcp_server_version_id,name,purpose,payload_schema,required)
                 VALUES (:id,:version_id,'token','auth',
-                        '{"env":["client_secret","key_id"]}'::jsonb,true)"""
+                        '{"headers":["X-Client-Secret","X-Key-Id"]}'::jsonb,true)"""
             ),
             {"id": slot_id, "version_id": mcp_version_id},
         )
@@ -189,7 +1159,8 @@ async def _prepare_exact_dependencies(
             text(
                 """INSERT INTO mcp_version_credential_slots
                 (id,mcp_server_version_id,name,purpose,payload_schema,required)
-                VALUES (:id,:version_id,'alternate','alternate auth','{}'::jsonb,false)"""
+                VALUES (:id,:version_id,'alternate','alternate auth',
+                        '{"headers":["X-Alternate"]}'::jsonb,false)"""
             ),
             {"id": alternate_slot_id, "version_id": mcp_version_id},
         )
@@ -284,7 +1255,12 @@ async def _create_valid_credential_version(
 ) -> uuid.UUID:
     credential_version_id = uuid.uuid4()
     envelope = encrypt_credential_payload(
-        {"env": {"client_secret": token, "key_id": "repinned-key-name"}},
+        {
+            "headers": {
+                "X-Client-Secret": token,
+                "X-Key-Id": "repinned-key-name",
+            }
+        },
         AssetScope.PROJECT,
         scenario.seed.owner_a.project_id,
         credential_version_id,
@@ -297,7 +1273,7 @@ async def _create_valid_credential_version(
                 (id,credential_id,version_number,status,payload_schema_version,
                  payload_schema,created_by_user_id)
                 VALUES (:id,:credential_id,3,'active',1,
-                        '{"env":["client_secret","key_id"]}'::jsonb,:owner)"""
+                        '{"headers":["X-Client-Secret","X-Key-Id"]}'::jsonb,:owner)"""
             ),
             {
                 "id": credential_version_id,
@@ -623,7 +1599,7 @@ async def test_initial_mcp_discovery_rechecks_authorization_after_materializatio
     monkeypatch.setattr(client_module, "MultiServerMCPClient", CountingClient)
     runtime = None
     task = asyncio.create_task(
-        PrivateAssetRuntime(
+        _project_mcp_asset_runtime(
             scenario.seed.factory,
             resolver=resolver,
         ).materialize(scenario.seed.owner_a, admitted)
@@ -703,7 +1679,7 @@ async def test_malformed_exact_skill_parse_cleans_temp_and_returns_stable_error(
     monkeypatch.setattr(runtime_module, "parse_skill_file", lambda *_args, **_kwargs: None)
 
     with pytest.raises(PrivateWorkAssetStale) as captured:
-        await PrivateAssetRuntime(
+        await _project_mcp_asset_runtime(
             scenario.seed.factory,
             resolver=resolver,
         ).materialize(scenario.seed.owner_a, admitted)
@@ -846,7 +1822,7 @@ async def test_materialization_preserves_stable_error_when_temp_cleanup_persists
     monkeypatch.setattr(runtime_module.shutil, "rmtree", failed_rmtree)
 
     with pytest.raises(PrivateWorkAssetStale) as captured:
-        await PrivateAssetRuntime(
+        await _project_mcp_asset_runtime(
             scenario.seed.factory,
             resolver=resolver,
         ).materialize(scenario.seed.owner_a, admitted)
@@ -871,7 +1847,10 @@ async def test_exact_runtime_materializes_skill_and_run_local_mcp_tool(
     original_cache = (cache._mcp_tools_cache, cache._cache_initialized, cache._config_mtime)
     resolver = ProjectAssetResolver(scenario.seed.factory, keyring=keyring)
     admission = PrivateRunAdmissionService(scenario.seed.factory, resolver=resolver)
-    asset_runtime = PrivateAssetRuntime(scenario.seed.factory, resolver=resolver)
+    asset_runtime = _project_mcp_asset_runtime(
+        scenario.seed.factory,
+        resolver=resolver,
+    )
 
     admitted_a = await admission.admit(scenario.seed.owner_a, scenario.thread_id, PrivateRunCreate())
     runtime_a = await asset_runtime.materialize(scenario.seed.owner_a, admitted_a)
@@ -896,8 +1875,8 @@ async def test_exact_runtime_materializes_skill_and_run_local_mcp_tool(
         assert counts == {"constructed": 2, "closed": 2}
 
         safe_mcp = json.dumps(runtime_a.safe_manifest.mcps[0].definition)
-        assert "client_secret" in safe_mcp
-        assert "key_id" in safe_mcp
+        assert "X-Client-Secret" in safe_mcp
+        assert "X-Key-Id" in safe_mcp
         assert sentinel not in safe_mcp
 
         from deerflow.sandbox.local import LocalSandboxProvider
@@ -1065,7 +2044,7 @@ async def test_exact_mcp_tool_fails_closed_when_remote_result_echoes_plaintext(
         scenario.seed.factory,
         resolver=resolver,
     ).admit(scenario.seed.owner_a, scenario.thread_id, PrivateRunCreate())
-    runtime = await PrivateAssetRuntime(
+    runtime = await _project_mcp_asset_runtime(
         scenario.seed.factory,
         resolver=resolver,
     ).materialize(scenario.seed.owner_a, admitted)
@@ -1128,7 +2107,10 @@ async def test_mcp_compare_and_decrypt_share_one_locked_closure_transaction(
     monkeypatch.setattr(resolver_module, "decrypt_credential_payload", barrier_decrypt)
     admission = PrivateRunAdmissionService(scenario.seed.factory, resolver=resolver)
     admitted = await admission.admit(scenario.seed.owner_a, scenario.thread_id, PrivateRunCreate())
-    runtime = await PrivateAssetRuntime(scenario.seed.factory, resolver=resolver).materialize(
+    runtime = await _project_mcp_asset_runtime(
+        scenario.seed.factory,
+        resolver=resolver,
+    ).materialize(
         scenario.seed.owner_a,
         admitted,
     )
@@ -1270,9 +2252,9 @@ async def test_exact_runtime_rejects_current_mcp_grant_or_envelope_drift(
             envelope_id = uuid.uuid4()
             envelope = encrypt_credential_payload(
                 {
-                    "env": {
-                        "client_secret": "repinned-secret-sentinel",
-                        "key_id": "repinned-key-name",
+                    "headers": {
+                        "X-Client-Secret": "repinned-secret-sentinel",
+                        "X-Key-Id": "repinned-key-name",
                     }
                 },
                 AssetScope.PROJECT,
@@ -1286,7 +2268,8 @@ async def test_exact_runtime_rejects_current_mcp_grant_or_envelope_drift(
                     (id,credential_id,version_number,status,payload_schema_version,
                      payload_schema,created_by_user_id)
                     VALUES (:id,:credential_id,3,'active',1,
-                            '{"env":["client_secret","key_id"]}'::jsonb,:owner)"""
+                            '{"headers":["X-Client-Secret","X-Key-Id"]}'::jsonb,
+                            :owner)"""
                 ),
                 {
                     "id": credential_version_id,
@@ -1341,5 +2324,8 @@ async def test_exact_runtime_rejects_current_mcp_grant_or_envelope_drift(
             )
 
     with pytest.raises(PrivateWorkAssetStale):
-        await PrivateAssetRuntime(scenario.seed.factory, resolver=resolver).materialize(scenario.seed.owner_a, admitted)
+        await _project_mcp_asset_runtime(
+            scenario.seed.factory,
+            resolver=resolver,
+        ).materialize(scenario.seed.owner_a, admitted)
     assert counts == {"constructed": 0, "closed": 0}

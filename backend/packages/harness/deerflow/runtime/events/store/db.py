@@ -40,6 +40,7 @@ from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 _EXECUTABLE_ROLES = frozenset({"admin", "editor", "runner"})
+_STREAM_EVENT_NAME_METADATA_KEY = "stream_event_name"
 
 
 class DbRunEventStore(RunEventStore):
@@ -372,15 +373,36 @@ class DbRunEventStore(RunEventStore):
     ) -> StoredStreamFrame:
         record = cls._row_to_dict(row)
         terminal = record["event_type"] == "stream.end"
+        event = "end" if terminal else record["event_type"]
+        metadata = record.get("metadata")
+        namespaced_event = metadata.get(_STREAM_EVENT_NAME_METADATA_KEY) if isinstance(metadata, dict) else None
+        if not terminal and isinstance(namespaced_event, str) and namespaced_event.partition("|")[0] == record["event_type"]:
+            try:
+                StreamFrame(event=namespaced_event, data=record["content"])
+            except (TypeError, ValueError):
+                pass
+            else:
+                event = namespaced_event
         return StoredStreamFrame(
             id=str(record["seq"]),
             thread_id=record["thread_id"],
             run_id=record["run_id"],
-            event="end" if terminal else record["event_type"],
+            event=event,
             data=record["content"],
             terminal=terminal,
             created=created,
         )
+
+    @staticmethod
+    def _stream_event_storage(frame: StreamFrame) -> tuple[str, dict[str, object]]:
+        """Return a bounded database event type plus lossless protocol metadata."""
+        if frame.terminal:
+            return "stream.end", {"stream_terminal": True}
+        event_type, separator, _namespace = frame.event.partition("|")
+        metadata: dict[str, object] = {"stream_terminal": False}
+        if separator:
+            metadata[_STREAM_EVENT_NAME_METADATA_KEY] = frame.event
+        return event_type, metadata
 
     async def append_stream_frame(
         self,
@@ -455,17 +477,15 @@ class DbRunEventStore(RunEventStore):
                 )
             frame = StreamFrame.end(status="interrupted")
 
-        db_content, metadata = self._content_to_db(
-            frame.data,
-            {"stream_terminal": frame.terminal},
-        )
+        event_type, stream_metadata = self._stream_event_storage(frame)
+        db_content, metadata = self._content_to_db(frame.data, stream_metadata)
         seq = self._advance_event_sequence(sequence)
         row = RunEventRow(
             thread_id=thread_id,
             run_id=run_id,
             project_id=project_id,
             owner_user_id=owner_user_id,
-            event_type="stream.end" if frame.terminal else frame.event,
+            event_type=event_type,
             category="stream",
             content=db_content,
             event_metadata=metadata,

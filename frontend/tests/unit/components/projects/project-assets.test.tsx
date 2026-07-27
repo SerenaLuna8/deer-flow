@@ -24,6 +24,7 @@ import {
 } from "@/components/projects/assets/system-binding-dialog";
 import type {
   AssetVersion,
+  ProjectAssetItem,
   ProjectAssetList,
   ProjectCredentialList,
 } from "@/core/shared-assets";
@@ -332,6 +333,38 @@ describe("project shared asset pages", () => {
     expect(admin).toContain("批准并发布");
     expect(admin).toContain(">归档<");
     expect(admin).toContain(">暂停<");
+  });
+
+  test("keeps unsupported historical MCP versions readable but blocks workflow actions", () => {
+    const item: ProjectAssetItem = {
+      ...adminData.project_items[0]!,
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.edit",
+        "mcp.credentials.approve",
+      ],
+    };
+    const unsupportedDraft = {
+      ...pendingMcpVersion,
+      workflow_status: "draft" as const,
+      definition: {
+        ...pendingMcpVersion.definition,
+        transport: "streamable_http" as const,
+      },
+    };
+    const html = renderToStaticMarkup(
+      <ProjectAssetHistoryView
+        kind="mcp-servers"
+        item={item}
+        versions={[unsupportedDraft]}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("streamable_http");
+    expect(html).toContain("此历史版本可以查看，但不能发布、绑定或用于 Agent");
+    expect(html).toContain("提交审批");
+    expect(html).toContain('disabled=""');
   });
 
   test("Credential view uses source tabs without repeating scope badges", () => {

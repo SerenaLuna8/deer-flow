@@ -8,10 +8,7 @@ import { toast } from "sonner";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Project } from "@/core/projects/types";
 import {
-  enableProjectSystemBinding,
   invalidateProjectAssetQueries,
-  listProjectAssets,
-  listProjectAssetVersions,
   useProjectAssets,
   type ProjectAssetList,
 } from "@/core/shared-assets";
@@ -19,9 +16,9 @@ import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 
 import {
   createProjectChatForAgent,
-  ensureMainSystemAgentBindings,
   mainProjectAgent,
 } from "./agent-selector-dialog";
+import { prepareMainProjectChatRuntime } from "./main-project-chat-runtime";
 
 export function useMainProjectChat(project: Project) {
   const router = useRouter();
@@ -51,29 +48,11 @@ export function useMainProjectChat(project: Project) {
 
     setIsCreating(true);
     try {
-      if (mainAgent.binding?.enabled !== true) {
-        const [history, skillCatalog, mcpCatalog] = await Promise.all([
-          listProjectAssetVersions(project.id, "agents", mainAgent.id),
-          listProjectAssets(project.id, "skills"),
-          listProjectAssets(project.id, "mcp-servers"),
-        ]);
-        const currentVersion = history.data.find(
-          (version) =>
-            "agent_id" in version &&
-            version.id === mainAgent.current_published_version_id,
-        );
-        if (!currentVersion || !("agent_id" in currentVersion)) {
-          throw new Error("Main 智能体当前版本不可用");
-        }
-        await ensureMainSystemAgentBindings({
-          agent: mainAgent,
-          requiredSkillVersionIds: currentVersion.skill_version_ids,
-          requiredMcpVersionIds: currentVersion.mcp_version_ids,
-          skillCatalog,
-          mcpCatalog,
-          enableBinding: (kind, input) =>
-            enableProjectSystemBinding(project.id, kind, input),
-        });
+      const prepared = await prepareMainProjectChatRuntime({
+        projectId: project.id,
+        agent: mainAgent,
+      });
+      if (prepared.bindingsChanged) {
         await Promise.all([
           invalidateProjectAssetQueries(
             queryClient,

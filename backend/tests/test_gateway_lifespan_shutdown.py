@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 
 from deerflow.config.auth_config import AuthAppConfig
@@ -120,3 +121,28 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     cleanup_upload_staging_files.assert_called_once_with()
     close_oidc_service.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
+
+
+def test_lifespan_does_not_log_or_raise_secret_bearing_config_input(caplog):
+    from app.gateway.app import lifespan
+
+    secret = "proxy-user:proxy-password"
+
+    def _broken_get_app_config():
+        raise ValueError(f"input_value=https://{secret}@proxy.example.test")
+
+    async def _run() -> None:
+        with pytest.raises(RuntimeError) as raised:
+            async with lifespan(FastAPI()):
+                pass
+        assert secret not in str(raised.value)
+        assert "input_value" not in str(raised.value)
+
+    with (
+        patch("app.gateway.app.get_app_config", side_effect=_broken_get_app_config),
+        caplog.at_level("ERROR", logger="app.gateway.app"),
+    ):
+        asyncio.run(_run())
+
+    assert secret not in caplog.text
+    assert "input_value" not in caplog.text

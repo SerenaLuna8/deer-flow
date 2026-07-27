@@ -9,7 +9,12 @@ import {
   type CredentialVersionOption,
 } from "@/components/projects/assets/mcp-approval-dialog";
 import { Button } from "@/components/ui/button";
-import type { AssetListKind, AssetVersion } from "@/core/shared-assets";
+import type {
+  AssetListKind,
+  AssetScope,
+  AssetVersion,
+} from "@/core/shared-assets";
+import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 import { AssetStatusBadge } from "./asset-status-badge";
 import { AssetVersionDiff } from "./asset-version-diff";
@@ -41,6 +46,7 @@ function versionStatus(version: AssetVersion) {
 
 export function AssetVersionHistory({
   kind,
+  scope,
   versions,
   pending = false,
   onPublish,
@@ -56,6 +62,7 @@ export function AssetVersionHistory({
   onRetryApprovalCredentials,
 }: {
   kind: AssetListKind;
+  scope: AssetScope;
   versions: AssetVersion[];
   pending?: boolean;
   onPublish?: (version: AssetVersion) => void;
@@ -63,7 +70,7 @@ export function AssetVersionHistory({
   onApprove?: (
     version: McpVersion,
     credentialVersions: Record<string, string>,
-  ) => void;
+  ) => boolean | void | Promise<boolean | void>;
   onConfigureCredentialGrants?: (
     version: McpVersion,
     credentialVersions: Record<string, string>,
@@ -93,6 +100,9 @@ export function AssetVersionHistory({
       <div className="space-y-3">
         {versions.map((version, index) => {
           const isMcp = "mcp_server_id" in version;
+          const runtimeBlockReason = isMcp
+            ? mcpVersionRuntimeBlockReason(version, scope)
+            : null;
           const actions =
             kind === "credentials" || !("workflow_status" in version)
               ? []
@@ -124,7 +134,8 @@ export function AssetVersionHistory({
                       <Button
                         type="button"
                         size="sm"
-                        disabled={pending}
+                        disabled={pending || Boolean(runtimeBlockReason)}
+                        title={runtimeBlockReason ?? undefined}
                         onClick={() => onPublish?.(version)}
                       >
                         发布版本
@@ -134,7 +145,8 @@ export function AssetVersionHistory({
                       <Button
                         type="button"
                         size="sm"
-                        disabled={pending}
+                        disabled={pending || Boolean(runtimeBlockReason)}
+                        title={runtimeBlockReason ?? undefined}
                         onClick={() => onSubmit?.(version)}
                       >
                         提交审批
@@ -144,7 +156,8 @@ export function AssetVersionHistory({
                       <Button
                         type="button"
                         size="sm"
-                        disabled={pending}
+                        disabled={pending || Boolean(runtimeBlockReason)}
+                        title={runtimeBlockReason ?? undefined}
                         onClick={() => setApprovalVersion(version)}
                       >
                         批准并发布
@@ -152,6 +165,11 @@ export function AssetVersionHistory({
                     )}
                   </div>
                 )}
+                {runtimeBlockReason ? (
+                  <p role="alert" className="text-destructive text-sm">
+                    {runtimeBlockReason}
+                  </p>
+                ) : null}
                 {isMcp &&
                   version.workflow_status === "published" &&
                   version.id === configureCredentialGrantsVersionId &&

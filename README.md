@@ -153,6 +153,8 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 时作为系统资产写入；`make migrate-db` 只执行 pending schema migrations，不重复 seed。Setup 不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
 
+项目 MCP 采用默认拒绝的执行策略：项目不能直接启动 `stdio` 子进程，只能使用平台运维在 `mcp_security.project_remote_allowed_endpoints` 中批准的精确 HTTPS `http`/`sse` 地址。任意环境变量、静态请求头和 OAuth 配置不会作为普通版本字段保存，认证值必须通过加密 Credential 的 header slot 提供。Worker 对工具发现和每次调用重新校验快照与端点、禁用重定向和环境代理，并执行平台级硬超时；生产环境还应配置 `mcp_security.egress_proxy_url`，由受控出口独立阻断私网、链路本地和云元数据地址。历史不兼容版本仍可审计读取，但 Project API 只返回远程 HTTPS origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。
+
 项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。新建后默认停用，但停用状态仍可编辑和发布，只有已发布版本才能通过列表或详情开关启用。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
 
 ## 项目结构

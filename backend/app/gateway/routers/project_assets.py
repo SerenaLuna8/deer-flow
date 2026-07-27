@@ -8,6 +8,7 @@ from dataclasses import fields as dataclass_fields
 from dataclasses import is_dataclass
 from datetime import datetime
 from typing import Annotated, Any, Literal, NoReturn
+from urllib.parse import urlsplit
 
 from fastapi import (
     APIRouter,
@@ -62,6 +63,7 @@ from app.shared_assets.skill_service import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
 )
+from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -290,7 +292,7 @@ class McpSlotRequest(_StrictModel):
 
 class McpVersionRequest(_StrictModel):
     description: str = ""
-    transport: str = "stdio"
+    transport: Literal["sse", "http"] = "http"
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     url: str | None = None
@@ -635,7 +637,15 @@ def get_skill_service(request: Request) -> SkillService:
 
 
 def get_mcp_service(request: Request) -> McpService:
-    return McpService(_factory(), governance_sink=_governance_sink(request))
+    endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
+    if not isinstance(endpoint_policy, ExactMcpEndpointPolicy):
+        request_id = get_current_trace_id() or generate_trace_id()
+        raise_asset_domain(AssetStorageUnavailable(request_id))
+    return McpService(
+        _factory(),
+        governance_sink=_governance_sink(request),
+        endpoint_policy=endpoint_policy,
+    )
 
 
 def get_credential_service(request: Request) -> CredentialService:
@@ -771,32 +781,116 @@ async def _version_call(actor, operation, response_model: type[_StrictModel]):
     try:
         result = await operation()
         return response_model(
-            data=_response_data(result),
+            data=_response_data(
+                result,
+                redact_project_mcp=_is_project_asset_actor(actor),
+            ),
             request_id=actor.request_id,
         )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
 
-async def _version_history(actor, operation, response_model: type[_StrictModel]):
+async def _version_history(
+    actor,
+    operation,
+    response_model: type[_StrictModel],
+    *,
+    redact_project_mcp: bool = False,
+):
     try:
         versions = await operation()
         return response_model(
-            data=[_response_data(version) for version in versions],
+            data=[
+                _response_data(
+                    version,
+                    redact_project_mcp=redact_project_mcp,
+                )
+                for version in versions
+            ],
             request_id=actor.request_id,
         )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
 
-def _response_data(value: object) -> object:
+def _is_project_asset_actor(actor: object) -> bool:
+    return (
+        isinstance(actor, ProjectContext)
+        or getattr(
+            actor,
+            "project_id",
+            None,
+        )
+        is not None
+    )
+
+
+def _redacted_project_mcp_url(value: object) -> str | None:
+    """Expose only a non-secret HTTPS origin from historical Project rows."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() != "https" or not hostname or parsed.username is not None or parsed.password is not None:
+        return None
+    authority = f"[{hostname}]" if ":" in hostname else hostname
+    if port is not None:
+        authority = f"{authority}:{port}"
+    return f"https://{authority}"
+
+
+def _response_data(
+    value: object,
+    *,
+    redact_project_mcp: bool = False,
+) -> object:
     """Copy immutable domain views into ordinary response-safe containers."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _response_data(getattr(value, field.name)) for field in dataclass_fields(value)}
+        response = {
+            field.name: _response_data(
+                getattr(value, field.name),
+                redact_project_mcp=redact_project_mcp,
+            )
+            for field in dataclass_fields(value)
+        }
+        if isinstance(value, McpDefinition):
+            # Historical versions may contain values that were labelled
+            # "non-secret" at authoring time. Arbitrary values cannot be
+            # classified reliably, so public API responses expose only the
+            # Credential-slot schema and never replay persisted env/header
+            # values.
+            response["env"] = {}
+            response["headers"] = {}
+            if redact_project_mcp:
+                response["command"] = None
+                response["args"] = []
+                response["url"] = _redacted_project_mcp_url(getattr(value, "url", None))
+                response["oauth"] = {}
+                response["routing"] = {}
+                response["tool_overrides"] = {}
+        return response
     if isinstance(value, Mapping):
-        return {str(key): _response_data(item) for key, item in value.items()}
+        return {
+            str(key): _response_data(
+                item,
+                redact_project_mcp=redact_project_mcp,
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [_response_data(item) for item in value]
+        return [
+            _response_data(
+                item,
+                redact_project_mcp=redact_project_mcp,
+            )
+            for item in value
+        ]
     return value
 
 
@@ -941,7 +1035,16 @@ def register_asset_routes(
         return await _version_call(actor, lambda: service.create_version(actor, asset_id, _mcp_definition(body), expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
     async def get_mcp_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), McpVersionHistoryResponse)
+        try:
+            asset = await service.get(actor, asset_id)
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+        return await _version_history(
+            actor,
+            lambda: service.get_version_history(actor, asset_id),
+            McpVersionHistoryResponse,
+            redact_project_mcp=asset.scope is AssetScope.PROJECT,
+        )
 
     async def publish_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), McpVersionResponse)

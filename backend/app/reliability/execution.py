@@ -55,6 +55,12 @@ from app.worker.service import (
     JobSettlement,
     LeaseLost,
 )
+from deerflow.config.mcp_security_config import McpSecurityConfig
+from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
+from deerflow.mcp_definition_policy import (
+    ExactMcpEndpointPolicy,
+    McpEndpointPolicy,
+)
 from deerflow.persistence.jobs.sql import (
     JobClaim,
     JobRepository,
@@ -838,7 +844,33 @@ class RunAgentPrivateExecutor:
         self._project_checkpointer = project_checkpointer
         self._store = store
         self._event_store = event_store
-        self._asset_runtime = asset_runtime or PrivateAssetRuntime(session_factory)
+        if asset_runtime is None:
+            raw_mcp_security = getattr(app_config, "mcp_security", None)
+            if isinstance(raw_mcp_security, McpSecurityConfig):
+                mcp_security = raw_mcp_security
+            elif isinstance(raw_mcp_security, Mapping):
+                mcp_security = McpSecurityConfig.model_validate(raw_mcp_security)
+            else:
+                mcp_security = McpSecurityConfig()
+            self._asset_runtime = PrivateAssetRuntime(
+                session_factory,
+                endpoint_policy=ExactMcpEndpointPolicy(
+                    frozenset(
+                        mcp_security.project_remote_allowed_endpoints,
+                    )
+                ),
+                http_client_factory=make_secure_mcp_http_client_factory(
+                    proxy_url=mcp_security.egress_proxy_url,
+                    timeout_seconds=max(
+                        mcp_security.discovery_timeout_seconds,
+                        mcp_security.tool_call_timeout_seconds,
+                    ),
+                ),
+                discovery_timeout_seconds=mcp_security.discovery_timeout_seconds,
+                tool_call_timeout_seconds=mcp_security.tool_call_timeout_seconds,
+            )
+        else:
+            self._asset_runtime = asset_runtime
         self._agent_factory = agent_factory or self._default_agent_factory()
         self._runner = runner
         self._quota = quota or _NoopPrivateRunAgentQuota()
@@ -1100,6 +1132,7 @@ class PrivateRunJobHandler:
         retry_max_seconds: int = 300,
         job_repository_builder=JobRepository,
         project_checkpointer: ProjectScopedCheckpointer | None = None,
+        endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunExecutionQuotaPort | None = None,
         audit: PrivateRunExecutionAuditPort | None = None,
     ) -> None:
@@ -1113,7 +1146,10 @@ class PrivateRunJobHandler:
         self._project_checkpointer = project_checkpointer
         self._quota = quota or _NoopPrivateRunExecutionQuota()
         self._audit = audit or _NoopPrivateRunExecutionAudit()
-        self._snapshots = RunSnapshotRepository(session_factory)
+        self._snapshots = RunSnapshotRepository(
+            session_factory,
+            endpoint_policy=endpoint_policy,
+        )
         self._events = DbRunEventStore(session_factory)
 
     def _runs(self, session: AsyncSession) -> PrivateRunRepository:

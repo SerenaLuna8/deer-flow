@@ -85,6 +85,7 @@ from app.shared_assets.errors import (
 from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
     ScheduledTaskRunRecord,
@@ -312,6 +313,7 @@ class AutomationDispatcher:
         retry_delay: timedelta = timedelta(seconds=30),
         max_concurrent_runs: int = 3,
         model_ref_resolver: ModelRefResolver | None = None,
+        endpoint_policy: McpEndpointPolicy | None = None,
         quota: AutomationQuotaPort | None = None,
         audit: AutomationAuditPort | None = None,
     ) -> None:
@@ -332,6 +334,7 @@ class AutomationDispatcher:
         self._snapshots = RunSnapshotRepository(
             session_factory,
             model_ref_resolver=model_ref_resolver,
+            endpoint_policy=endpoint_policy,
         )
 
     @staticmethod

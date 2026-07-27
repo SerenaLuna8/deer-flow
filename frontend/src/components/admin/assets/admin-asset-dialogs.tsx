@@ -25,6 +25,7 @@ import type {
   ReplaceCredentialInput,
   SkillVersionInput,
 } from "@/core/shared-assets";
+import { isMcpRuntimeTransport } from "@/core/shared-assets/mcp-runtime";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
 export type VersionAuthoringInput =
@@ -488,31 +489,28 @@ export function McpVersionFields() {
         传输方式
         <select
           name="transport"
-          defaultValue="stdio"
+          defaultValue="sse"
           className="border-input bg-background h-9 rounded-md border px-3 text-sm"
         >
-          <option value="stdio">标准输入输出（stdio）</option>
           <option value="sse">服务器推送（sse）</option>
           <option value="http">HTTP</option>
-          <option value="streamable_http">流式 HTTP</option>
         </select>
       </label>
       <label className="grid gap-2 text-sm">
-        命令
-        <Input name="command" />
-      </label>
-      <label className="grid gap-2 text-sm">
         URL
-        <Input name="url" type="url" />
+        <Input
+          name="url"
+          type="url"
+          required
+          placeholder="https://mcp.example.com"
+        />
+        <span className="text-muted-foreground text-xs">
+          该地址由 Worker 访问，须填写平台批准的精确 HTTPS 地址。
+        </span>
       </label>
-      <label className="grid gap-2 text-sm">
-        参数（逗号或换行分隔）
-        <Textarea name="args" />
-      </label>
-      <label className="grid gap-2 text-sm">
-        超时（秒）
-        <Input name="timeout_seconds" type="number" min={1} defaultValue={30} />
-      </label>
+      <p className="text-muted-foreground text-xs">
+        实际超时由平台控制，版本中的兼容值不可在此修改。
+      </p>
       <div className="border-border/70 space-y-3 rounded-lg border p-3">
         <p className="text-sm font-medium">Credential 槽位（可选）</p>
         <p className="text-muted-foreground text-xs">
@@ -535,18 +533,7 @@ export function McpVersionFields() {
           用途
           <Input name="slot_purpose" />
         </label>
-        <label className="grid gap-2 text-sm">
-          凭据字段分组
-          <select
-            name="slot_group"
-            defaultValue="headers"
-            className="border-input bg-background h-9 rounded-md border px-3 text-sm"
-          >
-            <option value="headers">请求头（headers）</option>
-            <option value="env">环境变量（env）</option>
-            <option value="oauth">OAuth</option>
-          </select>
-        </label>
+        <p className="text-sm">凭据字段分组：请求头（headers）</p>
         <label className="grid gap-2 text-sm">
           必需字段（逗号或换行分隔）
           <Textarea
@@ -564,7 +551,7 @@ export function McpVersionFields() {
   );
 }
 
-function versionInput(
+export function versionInput(
   kind: MutableKind,
   form: FormData,
   expectedAssetVersion: number,
@@ -597,30 +584,33 @@ function versionInput(
     };
   }
   const slotName = field(form, "slot_name").trim();
-  const slotGroup = field(form, "slot_group", "headers");
   const slotFields = list(form.get("slot_fields"));
+  const transport = field(form, "transport", "sse");
+  if (!isMcpRuntimeTransport(transport)) {
+    throw new Error("新 MCP 版本仅支持 SSE 或 HTTP");
+  }
+  const url = field(form, "url").trim();
+  if (!url) {
+    throw new Error("SSE 或 HTTP 传输必须填写 URL");
+  }
   return {
     description: field(form, "description"),
-    transport: field(
-      form,
-      "transport",
-      "stdio",
-    ) as McpVersionInput["transport"],
-    command: field(form, "command").trim() || null,
-    args: list(form.get("args")),
-    url: field(form, "url").trim() || null,
+    transport,
+    command: null,
+    args: [],
+    url,
     env: {},
     headers: {},
     oauth: {},
     routing: {},
     tool_overrides: {},
-    timeout_seconds: Number(form.get("timeout_seconds") ?? 30),
+    timeout_seconds: 30,
     credential_slots: slotName
       ? [
           {
             name: slotName,
             purpose: field(form, "slot_purpose"),
-            payload_schema: { [slotGroup]: slotFields },
+            payload_schema: { headers: slotFields },
             required: true,
           },
         ]

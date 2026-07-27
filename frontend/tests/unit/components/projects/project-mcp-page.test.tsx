@@ -63,7 +63,9 @@ const version: Extract<AssetVersion, { mcp_server_id: string }> = {
 
 describe("MCP asset detail", () => {
   test("shows the safe definition, slots and grants without fabricating runtime health", () => {
-    const html = renderToStaticMarkup(<McpAssetDetail version={version} />);
+    const html = renderToStaticMarkup(
+      <McpAssetDetail version={version} scope="project" />,
+    );
 
     for (const text of [
       "GitHub repository access",
@@ -75,6 +77,7 @@ describe("MCP asset detail", () => {
       "github-token",
       "Authorization",
       "已授权",
+      "此历史版本可以查看，但不能发布、绑定或用于 Agent",
     ]) {
       expect(html).toContain(text);
     }

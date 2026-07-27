@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
-import type { AssetVersion } from "@/core/shared-assets";
+import type { AssetScope, AssetVersion } from "@/core/shared-assets";
+import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 export type McpAssetVersion = Extract<AssetVersion, { mcp_server_id: string }>;
 
@@ -33,10 +34,25 @@ function JsonConfig({ value }: { value: Record<string, unknown> }) {
   );
 }
 
-export function McpAssetDetail({ version }: { version: McpAssetVersion }) {
+export function McpAssetDetail({
+  version,
+  scope,
+}: {
+  version: McpAssetVersion;
+  scope: AssetScope;
+}) {
   const definition = version.definition;
+  const runtimeBlockReason = mcpVersionRuntimeBlockReason(version, scope);
   return (
     <div className="space-y-6">
+      {runtimeBlockReason ? (
+        <p
+          role="alert"
+          className="border-destructive/30 bg-destructive/5 text-destructive rounded-xl border px-4 py-3 text-sm"
+        >
+          {runtimeBlockReason}
+        </p>
+      ) : null}
       <section className="space-y-2">
         <h3 className="text-sm font-semibold">MCP 说明</h3>
         <p className="text-muted-foreground text-sm leading-6 whitespace-pre-wrap">

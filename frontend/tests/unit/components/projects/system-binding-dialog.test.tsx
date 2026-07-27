@@ -266,4 +266,65 @@ describe("SystemBindingDialog history retry", () => {
     await retry?.();
     expect(refetch).toHaveBeenCalledTimes(1);
   });
+
+  test("shows unsupported historical MCP versions but prevents binding them", () => {
+    prepareMutations();
+    rs.mocked(useProjectAssetVersions).mockReturnValue({
+      data: {
+        data: [
+          {
+            id: PUBLISHED_VERSION_ID,
+            mcp_server_id: SYSTEM_ASSET_ID,
+            version_number: 1,
+            workflow_status: "published",
+            definition: {
+              description: "Unsupported legacy MCP",
+              transport: "streamable_http",
+              command: null,
+              args: [],
+              url: null,
+              env: {},
+              headers: {},
+              oauth: {},
+              routing: {},
+              tool_overrides: {},
+              timeout_seconds: 30,
+              credential_slots: [],
+            },
+            credential_slots: [],
+            credential_grants: [],
+            supersedes_version_id: null,
+            payload_checksum: "a".repeat(64),
+            submitted_at: null,
+            reviewed_at: null,
+            reviewed_by_user_id: null,
+            created_by_user_id: "user-1",
+            created_at: "2026-07-21T00:00:00Z",
+          },
+        ],
+        request_id: "request-1",
+      },
+      error: null,
+      isFetching: false,
+      isLoading: false,
+      refetch: rs.fn(),
+    } as never);
+
+    const html = renderToStaticMarkup(
+      <SystemBindingDialog
+        accountId="account-1"
+        projectId="project-1"
+        kind="mcp-servers"
+        item={SYSTEM_ASSET}
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+
+    expect(html).toContain("版本 1（不可用）");
+    expect(html).toContain("Private runtime 仅支持 stdio、SSE 或 HTTP");
+    expect(html).toContain(
+      'option value="22222222-2222-4222-8222-222222222222" disabled=""',
+    );
+  });
 });

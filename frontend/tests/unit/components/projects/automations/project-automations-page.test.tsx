@@ -29,10 +29,14 @@ rs.mock("@/core/project-automations/hooks", () => ({
 rs.mock("@/core/project-automations/readiness", () => ({
   useProjectAutomationReadiness: rs.fn(),
 }));
+rs.mock("@/components/projects/assets/use-mcp-dependency-runtime", () => ({
+  useAgentMcpDependencyRuntime: rs.fn(),
+}));
 rs.mock("@/core/shared-assets", () => ({
   useProjectAssets: rs.fn(),
 }));
 
+import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-mcp-dependency-runtime";
 import {
   ProjectAutomationsPage,
   automationActionFeedback,
@@ -121,10 +125,35 @@ function prepare({
     refetch: rs.fn(async () => undefined),
   } as never);
   rs.mocked(useProjectAssets).mockReturnValue({
-    data: { project_items: [], system_items: [], request_id: "req-agents" },
+    data: {
+      project_items: [
+        {
+          id: AUTOMATION.agent_asset_id,
+          scope: AUTOMATION.agent_scope,
+          project_id: PROJECT.id,
+          slug: "automation-agent",
+          display_name: "Automation Agent",
+          status: "active",
+          current_published_version_id: "22222222-2222-4222-8222-333333333333",
+          version: 1,
+          created_by_user_id: "user-1",
+          created_at: "2026-07-15T00:00:00Z",
+          updated_at: "2026-07-15T00:00:00Z",
+          capabilities: ["shared_assets.read", "shared_assets.execute"],
+          binding: null,
+        },
+      ],
+      system_items: [],
+      request_id: "req-agents",
+    },
     isLoading: false,
     error: null,
   } as never);
+  rs.mocked(useAgentMcpDependencyRuntime).mockReturnValue({
+    assessments: [{ status: "ready", reason: null }],
+    isLoading: false,
+    error: null,
+  });
   for (const hook of [
     useCreateProjectAutomation,
     useUpdateProjectAutomation,

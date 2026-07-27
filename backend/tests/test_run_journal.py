@@ -101,15 +101,36 @@ class TestLlmCallbacks:
         assert len(messages[0]["content"]["tool_calls"]) == 1
 
     @pytest.mark.anyio
-    async def test_on_llm_end_subagent_no_ai_message(self, journal_setup):
+    async def test_on_llm_end_subagent_response_stays_out_of_top_level_messages(self, journal_setup):
         j, store = journal_setup
         run_id = uuid4()
         j.on_llm_start({}, [], run_id=run_id, tags=["subagent:research"])
         j.on_llm_end(_make_llm_response("Sub answer"), run_id=run_id, parent_run_id=None, tags=["subagent:research"])
         await j.flush()
+
         messages = await store.list_messages("t1")
-        # subagent responses still emit llm.ai.response with category="message"
-        assert len(messages) == 1
+        assert messages == []
+
+        events = await store.list_events("t1", "r1")
+        response = next(e for e in events if e["event_type"] == "llm.ai.response")
+        assert response["category"] == "trace"
+        assert response["metadata"]["caller"] == "subagent:research"
+
+    @pytest.mark.anyio
+    async def test_on_llm_end_middleware_response_stays_out_of_top_level_messages(self, journal_setup):
+        j, store = journal_setup
+        run_id = uuid4()
+        j.on_llm_start({}, [], run_id=run_id, tags=["middleware:title"])
+        j.on_llm_end(_make_llm_response("Generated title"), run_id=run_id, parent_run_id=None, tags=["middleware:title"])
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert messages == []
+
+        events = await store.list_events("t1", "r1")
+        response = next(e for e in events if e["event_type"] == "llm.ai.response")
+        assert response["category"] == "trace"
+        assert response["metadata"]["caller"] == "middleware:title"
 
     @pytest.mark.anyio
     async def test_token_accumulation(self, journal_setup):
@@ -221,6 +242,146 @@ class TestToolCallbacks:
         assert len(messages) == 1
         assert messages[0]["event_type"] == "llm.tool.result"
         assert messages[0]["content"]["content"] == "file list"
+
+    @pytest.mark.anyio
+    async def test_subagent_tool_result_stays_out_of_top_level_messages(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        tool_run_id = uuid4()
+        j.on_tool_start(
+            {"name": "web_search"},
+            '{"query":"agent"}',
+            run_id=tool_run_id,
+            tags=["subagent:research"],
+        )
+        j.on_tool_end(
+            ToolMessage(content="subagent search results", tool_call_id="call_sub", name="web_search"),
+            run_id=tool_run_id,
+        )
+        await j.flush()
+
+        assert await store.list_messages("t1") == []
+        events = await store.list_events("t1", "r1")
+        tool_result = next(e for e in events if e["event_type"] == "llm.tool.result")
+        assert tool_result["category"] == "trace"
+        assert tool_result["metadata"]["caller"] == "subagent:research"
+
+    @pytest.mark.anyio
+    async def test_concurrent_tool_results_keep_their_ai_tool_call_caller_when_end_order_reverses(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_task", "name": "task", "args": {"description": "research"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_sub", "name": "web_search", "args": {"query": "agent"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
+
+        j.on_tool_end(
+            ToolMessage(content="subagent search results", tool_call_id="call_sub", name="web_search"),
+            run_id=uuid4(),
+        )
+        j.on_tool_end(
+            ToolMessage(content="子任务已完成", tool_call_id="call_task", name="task"),
+            run_id=uuid4(),
+        )
+        await j.flush()
+
+        messages = [message for message in await store.list_messages("t1") if message["event_type"] == "llm.tool.result"]
+        assert [message["content"]["tool_call_id"] for message in messages] == ["call_task"]
+
+        events = [event for event in await store.list_events("t1", "r1") if event["event_type"] == "llm.tool.result"]
+        by_tool_call_id = {event["content"]["tool_call_id"]: event for event in events}
+        assert by_tool_call_id["call_task"]["category"] == "message"
+        assert by_tool_call_id["call_task"]["metadata"]["caller"] == "lead_agent"
+        assert by_tool_call_id["call_sub"]["category"] == "trace"
+        assert by_tool_call_id["call_sub"]["metadata"]["caller"] == "subagent:research"
+
+    @pytest.mark.anyio
+    async def test_tool_run_id_wins_when_parallel_lead_and_subagent_calls_reuse_call_id(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        lead_tool_run_id = uuid4()
+        subagent_tool_run_id = uuid4()
+
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_1", "name": "task", "args": {"description": "research"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_tool_start(
+            {"name": "task"},
+            '{"description":"research"}',
+            run_id=lead_tool_run_id,
+            tags=["lead_agent"],
+        )
+
+        # A nested subagent may legitimately reuse the provider-local call ID.
+        # Its AI response overwrites the best-effort call-ID fallback, but must
+        # not overwrite the exact callback-run attribution above.
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_1", "name": "web_search", "args": {"query": "agent"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
+        j.on_tool_start(
+            {"name": "web_search"},
+            '{"query":"agent"}',
+            run_id=subagent_tool_run_id,
+            tags=["lead_agent", "subagent:research"],
+        )
+
+        j.on_tool_end(
+            ToolMessage(content="lead task completed", tool_call_id="call_1", name="task"),
+            run_id=lead_tool_run_id,
+        )
+        j.on_tool_end(
+            ToolMessage(content="subagent search results", tool_call_id="call_1", name="web_search"),
+            run_id=subagent_tool_run_id,
+        )
+        await j.flush()
+
+        tool_results = [event for event in await store.list_events("t1", "r1") if event["event_type"] == "llm.tool.result"]
+        by_content = {event["content"]["content"]: event for event in tool_results}
+        assert by_content["lead task completed"]["category"] == "message"
+        assert by_content["lead task completed"]["metadata"]["caller"] == "lead_agent"
+        assert by_content["subagent search results"]["category"] == "trace"
+        assert by_content["subagent search results"]["metadata"]["caller"] == "subagent:research"
+
+    @pytest.mark.anyio
+    async def test_lead_task_tool_message_remains_in_top_level_messages(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        tool_run_id = uuid4()
+        j.on_tool_start(
+            {"name": "task"},
+            '{"description":"research"}',
+            run_id=tool_run_id,
+            tags=["lead_agent"],
+        )
+        j.on_tool_end(
+            ToolMessage(content="子任务已完成", tool_call_id="call_task", name="task"),
+            run_id=tool_run_id,
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["event_type"] == "llm.tool.result"
+        assert messages[0]["content"]["name"] == "task"
+        assert messages[0]["metadata"]["caller"] == "lead_agent"
 
     @pytest.mark.anyio
     async def test_on_tool_error_no_crash(self, journal_setup):
@@ -413,6 +574,11 @@ class TestIdentifyCaller:
         assert j._identify_caller([]) == "lead_agent"
         assert j._identify_caller(None) == "lead_agent"
 
+    def test_non_lead_tag_takes_precedence_over_inherited_lead_tag(self, journal_setup):
+        j, _ = journal_setup
+        assert j._identify_caller(["lead_agent", "subagent:research"]) == "subagent:research"
+        assert j._identify_caller(["lead_agent", "middleware:title"]) == "middleware:title"
+
 
 class TestChainErrorCallback:
     @pytest.mark.anyio
@@ -542,7 +708,7 @@ class TestConvenienceFields:
 
         data = j.get_completion_data()
 
-        assert data["message_count"] == 2
+        assert data["message_count"] == 1
         assert data["last_ai_message"] == "Lead answer"
 
     @pytest.mark.anyio

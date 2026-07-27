@@ -185,6 +185,23 @@ describe("project asset list", () => {
     );
   });
 
+  test("routes system MCP binding through the version-aware dialog instead of a quick switch", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="mcp-servers"
+        data={catalog}
+        source="system"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("管理绑定");
+    expect(html).toContain("查看 Research Agent 详情");
+    expect(html).not.toContain('role="switch"');
+  });
+
   test("renders a project Skill enable switch and keeps detail access independent", () => {
     const suspendedSkill: ProjectAssetItem = {
       ...catalog.project_items[0]!,

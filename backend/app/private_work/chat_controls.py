@@ -40,6 +40,7 @@ from app.shared_assets.errors import (
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.config.app_config import AppConfig
+from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
@@ -110,13 +111,17 @@ class ProjectChatControlService:
         run_event_store: RunEventStore,
         *,
         resolver: ProjectAssetResolver | None = None,
+        endpoint_policy: McpEndpointPolicy | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._project_scoped_checkpointer = project_scoped_checkpointer
         self._thread_service = thread_service
         self._run_event_store = run_event_store
         self._resolver = resolver or ProjectAssetResolver(session_factory)
-        self._snapshots = RunSnapshotRepository(session_factory)
+        self._snapshots = RunSnapshotRepository(
+            session_factory,
+            endpoint_policy=endpoint_policy,
+        )
         self._revalidator = PrivateWorkRevalidator()
 
     async def get_goal(

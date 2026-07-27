@@ -137,10 +137,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         configure_logging(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
-    except Exception as e:
-        error_msg = f"Failed to load configuration during gateway startup: {e}"
-        logger.exception(error_msg)
-        raise RuntimeError(error_msg) from e
+    except Exception:
+        error_msg = "Failed to load configuration during gateway startup"
+        # Pydantic and YAML errors may contain the complete rejected input,
+        # including proxy or provider credentials. Keep both logs and the
+        # process-level exception stable and secret-free.
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from None
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 

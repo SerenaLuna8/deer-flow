@@ -189,6 +189,31 @@ def test_worker_private_context_overwrites_forged_runtime_user_id() -> None:
     assert config["context"]["run_id"] == "exact-run"
 
 
+def test_worker_installs_private_mcp_tools_as_internal_context_only() -> None:
+    from deerflow.runtime.runs.worker import _install_runtime_context
+
+    exact_mcp_tools = (object(),)
+    config = {
+        "context": {
+            "__runtime_mcp_tools": ("forged-mcp-tool",),
+        },
+        "metadata": {"safe": "value"},
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "exact-thread",
+            "run_id": "exact-run",
+            "private_scope": object(),
+            "__runtime_mcp_tools": exact_mcp_tools,
+        },
+    )
+
+    assert config["context"]["__runtime_mcp_tools"] is exact_mcp_tools
+    assert config["metadata"] == {"safe": "value"}
+
+
 @pytest.mark.anyio
 async def test_worker_passes_private_runtime_to_supported_factory_off_loop() -> None:
     from deerflow.runtime.runs.worker import _call_agent_factory_off_loop
@@ -768,6 +793,19 @@ def test_mcp_result_scan_rejects_nested_json_scalar_credential_echo(
         )
 
     assert str(captured.value) == "Private work is unavailable."
+
+
+def test_mcp_secret_scan_does_not_match_short_values_as_substrings() -> None:
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    assert not PrivateAgentRuntime._scalar_contains_secret(
+        "search",
+        ("a",),
+    )
+    assert PrivateAgentRuntime._scalar_contains_secret(
+        "a",
+        ("a",),
+    )
 
 
 @pytest.mark.anyio

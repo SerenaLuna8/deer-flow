@@ -46,6 +46,7 @@ import {
   type ProjectAssetItem,
   type ProjectCredentialList,
 } from "@/core/shared-assets";
+import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 import { McpApprovalDialog } from "./mcp-approval-dialog";
 import {
@@ -261,6 +262,10 @@ export function ProjectAssetDetailSheet({
   const versions = useMemo(() => history.data?.data ?? [], [history.data]);
   const selectedVersion =
     versions.find((version) => version.id === selectedVersionId) ?? null;
+  const selectedRuntimeBlockReason =
+    selectedVersion && isMcpVersion(selectedVersion)
+      ? mcpVersionRuntimeBlockReason(selectedVersion, item.scope)
+      : null;
   const currentPublished = versions.find(
     (version) => version.id === item.current_published_version_id,
   );
@@ -369,6 +374,28 @@ export function ProjectAssetDetailSheet({
     [history, item.id, onVersionCreated],
   );
 
+  function publishSelectedVersion(version: AssetVersion) {
+    if (
+      isMcpVersion(version) &&
+      mcpVersionRuntimeBlockReason(version, item.scope)
+    ) {
+      return;
+    }
+    publish.mutate(
+      {
+        assetId: item.id,
+        versionId: version.id,
+        input: { expected_asset_version: item.version },
+      },
+      {
+        onSuccess: (result) => {
+          setSelectedVersionId(result.data.id);
+          handleWorkbenchVersionCreated(result.data.id);
+        },
+      },
+    );
+  }
+
   function requestOpenChange(next: boolean) {
     if (!next && versionDirty) {
       setDiscardAction({ type: "close" });
@@ -401,6 +428,7 @@ export function ProjectAssetDetailSheet({
     version: McpVersion,
     credentialVersions: Record<string, string>,
   ): Promise<boolean> {
+    if (mcpVersionRuntimeBlockReason(version, item.scope)) return false;
     try {
       await approve.mutateAsync({
         assetId: item.id,
@@ -624,87 +652,97 @@ export function ProjectAssetDetailSheet({
                       </time>
                     </div>
 
-                    {item.scope === "project" && versionActions.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {versionActions.includes("publish") && canAuthor && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={versionPublishDisabled(
-                              actionPending,
-                              versionDirty,
-                              versionSelectionPending,
+                    {item.scope === "project" &&
+                      versionActions.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {versionActions.includes("publish") &&
+                            canAuthor && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={versionPublishDisabled(
+                                  actionPending ||
+                                    Boolean(selectedRuntimeBlockReason),
+                                  versionDirty,
+                                  versionSelectionPending,
+                                )}
+                                title={
+                                  selectedRuntimeBlockReason ??
+                                  (versionDirty
+                                    ? "请先保存或放弃当前未保存修改"
+                                    : versionSelectionPending
+                                      ? "正在加载新版本，请稍候"
+                                      : undefined)
+                                }
+                                onClick={() =>
+                                  publishSelectedVersion(selectedVersion)
+                                }
+                              >
+                                发布版本
+                              </Button>
                             )}
-                            title={
-                              versionDirty
-                                ? "请先保存或放弃当前未保存修改"
-                                : versionSelectionPending
-                                  ? "正在加载新版本，请稍候"
-                                  : undefined
-                            }
-                            onClick={() =>
-                              publish.mutate({
-                                assetId: item.id,
-                                versionId: selectedVersion.id,
-                                input: { expected_asset_version: item.version },
-                              })
-                            }
-                          >
-                            发布版本
-                          </Button>
-                        )}
-                        {versionActions.includes("submit") &&
-                          canAuthor &&
-                          isMcpVersion(selectedVersion) && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={versionActionDisabled(
-                                actionPending,
-                                versionSelectionPending,
-                              )}
-                              title={
-                                versionSelectionPending
-                                  ? "正在加载新版本，请稍候"
-                                  : undefined
-                              }
-                              onClick={() =>
-                                submit.mutate({
-                                  assetId: item.id,
-                                  versionId: selectedVersion.id,
-                                  input: {
-                                    expected_asset_version: item.version,
-                                  },
-                                })
-                              }
-                            >
-                              提交审批
-                            </Button>
-                          )}
-                        {versionActions.includes("approve") &&
-                          canApprove &&
-                          isMcpVersion(selectedVersion) && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={versionActionDisabled(
-                                actionPending,
-                                versionSelectionPending,
-                              )}
-                              title={
-                                versionSelectionPending
-                                  ? "正在加载新版本，请稍候"
-                                  : undefined
-                              }
-                              onClick={() =>
-                                setApprovalVersion(selectedVersion)
-                              }
-                            >
-                              批准并发布
-                            </Button>
-                          )}
-                      </div>
-                    )}
+                          {versionActions.includes("submit") &&
+                            canAuthor &&
+                            isMcpVersion(selectedVersion) && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={versionActionDisabled(
+                                  actionPending ||
+                                    Boolean(selectedRuntimeBlockReason),
+                                  versionSelectionPending,
+                                )}
+                                title={
+                                  selectedRuntimeBlockReason ??
+                                  (versionSelectionPending
+                                    ? "正在加载新版本，请稍候"
+                                    : undefined)
+                                }
+                                onClick={() =>
+                                  submit.mutate({
+                                    assetId: item.id,
+                                    versionId: selectedVersion.id,
+                                    input: {
+                                      expected_asset_version: item.version,
+                                    },
+                                  })
+                                }
+                              >
+                                提交审批
+                              </Button>
+                            )}
+                          {versionActions.includes("approve") &&
+                            canApprove &&
+                            isMcpVersion(selectedVersion) && (
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={versionActionDisabled(
+                                  actionPending ||
+                                    Boolean(selectedRuntimeBlockReason),
+                                  versionSelectionPending,
+                                )}
+                                title={
+                                  selectedRuntimeBlockReason ??
+                                  (versionSelectionPending
+                                    ? "正在加载新版本，请稍候"
+                                    : undefined)
+                                }
+                                onClick={() =>
+                                  setApprovalVersion(selectedVersion)
+                                }
+                              >
+                                批准并发布
+                              </Button>
+                            )}
+                        </div>
+                      )}
+
+                    {selectedRuntimeBlockReason ? (
+                      <p role="alert" className="text-destructive text-sm">
+                        {selectedRuntimeBlockReason}
+                      </p>
+                    ) : null}
 
                     {isMcpVersion(selectedVersion) &&
                       selectedVersion.workflow_status === "pending_approval" &&

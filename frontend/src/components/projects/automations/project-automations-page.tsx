@@ -3,6 +3,7 @@
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-mcp-dependency-runtime";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -203,15 +204,47 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
     "agents",
     listEnabled && permissions.canExecute && Boolean(user),
   );
-  const agents: AutomationAgentOption[] = executableProjectAgents(
+  const agentItems = executableProjectAgents(
     agentsQuery.data as ProjectAssetList | undefined,
-  ).map((agent) => ({
-    id: agent.id,
-    scope: agent.scope,
-    displayName: agent.display_name,
-    isDefault:
-      agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG,
-  }));
+  );
+  const mcpDependencyRuntime = useAgentMcpDependencyRuntime({
+    accountId: user?.id ?? "",
+    projectId: project.id,
+    agents: agentItems,
+    enabled: listEnabled && permissions.canExecute && Boolean(user),
+  });
+  const agents: AutomationAgentOption[] = agentItems.flatMap((agent, index) =>
+    mcpDependencyRuntime.assessments[index]?.status === "ready"
+      ? [
+          {
+            id: agent.id,
+            scope: agent.scope,
+            displayName: agent.display_name,
+            isDefault:
+              agent.scope === "system" &&
+              agent.slug === MAIN_PROJECT_AGENT_SLUG,
+          },
+        ]
+      : [],
+  );
+  const agentRuntimeReasonByKey = new Map(
+    agentItems.map((agent, index) => [
+      `${agent.scope}:${agent.id}`,
+      mcpDependencyRuntime.assessments[index]?.status === "ready"
+        ? null
+        : (mcpDependencyRuntime.assessments[index]?.reason ??
+          "无法验证 Agent 的 MCP 依赖，请稍后重试。"),
+    ]),
+  );
+  const automationAgentBlockReasons = Object.fromEntries(
+    automations.flatMap((automation) => {
+      const key = `${automation.agent_scope}:${automation.agent_asset_id}`;
+      const reason = agentRuntimeReasonByKey.has(key)
+        ? agentRuntimeReasonByKey.get(key)
+        : "Automation 的 Agent 当前不可执行或无法验证 MCP 依赖。";
+      return reason ? [[automation.id, reason] as const] : [];
+    }),
+  );
 
   const createAutomation = useCreateProjectAutomation();
   const updateAutomation = useUpdateProjectAutomation();
@@ -310,8 +343,21 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       permissions={permissions}
       schedulerEnabled={readiness.data?.scheduler_enabled ?? false}
       agents={agents}
-      agentsLoading={agentsQuery.isLoading}
-      agentsError={agentsQuery.error}
+      agentsLoading={agentsQuery.isLoading || mcpDependencyRuntime.isLoading}
+      agentsError={
+        agentsQuery.error ??
+        (mcpDependencyRuntime.error instanceof Error
+          ? mcpDependencyRuntime.error
+          : mcpDependencyRuntime.error
+            ? new Error("无法验证 Agent 的 MCP 依赖")
+            : null)
+      }
+      agentRuntimeNotice={
+        agentItems.length > agents.length
+          ? "部分 Agent 的 MCP 依赖不受支持或无法确认，已从可选列表移除。"
+          : null
+      }
+      automationAgentBlockReasons={automationAgentBlockReasons}
       runsLoading={runs.isLoading}
       runsError={runs.error}
       initialThreadId={threadId ?? undefined}
@@ -350,20 +396,24 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       onResume={
         permissions.canExecute
           ? (automation) =>
-              perform("resume", () =>
-                resumeAutomation.mutateAsync({
+              perform("resume", async () => {
+                const reason = automationAgentBlockReasons[automation.id];
+                if (reason) throw new Error(reason);
+                return resumeAutomation.mutateAsync({
                   taskId: automation.id,
                   expectedVersion: automation.version,
-                }),
-              )
+                });
+              })
           : undefined
       }
       onTrigger={
         permissions.canExecute
           ? (automation) =>
-              perform("trigger", () =>
-                triggerAutomation.mutateAsync(automation.id),
-              )
+              perform("trigger", async () => {
+                const reason = automationAgentBlockReasons[automation.id];
+                if (reason) throw new Error(reason);
+                return triggerAutomation.mutateAsync(automation.id);
+              })
           : undefined
       }
       onDelete={

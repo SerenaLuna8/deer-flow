@@ -163,6 +163,8 @@ export function AutomationWorkbench({
   agents,
   agentsLoading = false,
   agentsError = null,
+  agentRuntimeNotice = null,
+  automationAgentBlockReasons = {},
   runsLoading = false,
   runsError = null,
   initialThreadId,
@@ -188,6 +190,8 @@ export function AutomationWorkbench({
   agents: AutomationAgentOption[];
   agentsLoading?: boolean;
   agentsError?: Error | null;
+  agentRuntimeNotice?: string | null;
+  automationAgentBlockReasons?: Readonly<Record<string, string>>;
   runsLoading?: boolean;
   runsError?: Error | null;
   initialThreadId?: string;
@@ -239,13 +243,16 @@ export function AutomationWorkbench({
   const canCreate = permissions.canExecute && Boolean(onCreate);
   const canEdit = permissions.canManage && Boolean(onUpdate);
   const canDelete = permissions.canManage && Boolean(onDelete);
-  const canTrigger =
+  const selectedAgentBlockReason = selected
+    ? (automationAgentBlockReasons[selected.id] ?? null)
+    : null;
+  const canOfferTrigger =
     permissions.canExecute &&
     Boolean(selected && automationCanTrigger(selected.status)) &&
     Boolean(onTrigger);
   const canPause =
     permissions.canManage && selected?.status === "enabled" && Boolean(onPause);
-  const canResume =
+  const canOfferResume =
     permissions.canExecute &&
     selected?.status === "paused" &&
     Boolean(onResume);
@@ -524,6 +531,12 @@ export function AutomationWorkbench({
                       </Button>
                     ) : null}
 
+                    {selectedAgentBlockReason ? (
+                      <p role="alert" className="text-destructive text-sm">
+                        {selectedAgentBlockReason}
+                      </p>
+                    ) : null}
+
                     <div className="bg-muted/30 rounded-lg p-4 text-sm [overflow-wrap:anywhere] whitespace-pre-wrap">
                       {selected.prompt}
                     </div>
@@ -548,12 +561,15 @@ export function AutomationWorkbench({
                             暂停
                           </Button>
                         ) : null}
-                        {canResume ? (
+                        {canOfferResume ? (
                           <Button
                             type="button"
                             size="sm"
                             variant="outline"
-                            disabled={isMutating}
+                            disabled={
+                              isMutating || Boolean(selectedAgentBlockReason)
+                            }
+                            title={selectedAgentBlockReason ?? undefined}
                             onClick={() =>
                               void settleAutomationAction(() =>
                                 onResume?.(selected),
@@ -563,12 +579,15 @@ export function AutomationWorkbench({
                             恢复
                           </Button>
                         ) : null}
-                        {canTrigger ? (
+                        {canOfferTrigger ? (
                           <Button
                             type="button"
                             size="sm"
                             variant="outline"
-                            disabled={isMutating}
+                            disabled={
+                              isMutating || Boolean(selectedAgentBlockReason)
+                            }
+                            title={selectedAgentBlockReason ?? undefined}
                             onClick={() =>
                               void settleAutomationAction(() =>
                                 onTrigger?.(selected),
@@ -698,6 +717,11 @@ export function AutomationWorkbench({
             feedback={automationFeedbackForAction(actionFeedback, "create")}
             onRefresh={onRefresh}
           />
+          {agentRuntimeNotice ? (
+            <p role="alert" className="text-destructive text-sm">
+              {agentRuntimeNotice}
+            </p>
+          ) : null}
           {agentsLoading ? (
             <p role="status">正在加载 Agent…</p>
           ) : agentsError ? (

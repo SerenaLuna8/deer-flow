@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import sys
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from functools import partial
@@ -23,7 +25,9 @@ from app.reliability.workers import WorkerRegistry
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
+from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.quota_config import QuotaConfig
+from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
 from deerflow.persistence import close_engine, get_session_factory, init_engine
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import make_store
@@ -34,12 +38,34 @@ from deerflow.runtime.events.stream import PostgresStreamBridge
 WORKER_VERSION = "m6"
 
 
+class WorkerConfigurationUnavailable(RuntimeError):
+    """Stable, secret-free startup failure for an unusable Worker config."""
+
+    def __init__(self) -> None:
+        super().__init__("Worker configuration is unavailable")
+
+
 async def run_worker(
     *,
     handlers: dict[str, JobHandler] | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    config = await asyncio.to_thread(get_app_config)
+    try:
+        config = await asyncio.to_thread(get_app_config)
+        raw_mcp_security = getattr(config, "mcp_security", None)
+        if isinstance(raw_mcp_security, McpSecurityConfig):
+            mcp_security = raw_mcp_security
+        elif isinstance(raw_mcp_security, Mapping):
+            mcp_security = McpSecurityConfig.model_validate(
+                raw_mcp_security,
+            )
+        else:
+            mcp_security = McpSecurityConfig()
+        mcp_endpoint_policy = ExactMcpEndpointPolicy(
+            frozenset(mcp_security.project_remote_allowed_endpoints),
+        )
+    except Exception:
+        raise WorkerConfigurationUnavailable() from None
     if not config.worker.enabled:
         return
     async with AsyncExitStack() as stack:
@@ -124,6 +150,7 @@ async def run_worker(
                 retry_max_seconds=config.worker.retry_max_seconds,
                 job_repository_builder=repository_builder,
                 project_checkpointer=project_checkpointer,
+                endpoint_policy=mcp_endpoint_policy,
                 quota=quota_enforcer,
                 audit=audit_sink,
             )
@@ -160,6 +187,9 @@ def main() -> None:
             pass
     try:
         loop.run_until_complete(run_worker(stop_event=stop_event))
+    except WorkerConfigurationUnavailable as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from None
     finally:
         loop.close()
 

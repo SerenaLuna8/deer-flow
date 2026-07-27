@@ -65,6 +65,13 @@ import {
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 export type ProjectAssetSourceFilter = "system" | "project";
+export type ProjectAssetListRenderContext = {
+  project: Project;
+  items: ProjectAssetItem[];
+  source: ProjectAssetSourceFilter;
+  selectedAssetId: string | null;
+  onSelect: (item: ProjectAssetItem) => void;
+};
 
 const KIND_META = {
   agents: {
@@ -373,24 +380,37 @@ function AssetList({
                     : "border-border/70 flex min-w-28 shrink-0 items-center justify-end gap-2 border-l px-3 sm:min-w-36 sm:px-4"
                 }
               >
-                {kind !== "skills" ? (
+                {kind !== "skills" && kind !== "mcp-servers" ? (
                   <span className="text-muted-foreground hidden text-xs sm:inline">
                     {checked ? "已启用" : "未启用"}
                   </span>
                 ) : null}
-                <Switch
-                  checked={checked}
-                  disabled={toggleState.disabled || bindingBusy}
-                  className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
-                  aria-busy={pending || undefined}
-                  aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
-                  title={
-                    !toggleState.targetVersionId && !checked
-                      ? "没有可启用的已发布版本"
-                      : undefined
-                  }
-                  onCheckedChange={(next) => onToggleSystemBinding(item, next)}
-                />
+                {kind === "mcp-servers" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onSelect(item)}
+                  >
+                    管理绑定
+                  </Button>
+                ) : (
+                  <Switch
+                    checked={checked}
+                    disabled={toggleState.disabled || bindingBusy}
+                    className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
+                    aria-busy={pending || undefined}
+                    aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
+                    title={
+                      !toggleState.targetVersionId && !checked
+                        ? "没有可启用的已发布版本"
+                        : undefined
+                    }
+                    onCheckedChange={(next) =>
+                      onToggleSystemBinding(item, next)
+                    }
+                  />
+                )}
               </div>
             ) : kind === "skills" ? (
               <div className="flex min-w-28 shrink-0 flex-col items-center justify-center gap-1.5 px-5 py-5">
@@ -487,12 +507,14 @@ function ProjectAssetCatalog({
   accountId,
   project,
   kind,
+  renderList,
   renderVersion,
   renderLead,
 }: {
   accountId: string;
   project: Project;
   kind: MutableAssetKind;
+  renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderVersion: (
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
@@ -698,6 +720,7 @@ function ProjectAssetCatalog({
   }, [data, selectedAssetId, selectedItem]);
 
   function toggleSystemBinding(item: ProjectAssetItem, checked: boolean) {
+    if (kind === "mcp-servers") return;
     const state = systemBindingToggleState(item);
     if (state.disabled || state.checked === checked) return;
 
@@ -935,6 +958,14 @@ function ProjectAssetCatalog({
                 >
                   没有找到匹配的 {KIND_META[kind].singular}，请调整搜索词。
                 </p>
+              ) : renderList ? (
+                renderList({
+                  project,
+                  items,
+                  source: value,
+                  selectedAssetId,
+                  onSelect: (item) => setSelectedAssetId(item.id),
+                })
               ) : (
                 <ProjectAssetListView
                   kind={kind}
@@ -1065,12 +1096,14 @@ export function ProjectAssetPageShell({
   kind,
   title,
   description,
+  renderList,
   renderVersion,
   renderLead,
 }: {
   kind: MutableAssetKind;
   title: string;
   description: string;
+  renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderVersion: (
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
@@ -1098,6 +1131,7 @@ export function ProjectAssetPageShell({
         accountId={user.id}
         project={project}
         kind={kind}
+        renderList={renderList}
         renderVersion={renderVersion}
         renderLead={renderLead}
       />

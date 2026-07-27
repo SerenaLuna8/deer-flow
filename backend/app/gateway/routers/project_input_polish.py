@@ -42,7 +42,12 @@ from app.shared_assets.errors import (
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.config.app_config import AppConfig
+from deerflow.mcp_definition_policy import (
+    ExactMcpEndpointPolicy,
+    McpEndpointPolicy,
+)
 from deerflow.persistence.engine import get_session_factory
+from deerflow.trace_context import generate_trace_id, get_current_trace_id
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 logger = logging.getLogger(__name__)
@@ -99,10 +104,14 @@ class ProjectInputPolishService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         resolver: ProjectAssetResolver | None = None,
+        endpoint_policy: McpEndpointPolicy | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._resolver = resolver or ProjectAssetResolver(session_factory)
-        self._snapshots = RunSnapshotRepository(session_factory)
+        self._snapshots = RunSnapshotRepository(
+            session_factory,
+            endpoint_policy=endpoint_policy,
+        )
         self._revalidator = PrivateWorkRevalidator()
 
     async def validate_authority(
@@ -192,7 +201,13 @@ def project_input_polish_service(request: Request) -> ProjectInputPolishService:
     service = getattr(request.app.state, "project_input_polish_service", None)
     if isinstance(service, ProjectInputPolishService):
         return service
-    service = ProjectInputPolishService(get_session_factory())
+    endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
+    if not isinstance(endpoint_policy, ExactMcpEndpointPolicy):
+        raise private_work_http_exception(PrivateWorkUnavailable(get_current_trace_id() or generate_trace_id()))
+    service = ProjectInputPolishService(
+        get_session_factory(),
+        endpoint_policy=endpoint_policy,
+    )
     request.app.state.project_input_polish_service = service
     return service
 

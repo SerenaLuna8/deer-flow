@@ -46,6 +46,7 @@ from app.shared_assets.errors import (
 from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -164,6 +165,7 @@ class PrivateRunAdmissionService:
         revalidator: PrivateWorkRevalidator | None = None,
         snapshots: RunSnapshotRepository | None = None,
         model_ref_resolver: ModelRefResolver | None = None,
+        endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunAdmissionQuotaPort | None = None,
         audit: PrivateRunAdmissionAuditPort | None = None,
     ) -> None:
@@ -173,6 +175,7 @@ class PrivateRunAdmissionService:
         self._snapshots = snapshots or RunSnapshotRepository(
             session_factory,
             model_ref_resolver=model_ref_resolver,
+            endpoint_policy=endpoint_policy,
         )
         self._quota = quota or _NoopPrivateRunAdmissionQuota()
         self._audit = audit or _NoopPrivateRunAdmissionAudit()

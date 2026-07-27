@@ -52,6 +52,10 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "and TraceMiddleware captures logging.enhance.enabled once at startup so response X-Trace-Id headers, log trace_id fields, and Langfuse "
         "deerflow_trace_id stay coherent. A freshly reloaded AppConfig does not retrigger any of this."
     ),
+    "mcp_security": (
+        "Gateway authoring and Run admission, Scheduler admission, and independent Worker MCP clients capture the endpoint allowlist, controlled-egress requirement, and timeout ceilings at process startup; "
+        "all Gateway, Scheduler, and Worker instances must restart together when mcp_security.* changes."
+    ),
     # Not part of the AppConfig Pydantic schema — channel credentials are
     # consumed directly by ``start_channel_service()`` once at lifespan
     # startup and the live channel clients are not rebuilt on

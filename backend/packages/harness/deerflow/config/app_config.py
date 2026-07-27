@@ -17,6 +17,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
+from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.quota_config import QuotaConfig
@@ -175,6 +176,13 @@ class AppConfig(BaseModel):
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    mcp_security: McpSecurityConfig = Field(
+        default_factory=McpSecurityConfig,
+        description=format_field_description(
+            "mcp_security",
+            field_doc="Operator-owned project MCP endpoint, egress, discovery, and tool-call policy.",
+        ),
+    )
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")

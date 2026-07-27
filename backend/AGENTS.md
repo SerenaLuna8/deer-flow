@@ -215,11 +215,47 @@ generation is diagnostic snapshot metadata, not a global invalidation token: an 
 project mutation must not stale an exact admitted Run. Secret material never enters an API
 response, cache, checkpoint, event, repr, log, or audit metadata.
 
+Project MCP execution is fail-closed. Project and admin-project authoring accept only
+`http`/`sse` definitions whose complete HTTPS URL appears in the operator-owned
+`mcp_security.project_remote_allowed_endpoints`; project `stdio`, `streamable_http`, OAuth,
+literal env/header values, and env/OAuth Credential targets are rejected. Project secrets may
+enter a remote MCP call only through an approved encrypted Credential header slot; authority,
+proxy-authentication, content-length, and other hop-by-hop header names are forbidden. Run
+admission takes shared MCP/version locks, rejects historical project `stdio`, and revalidates
+the current definition and Credential-slot closure even when a caller omitted the endpoint
+policy (which fails closed). Worker revalidates every exact project MCP snapshot before
+discovery and every call. Worker injects a no-redirect, `trust_env=false` HTTP client, uses the
+configured controlled egress proxy, and applies separate operator hard timeouts to discovery
+and tool calls.
+`mcp_security` is startup-only: update Gateway, Scheduler, and every Worker together. Historical
+immutable versions remain readable with env/header values redacted and Project remote URLs
+reduced to their HTTPS origin; path/query details are never replayed. Unsafe versions are never
+rewritten or silently skipped. Gateway and Scheduler import the neutral
+`deerflow.mcp_definition_policy` module so policy validation cannot pull the Agent execution
+graph into either process.
+Packaged System MCP keeps the supported `stdio` env and remote header/OAuth Credential paths.
+For OAuth, Worker derives the access header only inside the one-shot call, bounds acquisition
+with the discovery deadline, refreshes through a local interceptor, and rejects tool metadata
+or results that echo either the admitted secret or the derived access token.
+
 `RunAgentPrivateExecutor` is the only production adapter that calls `run_agent()`. The Worker
 holds the raw lease token only in memory; PostgreSQL stores its hash. Durable stream appends
 validate the exact current lease in the same transaction, use thread-monotonic sequence IDs,
 and persist one terminal outcome. Gateway only reads scoped durable frames and honors
 `Last-Event-ID` after restart.
+
+The durable top-level `message` journal is a lead-Agent conversation projection. Lead AI
+messages and their exact `tool_call_id` results belong there; subagent and middleware AI/tool
+callbacks are persisted as `trace` events and continue to use the dedicated bounded subagent
+event stream. Caller attribution first follows the exact callback run ID from tool start, then
+falls back to the issuing AI tool call and callback tags, so provider-local call-ID reuse cannot
+leak nested reasoning or tool output into the user conversation. Run-level message counts and
+last-answer summaries are lead-only.
+
+For a private Run, Worker also installs only the exact admitted MCP proxy objects in internal
+runtime context. Delegated Agents disable global MCP/ACP discovery and marshal each proxy call
+back to the owner Worker loop, so the same authorization, grant, Credential, endpoint, and
+side-effect checks run for every delegated invocation.
 
 ## Project APIs
 

@@ -94,6 +94,14 @@ describe("project Agent start-chat continuation", () => {
       <ProjectAgentStartContinuationView status="read-only" />,
     );
     expect(forbidden).toContain("你可以查看 Agent，但不能创建新的私有对话");
+
+    const failed = renderToStaticMarkup(
+      <ProjectAgentStartContinuationView
+        status="error"
+        errorMessage="该 MCP 版本当前不能作为 Agent 依赖"
+      />,
+    );
+    expect(failed).toContain("该 MCP 版本当前不能作为 Agent 依赖");
   });
 
   test("creates the first Chat and consumes start_chat with replace navigation", async () => {
@@ -112,6 +120,9 @@ describe("project Agent start-chat continuation", () => {
       projectSlug: "alpha",
       intentId: "intent-first",
       agent,
+      prepareAgent: async (selected) => {
+        calls.push(["prepare", selected.id]);
+      },
       createChat: async (input) => {
         calls.push(["create", input.agent.id]);
         input.navigate("/projects/alpha/chats/first");
@@ -121,6 +132,7 @@ describe("project Agent start-chat continuation", () => {
     });
 
     expect(calls).toEqual([
+      ["prepare", agent.id],
       ["create", agent.id],
       ["replace", "/projects/alpha/chats/first"],
     ]);
@@ -146,6 +158,7 @@ describe("project Agent start-chat continuation", () => {
       projectSlug: "alpha",
       intentId: "intent-remount",
       agent,
+      prepareAgent: async () => undefined,
       createChat: async () => {
         createCount += 1;
         return pendingCreate;
@@ -161,6 +174,7 @@ describe("project Agent start-chat continuation", () => {
       replace: (path) => replacements.push(`second:${path}`),
     });
 
+    await Promise.resolve();
     await Promise.resolve();
     expect(createCount).toBe(1);
     releaseCreate?.("thread-once");

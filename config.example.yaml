@@ -1,4 +1,4 @@
-config_version: 26
+config_version: 27
 log_level: info
 logging:
   enhance:
@@ -87,6 +87,16 @@ tools:
 tool_search:
   enabled: false
   auto_promote_top_k: 3
+mcp_security:
+  # Project MCP servers cannot use stdio. Remote project MCP execution is
+  # disabled until an operator lists the exact HTTPS endpoint here.
+  project_remote_allowed_endpoints: []
+  # Keep this enabled in production and route MCP traffic through a proxy that
+  # independently blocks loopback, private, link-local, and metadata targets.
+  require_egress_proxy: true
+  egress_proxy_url: null
+  discovery_timeout_seconds: 15
+  tool_call_timeout_seconds: 60
 tool_output:
   enabled: true
   externalize_min_chars: 12000

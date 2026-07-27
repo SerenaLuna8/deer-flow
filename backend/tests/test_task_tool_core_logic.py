@@ -359,6 +359,139 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
 
 
+def test_task_tool_passes_only_admitted_private_mcp_proxies_to_subagent(monkeypatch):
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel
+
+    class Args(BaseModel):
+        value: str
+
+    async def invoke(value: str) -> str:
+        return value
+
+    admitted_tool = StructuredTool.from_function(
+        coroutine=invoke,
+        name="project_exact_echo",
+        description="Exact admitted MCP.",
+        args_schema=Args,
+        metadata={
+            "deerflow_mcp": True,
+            "deerflow_private_mcp": True,
+        },
+    )
+    runtime = _make_runtime()
+    runtime.context.update(
+        {
+            "private_scope": object(),
+            "__runtime_mcp_tools": (admitted_tool,),
+        }
+    )
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    def get_available_tools(**kwargs):
+        captured["tools_kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda _: _make_subagent_config(),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_stream_writer",
+        lambda: lambda _event: None,
+    )
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行子任务",
+        prompt="call exact MCP",
+        subagent_type="general-purpose",
+        tool_call_id="tc-private-mcp",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["tools_kwargs"]["include_mcp"] is False
+    assert captured["tools_kwargs"]["include_acp"] is False
+    tools = captured["executor_kwargs"]["tools"]
+    assert [tool.name for tool in tools] == ["project_exact_echo"]
+    assert tools[0] is not admitted_tool
+    assert tools[0].metadata == admitted_tool.metadata
+
+
+@pytest.mark.asyncio
+async def test_private_mcp_proxy_marshals_each_call_to_parent_loop():
+    from langchain_core.tools import StructuredTool
+
+    from app.private_work.asset_runtime import _safe_mcp_args_model
+
+    owner_loop = asyncio.get_running_loop()
+    owner_thread = threading.get_ident()
+    observed = {}
+
+    Args = _safe_mcp_args_model(
+        {
+            "type": "object",
+            "properties": {
+                "value": {"type": "string"},
+                "optional": {"type": "string"},
+            },
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        model_name="DelegatedMcpArgs",
+    )
+
+    async def invoke(**arguments):
+        observed["loop"] = asyncio.get_running_loop()
+        observed["thread"] = threading.get_ident()
+        observed["arguments"] = arguments
+        return {"echo": arguments["value"]}
+
+    admitted_tool = StructuredTool.from_function(
+        coroutine=invoke,
+        name="project_exact_echo",
+        description="Exact admitted MCP.",
+        args_schema=Args,
+        metadata={
+            "deerflow_mcp": True,
+            "deerflow_private_mcp": True,
+        },
+    )
+    wrapped = task_tool_module._wrap_private_mcp_tool_for_owner_loop(
+        admitted_tool,
+        owner_loop,
+    )
+
+    result = await asyncio.to_thread(
+        lambda: asyncio.run(wrapped.ainvoke({"value": "hello"})),
+    )
+
+    assert result == {"echo": "hello"}
+    assert observed == {
+        "loop": owner_loop,
+        "thread": owner_thread,
+        "arguments": {"value": "hello"},
+    }
+
+
 def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)

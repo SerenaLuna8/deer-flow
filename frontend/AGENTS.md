@@ -173,6 +173,23 @@ never plaintext, ciphertext, nonce, key ID, storage locator, secret hash, or raw
 payload. MCP versions with required Credential slots use submit/approve rather than direct
 publish.
 
+Project MCP authoring exposes only `http` and `sse`. The URL is required and described as a
+Worker-reachable, operator-approved exact HTTPS endpoint; project `stdio` and
+`streamable_http` are never offered for new versions. Literal env/header and OAuth editors are
+not exposed; authentication is configured through header Credential slots. Historical
+unsupported versions remain readable with an explicit blocked reason; Project MCP history
+exposes only the remote HTTPS origin, never a persisted path or query. Publish, binding, and
+Agent dependency selection stay disabled. The backend policy remains authoritative, and
+mutation failures stay visible in the active dialog without clearing the user's safe inputs.
+This restriction is scope-specific: packaged System MCP retains the runtime-supported `stdio`,
+`sse`, and `http` transports plus their existing env/header/OAuth credential capabilities;
+only transports or definitions that the private runtime cannot execute are blocked.
+Agent cards, the Agent selector, Main chat, Connections, and
+Automation creation/resume/manual-run all use the same fail-closed MCP dependency assessment.
+Main re-reads the exact published dependency versions on every start and enables or moves the
+required System bindings before creating the Thread; an existing Main binding never bypasses
+that recheck.
+
 ## Automation
 
 Automation definitions and occurrences are scoped by exact account, project, and owner.

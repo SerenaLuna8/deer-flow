@@ -1,6 +1,7 @@
 """Task tool for delegating work to subagents."""
 
 import asyncio
+import inspect
 import logging
 import uuid
 from dataclasses import replace
@@ -9,8 +10,10 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
+from pydantic import BaseModel
 
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -40,6 +43,69 @@ logger = logging.getLogger(__name__)
 # Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
 # write it back to the triggering AIMessage's usage_metadata.
 _subagent_usage_cache: dict[str, dict[str, int]] = {}
+
+
+async def _invoke_on_owner_loop(
+    owner_loop: asyncio.AbstractEventLoop,
+    target,
+    *args,
+    **kwargs,
+):
+    """Run a loop-bound trusted callback on the parent Worker's event loop."""
+
+    async def invoke():
+        result = target(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    if asyncio.get_running_loop() is owner_loop:
+        return await invoke()
+    future = asyncio.run_coroutine_threadsafe(invoke(), owner_loop)
+    return await asyncio.wrap_future(future)
+
+
+def _trusted_private_mcp_tools(
+    parent_context: dict[str, Any],
+) -> tuple[BaseTool, ...]:
+    """Return only opaque Worker-installed private MCP proxy objects."""
+
+    raw_tools = parent_context.get("__runtime_mcp_tools")
+    if not isinstance(raw_tools, tuple):
+        return ()
+    trusted: list[BaseTool] = []
+    for candidate in raw_tools:
+        metadata = getattr(candidate, "metadata", None)
+        if not isinstance(candidate, BaseTool) or not isinstance(metadata, dict) or metadata.get("deerflow_private_mcp") is not True:
+            return ()
+        trusted.append(candidate)
+    return tuple(trusted)
+
+
+def _wrap_private_mcp_tool_for_owner_loop(
+    admitted_tool: BaseTool,
+    owner_loop: asyncio.AbstractEventLoop,
+) -> StructuredTool:
+    """Keep delegated MCP calls on the parent loop that owns the exact runtime."""
+
+    args_schema = admitted_tool.args_schema
+    if not isinstance(args_schema, type) or not issubclass(args_schema, BaseModel):
+        raise RuntimeError("Private MCP tool schema is unavailable")
+
+    async def invoke(**arguments):
+        return await _invoke_on_owner_loop(
+            owner_loop,
+            admitted_tool.ainvoke,
+            dict(arguments),
+        )
+
+    return StructuredTool.from_function(
+        coroutine=invoke,
+        name=admitted_tool.name,
+        description=admitted_tool.description,
+        args_schema=args_schema,
+        return_direct=admitted_tool.return_direct,
+        response_format=admitted_tool.response_format,
+        metadata=dict(admitted_tool.metadata or {}),
+    )
 
 
 def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
@@ -358,6 +424,12 @@ async def task_tool(
         "groups": parent_tool_groups,
         "subagent_enabled": False,
     }
+    private_run = "private_scope" in parent_context
+    if private_run:
+        # Private Runs may use only the exact admitted proxies installed by the
+        # Worker below. Never fall back to process-global MCP or ACP discovery.
+        available_tools_kwargs["include_mcp"] = False
+        available_tools_kwargs["include_acp"] = False
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
     from deerflow.assets.catalog import trusted_asset_context
@@ -367,6 +439,20 @@ async def task_tool(
     if asset_context is not None:
         available_tools_kwargs["asset_context"] = asset_context
     tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
+    if private_run:
+        owner_loop = asyncio.get_running_loop()
+        admitted_mcp_tools = _trusted_private_mcp_tools(parent_context)
+        existing_names = {tool.name for tool in tools}
+        for admitted_tool in admitted_mcp_tools:
+            if admitted_tool.name in existing_names:
+                raise RuntimeError("Private MCP tool name conflicts with another tool")
+            tools.append(
+                _wrap_private_mcp_tool_for_owner_loop(
+                    admitted_tool,
+                    owner_loop,
+                )
+            )
+            existing_names.add(admitted_tool.name)
 
     # Create executor
     executor_kwargs = {

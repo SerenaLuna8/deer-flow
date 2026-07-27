@@ -340,6 +340,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   approvalCredentials = [],
   approvalCredentialsLoading = false,
   approvalCredentialsError,
+  approvalError,
   isLoading = false,
   error,
   actionError,
@@ -356,6 +357,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   approvalCredentials?: ProjectCredentialItem[];
   approvalCredentialsLoading?: boolean;
   approvalCredentialsError?: unknown;
+  approvalError?: unknown;
   isLoading?: boolean;
   error?: unknown;
   actionError?: unknown;
@@ -366,7 +368,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   onApprove?: (
     version: McpVersion,
     credentialVersions: Record<string, string>,
-  ) => void;
+  ) => boolean | void | Promise<boolean | void>;
   onRetryApprovalCredentials?: () => void;
 }) {
   const canAuthor = projectAssetCanAuthor(item, kind);
@@ -403,11 +405,13 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
       ) : (
         <AssetVersionHistory
           kind={kind}
+          scope={item.scope}
           versions={versions}
           pending={pending}
           approvalCredentials={approvalCredentials}
           approvalCredentialsLoading={approvalCredentialsLoading}
           approvalCredentialsError={approvalCredentialsError}
+          approvalError={approvalError}
           onRetryApprovalCredentials={onRetryApprovalCredentials}
           onPublish={canAuthor ? onPublish : undefined}
           onSubmit={canAuthor && kind === "mcp-servers" ? onSubmit : undefined}
@@ -577,6 +581,7 @@ function CredentialHistory({
       ) : (
         <AssetVersionHistory
           kind="credentials"
+          scope="project"
           versions={history.data?.data ?? []}
         />
       )}

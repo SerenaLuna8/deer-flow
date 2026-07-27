@@ -17,6 +17,7 @@ from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
 from app.shared_assets.models import WorkflowStatus
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.persistence.shared_assets import (
     CredentialEnvelopeRow,
     CredentialGrantRow,
@@ -101,14 +102,13 @@ def _safe_definition(mcp_module, *, credential: bool):
             mcp_module.McpCredentialSlot(
                 name="primary",
                 purpose="ERP authentication",
-                payload_schema={"env": ["ERP_TOKEN"]},
+                payload_schema={"headers": ["X-ERP-Token"]},
             ),
         )
     return mcp_module.McpDefinition(
         description="ERP tools",
         transport="http",
         url="https://mcp.example.test",
-        headers={"Accept": "application/json"},
         credential_slots=slots,
     )
 
@@ -126,7 +126,10 @@ async def test_project_mcp_direct_publish_and_credential_approval_are_scope_safe
     editor = await _seed_project(engine, factory, label="editor", role="editor")
     admin = await _seed_project(engine, factory, label="admin", role="admin")
     other_admin = await _seed_project(engine, factory, label="other", role="admin")
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         direct_asset = await mcp_service.create_asset(editor, mcp_module.CreateMcpServer("public", "Public"))
@@ -148,7 +151,7 @@ async def test_project_mcp_direct_publish_and_credential_approval_are_scope_safe
         credential = await credential_service.create(
             admin,
             credential_module.CreateCredential("erp", "ERP", "token"),
-            {"env": {"ERP_TOKEN": "never-log-me"}},
+            {"headers": {"X-ERP-Token": "never-log-me"}},
         )
         protected_asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("erp", "ERP"))
         protected_draft = await mcp_service.create_version(
@@ -177,7 +180,7 @@ async def test_project_mcp_direct_publish_and_credential_approval_are_scope_safe
         foreign = await credential_service.create(
             other_admin,
             credential_module.CreateCredential("other", "Other", "token"),
-            {"env": {"ERP_TOKEN": "foreign-secret"}},
+            {"headers": {"X-ERP-Token": "foreign-secret"}},
         )
         second_asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("erp-two", "ERP Two"))
         second_draft = await mcp_service.create_version(
@@ -235,13 +238,16 @@ async def test_mcp_approval_binds_named_required_slots_and_allows_optional_omiss
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_project(engine, factory, label="multi-slot", role="admin")
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         primary = await credential_service.create(
             admin,
             credential_module.CreateCredential("primary", "Primary", "token"),
-            {"env": {"ERP_TOKEN": "primary-secret"}},
+            {"headers": {"X-ERP-Token": "primary-secret"}},
         )
         secondary = await credential_service.create(
             admin,
@@ -256,7 +262,7 @@ async def test_mcp_approval_binds_named_required_slots_and_allows_optional_omiss
                 mcp_module.McpCredentialSlot(
                     "primary",
                     "ERP token",
-                    {"env": ["ERP_TOKEN"]},
+                    {"headers": ["X-ERP-Token"]},
                 ),
                 mcp_module.McpCredentialSlot(
                     "secondary",
@@ -266,7 +272,7 @@ async def test_mcp_approval_binds_named_required_slots_and_allows_optional_omiss
                 mcp_module.McpCredentialSlot(
                     "refresh",
                     "Optional refresh token",
-                    {"oauth": ["refresh_token"]},
+                    {"headers": ["X-Refresh-Token"]},
                     required=False,
                 ),
             ),
@@ -364,13 +370,16 @@ async def test_credential_grant_migration_is_explicit_and_revoke_invalidates_all
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_project(engine, factory, label="lifecycle", role="admin")
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         credential = await credential_service.create(
             admin,
             credential_module.CreateCredential("erp", "ERP", "token"),
-            {"env": {"ERP_TOKEN": "old-secret"}},
+            {"headers": {"X-ERP-Token": "old-secret"}},
         )
         asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("erp", "ERP"))
         draft = await mcp_service.create_version(
@@ -392,7 +401,7 @@ async def test_credential_grant_migration_is_explicit_and_revoke_invalidates_all
         replacement = await credential_service.replace(
             admin,
             credential.id,
-            {"env": {"ERP_TOKEN": "new-secret"}},
+            {"headers": {"X-ERP-Token": "new-secret"}},
             expected_credential_version=1,
         )
         assert replacement.id != grant.credential_version_id
@@ -484,13 +493,16 @@ async def test_credential_grant_migration_rejects_incompatible_current_payload_s
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_project(engine, factory, label="migration-schema", role="admin")
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         credential = await credential_service.create(
             admin,
             credential_module.CreateCredential("erp", "ERP", "token"),
-            {"env": {"ERP_TOKEN": "old-secret"}},
+            {"headers": {"X-ERP-Token": "old-secret"}},
         )
         asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("erp", "ERP"))
         draft = await mcp_service.create_version(
@@ -554,7 +566,10 @@ async def test_packaged_system_mcp_only_allows_dedicated_system_credential_grant
     editor = await _seed_project(engine, factory, label="system-editor", role="editor")
     admin = await _seed_project(engine, factory, label="system-admin-project", role="admin")
     system = await _seed_system_admin(engine)
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         await bootstrap_system_assets(factory)
@@ -795,7 +810,10 @@ async def test_mcp_definition_rows_reject_draft_checksum_drift(
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     editor = await _seed_project(engine, factory, label="checksum", role="editor")
-    service = mcp_module.McpService(factory)
+    service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     try:
         asset = await service.create_asset(editor, mcp_module.CreateMcpServer("checksum", "Checksum"))
         draft = await service.create_version(
@@ -828,18 +846,21 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     system = await _seed_system_admin(engine)
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         credential_a = await credential_service.create(
             system,
             credential_module.CreateCredential("system-a", "System A", "token"),
-            {"env": {"SYSTEM_TOKEN": "system-secret-a"}},
+            {"headers": {"X-System-Token": "system-secret-a"}},
         )
         credential_b = await credential_service.create(
             system,
             credential_module.CreateCredential("system-b", "System B", "token"),
-            {"env": {"SYSTEM_TOKEN": "system-secret-b"}},
+            {"headers": {"X-System-Token": "system-secret-b"}},
         )
         definition = mcp_module.McpDefinition(
             description="Two interchangeable system credentials",
@@ -849,12 +870,12 @@ async def test_concurrent_system_multi_slot_approvals_use_one_global_credential_
                 mcp_module.McpCredentialSlot(
                     "first",
                     "First system credential",
-                    {"env": ["SYSTEM_TOKEN"]},
+                    {"headers": ["X-System-Token"]},
                 ),
                 mcp_module.McpCredentialSlot(
                     "second",
                     "Second system credential",
-                    {"env": ["SYSTEM_TOKEN"]},
+                    {"headers": ["X-System-Token"]},
                 ),
             ),
         )
@@ -1051,13 +1072,16 @@ async def test_concurrent_mcp_approval_has_one_stable_conflict(
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin = await _seed_project(engine, factory, label="approval-race", role="admin")
-    mcp_service = mcp_module.McpService(factory)
+    mcp_service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
     credential_service = credential_module.CredentialService(factory)
     try:
         credential = await credential_service.create(
             admin,
             credential_module.CreateCredential("race", "Race", "token"),
-            {"env": {"ERP_TOKEN": "approval-secret"}},
+            {"headers": {"X-ERP-Token": "approval-secret"}},
         )
         asset = await mcp_service.create_asset(admin, mcp_module.CreateMcpServer("race", "Race"))
         draft = await mcp_service.create_version(

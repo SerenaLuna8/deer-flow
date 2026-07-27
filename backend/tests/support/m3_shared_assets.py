@@ -34,6 +34,7 @@ from app.shared_assets.models import (
     ResolvedMcpSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionMcpRefRow,
@@ -114,7 +115,10 @@ class M3Scenario:
             project_editor=project_editor,
             other_project_admin=other_project_admin,
             agents=AgentService(session_factory),
-            mcp_servers=McpService(session_factory),
+            mcp_servers=McpService(
+                session_factory,
+                endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://m3-scenario.example.test/mcp"})),
+            ),
             credentials=CredentialService(session_factory, keyring=keyring),
             bindings=BindingService(session_factory),
             resolver=ProjectAssetResolver(session_factory, keyring=keyring),
@@ -165,7 +169,7 @@ class M3Scenario:
         credential = await self.credentials.create(
             self.project_admin,
             CreateCredential("m3-project-token", "M3 Project Token", "token"),
-            {"env": {"M3_PROJECT_TOKEN": secret_sentinel}},
+            {"headers": {"X-M3-Project-Token": secret_sentinel}},
         )
         self.project_credential_id = credential.id
         self.project_credential_version_id = credential.current_version_id
@@ -187,7 +191,7 @@ class M3Scenario:
                     McpCredentialSlot(
                         name="primary",
                         purpose="Project API token",
-                        payload_schema={"env": ["M3_PROJECT_TOKEN"]},
+                        payload_schema={"headers": ["X-M3-Project-Token"]},
                     ),
                 ),
             ),

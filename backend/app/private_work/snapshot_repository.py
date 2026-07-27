@@ -29,6 +29,11 @@ from app.shared_assets.credential_closure import (
 )
 from app.shared_assets.model_refs import ExactModelRefResolver, ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetScope, ResolvedAgentSnapshot
+from deerflow.mcp_definition_policy import (
+    McpDefinitionPolicyError,
+    McpEndpointPolicy,
+    validate_project_mcp_definition,
+)
 from deerflow.persistence.private_work.model import RunAssetVersionRow, RunMcpGrantSnapshotRow
 from deerflow.persistence.shared_assets.agent_model import (
     AgentRow,
@@ -92,9 +97,11 @@ class RunSnapshotRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         model_ref_resolver: ModelRefResolver | None = None,
+        endpoint_policy: McpEndpointPolicy | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._model_ref_resolver = model_ref_resolver or ExactModelRefResolver()
+        self._endpoint_policy = endpoint_policy
 
     @staticmethod
     def _asset_allowed(
@@ -181,10 +188,25 @@ class RunSnapshotRepository:
         session: AsyncSession,
         version_ids: tuple[uuid.UUID, ...],
         project_id: uuid.UUID,
+        *,
+        endpoint_policy: McpEndpointPolicy | None = None,
     ) -> list[tuple[McpServerRow, McpServerVersionRow]]:
         rows: list[tuple[McpServerRow, McpServerVersionRow]] = []
         for version_id in version_ids:
-            row = (await session.execute(select(McpServerRow, McpServerVersionRow).join(McpServerVersionRow, McpServerVersionRow.mcp_server_id == McpServerRow.id).where(McpServerVersionRow.id == version_id))).one_or_none()
+            row = (
+                await session.execute(
+                    select(McpServerRow, McpServerVersionRow)
+                    .join(
+                        McpServerVersionRow,
+                        McpServerVersionRow.mcp_server_id == McpServerRow.id,
+                    )
+                    .where(McpServerVersionRow.id == version_id)
+                    .with_for_update(
+                        read=True,
+                        of=[McpServerRow, McpServerVersionRow],
+                    )
+                )
+            ).one_or_none()
             if row is None:
                 raise RunSnapshotAssetStale
             asset, version = row
@@ -196,8 +218,22 @@ class RunSnapshotRepository:
                 )
                 or asset.status != "active"
                 or version.workflow_status != "published"
+                or (asset.scope == AssetScope.PROJECT.value and version.transport == "stdio")
             ):
                 raise RunSnapshotAssetStale
+            if asset.scope == AssetScope.PROJECT.value:
+                try:
+                    validate_project_mcp_definition(
+                        transport=version.transport,
+                        url=version.url,
+                        env=version.non_secret_env,
+                        headers=version.non_secret_headers,
+                        oauth=version.oauth_metadata,
+                        credential_slot_schemas=(),
+                        endpoint_policy=endpoint_policy,
+                    )
+                except (AttributeError, McpDefinitionPolicyError, TypeError):
+                    raise RunSnapshotAssetStale from None
             rows.append((asset, version))
         return rows
 
@@ -254,6 +290,38 @@ class RunSnapshotRepository:
             )
         except McpCredentialClosureInvalid:
             raise RunSnapshotAssetStale from None
+
+    @staticmethod
+    def _validate_project_mcp_credential_slots(
+        mcps: list[tuple[McpServerRow, McpServerVersionRow]],
+        closures: Mapping[uuid.UUID, LockedMcpCredentialClosure],
+        *,
+        endpoint_policy: McpEndpointPolicy | None,
+    ) -> None:
+        """Validate the locked credential-slot schemas before admitting work."""
+
+        for asset, version in mcps:
+            if asset.scope != AssetScope.PROJECT.value:
+                continue
+            try:
+                closure = closures[uuid.UUID(str(version.id))]
+                validate_project_mcp_definition(
+                    transport=version.transport,
+                    url=version.url,
+                    env=version.non_secret_env,
+                    headers=version.non_secret_headers,
+                    oauth=version.oauth_metadata,
+                    credential_slot_schemas=tuple(slot.payload_schema for slot in closure.slots),
+                    endpoint_policy=endpoint_policy,
+                )
+            except (
+                AttributeError,
+                KeyError,
+                McpDefinitionPolicyError,
+                TypeError,
+                ValueError,
+            ):
+                raise RunSnapshotAssetStale from None
 
     async def create_run_with_snapshot(
         self,
@@ -423,8 +491,14 @@ class RunSnapshotRepository:
             session,
             resolved_agent.payload.mcp_version_ids,
             project_id,
+            endpoint_policy=self._endpoint_policy,
         )
         closures = await self._credential_closures(session, mcps)
+        self._validate_project_mcp_credential_slots(
+            mcps,
+            closures,
+            endpoint_policy=self._endpoint_policy,
+        )
         return skills, mcps, closures
 
     async def list_assets(
@@ -534,6 +608,7 @@ class RunSnapshotRepository:
             session,
             tuple(asset.version_id for asset in mcp_assets),
             context.project_id,
+            endpoint_policy=self._endpoint_policy,
         )
         by_version = {uuid.UUID(str(version.id)): (asset, version) for asset, version in mcps}
         for persisted in mcp_assets:
@@ -544,6 +619,11 @@ class RunSnapshotRepository:
             if asset.id != persisted.asset_id or asset.scope != persisted.asset_scope or version.payload_checksum != persisted.payload_checksum:
                 raise RunSnapshotAssetStale
         closures = await self._credential_closures(session, mcps)
+        self._validate_project_mcp_credential_slots(
+            mcps,
+            closures,
+            endpoint_policy=self._endpoint_policy,
+        )
         current = [
             RunMcpGrantSnapshot(
                 mcp_version_id=material.grant.mcp_server_version_id,

@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 _STREAM_EVENT = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
+_STREAM_NAMESPACE_MAX_DEPTH = 32
+_STREAM_NAMESPACE_SEGMENT_MAX_LENGTH = 256
+_STREAM_NAMESPACED_EVENT_MAX_LENGTH = 4096
 _POSITIVE_ASCII_DECIMAL = re.compile(r"[1-9][0-9]*")
 _TERMINAL_STATUSES = frozenset(
     {
@@ -20,6 +23,20 @@ _TERMINAL_STATUSES = frozenset(
         "timeout",
     }
 )
+
+
+def _is_valid_stream_event(event: object) -> bool:
+    if not isinstance(event, str) or len(event) > _STREAM_NAMESPACED_EVENT_MAX_LENGTH:
+        return False
+    base, separator, _namespace = event.partition("|")
+    if _STREAM_EVENT.fullmatch(base) is None:
+        return False
+    if not separator:
+        return True
+    segments = event.split("|")[1:]
+    if not 1 <= len(segments) <= _STREAM_NAMESPACE_MAX_DEPTH:
+        return False
+    return all(segment and len(segment) <= _STREAM_NAMESPACE_SEGMENT_MAX_LENGTH and "\x00" not in segment and "\r" not in segment and "\n" not in segment for segment in segments)
 
 
 class StreamScopeNotFound(LookupError):
@@ -83,9 +100,10 @@ class StreamFrame:
     def __post_init__(self) -> None:
         if self.category != "stream":
             raise ValueError("stream frame category must be 'stream'")
-        if _STREAM_EVENT.fullmatch(self.event) is None:
+        if not _is_valid_stream_event(self.event):
             raise ValueError("stream frame event is invalid")
-        if self.event in {"end", "stream.end"} and not self.terminal:
+        base_event = self.event.partition("|")[0]
+        if base_event in {"end", "stream.end"} and not self.terminal:
             raise ValueError("stream end events are reserved for terminal frames")
         if self.terminal and self.event != "end":
             raise ValueError("terminal stream frame event must be 'end'")

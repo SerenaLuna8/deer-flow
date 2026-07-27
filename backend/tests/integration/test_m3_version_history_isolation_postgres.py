@@ -27,6 +27,7 @@ from app.shared_assets.models import (
     SkillArchiveFile,
 )
 from deerflow.config.quota_config import QuotaConfig
+from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.persistence.shared_assets import CredentialRow
 
 
@@ -188,6 +189,7 @@ async def _create_asset_with_version(
     actor: ProjectContext | SystemAssetGovernanceContext,
     *,
     label: str,
+    include_next_mcp_version: bool = False,
 ):
     if kind == "agent":
         module = importlib.import_module("app.shared_assets.agent_service")
@@ -218,7 +220,13 @@ async def _create_asset_with_version(
         )
     else:
         module = importlib.import_module("app.shared_assets.mcp_service")
-        service = module.McpService(factory)
+        allowed_endpoints = {"https://history.example.test"}
+        if include_next_mcp_version:
+            allowed_endpoints.add("https://new-history.example.test")
+        service = module.McpService(
+            factory,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset(allowed_endpoints)),
+        )
         asset = await service.create_asset(
             actor,
             module.CreateMcpServer(f"{label}-mcp", f"{label} MCP"),
@@ -282,7 +290,10 @@ def _configure_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
 async def _create_versioned_asset(kind: str, factory, context: ProjectContext):
     if kind == "mcp":
         module = importlib.import_module("app.shared_assets.mcp_service")
-        service = module.McpService(factory)
+        service = module.McpService(
+            factory,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+        )
         asset = await service.create_asset(
             context,
             module.CreateMcpServer("history-mcp", "History MCP"),
@@ -312,7 +323,10 @@ async def _create_versioned_asset(kind: str, factory, context: ProjectContext):
 async def _create_empty_asset(kind: str, factory, context: ProjectContext):
     if kind == "mcp":
         module = importlib.import_module("app.shared_assets.mcp_service")
-        service = module.McpService(factory)
+        service = module.McpService(
+            factory,
+            endpoint_policy=ExactMcpEndpointPolicy(frozenset()),
+        )
         asset = await service.create_asset(
             context,
             module.CreateMcpServer("empty-history-mcp", "Empty History MCP"),
@@ -449,6 +463,7 @@ async def test_project_history_exposes_only_published_system_versions(
             factory,
             system,
             label=f"system-history-{kind}",
+            include_next_mcp_version=True,
         )
         published = await service.publish(
             system,

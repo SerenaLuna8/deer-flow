@@ -141,3 +141,25 @@ def test_get_config_returns_503_on_any_load_failure(monkeypatch, exception):
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Configuration not available"}
+
+
+def test_get_config_does_not_log_secret_bearing_validation_input(
+    monkeypatch,
+    caplog,
+):
+    secret = "proxy-user:proxy-password"
+
+    def _broken_get_app_config():
+        raise ValueError(f"input_value=https://{secret}@proxy.example.test")
+
+    monkeypatch.setattr(gateway_deps, "get_app_config", _broken_get_app_config)
+
+    with caplog.at_level("ERROR", logger="app.gateway.deps"):
+        response = TestClient(
+            _build_app(),
+            raise_server_exceptions=False,
+        ).get("/probe")
+
+    assert response.status_code == 503
+    assert secret not in caplog.text
+    assert "input_value" not in caplog.text

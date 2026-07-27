@@ -630,12 +630,20 @@ def _mcp_version_with_read_only_mappings(asset_id: uuid.UUID) -> McpVersionView:
         definition=McpDefinition(
             description="Analytics tools",
             transport="streamable_http",
+            command="must-never-return-command",
+            args=("must-never-return-arg",),
             url="https://analytics.example.test/mcp",
-            env=MappingProxyType({}),
-            headers=MappingProxyType({"X-Client": "deerflow"}),
-            oauth=MappingProxyType({}),
-            routing=MappingProxyType({}),
-            tool_overrides=MappingProxyType({}),
+            env=MappingProxyType({"OPAQUE_SETTING": "must-never-return"}),
+            headers=MappingProxyType({"X-Client": "must-never-return"}),
+            oauth=MappingProxyType(
+                {
+                    "extra_token_params": {
+                        "client_assertion": "must-never-return-oauth",
+                    }
+                }
+            ),
+            routing=MappingProxyType({"strategy": "must-never-return-routing"}),
+            tool_overrides=MappingProxyType({"search": {"value": "must-never-return-override"}}),
             timeout_seconds=45,
             credential_slots=(
                 project_assets.McpCredentialSlot(
@@ -669,14 +677,76 @@ def test_project_mcp_version_history_serializes_read_only_mapping_fields() -> No
     service = AsyncMock()
     asset_id = uuid.uuid4()
     version = _mcp_version_with_read_only_mappings(asset_id)
+    service.get.return_value = McpAssetView(**vars(_agent(AssetScope.PROJECT)))
     service.get_version_history.return_value = (version,)
 
     response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions")
 
     assert response.status_code == 200
-    assert response.json()["data"][0]["definition"]["headers"] == {"X-Client": "deerflow"}
+    assert response.json()["data"][0]["definition"]["env"] == {}
+    assert response.json()["data"][0]["definition"]["headers"] == {}
+    assert response.json()["data"][0]["definition"]["command"] is None
+    assert response.json()["data"][0]["definition"]["args"] == []
+    assert response.json()["data"][0]["definition"]["oauth"] == {}
+    assert response.json()["data"][0]["definition"]["routing"] == {}
+    assert response.json()["data"][0]["definition"]["tool_overrides"] == {}
+    assert "must-never-return" not in response.text
     assert response.json()["data"][0]["credential_slots"][0]["payload_schema"] == {"headers": ["Authorization"]}
     assert response.json()["data"][0]["workflow_status"] == "pending_approval"
+
+
+def test_project_mcp_history_never_replays_signed_endpoint_details() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = _mcp_version_with_read_only_mappings(asset_id)
+    service.get.return_value = McpAssetView(**vars(_agent(AssetScope.PROJECT)))
+    signed_marker = "must-never-return-signed-query"
+    version = dataclasses.replace(
+        version,
+        definition=dataclasses.replace(
+            version.definition,
+            url=(f"https://analytics.example.test/private/path?X-Amz-Signature={signed_marker}"),
+        ),
+    )
+    service.get_version_history.return_value = (version,)
+
+    response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["definition"]["url"] == ("https://analytics.example.test")
+    assert signed_marker not in response.text
+    assert "/private/path" not in response.text
+
+
+def test_project_mcp_history_preserves_system_stdio_runtime_definition() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = _mcp_version_with_read_only_mappings(asset_id)
+    version = dataclasses.replace(
+        version,
+        definition=dataclasses.replace(
+            version.definition,
+            transport="stdio",
+            command="system-mcp-server",
+            args=("--safe-mode",),
+            url=None,
+            oauth=MappingProxyType({}),
+            routing=MappingProxyType({}),
+            tool_overrides=MappingProxyType({}),
+        ),
+    )
+    service.get.return_value = McpAssetView(**vars(_agent(AssetScope.SYSTEM)))
+    service.get_version_history.return_value = (version,)
+
+    response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions")
+
+    assert response.status_code == 200
+    definition = response.json()["data"][0]["definition"]
+    assert definition["transport"] == "stdio"
+    assert definition["command"] == "system-mcp-server"
+    assert definition["args"] == ["--safe-mode"]
+    assert definition["env"] == {}
+    assert definition["headers"] == {}
 
 
 def test_project_mcp_version_mutation_serializes_after_committing_domain_result() -> None:
@@ -689,7 +759,7 @@ def test_project_mcp_version_mutation_serializes_after_committing_domain_result(
         f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions",
         json={
             "description": "Analytics tools",
-            "transport": "streamable_http",
+            "transport": "http",
             "command": None,
             "args": [],
             "url": "https://analytics.example.test/mcp",
@@ -712,8 +782,37 @@ def test_project_mcp_version_mutation_serializes_after_committing_domain_result(
     )
 
     assert response.status_code == 201
-    assert response.json()["data"]["definition"]["headers"] == {"X-Client": "deerflow"}
+    assert response.json()["data"]["definition"]["env"] == {}
+    assert response.json()["data"]["definition"]["headers"] == {}
+    assert response.json()["data"]["definition"]["command"] is None
+    assert response.json()["data"]["definition"]["args"] == []
+    assert response.json()["data"]["definition"]["oauth"] == {}
+    assert response.json()["data"]["definition"]["routing"] == {}
+    assert response.json()["data"]["definition"]["tool_overrides"] == {}
+    assert "must-never-return" not in response.text
     assert response.json()["data"]["credential_slots"][0]["payload_schema"] == {"headers": ["Authorization"]}
+
+
+@pytest.mark.parametrize("transport", ("stdio", "streamable_http"))
+def test_project_mcp_version_request_rejects_non_remote_supported_transport(
+    transport: str,
+) -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+
+    response = _client(mcp_service=service).post(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions",
+        json={
+            "transport": transport,
+            "command": "marker-command" if transport == "stdio" else None,
+            "args": [],
+            "url": None if transport == "stdio" else "https://mcp.example.test/api",
+            "expected_asset_version": 1,
+        },
+    )
+
+    assert response.status_code == 422
+    service.create_version.assert_not_awaited()
 
 
 def test_version_routes_register_kind_specific_strict_openapi_contracts() -> None:

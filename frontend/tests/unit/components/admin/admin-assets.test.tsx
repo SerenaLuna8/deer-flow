@@ -35,6 +35,7 @@ import {
   skillMarkdownTemplate,
   McpVersionFields,
   SkillVersionFields,
+  versionInput,
 } from "@/components/admin/assets/admin-asset-dialogs";
 import {
   AdminAssetPage,
@@ -169,6 +170,9 @@ describe("admin asset access and credential safety", () => {
     expect(pageSource).not.toContain("useCurrentProject");
     expect(pageSource).not.toContain("createProjectCredential(");
     expect(pageSource).not.toContain("useMutation(");
+    expect(pageSource).toContain("approve.mutateAsync");
+    expect(pageSource).toContain("settleMcpApproval");
+    expect(pageSource).toContain("approvalError={approve.error}");
     expect(apiSource).toContain(
       "/api/admin/projects/${parsedProjectId}/assets/${parsedKind}",
     );
@@ -216,7 +220,7 @@ describe("admin asset access and credential safety", () => {
       "MCP 依赖版本",
       "媒体类型",
       "传输方式",
-      "命令",
+      "URL",
       "Credential 槽位",
       "凭据字段分组",
     ]) {
@@ -234,6 +238,54 @@ describe("admin asset access and credential safety", () => {
     ]) {
       expect(html).not.toContain(english);
     }
+  });
+
+  test("project MCP authoring only offers supported remote transports", () => {
+    const html = renderToStaticMarkup(createElement(McpVersionFields));
+
+    expect(html).toContain('<option value="sse"');
+    expect(html).toContain('<option value="http"');
+    expect(html).toContain('name="url"');
+    expect(html).toContain('required=""');
+    expect(html).toContain("Worker 访问");
+    expect(html).toContain("平台批准的精确 HTTPS 地址");
+    expect(html).toContain("实际超时由平台控制");
+    expect(html).not.toContain('<option value="stdio"');
+    expect(html).not.toContain('<option value="streamable_http"');
+    expect(html).not.toContain('<option value="env"');
+    expect(html).not.toContain('<option value="oauth"');
+    expect(html).not.toContain('name="command"');
+    expect(html).not.toContain('name="args"');
+    expect(html).not.toContain('name="timeout_seconds"');
+  });
+
+  test("project MCP version input clears stale local-process fields", () => {
+    const form = new FormData();
+    form.set("description", "Remote MCP");
+    form.set("transport", "sse");
+    form.set("url", " https://mcp.example.test/sse ");
+    form.set("command", "npx");
+    form.set("args", "--yes,server");
+    form.set("timeout_seconds", "999");
+    form.set("slot_name", "api-token");
+    form.set("slot_group", "oauth");
+    form.set("slot_fields", "Authorization");
+
+    expect(versionInput("mcp-servers", form, 4)).toMatchObject({
+      description: "Remote MCP",
+      transport: "sse",
+      url: "https://mcp.example.test/sse",
+      command: null,
+      args: [],
+      timeout_seconds: 30,
+      credential_slots: [
+        {
+          name: "api-token",
+          payload_schema: { headers: ["Authorization"] },
+        },
+      ],
+      expected_asset_version: 4,
+    });
   });
 
   test("blank Skill authoring provides a valid immutable SKILL.md envelope", () => {

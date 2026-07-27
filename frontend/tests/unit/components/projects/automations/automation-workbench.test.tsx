@@ -63,6 +63,20 @@ describe("AutomationWorkbench", () => {
     );
   });
 
+  test("keeps an Automation with an unverified MCP Agent visible but blocks execution", () => {
+    const reason = "该 Agent 引用的 MCP 版本当前不能运行。";
+    const html = renderWorkbench({
+      permissions: { canRead: true, canManage: true, canExecute: true },
+      onTrigger: async () => undefined,
+      automationAgentBlockReasons: { [AUTOMATION.id]: reason },
+    });
+
+    expect(html).toContain(reason);
+    expect(html).toMatch(
+      /<button[^>]*disabled=""[^>]*title="该 Agent 引用的 MCP 版本当前不能运行。"[^>]*>立即运行<\/button>/u,
+    );
+  });
+
   test.each([
     ["conflict", "状态已更新，请刷新后重试。", true],
     ["rate_limit", "当前并发已达上限，请稍后重试。", false],

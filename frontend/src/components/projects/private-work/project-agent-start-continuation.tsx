@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -8,13 +9,17 @@ import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { useProjectPrivateWorkReadiness } from "@/core/private-work/readiness";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
-import type { ProjectAssetList } from "@/core/shared-assets";
+import {
+  invalidateProjectAssetQueries,
+  type ProjectAssetList,
+} from "@/core/shared-assets";
 
 import {
   createProjectChatForAgent,
   mainProjectAgent,
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
+import { prepareMainProjectChatRuntime } from "./main-project-chat-runtime";
 
 type StartChatCandidateState = {
   requested: boolean;
@@ -44,6 +49,7 @@ export async function consumeProjectStartChatIntent({
   intentId,
   agent,
   replace,
+  prepareAgent,
   createChat = createProjectChatForAgent,
 }: {
   scope: ProjectClientScope;
@@ -51,19 +57,21 @@ export async function consumeProjectStartChatIntent({
   intentId: string;
   agent: ExecutableProjectAgent;
   replace: (path: string) => void;
+  prepareAgent: (agent: ExecutableProjectAgent) => Promise<void>;
   createChat?: typeof createProjectChatForAgent;
 }): Promise<string> {
   const intentKey = `${scope.accountId}:${scope.projectId}:${intentId}`;
   let run = projectStartChatIntentRuns.get(intentKey);
   if (!run) {
-    run = Promise.resolve().then(() =>
-      createChat({
+    run = Promise.resolve().then(async () => {
+      await prepareAgent(agent);
+      return createChat({
         scope,
         projectSlug,
         agent,
         navigate: () => undefined,
-      }),
-    );
+      });
+    });
     projectStartChatIntentRuns.set(intentKey, run);
     void run.catch(() => {
       if (projectStartChatIntentRuns.get(intentKey) === run) {
@@ -88,9 +96,11 @@ export type ProjectAgentStartContinuationStatus =
 export function ProjectAgentStartContinuationView({
   status,
   onRetry,
+  errorMessage,
 }: {
   status: ProjectAgentStartContinuationStatus;
   onRetry?: () => void;
+  errorMessage?: string | null;
 }) {
   const copy = {
     "waiting-for-service": {
@@ -117,7 +127,10 @@ export function ProjectAgentStartContinuationView({
     ProjectAgentStartContinuationStatus,
     { title: string; detail: string }
   >;
-  const content = copy[status];
+  const content =
+    status === "error" && errorMessage
+      ? { ...copy.error, detail: errorMessage }
+      : copy[status];
   return (
     <section
       role={status === "error" ? "alert" : "status"}
@@ -150,6 +163,7 @@ export function ProjectAgentStartContinuation({
   intentId: string | null;
 }) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
   const canCreate =
     project.capabilities.includes("private_work.create") &&
@@ -165,7 +179,7 @@ export function ProjectAgentStartContinuation({
     [canCreate, catalog, readiness.data?.status, requested],
   );
   const [retry, setRetry] = useState(0);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const startedKeyRef = useRef<string | null>(null);
   const fallbackIntentIdRef = useRef<string | null>(null);
   fallbackIntentIdRef.current ??= `${privateWork.scope.accountId}:${privateWork.scope.projectId}:legacy`;
@@ -179,19 +193,44 @@ export function ProjectAgentStartContinuation({
       return;
     }
     startedKeyRef.current = candidateKey;
-    setFailed(false);
+    setFailure(null);
     void consumeProjectStartChatIntent({
       scope: privateWork.scope,
       projectSlug: project.slug,
       intentId: stableIntentId,
       agent: candidate,
+      prepareAgent: async (agent) => {
+        const prepared = await prepareMainProjectChatRuntime({
+          projectId: project.id,
+          agent,
+        });
+        if (!prepared.bindingsChanged) return;
+        await Promise.all(
+          (["agents", "skills", "mcp-servers"] as const).map((kind) =>
+            invalidateProjectAssetQueries(
+              queryClient,
+              privateWork.scope.accountId,
+              project.id,
+              kind,
+            ),
+          ),
+        );
+      },
       replace: (path) => router.replace(path),
-    }).catch(() => setFailed(true));
+    }).catch((error) =>
+      setFailure(
+        error instanceof Error
+          ? error.message
+          : "Agent 已完成配置，请重试进入对话。",
+      ),
+    );
   }, [
     candidate,
     candidateKey,
     privateWork.scope,
+    project.id,
     project.slug,
+    queryClient,
     router,
     stableIntentId,
   ]);
@@ -206,12 +245,13 @@ export function ProjectAgentStartContinuation({
   if (!candidate) {
     return <ProjectAgentStartContinuationView status="waiting-for-agent" />;
   }
-  if (failed) {
+  if (failure) {
     return (
       <ProjectAgentStartContinuationView
         status="error"
+        errorMessage={failure}
         onRetry={() => {
-          setFailed(false);
+          setFailure(null);
           setRetry((value) => value + 1);
         }}
       />

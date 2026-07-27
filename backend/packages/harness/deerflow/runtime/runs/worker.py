@@ -191,6 +191,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "__authorization_boundary",
             "__file_authority",
             "__run_read_only_mounts",
+            "__runtime_mcp_tools",
         ):
             if key in runtime_context:
                 existing_context[key] = runtime_context[key]
@@ -580,6 +581,7 @@ async def run_agent(
             # Context is merged after configurable by the Agent factory. Keep
             # both channels pinned to the same persisted private-Run model.
             runtime_ctx["model_name"] = record.model_name
+            runtime_ctx["__runtime_mcp_tools"] = tuple(getattr(ctx.private_agent_runtime, "mcp_tools", ()))
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
         if deerflow_trace_id:
@@ -743,12 +745,12 @@ async def run_agent(
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
 
-                mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                namespace, mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
                 if mode is None:
                     continue
 
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                sse_event = _lg_mode_to_sse_event(mode)
+                sse_event = _namespaced_sse_event(mode, namespace)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
                 if mode == "custom":
                     await subagent_events.add(chunk)
@@ -1472,6 +1474,20 @@ def _lg_mode_to_sse_event(mode: str) -> str:
     return mode
 
 
+def _namespaced_sse_event(mode: str, namespace: tuple[str, ...]) -> str:
+    """Encode a LangGraph namespace in the SSE event name.
+
+    The LangGraph SDK treats ``<mode>|<namespace segment>|...`` as the
+    subgraph form of a stream event. Keeping the payload unchanged while
+    suffixing the event name prevents child ``values`` and ``messages`` chunks
+    from being projected into the lead-agent conversation.
+    """
+    event = _lg_mode_to_sse_event(mode)
+    if not namespace:
+        return event
+    return "|".join((event, *namespace))
+
+
 def _error_fallback_message_from_metadata(metadata: dict[str, Any], content: Any) -> str:
     detail = metadata.get("error_detail")
     if isinstance(detail, str) and detail.strip():
@@ -1612,23 +1628,35 @@ def _unpack_stream_item(
     item: Any,
     lg_modes: list[str],
     stream_subgraphs: bool,
-) -> tuple[str | None, Any]:
-    """Unpack a multi-mode or subgraph stream item into (mode, chunk).
+) -> tuple[tuple[str, ...], str | None, Any]:
+    """Unpack a multi-mode or subgraph item into (namespace, mode, chunk).
 
-    Returns ``(None, None)`` if the item cannot be parsed.
+    Returns ``((), None, None)`` if the item cannot be parsed.
     """
     if stream_subgraphs:
         if isinstance(item, tuple) and len(item) == 3:
-            _ns, mode, chunk = item
-            return str(mode), chunk
+            namespace, mode, chunk = item
+            return _normalize_stream_namespace(namespace), str(mode), chunk
         if isinstance(item, tuple) and len(item) == 2:
-            mode, chunk = item
-            return str(mode), chunk
-        return None, None
+            first, chunk = item
+            if isinstance(first, (list, tuple)):
+                mode = lg_modes[0] if len(lg_modes) == 1 else None
+                return _normalize_stream_namespace(first), mode, chunk
+            return (), str(first), chunk
+        return (), None, None
 
     if isinstance(item, tuple) and len(item) == 2:
         mode, chunk = item
-        return str(mode), chunk
+        return (), str(mode), chunk
 
     # Fallback: single-element output from first mode
-    return lg_modes[0] if lg_modes else None, item
+    return (), lg_modes[0] if lg_modes else None, item
+
+
+def _normalize_stream_namespace(namespace: Any) -> tuple[str, ...]:
+    """Return the generated LangGraph namespace as protocol segments."""
+    if isinstance(namespace, str):
+        return tuple(segment for segment in namespace.split("|") if segment)
+    if isinstance(namespace, (list, tuple)):
+        return tuple(str(segment) for segment in namespace if str(segment))
+    return ()

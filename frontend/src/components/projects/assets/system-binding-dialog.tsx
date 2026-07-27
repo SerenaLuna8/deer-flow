@@ -23,6 +23,7 @@ import {
   type AssetListKind,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
+import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
   agents: "agent",
@@ -116,6 +117,34 @@ export function SystemBindingDialog({
       ),
     [history.data],
   );
+  const bindablePublished = useMemo(
+    () =>
+      published.filter(
+        (version) =>
+          kind !== "mcp-servers" ||
+          !("mcp_server_id" in version) ||
+          mcpVersionRuntimeBlockReason(version, item.scope) === null,
+      ),
+    [item.scope, kind, published],
+  );
+  const firstRuntimeBlockReason = useMemo(
+    () =>
+      kind === "mcp-servers"
+        ? (published
+            .filter(
+              (version) =>
+                "mcp_server_id" in version &&
+                mcpVersionRuntimeBlockReason(version, item.scope) !== null,
+            )
+            .map((version) =>
+              "mcp_server_id" in version
+                ? mcpVersionRuntimeBlockReason(version, item.scope)
+                : null,
+            )
+            .find((reason): reason is string => reason !== null) ?? null)
+        : null,
+    [item.scope, kind, published],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -143,7 +172,7 @@ export function SystemBindingDialog({
     historyRetryPending: history.isFetching,
     mutationPending: pending,
     selectedVersionId,
-    publishedVersionIds: published.map((version) => version.id),
+    publishedVersionIds: bindablePublished.map((version) => version.id),
     boundVersionId: item.binding?.enabled ? item.binding.version_id : null,
   });
 
@@ -211,17 +240,35 @@ export function SystemBindingDialog({
             >
               <option value="">请选择版本</option>
               {published.map((version) => (
-                <option key={version.id} value={version.id}>
+                <option
+                  key={version.id}
+                  value={version.id}
+                  disabled={
+                    kind === "mcp-servers" &&
+                    "mcp_server_id" in version &&
+                    mcpVersionRuntimeBlockReason(version, item.scope) !== null
+                  }
+                >
                   {bindingVersionLabel(version.version_number)}
+                  {kind === "mcp-servers" &&
+                  "mcp_server_id" in version &&
+                  mcpVersionRuntimeBlockReason(version, item.scope) !== null
+                    ? "（不可用）"
+                    : ""}
                 </option>
               ))}
             </select>
-            {published.length === 0 && (
+            {bindablePublished.length === 0 && (
               <span className="text-muted-foreground text-xs">
                 当前没有可启用的已发布版本。
               </span>
             )}
           </label>
+        ) : null}
+        {firstRuntimeBlockReason ? (
+          <p role="alert" className="text-destructive text-sm">
+            {firstRuntimeBlockReason}
+          </p>
         ) : null}
         <dl className="grid gap-2 text-sm">
           <div>

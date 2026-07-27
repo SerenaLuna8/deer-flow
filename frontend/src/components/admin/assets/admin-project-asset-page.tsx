@@ -14,6 +14,7 @@ import {
 } from "@/components/admin/assets/admin-asset-dialogs";
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
+import { settleMcpApproval } from "@/components/projects/assets/mcp-approval-dialog";
 import {
   ProjectAssetCatalogView,
   ProjectAssetHistoryView,
@@ -137,6 +138,7 @@ function AdminProjectAssetHistory({
       approvalCredentials={credentialData?.project_items ?? []}
       approvalCredentialsLoading={credentialCatalog.isLoading}
       approvalCredentialsError={credentialCatalog.error}
+      approvalError={approve.error}
       onRetryApprovalCredentials={() => void credentialCatalog.refetch()}
       isLoading={history.isLoading}
       error={history.error}
@@ -166,13 +168,16 @@ function AdminProjectAssetHistory({
         })
       }
       onApprove={(version: McpVersion, credentialVersions) =>
-        approve.mutate({
-          assetId: item.id,
-          versionId: version.id,
-          input: {
-            credential_versions: credentialVersions,
-            expected_asset_version: item.version,
-          },
+        settleMcpApproval(async () => {
+          await approve.mutateAsync({
+            assetId: item.id,
+            versionId: version.id,
+            input: {
+              credential_versions: credentialVersions,
+              expected_asset_version: item.version,
+            },
+          });
+          return true;
         })
       }
     />
@@ -385,6 +390,7 @@ function AdminProjectCredentialHistory({
       ) : (
         <AssetVersionHistory
           kind="credentials"
+          scope="project"
           versions={history.data?.data ?? []}
         />
       )}

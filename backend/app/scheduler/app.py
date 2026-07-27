@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -22,6 +24,8 @@ from app.reliability.owner_refs import AuditHmacKeyring
 from app.scheduler.service import AutomationSchedulerService
 from app.shared_assets.model_refs import ConfiguredModelRefResolver
 from deerflow.config import get_app_config
+from deerflow.config.mcp_security_config import McpSecurityConfig
+from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
 from deerflow.persistence import (
     close_engine,
     get_engine,
@@ -30,6 +34,13 @@ from deerflow.persistence import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SchedulerConfigurationUnavailable(RuntimeError):
+    """Stable, secret-free startup failure for an unusable Scheduler config."""
+
+    def __init__(self) -> None:
+        super().__init__("Scheduler configuration is unavailable")
 
 
 @dataclass(slots=True)
@@ -86,7 +97,22 @@ async def run_scheduler(
     *,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    config = await asyncio.to_thread(get_app_config)
+    try:
+        config = await asyncio.to_thread(get_app_config)
+        raw_mcp_security = getattr(config, "mcp_security", None)
+        if isinstance(raw_mcp_security, McpSecurityConfig):
+            mcp_security = raw_mcp_security
+        elif isinstance(raw_mcp_security, Mapping):
+            mcp_security = McpSecurityConfig.model_validate(
+                raw_mcp_security,
+            )
+        else:
+            mcp_security = McpSecurityConfig()
+        mcp_endpoint_policy = ExactMcpEndpointPolicy(
+            frozenset(mcp_security.project_remote_allowed_endpoints),
+        )
+    except Exception:
+        raise SchedulerConfigurationUnavailable() from None
     if not config.scheduler.enabled:
         return
     await init_engine(config.database)
@@ -124,6 +150,7 @@ async def run_scheduler(
                 session_factory,
                 max_concurrent_runs=config.scheduler.max_concurrent_runs,
                 model_ref_resolver=ConfiguredModelRefResolver(config),
+                endpoint_policy=mcp_endpoint_policy,
                 quota=quota_enforcer,
                 audit=audit_sink,
             ),
@@ -153,6 +180,9 @@ def main() -> None:
             pass
     try:
         loop.run_until_complete(run_scheduler(stop_event=stop_event))
+    except SchedulerConfigurationUnavailable as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1) from None
     finally:
         loop.close()
 

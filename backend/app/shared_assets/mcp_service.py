@@ -32,6 +32,10 @@ from app.shared_assets.errors import (
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.mcp_repository import GrantState, McpRepository, McpVersionRecord
 from app.shared_assets.models import AssetScope, WorkflowStatus
+from deerflow.mcp_definition_policy import (
+    McpEndpointPolicy,
+    validate_project_mcp_definition,
+)
 from deerflow.persistence.shared_assets import (
     CredentialVersionRow,
     McpCredentialSlotRow,
@@ -187,9 +191,12 @@ class McpService:
         self,
         session_factory: Callable[[], AsyncSession],
         governance_sink: SharedAssetGovernanceEventSink | None = None,
+        *,
+        endpoint_policy: McpEndpointPolicy | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._governance_sink = governance_sink or SharedAssetGovernanceEventSink()
+        self._endpoint_policy = endpoint_policy
 
     async def create_asset(self, actor: _Actor, command: CreateMcpServer) -> McpAssetView:
         command = self._validate_create(actor, command)
@@ -226,7 +233,11 @@ class McpService:
         *,
         expected_asset_version: int,
     ) -> McpVersionView:
-        definition = self._validate_definition(actor, definition)
+        definition = self._validate_definition(
+            actor,
+            definition,
+            endpoint_policy=self._endpoint_policy,
+        )
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: McpRepository) -> McpVersionView:
@@ -297,6 +308,7 @@ class McpService:
             record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
             if asset.status != "active" or record.row.workflow_status != WorkflowStatus.DRAFT.value or not record.slots:
                 raise AssetConflict(actor.request_id)
+            self._validate_transition_definition(actor, record)
             record.row.workflow_status = WorkflowStatus.PENDING_APPROVAL.value
             record.row.submitted_at = datetime.now(UTC)
             asset.version += 1
@@ -340,6 +352,7 @@ class McpService:
             expected_status = {WorkflowStatus.DRAFT.value, WorkflowStatus.PENDING_APPROVAL.value} if isinstance(actor, SystemAssetGovernanceContext) else {WorkflowStatus.PENDING_APPROVAL.value}
             if record.row.workflow_status not in expected_status:
                 raise AssetConflict(actor.request_id)
+            self._validate_transition_definition(actor, record)
             slots_by_name = {slot.name: slot for slot in record.slots}
             if set(credential_versions).difference(slots_by_name) or any(slot.required and slot.name not in credential_versions for slot in record.slots):
                 raise AssetValidationFailed(actor.request_id)
@@ -475,8 +488,7 @@ class McpService:
             record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
             if asset.status != "active" or record.row.workflow_status != WorkflowStatus.DRAFT.value or record.slots:
                 raise AssetConflict(actor.request_id)
-            if self._checksum(self._definition_from_record(record)) != record.row.payload_checksum:
-                raise AssetValidationFailed(actor.request_id)
+            self._validate_transition_definition(actor, record)
             record.row.workflow_status = WorkflowStatus.PUBLISHED.value
             asset.current_published_version_id = record.row.id
             asset.version += 1
@@ -769,7 +781,13 @@ class McpService:
         return CreateMcpServer(slug, display_name)
 
     @classmethod
-    def _validate_definition(cls, actor: _Actor, definition: McpDefinition) -> McpDefinition:
+    def _validate_definition(
+        cls,
+        actor: _Actor,
+        definition: McpDefinition,
+        *,
+        endpoint_policy: McpEndpointPolicy | None = None,
+    ) -> McpDefinition:
         request_id = getattr(actor, "request_id", "unknown")
         try:
             if not isinstance(definition, McpDefinition):
@@ -805,6 +823,16 @@ class McpService:
                     raise ValueError
             elif not url or command is not None or args:
                 raise ValueError
+            if isinstance(actor, ProjectContext) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None):
+                url = validate_project_mcp_definition(
+                    transport=transport,
+                    url=url,
+                    env=env,
+                    headers=headers,
+                    oauth=oauth,
+                    credential_slot_schemas=tuple(slot.payload_schema for slot in slots),
+                    endpoint_policy=endpoint_policy,
+                )
             persistent_strings = (
                 description,
                 command,
@@ -994,6 +1022,26 @@ class McpService:
         }
         value = json.dumps(canonical, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
         return hashlib.sha256(value).hexdigest()
+
+    def _validate_transition_definition(
+        self,
+        actor: _Actor,
+        record: McpVersionRecord,
+    ) -> McpDefinition:
+        """Revalidate locked historical data at every publish boundary."""
+
+        try:
+            definition = self._definition_from_record(record)
+        except (AttributeError, RecursionError, TypeError, ValueError):
+            raise AssetValidationFailed(actor.request_id) from None
+        definition = self._validate_definition(
+            actor,
+            definition,
+            endpoint_policy=self._endpoint_policy,
+        )
+        if self._checksum(definition) != record.row.payload_checksum:
+            raise AssetValidationFailed(actor.request_id)
+        return definition
 
     @staticmethod
     def _definition_from_record(record: McpVersionRecord) -> McpDefinition:

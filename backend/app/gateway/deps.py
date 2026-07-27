@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -79,14 +79,15 @@ def get_config() -> AppConfig:
 
     Any failure to materialise the config (missing file, permission denied,
     YAML parse error, validation error) is reported as 503 — semantically
-    "the gateway cannot serve requests without a usable configuration" — and
-    logged with the original exception so operators have something to debug.
+    "the gateway cannot serve requests without a usable configuration".
+    The exception is deliberately not rendered because validation errors can
+    include secret-bearing input values.
     """
     try:
         return get_app_config()
-    except Exception as exc:  # noqa: BLE001 - request boundary: log and degrade gracefully
-        logger.exception("Failed to load AppConfig at request time")
-        raise HTTPException(status_code=503, detail="Configuration not available") from exc
+    except Exception:  # noqa: BLE001 - request boundary: fail closed without rendering config input
+        logger.error("Failed to load AppConfig at request time")
+        raise HTTPException(status_code=503, detail="Configuration not available") from None
 
 
 async def project_session() -> AsyncIterator[AsyncSession]:
@@ -194,9 +195,20 @@ async def gateway_platform_runtime(
         from app.private_work.run_service import PrivateRunService
         from app.private_work.thread_service import PrivateThreadService
         from app.shared_assets.model_refs import ConfiguredModelRefResolver
+        from deerflow.config.mcp_security_config import McpSecurityConfig
+        from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
 
         model_ref_resolver = ConfiguredModelRefResolver(config)
+        raw_mcp_security = getattr(config, "mcp_security", None)
+        if isinstance(raw_mcp_security, McpSecurityConfig):
+            mcp_security = raw_mcp_security
+        elif isinstance(raw_mcp_security, Mapping):
+            mcp_security = McpSecurityConfig.model_validate(raw_mcp_security)
+        else:
+            mcp_security = McpSecurityConfig()
+        mcp_endpoint_policy = ExactMcpEndpointPolicy(frozenset(mcp_security.project_remote_allowed_endpoints))
+        app.state.mcp_endpoint_policy = mcp_endpoint_policy
 
         app.state.private_file_service = PrivateFileService(
             sf,
@@ -211,6 +223,7 @@ async def gateway_platform_runtime(
         app.state.private_run_admission_service = PrivateRunAdmissionService(
             sf,
             model_ref_resolver=model_ref_resolver,
+            endpoint_policy=mcp_endpoint_policy,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
         )
@@ -257,6 +270,7 @@ async def gateway_platform_runtime(
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
             model_ref_resolver=model_ref_resolver,
+            endpoint_policy=mcp_endpoint_policy,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
         )
@@ -272,6 +286,7 @@ async def gateway_platform_runtime(
             app.state.project_scoped_checkpointer,
             app.state.private_thread_service,
             app.state.private_run_event_store,
+            endpoint_policy=mcp_endpoint_policy,
         )
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
