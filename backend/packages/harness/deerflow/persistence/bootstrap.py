@@ -21,11 +21,12 @@ from deerflow.persistence.final_schema_contract import (
     LANGGRAPH_TABLES,
     inventory_is_m7_allowed,
     inventory_user_schema_objects,
+    verify_m7_baseline_catalog,
     verify_m7_catalog,
 )
 
 BASELINE_SCHEMA_REVISION = "0001_project_saas_baseline"
-CURRENT_SCHEMA_REVISION = BASELINE_SCHEMA_REVISION
+CURRENT_SCHEMA_REVISION = "0002_skill_design_builder"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
@@ -122,6 +123,10 @@ async def classify_database(
     if revision == CURRENT_SCHEMA_REVISION:
         if await verify_m7_catalog(connection):
             return "current"
+        raise M7RecreateRequired()
+    if revision == BASELINE_SCHEMA_REVISION:
+        if await verify_m7_baseline_catalog(connection):
+            return "upgradeable"
         raise M7RecreateRequired()
     raise M7RecreateRequired()
 

@@ -8,7 +8,7 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
-CURRENT_REVISION = "0001_project_saas_baseline"
+CURRENT_REVISION = "0002_skill_design_builder"
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:
@@ -114,6 +114,44 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
     assert result.schema_state == "recreate_required"
     assert result.revision_matches is False
     assert result.missing_tables == ("projects",)
+    assert result.healthy is False
+
+
+@pytest.mark.asyncio
+async def test_check_reports_exact_frozen_baseline_as_migration_required(
+    monkeypatch,
+) -> None:
+    missing = {
+        "skill_design_draft_files",
+        "skill_design_operations",
+        "skill_design_sessions",
+    }
+    connection = _connection(
+        revision="0001_project_saas_baseline",
+        present_tables=set(check_postgres.REQUIRED_TABLES) - missing,
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "create_async_engine",
+        lambda *_args, **_kwargs: _Engine(connection),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "classify_database",
+        AsyncMock(return_value="upgradeable"),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "get_head_revision",
+        lambda: CURRENT_REVISION,
+    )
+
+    result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
+
+    assert result.current_revision == "0001_project_saas_baseline"
+    assert result.head_revision == CURRENT_REVISION
+    assert result.schema_state == "migration_required"
+    assert set(result.missing_tables) == missing
     assert result.healthy is False
 
 

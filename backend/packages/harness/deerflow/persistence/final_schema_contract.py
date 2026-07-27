@@ -12,7 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.base import Base
-from deerflow.persistence.final_schema_digest import M7_CANONICAL_SCHEMA_DIGEST
+from deerflow.persistence.final_schema_digest import (
+    M7_BASELINE_CANONICAL_SCHEMA_DIGEST,
+    M7_CANONICAL_SCHEMA_DIGEST,
+)
 
 FINAL_APP_TABLES = frozenset(Base.metadata.tables)
 LANGGRAPH_TABLES = frozenset(
@@ -72,8 +75,9 @@ class CatalogInvariant:
     digest: str
 
 
-# The consolidated 0001 baseline is the one current application schema.
-FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+# The immutable 0001 catalog is retained only as the exact, upgradeable
+# ancestor. Never rewrite these values when adding a later revision.
+FROZEN_M7_BASELINE_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
         count=53,
         digest="9050577c4197d4610159fb435e432287f54711b5c1d62082b67c26777fb3313f",
@@ -100,6 +104,35 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
 }
 
+# The current catalog is generated from the complete forward-only migration
+# chain. Values are filled from a disposable PostgreSQL installation.
+FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+    "relations": CatalogInvariant(
+        count=56,
+        digest="5e75a42fba6261dc4bc28a6a6545791a92de334412fd35bfd96ee87e92441636",
+    ),
+    "columns": CatalogInvariant(
+        count=686,
+        digest="18a4030ff6e9d10ff0658e823acd7a17a4e9e811a1dc14e4a8a15d66e88ddd05",
+    ),
+    "constraints": CatalogInvariant(
+        count=451,
+        digest="5f71db896d13c549613a039074aec82bfe311285f7541eaa766496d559cf4d21",
+    ),
+    "indexes": CatalogInvariant(
+        count=181,
+        digest="e8e2f3d0d574d63dfff6d44aee48138ecb18ab43c9f5c160a327f6e18cfddbd4",
+    ),
+    "functions": CatalogInvariant(
+        count=10,
+        digest="0fbb322b08fe552383069830ffbf733692eb6a76a71f1340cbbb43ad2328d8d7",
+    ),
+    "triggers": CatalogInvariant(
+        count=69,
+        digest="c96677ec6ee059f25522962ee708b2751d865edce3926a5eb9d75ad0fc0d3c95",
+    ),
+}
+
 
 def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
     payload = {category: {"count": invariant.count, "digest": invariant.digest} for category, invariant in sorted(signature.items())}
@@ -112,6 +145,11 @@ def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
         ).encode("utf-8")
     ).hexdigest()
 
+
+if M7_BASELINE_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(  # pragma: no cover - import-time release invariant
+    FROZEN_M7_BASELINE_CATALOG_SIGNATURE
+):
+    raise RuntimeError("M7 baseline schema digest does not match its frozen catalog signature")
 
 if M7_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(FINAL_M7_CATALOG_SIGNATURE):  # pragma: no cover - import-time release invariant
     raise RuntimeError("M7 canonical schema digest does not match its catalog signature")
@@ -238,10 +276,17 @@ async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, Ca
 
 
 async def verify_m7_catalog(connection: AsyncConnection) -> bool:
-    """Return whether all current baseline catalog invariants match exactly."""
+    """Return whether all current catalog invariants match exactly."""
 
     signature = await read_m7_catalog_signature(connection)
     return signature == FINAL_M7_CATALOG_SIGNATURE
+
+
+async def verify_m7_baseline_catalog(connection: AsyncConnection) -> bool:
+    """Return whether the database is the exact frozen 0001 ancestor."""
+
+    signature = await read_m7_catalog_signature(connection)
+    return signature == FROZEN_M7_BASELINE_CATALOG_SIGNATURE
 
 
 _USER_SCHEMA_INVENTORY_SQL = """
@@ -481,6 +526,8 @@ __all__ = [
     "FINAL_APP_TABLES",
     "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
+    "FROZEN_M7_BASELINE_CATALOG_SIGNATURE",
+    "M7_BASELINE_CANONICAL_SCHEMA_DIGEST",
     "M7_CANONICAL_SCHEMA_DIGEST",
     "LANGGRAPH_INDEXES",
     "LANGGRAPH_ROOT_OBJECTS",
@@ -490,5 +537,6 @@ __all__ = [
     "inventory_is_m7_allowed",
     "inventory_user_schema_objects",
     "read_m7_catalog_signature",
+    "verify_m7_baseline_catalog",
     "verify_m7_catalog",
 ]

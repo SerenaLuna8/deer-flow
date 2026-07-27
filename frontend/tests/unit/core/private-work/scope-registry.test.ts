@@ -11,6 +11,7 @@ import {
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
 import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
+import { skillBuilderRootKey } from "@/core/skill-builder/query-keys";
 
 const A_P1 = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -147,6 +148,10 @@ describe("project private-work scope registry", () => {
       });
     const queryClient = new QueryClient();
     queryClient.setQueryData([...privateWorkRoot(A_P1), "threads"], "old");
+    queryClient.setQueryData(
+      [...skillBuilderRootKey(A_P1.accountId, A_P1.projectId), "sessions"],
+      "old",
+    );
     queryClient.setQueryData([...automationRoot(A_P1), "list", 50, 0], "old");
     queryClient.setQueryData(
       [...projectSharedAssetRoot(A_P1), "skills"],
@@ -164,12 +169,19 @@ describe("project private-work scope registry", () => {
       "cancel",
       "cancel",
       "cancel",
+      "cancel",
       "dispose",
     ]);
     expect(dispose).toHaveBeenCalledWith(A_P1);
     expect(registry.has(A_P1)).toBe(false);
     expect(
       queryClient.getQueryData([...privateWorkRoot(A_P1), "threads"]),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryData([
+        ...skillBuilderRootKey(A_P1.accountId, A_P1.projectId),
+        "sessions",
+      ]),
     ).toBeUndefined();
     expect(
       queryClient.getQueryData([...automationRoot(A_P1), "list", 50, 0]),
@@ -253,6 +265,66 @@ describe("project private-work scope registry", () => {
     });
     const mutation = queryClient.getMutationCache().build(queryClient, {
       mutationKey: [...root, "mutation", "submit-turn"],
+      mutationFn: () =>
+        access.runAbortable!(async (signal) => {
+          signal.addEventListener("abort", () => {
+            mutationAborted = true;
+          });
+          mutationStarted();
+          return deferredMutation;
+        }),
+    });
+    const pendingMutation = mutation.execute(undefined);
+    await Promise.all([queryReady, mutationReady]);
+
+    await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
+
+    expect(queryAborted).toBe(true);
+    expect(mutationAborted).toBe(true);
+    expect(queryClient.getQueryData([...root, "sessions"])).toBeUndefined();
+    expect(
+      queryClient.getMutationCache().findAll({ mutationKey: root }),
+    ).toHaveLength(0);
+
+    resolveMutation("late-mutation");
+    await Promise.all([pendingQuery, pendingMutation]);
+  });
+
+  test("aborts and removes Skill Builder queries and mutations on scope exit", async () => {
+    const registry = createPrivateWorkScopeRegistry();
+    const access = registry.acquire(A_P1);
+    const queryClient = new QueryClient();
+    const root = skillBuilderRootKey(A_P1.accountId, A_P1.projectId);
+    let queryStarted!: () => void;
+    const queryReady = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    let queryAborted = false;
+    const pendingQuery = queryClient
+      .fetchQuery({
+        queryKey: [...root, "sessions"],
+        queryFn: ({ signal }) =>
+          new Promise<string>((resolve) => {
+            signal.addEventListener("abort", () => {
+              queryAborted = true;
+              resolve("late-query");
+            });
+            queryStarted();
+          }),
+      })
+      .catch(() => undefined);
+
+    let mutationStarted!: () => void;
+    const mutationReady = new Promise<void>((resolve) => {
+      mutationStarted = resolve;
+    });
+    let mutationAborted = false;
+    let resolveMutation!: (value: string) => void;
+    const deferredMutation = new Promise<string>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const mutation = queryClient.getMutationCache().build(queryClient, {
+      mutationKey: [...root, "mutation", "draft-turn"],
       mutationFn: () =>
         access.runAbortable!(async (signal) => {
           signal.addEventListener("abort", () => {

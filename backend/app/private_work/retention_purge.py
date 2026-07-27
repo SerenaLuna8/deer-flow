@@ -23,6 +23,7 @@ from deerflow.persistence.private_work.model import (
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentDesignSessionRow,
+    SkillDesignSessionRow,
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
@@ -418,6 +419,17 @@ async def purge_private_scope(
         delete(AgentDesignSessionRow).where(
             AgentDesignSessionRow.project_id == project_id,
             *(() if owner_user_id is None else (AgentDesignSessionRow.owner_user_id == owner_user_id,)),
+        )
+    )
+    # Skill Builder stores the same owner-private conversation class plus
+    # temporary candidate BLOBs. Operations and files cascade with the session.
+    # Completed sessions must be removed before their created Skill/version so
+    # the retention transaction cannot be blocked by the intentional RESTRICT
+    # foreign keys.
+    await session.execute(
+        delete(SkillDesignSessionRow).where(
+            SkillDesignSessionRow.project_id == project_id,
+            *(() if owner_user_id is None else (SkillDesignSessionRow.owner_user_id == owner_user_id,)),
         )
     )
 

@@ -79,27 +79,29 @@ does not acquire the Scheduler ownership lock or start polling.
 
 ## Forward-only PostgreSQL migrations
 
-`0001_project_saas_baseline.py` is the immutable merged baseline and the single current head.
-It already contains the schema, relationships, and constraints required for controlled
+`0001_project_saas_baseline.py` is the immutable merged baseline. It already contains the schema,
+relationships, and constraints required for controlled
 project-Skill package hard deletion, case-insensitive project-local Skill name uniqueness,
 the four logical Agent documents (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md`), and
 private owner-scoped Agent Builder sessions plus idempotent operations.
 
-The first future schema change must add a new linear `0002` Alembic revision. Every subsequent
-change continues that forward-only chain; never edit, squash, restamp, or replace the frozen
-baseline or any later committed revision.
+The single current head is `0002_skill_design_builder.py`. It adds owner-private Skill Builder
+sessions, idempotent operations, durable candidate files, and exact immutable pins to the
+packaged System `skill-creator`. Every subsequent change starts at `0003` and continues that
+forward-only chain; never edit, squash, restamp, or replace the frozen baseline or a committed
+later revision.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the
-named empty target if needed, applies the single current baseline,
+named empty target if needed, applies the complete current migration chain,
 seeds the packaged system asset catalog, initializes the LangGraph checkpointer/store schema,
 and bootstraps the default project. The application role must be an ordinary non-superuser.
 
-An existing database for the current release must already match the exact baseline catalog.
-`make migrate-db` uses only `DATABASE_URL` and is reserved for future committed revisions; once
-such revisions exist, it may apply pending migrations from a verified older committed revision
-through head. It never creates the database and never seeds the catalog, initializes LangGraph,
-or bootstraps a default project. Runtime startup only performs read-only validation. An unknown
-revision, unversioned nonempty schema, or catalog drift fails closed without DDL or repair.
+An existing database for the current release must exactly match either the current `0002` catalog
+or the frozen `0001` catalog. `make migrate-db` uses only `DATABASE_URL`; while application
+processes are stopped it upgrades the exact frozen ancestor through head. It never creates the
+database and never seeds the catalog, initializes LangGraph, or bootstraps a default project.
+Runtime startup only performs read-only validation. An unknown revision, unversioned nonempty
+schema, or catalog drift fails closed without DDL or repair.
 
 `make check-db` is also read-only. It reports current/head revision, required application and
 LangGraph relations, and whether setup, migration, or operator intervention is required without
@@ -214,6 +216,16 @@ reservation and both governance events. It never publishes that template, never 
 asset without its initial version, and returns the final asset revision after both writes.
 Every later UI-authored version is a fork of the exact selected immutable version; there is no
 independent blank-version UI path.
+Conversational project Skill creation uses private owner-scoped Skill Builder sessions. Session
+creation stores only the normalized project-local name and pins the exact current published
+System `skill-creator` asset/version/checksum without requiring a project binding. Generation
+loads that immutable `SKILL.md`, calls a no-tool model, strictly validates its JSON contract,
+and permits one bounded repair attempt without echoing the invalid output. It persists only
+bounded UTF-8 candidate files plus validated clarification/messages. Candidate edits, validation, and commit
+are revision-, checksum-, and idempotency-bound. Final commit revalidates the exact draft and
+atomically creates a suspended Skill with published version 1; it never enables, binds, or adds
+the Skill to an Agent. Cancel clears candidate bytes. Hard deletion tombstones completed Builder
+references before deleting the Skill package.
 Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` entries are logical UI documents
 backed by fields on the immutable Agent version; they are not filesystem assets or a separate
 version graph. Saving them against a published Agent atomically clones and publishes the current

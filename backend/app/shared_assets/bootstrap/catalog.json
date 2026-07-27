@@ -168,7 +168,7 @@
       "version": 1,
       "payload_path": "content/public-skills/skill-creator-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "86276b27f6b71bbfa3a1f2a336710b27da2ed4210d4b68601877f0f2d203dd26"
+      "sha256": "0e57b341197334cc303297ea02397774111ba778f6bd778eb8e3d9bf04326efa"
     },
     {
       "source_key": "builtin:skill:surprise-me",

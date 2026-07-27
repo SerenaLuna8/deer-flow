@@ -3,6 +3,7 @@
 import {
   ArrowRightIcon,
   BotIcon,
+  FilePlus2Icon,
   PlugZapIcon,
   PlusIcon,
   SearchIcon,
@@ -27,6 +28,12 @@ import {
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -94,6 +101,35 @@ const BINDING_KIND: Record<MutableAssetKind, AssetKind> = {
   skills: "skill",
   "mcp-servers": "mcp",
 };
+
+export function SkillCreateMenuItems({
+  projectSlug,
+  onBlank,
+  onImport,
+}: {
+  projectSlug: string;
+  onBlank: () => void;
+  onImport: () => void;
+}) {
+  return (
+    <>
+      <DropdownMenuItem asChild>
+        <Link href={`/projects/${encodeURIComponent(projectSlug)}/skills/new`}>
+          <SparklesIcon aria-hidden className="size-4" />
+          AI 对话创建
+        </Link>
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={onBlank}>
+        <FilePlus2Icon aria-hidden className="size-4" />
+        从空白创建
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={onImport}>
+        <UploadIcon aria-hidden className="size-4" />
+        上传压缩包
+      </DropdownMenuItem>
+    </>
+  );
+}
 
 function assetAvailability(item: ProjectAssetItem): string {
   if (item.scope === "system") {
@@ -962,27 +998,34 @@ function ProjectAssetCatalog({
             {canCreate && sourceFilter === "project" ? (
               <div className="flex shrink-0 items-center gap-2">
                 {kind === "skills" ? (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button type="button" size="sm">
+                        <PlusIcon aria-hidden className="size-4" />
+                        新建 Skill
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <SkillCreateMenuItems
+                        projectSlug={project.slug}
+                        onBlank={() => onCreateOpenChange(true)}
+                        onImport={() => {
+                          importSkill.reset();
+                          setImportOpen(true);
+                        }}
+                      />
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                ) : (
                   <Button
                     type="button"
                     size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      importSkill.reset();
-                      setImportOpen(true);
-                    }}
+                    onClick={() => onCreateOpenChange(true)}
                   >
-                    <UploadIcon aria-hidden className="size-4" />
-                    上传压缩包
+                    <PlusIcon aria-hidden className="size-4" />
+                    新建{KIND_META[kind].singular}
                   </Button>
-                ) : null}
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => onCreateOpenChange(true)}
-                >
-                  <PlusIcon aria-hidden className="size-4" />
-                  新建{KIND_META[kind].singular}
-                </Button>
+                )}
               </div>
             ) : null}
           </div>

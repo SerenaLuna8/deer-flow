@@ -15,7 +15,7 @@ from deerflow.persistence.final_schema_contract import (
 )
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-CURRENT_REVISION = BASELINE_REVISION
+CURRENT_REVISION = "0002_skill_design_builder"
 
 
 def _exact_app_only_objects() -> frozenset[str]:
@@ -54,6 +54,50 @@ async def test_classify_database_accepts_exact_current_schema(monkeypatch) -> No
     monkeypatch.setattr(bootstrap, "verify_m7_catalog", AsyncMock(return_value=True))
 
     assert await bootstrap.classify_database(connection) == "current"
+
+
+@pytest.mark.asyncio
+async def test_classify_database_accepts_only_exact_baseline_as_upgradeable(
+    monkeypatch,
+) -> None:
+    connection = AsyncMock()
+    connection.scalar.return_value = BASELINE_REVISION
+    monkeypatch.setattr(
+        bootstrap,
+        "inventory_user_schema_objects",
+        AsyncMock(return_value=_exact_app_only_objects()),
+    )
+    baseline_catalog = AsyncMock(return_value=True)
+    current_catalog = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        bootstrap,
+        "verify_m7_baseline_catalog",
+        baseline_catalog,
+    )
+    monkeypatch.setattr(bootstrap, "verify_m7_catalog", current_catalog)
+
+    assert await bootstrap.classify_database(connection) == "upgradeable"
+    baseline_catalog.assert_awaited_once_with(connection)
+    current_catalog.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_classify_database_rejects_drifted_baseline(monkeypatch) -> None:
+    connection = AsyncMock()
+    connection.scalar.return_value = BASELINE_REVISION
+    monkeypatch.setattr(
+        bootstrap,
+        "inventory_user_schema_objects",
+        AsyncMock(return_value=_exact_app_only_objects()),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "verify_m7_baseline_catalog",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(bootstrap.M7RecreateRequired):
+        await bootstrap.classify_database(connection)
 
 
 @pytest.mark.asyncio

@@ -27,17 +27,32 @@ from app.shared_assets.agent_design_service import (
     AgentDesignService,
     CreateAgentDesignSession,
 )
-from app.shared_assets.errors import AssetConflict
+from app.shared_assets.bootstrap import bootstrap_system_assets
+from app.shared_assets.errors import AssetConflict, AssetNotFound
+from app.shared_assets.skill_design_generation import (
+    CandidateResult,
+    SkillDesignGeneratedFile,
+    SkillDesignGenerationRequest,
+)
+from app.shared_assets.skill_design_service import (
+    CancelSkillDesignSession,
+    CreateSkillDesignSession,
+    SkillDesignMessageTurn,
+    SkillDesignService,
+    SkillDesignStatus,
+    SubmitSkillDesignTurn,
+)
 from app.shared_assets.skill_service import CreateSkill, SkillService
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.auth_sessions import AuthSessionRepository, AuthSessionRow
 from deerflow.persistence.base import Base
+from deerflow.persistence.shared_assets import SkillDesignDraftFileRow, SkillDesignOperationRow
 from deerflow.persistence.user.model import UserRow
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
 BASELINE_REVISION = "0001_project_saas_baseline"
-CURRENT_REVISION = BASELINE_REVISION
+CURRENT_REVISION = "0002_skill_design_builder"
 FROZEN_BASELINE_SHA256 = "60cc71df98cbd345a338e54820dde05861e061cb76546fec1279060a04c108a6"
 
 LEGACY_RELATIONS = {
@@ -72,6 +87,9 @@ REQUIRED_TRIGGERS = {
     "trg_project_usage_ledger_append_only",
     "trg_run_events_stream_terminal",
     "trg_scheduled_tasks_updated_at",
+    "trg_skill_design_draft_files_updated_at",
+    "trg_skill_design_operations_updated_at",
+    "trg_skill_design_sessions_updated_at",
 }
 EXPECTED_FUNCTION_FRAGMENTS = {
     "bump_asset_catalog_generation": "generation = asset_catalog_state.generation + 1",
@@ -101,6 +119,21 @@ EXPECTED_TRIGGER_IDENTITIES = {
     "trg_project_usage_ledger_append_only": ("project_usage_ledger", "reject_m7_append_only_mutation", 27),
     "trg_run_events_stream_terminal": ("run_events", "enforce_stream_terminal_invariant", 7),
     "trg_scheduled_tasks_updated_at": ("scheduled_tasks", "set_m7_updated_at", 19),
+    "trg_skill_design_draft_files_updated_at": (
+        "skill_design_draft_files",
+        "set_m7_updated_at",
+        19,
+    ),
+    "trg_skill_design_operations_updated_at": (
+        "skill_design_operations",
+        "set_m7_updated_at",
+        19,
+    ),
+    "trg_skill_design_sessions_updated_at": (
+        "skill_design_sessions",
+        "set_m7_updated_at",
+        19,
+    ),
 }
 EXPECTED_APP_SEQUENCE_OWNERS = {
     ("run_events_id_seq", "run_events"),
@@ -134,6 +167,47 @@ def _v1_skill_checksum(path: str, content: bytes) -> str:
         sort_keys=True,
     ).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _project_context(private_context) -> ProjectContext:
+    return ProjectContext(
+        user_id=private_context.user_id,
+        project_id=private_context.project_id,
+        membership_id=private_context.membership_id,
+        role=private_context.role,
+        capabilities=private_context.capabilities,
+        membership_version=private_context.membership_version,
+        request_id=private_context.request_id,
+    )
+
+
+class _PostgresSkillDesignGenerator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(
+        self,
+        request: SkillDesignGenerationRequest,
+        *,
+        skill_creator_content: str,
+    ) -> CandidateResult:
+        assert "Skill Creator" in skill_creator_content
+        self.calls += 1
+        return CandidateResult(
+            files=(
+                SkillDesignGeneratedFile(
+                    path="SKILL.md",
+                    media_type="text/markdown",
+                    content=(f"---\nname: {request.skill_slug}\ndescription: Create concise release notes from merged pull requests.\n---\n\n# Workflow\n\nGroup merged changes by label and summarize their user impact.\n"),
+                ),
+                SkillDesignGeneratedFile(
+                    path="scripts/format_release_notes.py",
+                    media_type="text/x-python",
+                    content=('def format_release_notes(changes: list[str]) -> str:\n    return "\\n".join(changes)\n'),
+                ),
+            ),
+            summary="候选 Skill 已生成。",
+        )
 
 
 def _versions_dir() -> Path:
@@ -326,9 +400,12 @@ async def _native_relational_catalog(
     return snapshot
 
 
-def test_migration_history_has_one_consolidated_0001_head() -> None:
+def test_migration_history_preserves_frozen_0001_and_has_one_linear_head() -> None:
     revision_files = sorted(path for path in _versions_dir().glob("*.py") if path.name != "__init__.py")
-    assert [path.name for path in revision_files] == ["0001_project_saas_baseline.py"]
+    assert [path.name for path in revision_files] == [
+        "0001_project_saas_baseline.py",
+        "0002_skill_design_builder.py",
+    ]
     assert hashlib.sha256(revision_files[0].read_bytes()).hexdigest() == FROZEN_BASELINE_SHA256
 
     baseline_spec = importlib.util.spec_from_file_location("m7_final_baseline", revision_files[0])
@@ -340,6 +417,18 @@ def test_migration_history_has_one_consolidated_0001_head() -> None:
     assert bootstrap_module._get_head_revision() == CURRENT_REVISION
     with pytest.raises(RuntimeError, match="M7 baseline downgrade is unsupported"):
         baseline_module.downgrade()
+
+    current_spec = importlib.util.spec_from_file_location(
+        "skill_design_builder",
+        revision_files[1],
+    )
+    assert current_spec is not None and current_spec.loader is not None
+    current_module = importlib.util.module_from_spec(current_spec)
+    current_spec.loader.exec_module(current_module)
+    assert current_module.revision == CURRENT_REVISION
+    assert current_module.down_revision == BASELINE_REVISION
+    with pytest.raises(RuntimeError, match="Skill Builder downgrade is unsupported"):
+        current_module.downgrade()
 
 
 def test_final_metadata_and_contract_have_no_staged_relations() -> None:
@@ -362,6 +451,9 @@ async def test_empty_database_installs_current_forward_head(
             assert {
                 "agent_design_operations",
                 "agent_design_sessions",
+                "skill_design_draft_files",
+                "skill_design_operations",
+                "skill_design_sessions",
             } <= relations
             assert not (relations & LEGACY_RELATIONS)
             agent_version_columns = set(
@@ -477,6 +569,148 @@ async def test_agent_builder_session_persists_optional_json_as_sql_null(
         assert stored == (True, True)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_skill_builder_is_owner_scoped_and_cancel_physically_clears_candidate_files(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    owner = _project_context(seed.owner_a)
+    same_project_other_owner = _project_context(seed.owner_b)
+    same_owner_other_project = _project_context(seed.project_b_owner_a)
+    generator = _PostgresSkillDesignGenerator()
+    service = SkillDesignService(seed.factory, generator=generator)
+    try:
+        await bootstrap_system_assets(seed.factory)
+        created = await service.create(
+            owner,
+            CreateSkillDesignSession(
+                slug="postgres-release-notes",
+                display_name="PostgreSQL Release Notes",
+                idempotency_key="create-postgres-release-notes",
+            ),
+        )
+        ready = await service.submit_turn(
+            owner,
+            created.id,
+            SubmitSkillDesignTurn(
+                input=SkillDesignMessageTurn(
+                    kind="message",
+                    message="请按标签整理已合并的拉取请求并生成简洁的发布说明。",
+                ),
+                expected_revision=created.revision,
+                idempotency_key="generate-postgres-release-notes",
+            ),
+        )
+
+        assert ready.status is SkillDesignStatus.DRAFT_READY
+        assert ready.draft_checksum is not None
+        assert [file.path for file in ready.files] == [
+            "SKILL.md",
+            "scripts/format_release_notes.py",
+        ]
+        assert generator.calls == 1
+        with pytest.raises(AssetNotFound):
+            await service.get(same_project_other_owner, created.id)
+        with pytest.raises(AssetNotFound):
+            await service.get(same_owner_other_project, created.id)
+
+        async with seed.factory() as session:
+            stored_files = tuple(
+                (
+                    await session.execute(
+                        select(SkillDesignDraftFileRow)
+                        .where(
+                            SkillDesignDraftFileRow.project_id == owner.project_id,
+                            SkillDesignDraftFileRow.owner_user_id == str(owner.user_id),
+                            SkillDesignDraftFileRow.session_id == created.id,
+                        )
+                        .order_by(SkillDesignDraftFileRow.path)
+                    )
+                ).scalars()
+            )
+            turn_operations = tuple(
+                (
+                    await session.execute(
+                        select(SkillDesignOperationRow).where(
+                            SkillDesignOperationRow.project_id == owner.project_id,
+                            SkillDesignOperationRow.owner_user_id == str(owner.user_id),
+                            SkillDesignOperationRow.session_id == created.id,
+                        )
+                    )
+                ).scalars()
+            )
+        assert [row.path for row in stored_files] == [
+            "SKILL.md",
+            "scripts/format_release_notes.py",
+        ]
+        assert {row.operation_kind for row in turn_operations} == {"turn"}
+        assert {row.status for row in turn_operations} == {"completed"}
+
+        cancel_command = CancelSkillDesignSession(
+            expected_revision=ready.revision,
+            idempotency_key="cancel-postgres-release-notes",
+        )
+        cancelled = await service.cancel(owner, created.id, cancel_command)
+        repeated = await service.cancel(owner, created.id, cancel_command)
+
+        assert repeated == cancelled
+        assert cancelled.status is SkillDesignStatus.CANCELLED
+        assert cancelled.files == ()
+        assert cancelled.draft_checksum is None
+        assert cancelled.validation is None
+        async with seed.factory() as session:
+            assert (
+                await session.scalar(
+                    select(SkillDesignDraftFileRow).where(
+                        SkillDesignDraftFileRow.session_id == created.id,
+                    )
+                )
+                is None
+            )
+            stored_session = (
+                await session.execute(
+                    text(
+                        """SELECT project_id,owner_user_id,status,draft_checksum,
+                                  validation_json,active_clarification_json,
+                                  error_code,error_message
+                           FROM skill_design_sessions
+                           WHERE id=:session_id"""
+                    ),
+                    {"session_id": created.id},
+                )
+            ).one()
+            operations = tuple(
+                (
+                    await session.execute(
+                        select(SkillDesignOperationRow)
+                        .where(
+                            SkillDesignOperationRow.project_id == owner.project_id,
+                            SkillDesignOperationRow.owner_user_id == str(owner.user_id),
+                            SkillDesignOperationRow.session_id == created.id,
+                        )
+                        .order_by(SkillDesignOperationRow.operation_kind)
+                    )
+                ).scalars()
+            )
+        assert stored_session == (
+            owner.project_id,
+            str(owner.user_id),
+            "cancelled",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        assert [(row.operation_kind, row.status) for row in operations] == [
+            ("cancel", "completed"),
+            ("turn", "completed"),
+        ]
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.postgres

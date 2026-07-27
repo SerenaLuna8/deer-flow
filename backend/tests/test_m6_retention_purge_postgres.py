@@ -23,11 +23,14 @@ from app.private_work.retention_purge import (
     RetentionNotEligible,
     RetentionPurger,
     RetentionPurgeRepository,
+    purge_private_scope,
+    purge_project_shared_scope,
 )
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
+from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.credential_service import CreateCredential
 from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.skill_service import CreateSkill, SkillService
@@ -39,6 +42,9 @@ from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
+    SkillDesignDraftFileRow,
+    SkillDesignOperationRow,
+    SkillDesignSessionRow,
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
@@ -159,34 +165,180 @@ async def test_project_skill_storage_release_groups_exact_version_bytes() -> Non
 
 
 @pytest.mark.anyio
-async def test_private_purge_deletes_exact_owner_agent_design_sessions_first() -> None:
+async def test_private_purge_deletes_exact_owner_builder_sessions_first() -> None:
     from app.private_work.retention_purge import purge_private_scope
 
     project_id = uuid.uuid4()
     owner_user_id = str(uuid.uuid4())
     captured = []
 
-    class StopAfterFirstDelete(RuntimeError):
+    class StopAfterBuilderDeletes(RuntimeError):
         pass
 
     class Session:
         async def execute(self, statement):
             captured.append(statement)
-            raise StopAfterFirstDelete
+            if len(captured) == 2:
+                raise StopAfterBuilderDeletes
 
-    with pytest.raises(StopAfterFirstDelete):
+    with pytest.raises(StopAfterBuilderDeletes):
         await purge_private_scope(
             Session(),  # type: ignore[arg-type]
             project_id=project_id,
             owner_user_id=owner_user_id,
         )
 
-    assert len(captured) == 1
-    statement = captured[0]
-    assert statement.table.name == "agent_design_sessions"
-    sql = str(statement)
-    assert "agent_design_sessions.project_id" in sql
-    assert "agent_design_sessions.owner_user_id" in sql
+    assert len(captured) == 2
+    agent_statement, skill_statement = captured
+    assert agent_statement.table.name == "agent_design_sessions"
+    assert skill_statement.table.name == "skill_design_sessions"
+    agent_sql = str(agent_statement)
+    skill_sql = str(skill_statement)
+    assert "agent_design_sessions.project_id" in agent_sql
+    assert "agent_design_sessions.owner_user_id" in agent_sql
+    assert "skill_design_sessions.project_id" in skill_sql
+    assert "skill_design_sessions.owner_user_id" in skill_sql
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_project_retention_removes_completed_skill_builder_before_created_skill(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M3Scenario.create(migrated_postgres_database_url)
+    try:
+        await bootstrap_system_assets(scenario.session_factory)
+        skills = SkillService(
+            scenario.session_factory,
+            quota=_quota(scenario.session_factory),
+        )
+        project_skill = await skills.create_asset(
+            scenario.project_admin,
+            CreateSkill(
+                "builder-retention-skill",
+                "Builder Retention Skill",
+            ),
+        )
+        version = await skills.create_version_from_archive(
+            scenario.project_admin,
+            project_skill.id,
+            (
+                SkillArchiveFile(
+                    "SKILL.md",
+                    b"---\nname: builder-retention-skill\ndescription: retention test\n---\n\n# Workflow\n\nTest.",
+                    "text/markdown",
+                ),
+            ),
+            expected_asset_version=project_skill.version,
+        )
+        await skills.publish(
+            scenario.project_admin,
+            project_skill.id,
+            version.id,
+            expected_asset_version=project_skill.version + 1,
+        )
+        builder_id = uuid.uuid4()
+        operation_id = uuid.uuid4()
+        content = b"temporary private candidate"
+        async with scenario.session_factory() as session, session.begin():
+            creator = (
+                await session.execute(
+                    select(SkillRow).where(
+                        SkillRow.scope == "system",
+                        SkillRow.slug == "skill-creator",
+                    )
+                )
+            ).scalar_one()
+            creator_version = await session.get(
+                SkillVersionRow,
+                creator.current_published_version_id,
+            )
+            assert creator_version is not None
+            session.add(
+                SkillDesignSessionRow(
+                    id=builder_id,
+                    project_id=scenario.project_admin.project_id,
+                    owner_user_id=str(scenario.project_admin.user_id),
+                    thread_id=uuid.uuid4(),
+                    slug="builder-retention-skill",
+                    display_name="Builder Retention Skill",
+                    status="completed",
+                    revision=2,
+                    messages_json=[],
+                    progress_json=[],
+                    draft_checksum="a" * 64,
+                    validation_json={"validated": True},
+                    validated_draft_checksum="a" * 64,
+                    skill_creator_skill_id=creator.id,
+                    skill_creator_version_id=creator_version.id,
+                    skill_creator_payload_checksum=(creator_version.payload_checksum),
+                    created_skill_id=project_skill.id,
+                    created_skill_version_id=version.id,
+                    created_skill_deleted=False,
+                    create_idempotency_key_hash="b" * 64,
+                    create_request_checksum="c" * 64,
+                )
+            )
+            await session.flush()
+            session.add(
+                SkillDesignOperationRow(
+                    id=operation_id,
+                    project_id=scenario.project_admin.project_id,
+                    owner_user_id=str(scenario.project_admin.user_id),
+                    session_id=builder_id,
+                    operation_kind="commit",
+                    idempotency_key_hash="d" * 64,
+                    request_checksum="e" * 64,
+                    status="completed",
+                    result_revision=2,
+                )
+            )
+            session.add(
+                SkillDesignDraftFileRow(
+                    project_id=scenario.project_admin.project_id,
+                    owner_user_id=str(scenario.project_admin.user_id),
+                    session_id=builder_id,
+                    path="notes.txt",
+                    media_type="text/plain",
+                    size_bytes=len(content),
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    content=content,
+                )
+            )
+            await session.execute(
+                update(ProjectRow)
+                .where(ProjectRow.id == scenario.project_admin.project_id)
+                .values(
+                    status="pending_deletion",
+                    deletion_requested_at=EXPIRED,
+                    deletion_effective_at=EXPIRED,
+                )
+            )
+
+        async with scenario.session_factory() as session, session.begin():
+            await purge_private_scope(
+                session,
+                project_id=scenario.project_admin.project_id,
+                owner_user_id=None,
+            )
+            assert await session.get(SkillDesignSessionRow, builder_id) is None
+            assert (
+                await session.get(
+                    SkillDesignOperationRow,
+                    operation_id,
+                )
+                is None
+            )
+            assert await session.scalar(select(SkillDesignDraftFileRow).where(SkillDesignDraftFileRow.session_id == builder_id)) is None
+            await purge_project_shared_scope(
+                session,
+                project_id=scenario.project_admin.project_id,
+            )
+
+        async with scenario.session_factory() as session:
+            assert await session.get(SkillRow, project_skill.id) is None
+    finally:
+        await scenario.close()
 
 
 @pytest.mark.anyio

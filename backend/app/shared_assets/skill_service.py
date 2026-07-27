@@ -282,6 +282,12 @@ class SkillArchivePreview:
 
 
 @dataclass(frozen=True)
+class SkillDraftSnapshot:
+    checksum: str
+    files: tuple[SkillArchiveFile, ...]
+
+
+@dataclass(frozen=True)
 class SkillAssetView:
     id: uuid.UUID
     scope: AssetScope
@@ -693,6 +699,58 @@ class SkillService:
         normalized = normalize_skill_files(files, request_id=request_id)
         return await asyncio.to_thread(_analyze_skill_files, normalized, request_id)
 
+    async def prepare_draft_snapshot(
+        self,
+        actor: ProjectContext,
+        files: Sequence[SkillArchiveFile],
+    ) -> SkillDraftSnapshot:
+        """Normalize a non-executable Builder draft without requiring validity."""
+
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        normalized = normalize_skill_files(files, request_id=actor.request_id)
+        checksum = await asyncio.to_thread(
+            _snapshot_checksum_for_files,
+            normalized,
+        )
+        return SkillDraftSnapshot(checksum=checksum, files=normalized)
+
+    async def apply_draft_changes(
+        self,
+        actor: ProjectContext,
+        files: Sequence[SkillArchiveFile],
+        changes: Sequence[SkillFileChange],
+        *,
+        expected_draft_checksum: str,
+    ) -> SkillDraftSnapshot:
+        """Apply bounded UTF-8 edits while deferring semantic validation."""
+
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        if not isinstance(expected_draft_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_draft_checksum) is None:
+            raise AssetValidationFailed(actor.request_id)
+        normalized = normalize_skill_files(files, request_id=actor.request_id)
+        current_checksum = await asyncio.to_thread(
+            _snapshot_checksum_for_files,
+            normalized,
+        )
+        if current_checksum != expected_draft_checksum:
+            raise AssetConflict(actor.request_id)
+        validated_changes = _validate_file_changes(changes, actor.request_id)
+        updated = await asyncio.to_thread(
+            _apply_file_changes,
+            normalized,
+            validated_changes,
+            actor.request_id,
+        )
+        checksum = await asyncio.to_thread(
+            _snapshot_checksum_for_files,
+            updated,
+        )
+        return SkillDraftSnapshot(checksum=checksum, files=updated)
+
     async def create_project_from_archive_upload(
         self,
         actor: ProjectContext,
@@ -737,6 +795,41 @@ class SkillService:
             )
 
         return await self._execute(actor, operation)
+
+    async def create_project_from_preview_in_session(
+        self,
+        session: AsyncSession,
+        actor: ProjectContext,
+        command: CreateSkill,
+        preview: SkillArchivePreview,
+    ) -> ProjectSkillArchiveCreateResult:
+        """Create suspended Skill + published v1 in the caller transaction."""
+
+        command = self._validate_create(actor, command)
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        if not isinstance(preview, SkillArchivePreview):
+            raise AssetValidationFailed(actor.request_id)
+        repository = SkillRepository(session)
+        prepared = _PreparedProjectSkillArchive(
+            command=command,
+            preview=preview,
+        )
+        plan = await self._plan_project_archive_import(
+            repository,
+            actor,
+            (prepared,),
+            execute=True,
+            replace=False,
+        )
+        if len(plan) != 1 or plan[0].action != "create":
+            raise AssetConflict(actor.request_id)
+        return await self._execute_project_archive_create(
+            repository,
+            actor,
+            prepared,
+        )
 
     async def import_project_archives_atomic(
         self,

@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import and_, delete, exists, func, or_, select
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -17,6 +17,7 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentVersionSkillRefRow,
     ProjectSystemSkillBindingRow,
+    SkillDesignSessionRow,
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
@@ -257,6 +258,21 @@ class SkillRepository:
         selected_version_ids = tuple(version_ids)
         if asset.scope != "project" or asset.project_id != context.project_id or len(set(selected_version_ids)) != len(selected_version_ids):
             raise AssetNotFound(context.request_id)
+
+        # Preserve owner-private Builder history while severing the deleted
+        # shared-asset reference. Completed commit retries then fail closed.
+        await self.session.execute(
+            update(SkillDesignSessionRow)
+            .where(
+                SkillDesignSessionRow.project_id == context.project_id,
+                SkillDesignSessionRow.created_skill_id == asset.id,
+            )
+            .values(
+                created_skill_id=None,
+                created_skill_version_id=None,
+                created_skill_deleted=True,
+            )
+        )
 
         # This transient state is never committed: it combines with the cleared
         # pointer to authorize the published-child trigger added in revision 0002.

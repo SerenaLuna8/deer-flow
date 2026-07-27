@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.shared_assets.bootstrap import service as bootstrap_service
 from app.shared_assets.bootstrap.catalog import BootstrapCatalogError
+from app.shared_assets.bootstrap.skill_archive import load_skill_archive
 from app.shared_assets.models import SkillArchiveFile
 from scripts import generate_public_system_skill_catalog as generator
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_SKILL_CREATOR_SOURCE = _REPOSITORY_ROOT / "skills" / "public" / "skill-creator" / "SKILL.md"
+_SKILL_CREATOR_ARCHIVE = _REPOSITORY_ROOT / "backend" / "app" / "shared_assets" / "bootstrap" / "content" / "public-skills" / "skill-creator-v1.skill.json"
+_CATALOG = _REPOSITORY_ROOT / "backend" / "app" / "shared_assets" / "bootstrap" / "catalog.json"
 
 
 def _manifest(*, description: str) -> bytes:
@@ -76,3 +85,38 @@ def test_generator_write_rejects_symlink_destination(
 
     assert outside.read_bytes() == b"outside remains unchanged\n"
     assert catalog_path.read_bytes() == b"old catalog\n"
+
+
+def _assert_skill_creator_builder_contract(instructions: str) -> None:
+    assert "skill_manage" not in instructions
+    builder_heading = "## DeerFlow Skill Builder"
+    assert builder_heading in instructions
+    builder_section = instructions.split(builder_heading, 1)[1].split("\n## ", 1)[0]
+    assert "candidate package" in builder_section
+    for path in ("SKILL.md", "scripts/", "references/", "assets/"):
+        assert path in builder_section
+    assert "Do not run" in builder_section
+    for script in (
+        "scripts/init_skill.py",
+        "scripts/quick_validate.py",
+        "scripts/package_skill.py",
+    ):
+        assert script in builder_section
+    assert "Builder validation" in builder_section
+    assert "Builder commit" in builder_section
+    assert "explicit user confirmation" in builder_section
+    assert "Outside the dedicated DeerFlow Skill Builder" in builder_section
+
+
+def test_skill_creator_source_and_packaged_archive_use_builder_candidate_protocol() -> None:
+    source_instructions = _SKILL_CREATOR_SOURCE.read_text(encoding="utf-8")
+    archive_payload = _SKILL_CREATOR_ARCHIVE.read_bytes()
+    archive_files = load_skill_archive(archive_payload)
+    packaged_instructions = next(file.content.decode("utf-8") for file in archive_files if file.path == "SKILL.md")
+    catalog = json.loads(_CATALOG.read_text(encoding="utf-8"))
+    catalog_entry = next(entry for entry in catalog["entries"] if entry.get("source_key") == "builtin:skill:skill-creator")
+
+    _assert_skill_creator_builder_contract(source_instructions)
+    _assert_skill_creator_builder_contract(packaged_instructions)
+    assert packaged_instructions == source_instructions
+    assert catalog_entry["sha256"] == hashlib.sha256(archive_payload).hexdigest()

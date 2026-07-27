@@ -25,6 +25,11 @@ from deerflow.persistence.shared_assets.mcp_model import (
     McpServerRow,
     McpServerVersionRow,
 )
+from deerflow.persistence.shared_assets.skill_design_model import (
+    SkillDesignDraftFileRow,
+    SkillDesignOperationRow,
+    SkillDesignSessionRow,
+)
 from deerflow.persistence.shared_assets.skill_model import (
     SkillRow,
     SkillVersionFileRow,
@@ -50,6 +55,9 @@ __all__ = [
     "ProjectSystemMcpBindingRow",
     "ProjectSystemSkillBindingRow",
     "SkillRow",
+    "SkillDesignDraftFileRow",
+    "SkillDesignOperationRow",
+    "SkillDesignSessionRow",
     "SkillVersionFileRow",
     "SkillVersionRow",
 ]

@@ -162,9 +162,19 @@ one final confirmation. Completion creates a published version 1 but leaves the 
 cards and details expose the capability-checked activate action. Never fall back to the former
 generic Agent create dialog or sequence a bare Agent create before the Builder commit.
 
-Project Skill list creation is one scoped backend mutation that atomically creates the disabled
-asset plus version 1 Draft containing a backend-valid root `SKILL.md`; the frontend must never
-sequence a separate asset request and version request. The template frontmatter name is the
+Project Skill creation offers AI conversation, blank creation, and archive import from one menu.
+Conversation creation uses `/projects/{project_slug}/skills/new` and the resumable
+`/skills/new/{session_id}` workspace. The name step creates only a private Builder session.
+The workspace preserves the selected file while generated files change, selects `SKILL.md` only
+when the first candidate package appears, locks conversation while local file edits are unsaved,
+and requires an explicit checksum-bound validation before one atomic commit. Warnings require
+acknowledgement; commit publishes version 1 while leaving the Skill suspended and unbound.
+Skill Builder queries and mutations use their own account+project root and are aborted and removed
+with the active private-work scope.
+
+Blank Project Skill creation remains one scoped backend mutation that atomically creates the
+disabled asset plus version 1 Draft containing a backend-valid root `SKILL.md`; the frontend must
+never sequence a separate asset request and version request. The template frontmatter name is the
 immutable asset slug. After the catalog refresh, the detail sheet opens the returned asset ID,
 loads its version history, and selects Draft version 1. The detail sheet has no blank-version
 action: its single “创建新版本” entry starts an editable copy of the currently selected immutable

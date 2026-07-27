@@ -86,16 +86,15 @@ Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENT
 ## PostgreSQL schema lifecycle
 
 For a new installation, provision an empty PostgreSQL database, run `make setup-db`, then run
-`make start`. The immutable `0001_project_saas_baseline` is the single current head. It already
-contains the schema and constraints for project-Skill package hard deletion and project-local
-name uniqueness, the four logical Agent documents, and private Agent Builder sessions and
-operations. Setup applies this baseline, seeds the packaged system catalog, initializes the
-LangGraph schema, and bootstraps the default project.
+`make start`. The immutable `0001_project_saas_baseline` remains the frozen ancestor; the single
+current head is `0002_skill_design_builder`, which adds private Skill Builder sessions, pinned
+system `skill-creator` versions, idempotent operations, and durable candidate files. Setup applies
+the complete linear chain, seeds the packaged system catalog, initializes the LangGraph schema,
+and bootstraps the default project.
 
-An existing database for the current release must already match the exact
-`0001_project_saas_baseline` catalog. `make migrate-db` is reserved for future committed
-revisions; once they exist, stop application processes, apply pending migrations from a verified
-older committed revision, run `make check-db`, and then restart. It never creates a database,
+An existing database for the current release must either match the exact current `0002` catalog
+or the exact frozen `0001` catalog. For the latter, stop application processes, run
+`make migrate-db`, run `make check-db`, and then restart. Migration never creates a database,
 seeds the catalog, initializes LangGraph, or bootstraps a project. Runtime startup and `check-db`
 are read-only schema consumers and never create, migrate, stamp, or repair database objects.
 
@@ -120,7 +119,7 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install backend and frontend dependencies
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
-make migrate-db  # 未来新增 revision 后显式执行已提交的 pending migrations
+make migrate-db  # 停服后从精确冻结祖先显式执行已提交的 pending migrations
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、Alembic head 与必需表
 make release-acceptance  # M8 宿主机完整 candidate/review/final 验收（要求显式 live 环境）
@@ -187,9 +186,9 @@ These apply repo-wide; module guides own the module-specific detail.
   pytest（已递归收集 `tests/blocking_io/`）、固定 23 文件 PostgreSQL 门禁、前端单元测试、确定性
   Chromium E2E、构建与安全检查的唯一 CI 编排。不要为这些命令再新增独立重复 workflow；Replay E2E、
   发布、容器、Helm Chart 和版本检查仍保持专用 workflow。
-- **Forward-only schema migrations** — `0001_project_saas_baseline.py` 是禁止改写的冻结基线和
-  单一当前 head，已包含项目 Skill 整包硬删除与项目内名字唯一、Agent 四逻辑文档及 Agent Builder
-  表。未来 schema 变化从 `0002` 起线性追加 revision，绝不重写、压缩或 stamp 历史。
+- **Forward-only schema migrations** — `0001_project_saas_baseline.py` 是禁止改写的冻结基线；
+  当前单一 head `0002_skill_design_builder.py` 线性增加 Skill Builder 会话、操作和候选文件表。
+  未来 schema 变化从 `0003` 起继续线性追加 revision，绝不重写、压缩或 stamp 历史。
   `make setup-db` 在空库应用当前 head 并初始化 builtin catalog、LangGraph schema 与 default
   project；`make migrate-db` 保留给未来已提交 revision，且不执行这些 bootstrap side effects；
   运行时和 `make check-db` 只读校验。未知 revision 或 catalog drift 拒绝自动处理。真实测试只准

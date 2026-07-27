@@ -4,6 +4,7 @@ import { agentBuilderRootKey } from "@/core/agent-builder/query-keys";
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
 import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
+import { skillBuilderRootKey } from "@/core/skill-builder/query-keys";
 
 import {
   clearProjectReconnectStorage,
@@ -124,6 +125,7 @@ export async function transitionPrivateWorkScope(
   const roots = [
     privateWorkRoot(previous),
     agentBuilderRootKey(previous.accountId, previous.projectId),
+    skillBuilderRootKey(previous.accountId, previous.projectId),
     automationRoot(previous),
     governanceRoot(previous),
     projectSharedAssetRoot(previous),

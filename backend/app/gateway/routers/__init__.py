@@ -6,12 +6,14 @@ from . import (
     project_invitations,
     project_lifecycle,
     project_members,
+    project_skill_builder,
     projects,
 )
 
 __all__ = [
     "models",
     "project_agent_builder",
+    "project_skill_builder",
     "project_invitations",
     "project_lifecycle",
     "project_members",

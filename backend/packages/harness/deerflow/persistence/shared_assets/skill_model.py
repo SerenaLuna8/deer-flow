@@ -53,6 +53,7 @@ class SkillRow(Base):
         CheckConstraint("status IN ('active', 'archived', 'suspended')", name="ck_skills_status"),
         CheckConstraint("version >= 1", name="ck_skills_version"),
         UniqueConstraint("id", "scope", name="uq_skills_id_scope"),
+        UniqueConstraint("project_id", "id", name="uq_skills_project_id_id"),
         UniqueConstraint("source_key", name="uq_skills_source_key"),
         ForeignKeyConstraint(
             ["id", "current_published_version_id"],

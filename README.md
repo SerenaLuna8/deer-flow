@@ -86,7 +86,7 @@ make config
 
 ### 3. 初始化 PostgreSQL
 
-`0001_project_saas_baseline` 是不可改写的冻结基线和单一当前 head。它已包含项目 Skill 整包硬删除与项目内大小写不敏感名字唯一、Agent 的 `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md` 四个逻辑文档，以及私有 Agent Builder 会话和幂等操作表。系统支持在全新 PostgreSQL 目标库中安装这份当前基线；运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
+`0001_project_saas_baseline` 是不可改写的冻结基线；单一当前 head 是 `0002_skill_design_builder`。`0001` 已包含项目 Skill 整包硬删除与项目内大小写不敏感名字唯一、Agent 的 `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md` 四个逻辑文档，以及私有 Agent Builder 会话和幂等操作表；`0002` 增加私有 Skill Builder 会话、固定的系统 `skill-creator` 版本、幂等操作与持久化候选文件。系统支持在全新 PostgreSQL 目标库中安装完整迁移链；运行时不会建库、执行 migration、stamp 或修复 schema。应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 全新数据库
@@ -96,7 +96,7 @@ make setup-db
 make check-db
 ```
 
-`make setup-db` 从空库安装单一当前 baseline，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make check-db` 只读校验 current/head revision 与必需对象。当前版本的已有数据库必须已经精确匹配 `0001_project_saas_baseline` catalog。`make migrate-db` 保留给未来从 `0002` 起追加的已提交 forward-only revision，只执行 pending migrations，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化。未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
+`make setup-db` 从空库安装完整当前迁移链，并初始化系统资产 catalog、LangGraph schema 和默认项目；`make check-db` 只读校验 current/head revision 与必需对象。当前版本的已有数据库必须精确匹配 `0002_skill_design_builder` catalog；精确匹配冻结 `0001` catalog 的数据库可在停服后通过 `make migrate-db` 升级。迁移只执行 pending revisions，不创建数据库，也不重复执行 catalog、LangGraph 或默认项目初始化。未知 revision、未纳管非空 schema 或 catalog drift 会拒绝自动处理。命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 
@@ -153,7 +153,9 @@ System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 p
 
 Agent 不向用户提供创建版本、选择版本或发布版本的操作。项目与管理员代管项目 API 只保留内部 revision 历史的只读查询；Builder 确认和四项指令保存由后端内部原子维护不可变 revision，Run snapshot 仍固定实际使用的精确配置。
 
-项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。从列表新建 Skill 时，后端会在同一事务中创建默认停用的资产、版本 1 草稿以及根目录 `SKILL.md` 基础模板，不会留下没有版本文件的半成品，也不会自动发布；只有已发布版本才能通过列表或详情开关启用。详情不再提供空白版本入口，后续版本统一从当前选中版本点击“创建新版本”，修改并另存为新的不可变草稿。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时也可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
+项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。列表的新建菜单提供“AI 对话创建”“从空白创建”和“上传压缩包”三种入口。AI 对话创建会先建立仅绑定当前项目与账号的可恢复设计会话，固定当时已发布的系统 `skill-creator` 版本，并由无工具的一次性模型生成临时候选文件包；用户可以按目录预览和修改文件，每次变化后都要重新检查，最终确认才会原子创建默认停用、已发布版本 1 且尚未绑定任何 Agent 的项目 Skill。放弃会话会清除候选文件，未完成会话数量和文件大小均受限，敏感凭据样式的名称、消息或文件不会进入设计存储或模型输入。
+
+从列表空白创建时，后端会在同一事务中创建默认停用的资产、版本 1 草稿以及根目录 `SKILL.md` 基础模板，不会留下没有版本文件的半成品，也不会自动发布；只有已发布版本才能通过列表或详情开关启用。详情不再提供空白版本入口，后续版本统一从当前选中版本点击“创建新版本”，修改并另存为新的不可变草稿。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时也可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
 
 ## 项目结构
 
