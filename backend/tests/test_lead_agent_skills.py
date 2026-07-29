@@ -5,6 +5,7 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.tools import tool
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
@@ -91,7 +92,10 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
 
     skill = dataclasses.replace(
         skill,
-        allowed_tools=("exact_builtin", "exact_mcp"),
+        # Merely admitting a Skill must not activate its tool allowlist. Both
+        # exact candidate tools remain in the graph; the request-time policy
+        # middleware narrows them only after slash/skill_context activation.
+        allowed_tools=("exact_builtin",),
     )
     exact_config = AppConfig.model_validate(
         {
@@ -134,6 +138,14 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
         skills=(skill,),
         skill_root=tmp_path,
         mcp_tools=(exact_mcp,),
+        safe_manifest=SimpleNamespace(
+            skills=(
+                SimpleNamespace(
+                    relative_root=skill.relative_path.as_posix(),
+                    version_id="exact-skill-version",
+                ),
+            ),
+        ),
     )
     config = {
         "configurable": {
@@ -146,11 +158,14 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
         }
     }
     captured: dict[str, object] = {}
+    available_tool_builds = 0
 
     def forbidden_global_fallback(*_args, **_kwargs):
         raise AssertionError("private runtime must not consult global asset state")
 
     def fake_available_tools(**kwargs):
+        nonlocal available_tool_builds
+        available_tool_builds += 1
         captured["tool_kwargs"] = kwargs
         return [exact_builtin]
 
@@ -177,7 +192,7 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
     monkeypatch.setattr(lead_agent_module, "load_agent_config", forbidden_global_fallback)
     monkeypatch.setattr(
         lead_agent_module,
-        "_load_enabled_skills_for_tool_policy",
+        "_load_enabled_available_skills",
         forbidden_global_fallback,
     )
     monkeypatch.setattr(prompt, "get_enabled_skills_for_config", forbidden_global_fallback)
@@ -195,6 +210,7 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
     )
 
     assert result == "exact-agent"
+    assert available_tool_builds == 1
     assert captured["model"] == {
         "name": "exact-model",
         "thinking_enabled": True,
@@ -219,6 +235,7 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
     ]
     assert create_kwargs["system_prompt"] == "exact-system-prompt"
     assert captured["middlewares"]["runtime_skills"] == (skill,)
+    assert captured["middlewares"]["runtime_skill_version_ids"] == ("exact-skill-version",)
     assert captured["middlewares"]["runtime_skills_root"] == tmp_path
     assert captured["middlewares"]["runtime_skills_container_path"] == "/mnt/exact-skills"
     assert captured["prompt"]["exact_soul"] == "exact admitted soul"
@@ -227,3 +244,94 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
     assert config["metadata"]["model_name"] == "exact-model"
     assert config["metadata"]["tool_groups"] == ["exact-group"]
     assert config["metadata"]["subagent_enabled"] is False
+
+
+@pytest.mark.parametrize("is_bootstrap", [False, True])
+def test_passive_discoverable_skills_never_filter_lead_candidates(
+    is_bootstrap: bool,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    skill = dataclasses.replace(
+        _runtime_skill(tmp_path),
+        name="bootstrap",
+        relative_path=Path("bootstrap"),
+        allowed_tools=("allowed_candidate",),
+    )
+
+    @tool
+    def allowed_candidate(value: str) -> str:
+        """Candidate named by the passive Skill."""
+
+        return value
+
+    @tool
+    def other_candidate(value: str) -> str:
+        """Candidate not named by the passive Skill."""
+
+        return value
+
+    app_config = AppConfig.model_validate(
+        {
+            "models": [
+                {
+                    "name": "test-model",
+                    "use": "tests.fake:Model",
+                    "model": "provider-model",
+                }
+            ],
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+            "skills": {"deferred_discovery": False},
+            "tool_search": {"enabled": False},
+        }
+    )
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda _name: None)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_load_enabled_available_skills",
+        lambda *_args, **_kwargs: [skill],
+    )
+    monkeypatch.setattr(
+        tools_module,
+        "get_available_tools",
+        lambda **_kwargs: [allowed_candidate, other_candidate],
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_chat_model",
+        lambda **_kwargs: "model",
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_middlewares",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "apply_prompt_template",
+        lambda **_kwargs: "prompt",
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_agent",
+        lambda **kwargs: kwargs,
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_tracing_callbacks",
+        lambda: [],
+    )
+
+    result = lead_agent_module._make_lead_agent(
+        {"configurable": {"is_bootstrap": is_bootstrap}},
+        app_config=app_config,
+    )
+
+    assert [candidate.name for candidate in result["tools"]] == [
+        "allowed_candidate",
+        "other_candidate",
+    ]

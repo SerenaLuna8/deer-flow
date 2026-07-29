@@ -10,6 +10,7 @@ same ``Command`` + ``ToolMessage`` return shape, same fail-safe degradation.
 
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated
@@ -133,7 +134,11 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
         mutability = "[run exact, read-only]" if s.runtime_read_only else "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
         tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
         location = s.get_container_file_path(container_base_path)
-        blocks.append(f"## Skill: {s.name}\n- Description: {s.description} {mutability}\n- Allowed tools: {tools_line}\n- Location: {location}")
+        name = html.escape(s.name, quote=False)
+        description = html.escape(s.description, quote=False)
+        tools = html.escape(tools_line, quote=False)
+        escaped_location = html.escape(location, quote=False)
+        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {escaped_location}")
     return "\n\n".join(blocks)
 
 
@@ -156,7 +161,7 @@ def get_skill_index_prompt_section(
     if not skill_names:
         return ""
 
-    names = ", ".join(sorted(skill_names))
+    names = ", ".join(html.escape(name, quote=False) for name in sorted(skill_names))
     evolution = f"\n{skill_evolution_section}" if skill_evolution_section else ""
 
     return f"""<skill_system>

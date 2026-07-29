@@ -20,6 +20,10 @@ from __future__ import annotations
 import posixpath
 from typing import Any
 
+from deerflow.runtime.skill_context_authority import (
+    VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+)
+
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
 # by the caller. Source of truth for what a skill *may* receive.
 SECRETS_CONTEXT_KEY = "secrets"
@@ -51,6 +55,12 @@ SKILL_SECRET_EXEC_READY_CONTEXT_KEY = "__skill_secret_exec_ready"
 # (binding point A). Written by the skill-activation middleware, read by the bash
 # tool. Both reserved keys are stripped from trace payloads (see tracing redactor).
 ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
+
+# Reserved sub-key holding the active Skill tool-policy decision for one model
+# step. The decision includes a middleware-instance owner token that prevents a
+# caller from forging an allow-all decision in its mergeable run context, so the
+# entire value must be stripped from every observable serialization surface.
+SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY = "__skill_tool_policy_decision"
 
 
 def _string_pairs(raw: Any) -> dict[str, str]:
@@ -99,6 +109,40 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     if not isinstance(context, dict):
         return {}
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
+
+
+def write_slash_skill_source_path(
+    context: Any,
+    path: str,
+    *,
+    owner_token: str,
+) -> None:
+    """Persist an authenticated slash-activated Skill path in run context."""
+
+    if isinstance(context, dict) and isinstance(path, str) and path and isinstance(owner_token, str) and owner_token:
+        context[_SLASH_SECRET_SOURCE_KEY] = {
+            "path": path,
+            "owner_token": owner_token,
+        }
+
+
+def read_slash_skill_source_path(
+    context: Any,
+    *,
+    owner_token: str,
+) -> str | None:
+    """Return the authenticated slash-activated Skill path, if well formed."""
+
+    if not isinstance(context, dict):
+        return None
+    source = context.get(_SLASH_SECRET_SOURCE_KEY)
+    if not isinstance(source, dict):
+        return None
+    path = source.get("path")
+    source_owner_token = source.get("owner_token")
+    if not isinstance(owner_token, str) or not owner_token or source_owner_token != owner_token:
+        return None
+    return path if isinstance(path, str) and path else None
 
 
 def resolve_provider_active_secrets(
@@ -180,6 +224,14 @@ def active_provider_secret_request(
 _SLASH_SECRET_SOURCE_KEY = "__slash_skill_secret_source"
 _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
 
+# Authenticated identity of the latest slash message that already activated in
+# this private Run. The reminder is injected only into a per-call request
+# override, so it is absent from graph state on the next model step. This
+# runtime-only marker prevents a repeated Skill read, reminder, and activation
+# audit while secret bindings continue to be recomputed on every model call.
+# It contains coordinates and a message id/digest, never a secret value.
+_SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
+
 # Run-context keys whose values are request-scoped secrets and must be stripped
 # before a context mapping is serialized anywhere observable (traces, logs).
 REDACTED_CONTEXT_KEYS = frozenset(
@@ -192,6 +244,9 @@ REDACTED_CONTEXT_KEYS = frozenset(
         ACTIVE_SECRETS_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,
+        _SLASH_SKILL_ACTIVATION_RUN_KEY,
+        SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
+        VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
     }
 )
 

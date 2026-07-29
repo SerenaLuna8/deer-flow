@@ -10,7 +10,20 @@ class NamedTool(Protocol):
     name: str
 
 
-SKILL_LOADING_TOOL_NAMES = frozenset({"read_file"})
+# Framework tools that remain available under an active Skill restriction.
+# ``tool_search`` remains safe because SkillToolPolicyMiddleware filters both
+# returned schemas/promotions and subsequent execution. ``describe_skill`` only
+# returns metadata for the exact admitted catalog.
+ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES = frozenset(
+    {
+        "describe_skill",
+        "read_file",
+        "tool_search",
+    }
+)
+
+# Backwards-compatible alias used by statically configured subagent paths.
+SKILL_LOADING_TOOL_NAMES = ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES
 
 
 def allowed_tool_names_for_skills(skills: list[Skill]) -> set[str] | None:

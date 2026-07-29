@@ -51,7 +51,11 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
 from deerflow.runtime.serialization import serialize
+from deerflow.runtime.skill_context_authority import (
+    VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+)
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
 from deerflow.sandbox.sandbox import (
     AUTHORIZATION_REVOKED_REASON,
@@ -122,6 +126,8 @@ def _build_runtime_context(
         for key, value in caller_context.items():
             if key in {
                 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+                _SLASH_SKILL_ACTIVATION_RUN_KEY,
+                VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
                 "stop_reason",
             }:
                 continue
@@ -189,6 +195,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         # Both are Worker-owned ephemeral values. Never retain a client value
         # or a stale value from a reused config object.
         existing_context.pop(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, None)
+        existing_context.pop(_SLASH_SKILL_ACTIVATION_RUN_KEY, None)
+        existing_context.pop(VERIFIED_SKILL_SOURCE_CONTEXT_KEY, None)
         existing_context.pop("stop_reason", None)
         if "private_scope" in runtime_context or "__run_read_only_mounts" in runtime_context:
             existing_context["thread_id"] = runtime_context["thread_id"]
@@ -220,7 +228,16 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
                 existing_context[key] = runtime_context[key]
         return
 
-    config["context"] = {key: value for key, value in runtime_context.items() if key != "stop_reason"}
+    config["context"] = {
+        key: value
+        for key, value in runtime_context.items()
+        if key
+        not in {
+            "stop_reason",
+            _SLASH_SKILL_ACTIVATION_RUN_KEY,
+            VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+        }
+    }
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:

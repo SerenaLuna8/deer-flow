@@ -187,6 +187,19 @@ def _skill_mutability_label(
     return "[built-in]"
 
 
+def _render_available_skill(
+    name: str,
+    description: str,
+    category: SkillCategory | str,
+    location: str,
+    runtime_read_only: bool,
+) -> str:
+    escaped_name = html.escape(name, quote=False)
+    escaped_description = html.escape(description, quote=False)
+    escaped_location = html.escape(location, quote=False)
+    return f"    <skill>\n        <name>{escaped_name}</name>\n        <description>{escaped_description} {_skill_mutability_label(category, runtime_read_only)}</description>\n        <location>{escaped_location}</location>\n    </skill>"
+
+
 def clear_skills_system_prompt_cache() -> None:
     _invalidate_enabled_skills_cache()
 
@@ -649,7 +662,13 @@ def _render_skills_prompt_section(
     skills_list = ""
     if filtered:
         skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category, runtime_read_only)}</description>\n        <location>{location}</location>\n    </skill>"
+            _render_available_skill(
+                name,
+                description,
+                category,
+                location,
+                runtime_read_only,
+            )
             for name, description, category, location, runtime_read_only in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
@@ -660,7 +679,7 @@ def _render_skills_prompt_section(
             (name, description, category, location, runtime_read_only) for name, description, category, location, runtime_read_only in disabled_skill_signature if available_skills_key is None or name in available_skills_key
         ]
         if disabled_filtered:
-            disabled_items = "\n".join(f"    - {name} ({category})" for name, _description, category, _location, _runtime_read_only in disabled_filtered)
+            disabled_items = "\n".join(f"    - {html.escape(name, quote=False)} ({category})" for name, _description, category, _location, _runtime_read_only in disabled_filtered)
             disabled_section = f"""<disabled_skills>
 The following skills are INSTALLED but DISABLED. You MUST NOT read,
 reference, or use any of these skills — including their SKILL.md,

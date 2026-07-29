@@ -100,7 +100,7 @@ def _canonical_member_path(raw_path: object, request_id: str) -> str:
         raise _invalid(request_id)
     windows_path = PureWindowsPath(raw_path)
     posix_path = raw_path.replace("\\", "/")
-    if windows_path.drive or windows_path.is_absolute() or posix_path.startswith("/") or ".." in PurePosixPath(posix_path).parts:
+    if ":" in raw_path or windows_path.drive or windows_path.is_absolute() or posix_path.startswith("/") or ".." in PurePosixPath(posix_path).parts:
         raise _invalid(request_id)
     normalized = unicodedata.normalize(
         "NFC",

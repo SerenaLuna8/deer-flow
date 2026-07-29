@@ -21,6 +21,7 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 from __future__ import annotations
 
 import logging
+import secrets
 from pathlib import Path
 
 from langchain.agents import create_agent
@@ -44,7 +45,6 @@ from deerflow.assets.catalog import trusted_asset_context
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
-from deerflow.skills.tool_policy import SKILL_LOADING_TOOL_NAMES, filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -263,6 +263,7 @@ def build_middlewares(
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
     runtime_skills: tuple[Skill, ...] | None = None,
+    runtime_skill_version_ids: tuple[str, ...] | None = None,
     runtime_skills_root: Path | None = None,
     runtime_skills_container_path: str | None = None,
     resolved_subagent_enabled: bool | None = None,
@@ -309,6 +310,7 @@ def build_middlewares(
     # explicit user activation priority over model-side relevance guessing.
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
+    slash_source_owner_token = secrets.token_urlsafe(24)
     middlewares.append(
         SkillActivationMiddleware(
             available_skills=available_skills,
@@ -317,8 +319,29 @@ def build_middlewares(
             runtime_skills=runtime_skills,
             runtime_skills_root=runtime_skills_root,
             runtime_skills_container_path=runtime_skills_container_path,
+            slash_source_owner_token=slash_source_owner_token,
         )
     )
+
+    if runtime_skills is not None:
+        from deerflow.agents.middlewares.skill_tool_policy_middleware import (
+            SkillToolPolicyMiddleware,
+        )
+
+        exact_version_ids = () if not runtime_skills and runtime_skill_version_ids is None else runtime_skill_version_ids
+        if exact_version_ids is None:
+            raise ValueError("runtime_skill_version_ids are required for exact runtime Skills")
+        exact_container_path = runtime_skills_container_path or (str(runtime_skills_root) if runtime_skills_root is not None else resolved_app_config.skills.container_path)
+        middlewares.append(
+            SkillToolPolicyMiddleware(
+                runtime_skills=runtime_skills,
+                runtime_skill_version_ids=exact_version_ids,
+                runtime_skills_container_path=exact_container_path,
+                available_skills=available_skills,
+                slash_source_owner_token=slash_source_owner_token,
+                skill_file_read_tool_names=(resolved_app_config.summarization.skill_file_read_tool_names),
+            )
+        )
 
     # Capture completed task delegations and loaded skill files before
     # summarization can compact them, then inject durable context channels
@@ -431,18 +454,42 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
-def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
+def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
         skills = get_enabled_skills_for_config(app_config, user_id=user_id)
     except Exception:
-        logger.exception("Failed to load skills for allowed-tools policy")
+        logger.exception("Failed to load enabled Skills for discovery")
         raise
 
     if available_skills is None:
         return skills
     return [skill for skill in skills if skill.name in available_skills]
+
+
+def _exact_runtime_skill_version_ids(
+    private_runtime,
+    runtime_skills: tuple[Skill, ...],
+) -> tuple[str, ...]:
+    """Align exact runtime Skill objects with their admitted version IDs."""
+
+    if not runtime_skills:
+        return ()
+    safe_manifest = getattr(private_runtime, "safe_manifest", None)
+    manifests = tuple(getattr(safe_manifest, "skills", ()))
+    if len(manifests) != len(runtime_skills):
+        raise RuntimeError("Private runtime Skill manifest does not match exact runtime Skills")
+
+    version_ids: list[str] = []
+    for manifest, skill in zip(manifests, runtime_skills, strict=True):
+        if getattr(manifest, "relative_root", None) != skill.relative_path.as_posix():
+            raise RuntimeError("Private runtime Skill manifest path does not match exact runtime Skill")
+        version_id = str(getattr(manifest, "version_id", ""))
+        if not version_id:
+            raise RuntimeError("Private runtime Skill manifest is missing an exact version ID")
+        version_ids.append(version_id)
+    return tuple(version_ids)
 
 
 def make_lead_agent(config: RunnableConfig):
@@ -512,6 +559,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         )
 
     runtime_skills = tuple(getattr(private_runtime, "skills", ())) if private_runtime is not None else None
+    runtime_skill_version_ids = _exact_runtime_skill_version_ids(private_runtime, runtime_skills) if runtime_skills is not None else None
     available_skills = {skill.name for skill in runtime_skills} if runtime_skills is not None else _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = getattr(private_runtime, "model_ref", None) if private_runtime is not None else agent_config.model if agent_config and agent_config.model else None
@@ -584,10 +632,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = (
+    available_skill_catalog = (
         list(runtime_skills)
         if runtime_skills is not None
-        else _load_enabled_skills_for_tool_policy(
+        else _load_enabled_available_skills(
             available_skills,
             app_config=resolved_app_config,
             user_id=resolved_user_id,
@@ -606,7 +654,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         # Keep the bootstrap skill set intentionally narrow so agent creation
         # remains deterministic before the custom agent's own config exists.
-        bootstrap_skills = [s for s in skills_for_tool_policy if s.name in _BOOTSTRAP_SKILL_NAMES]
+        bootstrap_skills = [skill for skill in available_skill_catalog if skill.name in _BOOTSTRAP_SKILL_NAMES]
         skill_setup = build_skill_search_setup(
             bootstrap_skills,
             enabled=skill_search_enabled,
@@ -618,10 +666,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             app_config=resolved_app_config,
             asset_context=_trusted_runtime_asset_context(cfg),
         )
-        filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+        configured_tools = raw_tools
         if non_interactive:
-            filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
-        final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+            configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        final_tools, setup = assemble_deferred_tools(
+            configured_tools,
+            enabled=resolved_app_config.tool_search.enabled,
+        )
         mcp_routing_middleware = build_mcp_routing_middleware(
             final_tools,
             setup,
@@ -655,10 +706,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             state_schema=ThreadState,
         )
 
-    # Build skill search setup from policy-filtered skills (same list used for
-    # tool-policy filtering), so describe_skill only exposes allowed skills.
+    # Build discovery from the Agent-available Skill catalog. Availability is
+    # not activation: only the exact-runtime middleware may apply allowed-tools.
     skill_setup = build_skill_search_setup(
-        skills_for_tool_policy,
+        available_skill_catalog,
         enabled=skill_search_enabled,
         container_base_path=container_base_path,
     )
@@ -677,16 +728,23 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         tool_kwargs["include_acp"] = False
     raw_tools = get_available_tools(**tool_kwargs)
     private_mcp_tools = list(getattr(private_runtime, "mcp_tools", ())) if private_runtime is not None else []
-    filtered = filter_tools_by_skill_allowed_tools(raw_tools + private_mcp_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+    candidate_tools = raw_tools + private_mcp_tools + extra_tools
+    configured_tools = candidate_tools
     if non_interactive:
-        filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
-    final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+        configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    final_tools, setup = assemble_deferred_tools(
+        configured_tools,
+        enabled=resolved_app_config.tool_search.enabled,
+    )
     mcp_routing_middleware = build_mcp_routing_middleware(
         final_tools,
         setup,
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
-    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered, deferred_names=setup.deferred_names)
+    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(
+        configured_tools,
+        deferred_names=setup.deferred_names,
+    )
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
     private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
@@ -727,6 +785,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
             runtime_skills=runtime_skills,
+            runtime_skill_version_ids=runtime_skill_version_ids,
             runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
             runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
             resolved_subagent_enabled=subagent_enabled,

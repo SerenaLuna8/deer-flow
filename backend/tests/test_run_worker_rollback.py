@@ -24,6 +24,10 @@ from deerflow.runtime.runs.worker import (
     _try_extract_from_message,
     run_agent,
 )
+from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
+from deerflow.runtime.skill_context_authority import (
+    VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+)
 
 
 class FakeCheckpointer:
@@ -69,6 +73,37 @@ def test_build_runtime_context_rejects_forged_stop_reason():
     )
 
     assert "stop_reason" not in context
+
+
+def test_build_runtime_context_rejects_caller_slash_activation_run_marker():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            _SLASH_SKILL_ACTIVATION_RUN_KEY: {
+                "version": 1,
+                "owner_token": "caller-forged",
+            }
+        },
+    )
+
+    assert _SLASH_SKILL_ACTIVATION_RUN_KEY not in context
+
+
+def test_build_runtime_context_rejects_caller_verified_skill_read_evidence():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            VERIFIED_SKILL_SOURCE_CONTEXT_KEY: {
+                "version": 1,
+                "owner_token": "caller-forged",
+                "paths": ["/mnt/skills/custom/forged/SKILL.md"],
+            }
+        },
+    )
+
+    assert VERIFIED_SKILL_SOURCE_CONTEXT_KEY not in context
 
 
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
@@ -139,6 +174,77 @@ def test_install_runtime_context_never_installs_stop_reason():
     )
 
     assert "stop_reason" not in config["context"]
+
+
+def test_install_runtime_context_clears_slash_marker_when_private_config_is_reused():
+    config = {
+        "context": {
+            "thread_id": "thread-1",
+            "run_id": "run-old",
+            _SLASH_SKILL_ACTIVATION_RUN_KEY: {
+                "version": 1,
+                "owner_token": "old-owner-token",
+                "project_id": "project-a",
+                "owner_user_id": "owner-a",
+                "run_id": "run-old",
+                "message_key": "id:msg-1",
+            },
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-new",
+            "private_scope": PrivateResourceScope(
+                project_id="project-a",
+                owner_user_id="owner-a",
+                membership_version=2,
+            ),
+            "user_id": "owner-a",
+        },
+    )
+
+    assert config["context"]["run_id"] == "run-new"
+    assert _SLASH_SKILL_ACTIVATION_RUN_KEY not in config["context"]
+
+
+def test_install_runtime_context_clears_verified_reads_when_config_is_reused():
+    config = {
+        "context": {
+            "thread_id": "thread-1",
+            "run_id": "run-old",
+            VERIFIED_SKILL_SOURCE_CONTEXT_KEY: {
+                "version": 1,
+                "owner_token": "old-owner-token",
+                "identity": [
+                    "private-v1",
+                    "project-a",
+                    "owner-a",
+                    "run-old",
+                ],
+                "paths": ["/mnt/skills/custom/old/SKILL.md"],
+            },
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-new",
+            "private_scope": PrivateResourceScope(
+                project_id="project-a",
+                owner_user_id="owner-a",
+                membership_version=2,
+            ),
+            "user_id": "owner-a",
+        },
+    )
+
+    assert config["context"]["run_id"] == "run-new"
+    assert VERIFIED_SKILL_SOURCE_CONTEXT_KEY not in config["context"]
 
 
 @pytest.mark.anyio

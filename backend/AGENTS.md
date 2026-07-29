@@ -197,6 +197,68 @@ publish versions while suspended; activation is a separate capability-checked tr
 requires a published version. Resolution and runtime materialization accept only active,
 published Skills. Project Skill display names are case-insensitively unique within one project;
 different projects may use the same display name.
+
+### Runtime Skill activation, Scan, and Review
+
+Every Skill in an admitted Agent snapshot is passive until activated. Lead-Agent
+`allowed-tools` authority has exactly two sources: an explicit user slash activation, or a
+successful `read_file` of an exact admitted `SKILL.md` observed by
+`SkillToolPolicyMiddleware` in the current private Run. The latter creates ephemeral evidence
+bound to `project_id + owner_user_id + run_id` and a middleware-local owner token. Durable
+`ThreadState.skill_context` is an observational reminder channel only; it is never tool-policy,
+Credential, secret, or execution authority. The Worker rejects caller-supplied evidence, clears
+stale evidence when a runtime config is reused, and redacts the evidence and policy decision
+from every observable serialization surface.
+
+Slash authority has priority over later successful reads. One authenticated run marker binds
+the slash to `project_id + owner_user_id + run_id + message id/hash`, so the same command reads,
+injects, and audits once per Run while secret bindings are still recomputed on every model call.
+The marker is runtime-only, rejected from caller context, cleared on config reuse, and never
+contains secret material.
+
+Active Skill policy is enforced at three independent lead-Agent boundaries:
+
+1. model-call tool schemas;
+2. tool execution before the handler runs;
+3. `tool_search` returned schemas and promoted names.
+
+The decision binds a middleware owner token, decision version, source, exact paths, exact
+admitted version IDs, and allowed names. Malformed evidence, stale decisions, unresolved exact
+paths, or unvalidated `tool_search` result shapes fail closed. `describe_skill`, `read_file`,
+and policy-filtered `tool_search` remain framework tools; Review does not add a framework tool.
+Subagent Skill loading keeps its required framework tools and escapes loaded Skill text, but
+must not be described as having the lead middleware's complete dynamic active-policy lifecycle.
+
+Autonomous Skill secret selection consumes the same authenticated successful-read evidence,
+not `ThreadState.skill_context`; explicit slash selection consumes its authenticated slash
+source. Both are resolved back to the exact admitted runtime registry. Existing command-boundary
+project/membership/Run/lease/version/checksum/Credential revalidation and one-subprocess
+plaintext injection remain authoritative.
+
+Project Skill authoring always runs deterministic SkillScan. Its Python analysis covers direct
+network sinks, supported HTTP client-instance data flow, uncertain `subprocess shell` arguments,
+reverse-shell call sites, and PEP 695 type-alias handling while retaining the final 100 MiB,
+16384-file, bounded-log, and Mach-O boundaries. Both archive authoring and archive preflight
+reject any member name containing `:`, including ZIP/TAR NTFS alternate-data-stream names.
+Untrusted Skill names, descriptions, paths, allowed-tool metadata, slash reminders, and
+subagent-loaded content must be escaped at their prompt or ToolMessage rendering boundary.
+
+Deterministic Review v1 lives in the app-independent
+`deerflow.skills.review` package and emits the three checked-in
+`contracts/skill_review` schemas. The app-only `PostgresSkillVersionReader` requires a
+server-issued `ProjectContext` plus exact Skill/version/checksum, reads through project-scoped
+repository authority in one transaction, revalidates immutable rows/files/checksums, and emits
+a secret-free PackageSnapshot. `PostgresSkillReviewService` analyzes and renders outside the
+transaction with `asyncio.to_thread`; harness code never imports `app.*`. Static report
+`completed_at` is supplied from the immutable version `created_at`, not the current clock, so
+repeated review of one exact version is byte-stable.
+
+Review has no Gateway API, model tool, LLM moderation step, persistence side effect, public
+`skill-reviewer` Skill, or runtime authorization effect. The changed-public-Skill check is a
+step in the existing consolidated release workflow, not a separate workflow. Its PostgreSQL
+exact-version integration test requires a real `POSTGRES_TEST_URL`; a local skip caused by a
+missing URL is not release evidence.
+
 Interactive project Skill creation atomically writes the suspended asset and version 1 Draft
 with one backend-generated root `SKILL.md` template in the same transaction, including quota
 reservation and both governance events. It never publishes that template, never leaves an

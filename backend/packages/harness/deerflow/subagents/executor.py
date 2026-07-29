@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import html
 import logging
 import os
 import re
@@ -27,7 +28,10 @@ from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadSt
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
-from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.tool_policy import (
+    ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES,
+    filter_tools_by_skill_allowed_tools,
+)
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.step_events import capture_new_step_messages
@@ -652,7 +656,11 @@ class SubagentExecutor:
         return all_skills
 
     def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
-        return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
+        return filter_tools_by_skill_allowed_tools(
+            self._base_tools,
+            skills,
+            always_allowed_tool_names=ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES,
+        )
 
     async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
         """Load skill content as conversation items based on config.skills.
@@ -678,7 +686,9 @@ class SubagentExecutor:
                 content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
                 content = content.strip()
                 if content:
-                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    escaped_name = html.escape(skill.name, quote=True)
+                    escaped_content = html.escape(content, quote=False)
+                    messages.append(SystemMessage(content=f'<skill name="{escaped_name}">\n{escaped_content}\n</skill>'))
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
             except Exception:
                 logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)

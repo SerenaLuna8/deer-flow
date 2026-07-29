@@ -282,6 +282,41 @@ def test_load_skill_archive_package_rejects_unsafe_paths(
 
 
 @pytest.mark.parametrize(
+    ("filename", "payload"),
+    [
+        (
+            "ads.zip",
+            _zip(
+                {
+                    "skill/SKILL.md": _manifest(),
+                    "skill/scripts/run.sh:hidden.txt": b"hidden",
+                }
+            ),
+        ),
+        (
+            "ads.tar",
+            _tar(
+                {
+                    "skill/SKILL.md": _manifest(),
+                    "skill/scripts/run.sh:hidden.txt": b"hidden",
+                }
+            ),
+        ),
+    ],
+)
+def test_load_skill_archive_package_rejects_ntfs_ads_paths(
+    filename: str,
+    payload: bytes,
+) -> None:
+    with pytest.raises(AssetValidationFailed):
+        load_skill_archive_package(
+            payload,
+            filename=filename,
+            request_id="req-ads-package",
+        )
+
+
+@pytest.mark.parametrize(
     "member_type",
     [
         tarfile.SYMTYPE,

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import importlib
 import io
+import json
 import logging
 import threading
 import uuid
@@ -31,6 +32,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
 )
 from app.shared_assets.models import AgentPayload, SkillArchiveFile, WorkflowStatus
+from app.shared_assets.skill_review import PostgresSkillReviewService
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
@@ -427,6 +429,86 @@ async def test_project_skill_publishes_complete_snapshot_and_hides_cross_project
                     )
         with pytest.raises(dataclasses.FrozenInstanceError):
             published.payload_checksum = "0" * 64
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_skill_review_reads_only_exact_authorized_version(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.skill_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-review-owner",
+        role="admin",
+    )
+    outsider = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="skill-review-outsider",
+    )
+    skill_service = _service(service_module, factory)
+    review_service = PostgresSkillReviewService(factory)
+    try:
+        asset = await skill_service.create_asset(
+            editor,
+            service_module.CreateSkill(
+                "review-exact-skill",
+                "Review Exact Skill",
+            ),
+        )
+        version = await skill_service.create_version_from_archive(
+            editor,
+            asset.id,
+            _archive(name="review-exact-skill"),
+            expected_asset_version=1,
+        )
+
+        result = await review_service.review(
+            editor,
+            skill_id=asset.id,
+            version_id=version.id,
+            expected_checksum=version.payload_checksum,
+        )
+
+        assert result.facts["subject"]["skill_id"] == str(asset.id)
+        assert result.facts["subject"]["version_id"] == str(version.id)
+        assert result.facts["subject"]["payload_checksum"] == version.payload_checksum
+        serialized = json.dumps(
+            {
+                "facts": result.facts,
+                "report": result.report,
+            },
+            sort_keys=True,
+        )
+        assert str(editor.project_id) not in serialized
+        assert str(editor.user_id) not in serialized
+
+        with pytest.raises(AssetNotFound):
+            await review_service.review(
+                outsider,
+                skill_id=asset.id,
+                version_id=version.id,
+                expected_checksum=version.payload_checksum,
+            )
+        with pytest.raises(AssetNotFound):
+            await review_service.review(
+                editor,
+                skill_id=asset.id,
+                version_id=uuid.uuid4(),
+                expected_checksum=version.payload_checksum,
+            )
+        with pytest.raises(AssetConflict):
+            await review_service.review(
+                editor,
+                skill_id=asset.id,
+                version_id=version.id,
+                expected_checksum="0" * 64,
+            )
     finally:
         await engine.dispose()
 
