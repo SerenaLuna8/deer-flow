@@ -8,18 +8,6 @@ if (!new Set(["production", "static"]).has(buildMode)) {
     `Unsupported BUILD_MODE=${JSON.stringify(buildMode)}; expected "production" or "static".`,
   );
 }
-const acceptanceDistDir = process.env.DEER_FLOW_NEXT_DIST_DIR?.trim();
-if (
-  acceptanceDistDir &&
-  !/^\.m8-next-[0-9a-f]{32}\/\.next$/u.test(acceptanceDistDir)
-) {
-  throw new Error("DEER_FLOW_NEXT_DIST_DIR_INVALID");
-}
-const acceptanceTsconfigPath = acceptanceDistDir?.replace(
-  /\/\.next$/u,
-  "/tsconfig.json",
-);
-
 process.env.NEXT_PUBLIC_BUILD_MODE = buildMode;
 await import("./src/env.js");
 
@@ -38,11 +26,7 @@ const config = {
   experimental: {
     authInterrupts: true,
   },
-  distDir:
-    acceptanceDistDir ?? (buildMode === "static" ? ".next-static" : ".next"),
-  typescript: acceptanceTsconfigPath
-    ? { tsconfigPath: acceptanceTsconfigPath }
-    : undefined,
+  distDir: buildMode === "static" ? ".next-static" : ".next",
   env: {
     NEXT_PUBLIC_BUILD_MODE: buildMode,
   },

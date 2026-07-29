@@ -8,8 +8,16 @@ source. New writes always target the per-user layout.
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -18,6 +26,59 @@ logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+MAX_AGENT_OUTPUT_TOKENS = 200_000
+
+
+class AgentModelSettings(BaseModel):
+    """Strict immutable settings carried by one exact Agent version."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+    )
+
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_AGENT_OUTPUT_TOKENS,
+    )
+    thinking_enabled: bool | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+    @field_validator("temperature")
+    @classmethod
+    def _canonical_temperature(
+        cls,
+        value: float | None,
+    ) -> float | None:
+        # PostgreSQL JSONB normalizes negative zero. Canonicalize before the
+        # v3 checksum so a stored row always hashes exactly as authored.
+        if value == 0:
+            return 0.0
+        return value
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.model_dump(exclude_none=True)
+
+    def sampling_overrides(self) -> dict[str, float | int]:
+        return {
+            key: value
+            for key, value in self.model_dump(
+                include={"temperature", "max_tokens"},
+                exclude_none=True,
+            ).items()
+            if isinstance(value, (float, int)) and not isinstance(value, bool)
+        }
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_nulls(self, handler):
+        """Keep the nested HTTP/JSON contract aligned with checksum JSON."""
+
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class GitHubTriggerConfig(BaseModel):
@@ -130,6 +191,7 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    model_settings: AgentModelSettings | None = None
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.
@@ -143,7 +205,16 @@ class AgentConfig(BaseModel):
 # drop hand-authored configuration. ``name`` is included because the
 # updaters always re-emit it from the directory name (it must never come
 # from the request body).
-MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset({"name", "description", "model", "tool_groups", "skills"})
+MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset(
+    {
+        "name",
+        "description",
+        "model",
+        "tool_groups",
+        "skills",
+        "model_settings",
+    }
+)
 
 
 def preserve_non_managed_fields(existing_cfg: AgentConfig) -> dict[str, object]:
@@ -213,12 +284,14 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
     if not isinstance(snapshot, AssetCatalogAgentSnapshot):
         raise AssetCatalogUnavailable("system agent snapshot is invalid")
     require_system_asset(snapshot)
+    model_settings = AgentModelSettings.model_validate(dict(snapshot.model_settings))
     return AgentConfig(
         name=snapshot.slug,
         description=snapshot.description,
         model=snapshot.model_ref or None,
         tool_groups=list(snapshot.tool_groups),
         skills=list(snapshot.skill_slugs),
+        model_settings=(None if model_settings.is_empty else model_settings),
     )
 
 
@@ -259,6 +332,7 @@ def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
         if not isinstance(snapshot, AssetCatalogAgentSnapshot):
             raise AssetCatalogUnavailable("system agent snapshot is invalid")
         require_system_asset(snapshot)
+        model_settings = AgentModelSettings.model_validate(dict(snapshot.model_settings))
         agents.append(
             AgentConfig(
                 name=snapshot.slug,
@@ -266,6 +340,7 @@ def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
                 model=snapshot.model_ref or None,
                 tool_groups=list(snapshot.tool_groups),
                 skills=list(snapshot.skill_slugs),
+                model_settings=(None if model_settings.is_empty else model_settings),
             )
         )
     agents.sort(key=lambda a: a.name)

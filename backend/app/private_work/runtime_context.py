@@ -58,6 +58,7 @@ _AUTHORITY_KEYS = frozenset(
         "skill_ids",
         "skills",
         "subagent_enabled",
+        "stop_reason",
         "system_role",
         "tool_groups",
         "trusted_asset_context",

@@ -76,6 +76,14 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
     }
 )
 
+DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES = frozenset(
+    {
+        "agent_middlewares",
+        "configured_middlewares",
+        "trusted_middlewares",
+    }
+)
+
 
 class CircuitBreakerConfig(BaseModel):
     """Configuration for the LLM Circuit Breaker."""
@@ -242,6 +250,9 @@ class AppConfig(BaseModel):
     @classmethod
     def reject_removed_legacy_config(cls, value: object) -> object:
         if isinstance(value, Mapping):
+            unsupported_middlewares = set(DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES.intersection(value))
+            if unsupported_middlewares:
+                raise ValueError("DYNAMIC_MIDDLEWARE_CONFIG_UNSUPPORTED: " + ",".join(sorted(unsupported_middlewares)))
             removed = set(LEGACY_CONFIG_TOMBSTONES.intersection(value))
             for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
                 section, key = field_path.split(".", 1)

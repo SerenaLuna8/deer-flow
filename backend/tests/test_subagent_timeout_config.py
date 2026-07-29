@@ -103,6 +103,18 @@ class TestSubagentsAppConfigDefaults:
         config = SubagentsAppConfig()
         assert config.max_turns is None
 
+    def test_default_total_delegation_limit(self):
+        config = SubagentsAppConfig()
+        assert config.max_total_per_run == 6
+
+    def test_total_delegation_limit_is_strictly_bounded(self):
+        assert SubagentsAppConfig(max_total_per_run=1).max_total_per_run == 1
+        assert SubagentsAppConfig(max_total_per_run=50).max_total_per_run == 50
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=0)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=51)
+
     def test_default_agents_empty(self):
         config = SubagentsAppConfig()
         assert config.agents == {}

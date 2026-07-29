@@ -67,6 +67,31 @@ describe("agent builder contracts", () => {
     expect(agentBuilderBlueprintSchema.parse(blueprint)).toEqual(blueprint);
   });
 
+  test("preserves strict optional per-version model settings", () => {
+    const parsed = agentBuilderBlueprintSchema.parse({
+      ...blueprint,
+      model_settings: {
+        temperature: 0.2,
+        max_tokens: 12_000,
+        thinking_enabled: false,
+        reasoning_effort: "high",
+      },
+    });
+
+    expect(parsed.model_settings).toEqual({
+      temperature: 0.2,
+      max_tokens: 12_000,
+      thinking_enabled: false,
+      reasoning_effort: "high",
+    });
+    expect(() =>
+      agentBuilderBlueprintSchema.parse({
+        ...blueprint,
+        model_settings: { top_p: 0.9 },
+      }),
+    ).toThrow();
+  });
+
   test("rejects an incomplete or unknown blueprint payload", () => {
     expect(() =>
       agentBuilderBlueprintSchema.parse({

@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.constants import TAG_NOSTREAM
 
@@ -378,6 +379,19 @@ class TestTitleMiddlewareCoreLogic:
         result = middleware._generate_title_result(state)
         assert result["title"].endswith("...")
         assert result["title"].startswith("这是一个非常长的问题描述")
+        assert len(result["title"]) <= 50
+
+    @pytest.mark.parametrize("max_chars", [2, 3, 4, 10, 50, 60])
+    def test_fallback_title_never_exceeds_max_chars_at_ellipsis_boundaries(self, max_chars):
+        """The ellipsis is part of the configured title-length budget."""
+        middleware = TitleMiddleware(title_config=SimpleNamespace(max_chars=max_chars))
+
+        title = middleware._fallback_title("x" * 200)
+
+        assert title
+        assert len(title) <= max_chars
+        if max_chars >= 3:
+            assert title.endswith("...")
 
     def test_parse_title_strips_think_tags(self):
         """Title model responses with <think>...</think> blocks are stripped before use."""

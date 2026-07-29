@@ -4,6 +4,7 @@ from typing import Annotated, NotRequired, TypedDict
 from langchain.agents import AgentState
 
 from deerflow.agents.goal_state import GoalState
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
@@ -18,9 +19,21 @@ class ThreadDataState(TypedDict):
     outputs_path: NotRequired[str | None]
 
 
+class ViewedImageFileRef(TypedDict):
+    """Run-bound sandbox coordinates; never contains a host filesystem path."""
+
+    path: str
+    sandbox_id: str
+    run_id: str
+    project_id: NotRequired[str]
+    owner_user_id: NotRequired[str]
+
+
 class ViewedImageData(TypedDict):
-    base64: str
     mime_type: str
+    size: int
+    sha256: str
+    file_ref: ViewedImageFileRef
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -63,21 +76,110 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
     return list(dict.fromkeys(existing + new))
 
 
-def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
-    """Reducer for viewed_images dict - merges image dictionaries.
+ViewedImageScope = tuple[str, str, str | None, str | None]
+_VIEWED_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_VIEWED_IMAGE_MIME_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+)
+_VIEWED_IMAGE_VIRTUAL_ROOTS = (
+    f"{VIRTUAL_PATH_PREFIX}/workspace",
+    f"{VIRTUAL_PATH_PREFIX}/uploads",
+    f"{VIRTUAL_PATH_PREFIX}/outputs",
+)
 
-    Special case: If new is an empty dict {}, it clears the existing images.
-    This allows middlewares to clear the viewed_images state after processing.
-    """
-    if existing is None:
-        return new or {}
+
+def _is_viewed_image_virtual_path(path: str) -> bool:
+    return any(path == root or path.startswith(f"{root}/") for root in _VIEWED_IMAGE_VIRTUAL_ROOTS)
+
+
+def normalize_viewed_images(
+    images: Mapping[str, object] | None,
+) -> dict[str, ViewedImageData]:
+    """Drop legacy base64 payloads and malformed checkpoint references."""
+
+    normalized: dict[str, ViewedImageData] = {}
+    for image_path, raw_image_data in (images or {}).items():
+        if not isinstance(image_path, str) or not isinstance(raw_image_data, Mapping):
+            continue
+        raw_ref = raw_image_data.get("file_ref")
+        mime_type = raw_image_data.get("mime_type")
+        size = raw_image_data.get("size")
+        sha256 = raw_image_data.get("sha256")
+        if (
+            not _is_viewed_image_virtual_path(image_path)
+            or not isinstance(raw_ref, Mapping)
+            or raw_ref.get("path") != image_path
+            or not isinstance(raw_ref.get("sandbox_id"), str)
+            or not raw_ref["sandbox_id"]
+            or not isinstance(raw_ref.get("run_id"), str)
+            or not raw_ref["run_id"]
+            or mime_type not in _VIEWED_IMAGE_MIME_TYPES
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 0 <= size <= _VIEWED_IMAGE_MAX_BYTES
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            continue
+
+        project_id = raw_ref.get("project_id")
+        owner_user_id = raw_ref.get("owner_user_id")
+        if (project_id is None) != (owner_user_id is None):
+            continue
+        if project_id is not None and (not isinstance(project_id, str) or not project_id or not isinstance(owner_user_id, str) or not owner_user_id):
+            continue
+
+        file_ref: ViewedImageFileRef = {
+            "path": image_path,
+            "sandbox_id": raw_ref["sandbox_id"],
+            "run_id": raw_ref["run_id"],
+        }
+        if isinstance(project_id, str) and isinstance(owner_user_id, str):
+            file_ref["project_id"] = project_id
+            file_ref["owner_user_id"] = owner_user_id
+        normalized[image_path] = {
+            "mime_type": mime_type,
+            "size": size,
+            "sha256": sha256,
+            "file_ref": file_ref,
+        }
+    return normalized
+
+
+def _viewed_image_scope(image_data: ViewedImageData) -> ViewedImageScope:
+    file_ref = image_data["file_ref"]
+    return (
+        file_ref["sandbox_id"],
+        file_ref["run_id"],
+        file_ref.get("project_id"),
+        file_ref.get("owner_user_id"),
+    )
+
+
+def merge_viewed_images(
+    existing: dict[str, ViewedImageData] | None,
+    new: dict[str, ViewedImageData] | None,
+) -> dict[str, ViewedImageData]:
+    """Keep only lightweight references from one exact Run/sandbox scope."""
+
+    normalized_existing = normalize_viewed_images(existing)
     if new is None:
-        return existing
-    # Special case: empty dict means clear all viewed images
-    if len(new) == 0:
+        return normalized_existing
+    if not new:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+
+    normalized_new = normalize_viewed_images(new)
+    new_scopes = {_viewed_image_scope(image_data) for image_data in normalized_new.values()}
+    if len(new_scopes) != 1:
+        return {}
+    current_scope = next(iter(new_scopes))
+    retained_existing = {path: image_data for path, image_data in normalized_existing.items() if _viewed_image_scope(image_data) == current_scope}
+    return {**retained_existing, **normalized_new}
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:
@@ -132,6 +234,11 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 class DelegationEntry(TypedDict):
     id: str
+    occurrence: NotRequired[int]
+    dispatch_ref: NotRequired[str]
+    project_id: NotRequired[str]
+    owner_user_id: NotRequired[str]
+    run_id: NotRequired[str]
     description: str
     subagent_type: str
     status: str
@@ -145,6 +252,33 @@ class DelegationEntry(TypedDict):
     created_at: str
 
 
+DelegationIdentity = tuple[str | None, str | None, str | None, str, int]
+_DELEGATION_SCOPE_FIELDS = ("project_id", "owner_user_id", "run_id")
+
+
+def delegation_occurrence(entry: Mapping[str, object]) -> int:
+    """Normalize legacy entries without an occurrence to the first call."""
+    occurrence = entry.get("occurrence")
+    if isinstance(occurrence, int) and not isinstance(occurrence, bool) and occurrence >= 1:
+        return occurrence
+    return 1
+
+
+def delegation_identity(entry: Mapping[str, object]) -> DelegationIdentity:
+    """Return the private Run- and occurrence-scoped delegation identity."""
+    return (
+        str(entry["project_id"]) if entry.get("project_id") is not None else None,
+        str(entry["owner_user_id"]) if entry.get("owner_user_id") is not None else None,
+        str(entry["run_id"]) if entry.get("run_id") is not None else None,
+        str(entry["id"]),
+        delegation_occurrence(entry),
+    )
+
+
+def _has_delegation_scope(entry: Mapping[str, object]) -> bool:
+    return any(entry.get(field) is not None for field in _DELEGATION_SCOPE_FIELDS)
+
+
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
@@ -156,19 +290,41 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     if not new:
         return existing or []
 
-    by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
-    for entry in [*(existing or []), *new]:
-        entry_id = entry["id"]
-        previous = by_id.get(entry_id)
+    by_identity: dict[DelegationIdentity, DelegationEntry] = {}
+    order: list[DelegationIdentity] = []
+    for entry in existing or []:
+        identity = delegation_identity(entry)
+        if identity not in by_identity:
+            order.append(identity)
+        by_identity[identity] = entry
+
+    for entry in new:
+        identity = delegation_identity(entry)
+        previous = by_identity.get(identity)
+
+        # Older extraction paths emitted an update without scope fields. If
+        # exactly one retained entry has this provider call id, bind the update
+        # to that entry and preserve its server-issued private Run scope. If
+        # multiple scoped entries reused the same provider id, ambiguity fails
+        # closed by retaining a separate unscoped legacy entry.
+        if previous is None and not _has_delegation_scope(entry):
+            matches = [candidate for candidate in order if candidate[3] == str(entry["id"]) and candidate[4] == delegation_occurrence(entry)]
+            if len(matches) == 1:
+                identity = matches[0]
+                previous = by_identity[identity]
+                entry = {
+                    **entry,
+                    **{field: previous[field] for field in _DELEGATION_SCOPE_FIELDS if previous.get(field) is not None},
+                }
+
         if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
             continue
-        if entry_id not in by_id:
-            order.append(entry_id)
+        if identity not in by_identity:
+            order.append(identity)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
-        by_id[entry_id] = entry
-    merged = [by_id[entry_id] for entry_id in order]
+        by_identity[identity] = entry
+    merged = [by_identity[identity] for identity in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
         merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
     return merged
@@ -239,7 +395,7 @@ class ThreadState(AgentState):
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]

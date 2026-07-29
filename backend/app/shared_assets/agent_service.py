@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TypeVar
 
+from pydantic import ValidationError
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +25,12 @@ from app.shared_assets.errors import (
     SharedAssetError,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
-from app.shared_assets.models import AgentPayload, AssetScope, WorkflowStatus
+from app.shared_assets.models import (
+    AgentModelSettings,
+    AgentPayload,
+    AssetScope,
+    WorkflowStatus,
+)
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -111,6 +117,7 @@ class AgentVersionView:
     identity: str = ""
     user_context: str = ""
     payload_schema_version: int = 1
+    model_settings: AgentModelSettings = AgentModelSettings()
 
 
 @dataclass(frozen=True)
@@ -167,7 +174,11 @@ class AgentService:
         """
 
         command = self._validate_create(actor, command)
-        payload = self._validate_payload(actor, payload, payload_schema_version=2)
+        payload = self._validate_payload(
+            actor,
+            payload,
+            payload_schema_version=self._payload_schema_version(payload),
+        )
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         if not isinstance(actor, ProjectContext):
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
@@ -188,6 +199,7 @@ class AgentService:
             None,
             "agent.create",
         )
+        payload_schema_version = self._payload_schema_version(payload)
         row = AgentVersionRow(
             agent_id=asset.id,
             version_number=1,
@@ -198,12 +210,13 @@ class AgentService:
             identity=payload.identity,
             user_context=payload.user_context,
             model_ref=payload.model_ref,
+            model_settings=self._model_settings_json(payload.model_settings),
             tool_groups=list(payload.tool_groups),
             supersedes_version_id=None,
-            payload_schema_version=2,
+            payload_schema_version=payload_schema_version,
             payload_checksum=self._payload_checksum(
                 payload,
-                payload_schema_version=2,
+                payload_schema_version=payload_schema_version,
             ),
             created_by_user_id=str(actor.user_id),
         )
@@ -248,7 +261,7 @@ class AgentService:
         payload = self._validate_payload(
             actor,
             payload,
-            payload_schema_version=2,
+            payload_schema_version=self._payload_schema_version(payload),
         )
         provided_instruction_fields = self._normalize_provided_instruction_fields(
             actor,
@@ -274,7 +287,7 @@ class AgentService:
             effective_payload = self._validate_payload(
                 actor,
                 effective_payload,
-                payload_schema_version=2,
+                payload_schema_version=self._payload_schema_version(effective_payload),
             )
             await self._validate_dependency_closure(
                 repository,
@@ -288,6 +301,7 @@ class AgentService:
                 version_number = await repository.next_override_version_number(actor, asset)
             else:
                 version_number = await repository.next_system_version_number(actor, asset)
+            payload_schema_version = self._payload_schema_version(effective_payload)
             row = AgentVersionRow(
                 agent_id=asset.id,
                 version_number=version_number,
@@ -298,12 +312,13 @@ class AgentService:
                 identity=effective_payload.identity,
                 user_context=effective_payload.user_context,
                 model_ref=effective_payload.model_ref,
+                model_settings=self._model_settings_json(effective_payload.model_settings),
                 tool_groups=list(effective_payload.tool_groups),
                 supersedes_version_id=asset.current_published_version_id,
-                payload_schema_version=2,
+                payload_schema_version=payload_schema_version,
                 payload_checksum=self._payload_checksum(
                     effective_payload,
-                    payload_schema_version=2,
+                    payload_schema_version=payload_schema_version,
                 ),
                 created_by_user_id=str(actor.user_id),
             )
@@ -373,6 +388,7 @@ class AgentService:
                 skill_version_ids: tuple[uuid.UUID, ...] = ()
                 mcp_version_ids: tuple[uuid.UUID, ...] = ()
                 supersedes_version_id = None
+                model_settings = AgentModelSettings()
             else:
                 description = base.row.description
                 model_ref = base.row.model_ref
@@ -380,6 +396,10 @@ class AgentService:
                 skill_version_ids = base.skill_version_ids
                 mcp_version_ids = base.mcp_version_ids
                 supersedes_version_id = base.row.id
+                model_settings = self._model_settings_from_row(
+                    base.row.model_settings,
+                    actor.request_id,
+                )
 
             if current_is_published:
                 await self._validate_dependency_closure(
@@ -399,8 +419,10 @@ class AgentService:
                 agents_instructions=instructions.agents_instructions,
                 identity=instructions.identity,
                 user_context=instructions.user_context,
+                model_settings=model_settings,
             )
             version_number = await self._next_version_number(repository, actor, asset)
+            payload_schema_version = self._payload_schema_version(payload)
             row = AgentVersionRow(
                 agent_id=asset.id,
                 version_number=version_number,
@@ -411,10 +433,14 @@ class AgentService:
                 identity=payload.identity,
                 user_context=payload.user_context,
                 model_ref=payload.model_ref,
+                model_settings=self._model_settings_json(payload.model_settings),
                 tool_groups=list(payload.tool_groups),
                 supersedes_version_id=supersedes_version_id,
-                payload_schema_version=2,
-                payload_checksum=self._payload_checksum(payload, payload_schema_version=2),
+                payload_schema_version=payload_schema_version,
+                payload_checksum=self._payload_checksum(
+                    payload,
+                    payload_schema_version=payload_schema_version,
+                ),
                 created_by_user_id=str(actor.user_id),
             )
             record = await self._create_version_record(
@@ -479,6 +505,10 @@ class AgentService:
                 agents_instructions=record.row.agents_instructions,
                 identity=record.row.identity,
                 user_context=record.row.user_context,
+                model_settings=self._model_settings_from_row(
+                    record.row.model_settings,
+                    actor.request_id,
+                ),
             )
             current_payload = self._validate_payload(
                 actor,
@@ -508,8 +538,9 @@ class AgentService:
                 effective_payload = self._validate_payload(
                     actor,
                     effective_payload,
-                    payload_schema_version=2,
+                    payload_schema_version=self._payload_schema_version(effective_payload),
                 )
+                payload_schema_version = self._payload_schema_version(effective_payload)
                 synthesized_row = AgentVersionRow(
                     agent_id=asset.id,
                     version_number=await self._next_version_number(
@@ -524,12 +555,13 @@ class AgentService:
                     identity=effective_payload.identity,
                     user_context=effective_payload.user_context,
                     model_ref=effective_payload.model_ref,
+                    model_settings=self._model_settings_json(effective_payload.model_settings),
                     tool_groups=list(effective_payload.tool_groups),
                     supersedes_version_id=asset.current_published_version_id,
-                    payload_schema_version=2,
+                    payload_schema_version=payload_schema_version,
                     payload_checksum=self._payload_checksum(
                         effective_payload,
-                        payload_schema_version=2,
+                        payload_schema_version=payload_schema_version,
                     ),
                     created_by_user_id=str(actor.user_id),
                 )
@@ -840,8 +872,20 @@ class AgentService:
         payload_schema_version: int,
     ) -> AgentPayload:
         request_id = getattr(actor, "request_id", "unknown")
-        if not isinstance(payload, AgentPayload) or not isinstance(payload_schema_version, int) or isinstance(payload_schema_version, bool) or payload_schema_version not in (1, 2):
+        if (
+            not isinstance(payload, AgentPayload)
+            or not isinstance(payload_schema_version, int)
+            or isinstance(payload_schema_version, bool)
+            or payload_schema_version not in (1, 2, 3)
+            or not isinstance(payload.model_settings, AgentModelSettings)
+        ):
             raise AssetValidationFailed(request_id)
+        try:
+            model_settings = AgentModelSettings.model_validate(
+                payload.model_settings,
+            )
+        except ValidationError:
+            raise AssetValidationFailed(request_id) from None
         if not all(
             isinstance(value, str)
             for value in (
@@ -866,10 +910,13 @@ class AgentService:
                 identity=payload.identity,
                 user_context=payload.user_context,
                 payload_schema_version=payload_schema_version,
+                model_settings=model_settings,
             )
         except TypeError:
             raise AssetValidationFailed(request_id) from None
         if not normalized.model_ref.strip() or len(normalized.model_ref) > 255:
+            raise AssetValidationFailed(request_id)
+        if payload_schema_version in (1, 2) and not normalized.model_settings.is_empty:
             raise AssetValidationFailed(request_id)
         if payload_schema_version == 1:
             if not normalized.soul.strip():
@@ -976,6 +1023,38 @@ class AgentService:
             raise AssetValidationFailed(actor.request_id)
 
     @staticmethod
+    def _payload_schema_version(payload: object) -> int:
+        if isinstance(payload, AgentPayload) and isinstance(payload.model_settings, AgentModelSettings) and not payload.model_settings.is_empty:
+            return 3
+        return 2
+
+    @staticmethod
+    def _model_settings_json(
+        settings: AgentModelSettings,
+    ) -> dict[str, object]:
+        if not isinstance(settings, AgentModelSettings):
+            raise ValueError("invalid Agent model settings")
+        try:
+            canonical = AgentModelSettings.model_validate(settings)
+        except ValidationError:
+            raise ValueError("invalid Agent model settings") from None
+        return canonical.model_dump(exclude_none=True)
+
+    @staticmethod
+    def _model_settings_from_row(
+        value: object,
+        request_id: str,
+    ) -> AgentModelSettings:
+        if value is None:
+            value = {}
+        if not isinstance(value, dict):
+            raise AssetValidationFailed(request_id)
+        try:
+            return AgentModelSettings.model_validate(value)
+        except ValidationError:
+            raise AssetValidationFailed(request_id) from None
+
+    @staticmethod
     def _payload_checksum(
         payload: AgentPayload,
         *,
@@ -989,7 +1068,7 @@ class AgentService:
             "soul": payload.soul,
             "tool_groups": list(payload.tool_groups),
         }
-        if payload_schema_version == 2:
+        if payload_schema_version in (2, 3):
             document.update(
                 {
                     "agents_instructions": payload.agents_instructions,
@@ -997,6 +1076,8 @@ class AgentService:
                     "user_context": payload.user_context,
                 }
             )
+            if payload_schema_version == 3:
+                document["model_settings"] = AgentService._model_settings_json(payload.model_settings)
         elif payload_schema_version != 1:
             raise ValueError("unsupported Agent payload schema version")
         canonical = json.dumps(
@@ -1050,6 +1131,10 @@ class AgentService:
             identity=row.identity,
             user_context=row.user_context,
             payload_schema_version=row.payload_schema_version,
+            model_settings=AgentService._model_settings_from_row(
+                row.model_settings,
+                "unknown",
+            ),
         )
 
     @staticmethod
@@ -1094,6 +1179,7 @@ class AgentService:
             identity=(payload.identity if "identity" in provided_instruction_fields else instructions.identity),
             user_context=(payload.user_context if "user_context" in provided_instruction_fields else instructions.user_context),
             payload_schema_version=payload.payload_schema_version,
+            model_settings=payload.model_settings,
         )
 
     @classmethod

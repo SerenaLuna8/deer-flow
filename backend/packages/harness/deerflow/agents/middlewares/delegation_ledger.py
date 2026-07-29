@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from html import escape
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
-from deerflow.agents.thread_state import DelegationEntry
+from deerflow.agents.thread_state import (
+    TERMINAL_STATUSES,
+    DelegationEntry,
+    delegation_occurrence,
+)
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
 )
@@ -95,39 +99,32 @@ def _tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
-def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
-    """Enumerate `task` delegations from AI tool calls and paired results."""
-    entries_by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
-    now = _utc_now_iso()
-    for message in messages:
-        if not isinstance(message, AIMessage):
+def _apply_tool_results(
+    entries: list[DelegationEntry],
+    messages: list[AnyMessage],
+) -> None:
+    """Pair ToolMessages to unfinished occurrences in provider order."""
+    pending_by_id: dict[str, list[DelegationEntry]] = {}
+    for entry in entries:
+        if entry["status"] in TERMINAL_STATUSES:
             continue
-        for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) != "task":
-                continue
-            tool_call_id = _tool_call_id(tool_call)
-            if tool_call_id is None:
-                continue
-            args = _tool_call_args(tool_call)
-            description = str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP]
-            if tool_call_id not in entries_by_id:
-                order.append(tool_call_id)
-            entries_by_id[tool_call_id] = {
-                "id": tool_call_id,
-                "description": description,
-                "subagent_type": str(args.get("subagent_type") or ""),
-                "status": "in_progress",
-                "created_at": now,
-            }
+        pending_by_id.setdefault(entry["id"], []).append(entry)
 
+    next_result_index: dict[str, int] = {}
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
         tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
-        entry = entries_by_id.get(tool_call_id)
-        if entry is None:
+        pending = pending_by_id.get(tool_call_id)
+        if not pending:
             continue
+        result_index = next_result_index.get(tool_call_id, 0)
+        if result_index >= len(pending):
+            continue
+        entry = pending[result_index]
+        # A result consumes its provider-order occurrence even when it is not a
+        # structured subagent terminal result.
+        next_result_index[tool_call_id] = result_index + 1
         structured = read_subagent_result_metadata(message.additional_kwargs)
         if structured is None:
             continue
@@ -145,7 +142,64 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
                     "result_ref": str(message.id or tool_call_id),
                 }
             )
-    return [entries_by_id[tool_call_id] for tool_call_id in order]
+
+
+def extract_delegations(
+    messages: list[AnyMessage],
+    *,
+    prior_entries: list[DelegationEntry] | None = None,
+) -> list[DelegationEntry]:
+    """Enumerate task dispatches and pair results by provider-call occurrence.
+
+    ``prior_entries`` lets a resumed Run apply newly appended ToolMessages to
+    in-progress delegations whose AI dispatch lives before the pre-Run message
+    boundary.
+    """
+    entries = [cast(DelegationEntry, dict(entry)) for entry in (prior_entries or [])]
+    next_occurrence_by_id: dict[str, int] = {}
+    for entry in entries:
+        next_occurrence_by_id[entry["id"]] = max(
+            next_occurrence_by_id.get(entry["id"], 0),
+            delegation_occurrence(entry),
+        )
+
+    dispatches: list[tuple[str, dict[str, Any], str | None]] = []
+    dispatch_count_by_id: dict[str, int] = {}
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        message_id = str(message.id) if message.id else None
+        for tool_call_index, tool_call in enumerate(message.tool_calls or []):
+            if _tool_call_name(tool_call) != "task":
+                continue
+            tool_call_id = _tool_call_id(tool_call)
+            if tool_call_id is None:
+                continue
+            dispatch_ref = f"{message_id}:{tool_call_index}" if message_id is not None else None
+            dispatches.append((tool_call_id, _tool_call_args(tool_call), dispatch_ref))
+            dispatch_count_by_id[tool_call_id] = dispatch_count_by_id.get(tool_call_id, 0) + 1
+
+    now = _utc_now_iso()
+    for tool_call_id, args, dispatch_ref in dispatches:
+        if dispatch_ref is not None and any(entry["id"] == tool_call_id and entry.get("dispatch_ref") == dispatch_ref for entry in entries):
+            continue
+        occurrence = next_occurrence_by_id.get(tool_call_id, 0) + 1
+        next_occurrence_by_id[tool_call_id] = occurrence
+        entry: DelegationEntry = {
+            "id": tool_call_id,
+            "description": str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP],
+            "subagent_type": str(args.get("subagent_type") or ""),
+            "status": "in_progress",
+            "created_at": now,
+        }
+        if occurrence > 1 or dispatch_count_by_id[tool_call_id] > 1:
+            entry["occurrence"] = occurrence
+        if dispatch_ref is not None:
+            entry["dispatch_ref"] = dispatch_ref
+        entries.append(entry)
+
+    _apply_tool_results(entries, messages)
+    return entries
 
 
 def _fits_budget(lines: list[str], candidate: str, max_chars: int) -> bool:

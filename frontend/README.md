@@ -54,8 +54,7 @@ frontend/
 │   ├── e2e/                 # 确定性动态模式 Playwright E2E
 │   ├── e2e-static/          # 静态构建 Playwright E2E
 │   ├── e2e-real-backend/    # Replay Gateway 全栈回放
-│   ├── e2e-record/          # 人工录制 Replay fixture
-│   └── e2e-release/         # M8 宿主机发布验收
+│   └── e2e-record/          # 人工录制 Replay fixture
 ├── public/                  # 静态资源和确定性演示 fixture
 ├── scripts/                 # 前端辅助脚本
 └── package.json

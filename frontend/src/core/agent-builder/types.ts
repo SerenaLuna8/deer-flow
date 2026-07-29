@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import { assetSummarySchema } from "@/core/shared-assets/types";
+import {
+  agentModelSettingsSchema,
+  assetSummarySchema,
+} from "@/core/shared-assets/types";
 
 const uuidSchema = z.string().uuid();
 const timestampSchema = z.string().datetime({ offset: true });
@@ -51,6 +54,7 @@ export const agentBuilderBlueprintSchema = z
     soul: z.string(),
     identity: z.string(),
     user_context: z.string(),
+    model_settings: agentModelSettingsSchema.optional(),
   })
   .strict();
 

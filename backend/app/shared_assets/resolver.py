@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
@@ -38,6 +39,7 @@ from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvali
 from app.shared_assets.mcp_repository import McpVersionRecord
 from app.shared_assets.mcp_service import McpService
 from app.shared_assets.models import (
+    AgentModelSettings,
     AgentPayload,
     AssetKind,
     AssetScope,
@@ -446,6 +448,12 @@ class ProjectAssetResolver:
             context.request_id,
         )
         dependencies = tuple((*skill_ids, *mcp_ids))
+        try:
+            model_settings = AgentModelSettings.model_validate({} if version.model_settings is None else version.model_settings)
+        except ValidationError:
+            raise AssetResolutionUnavailable(context.request_id) from None
+        if version.payload_schema_version not in (1, 2, 3) or (version.payload_schema_version in (1, 2) and not model_settings.is_empty):
+            raise AssetResolutionUnavailable(context.request_id)
         return ResolvedAgentSnapshot(
             kind=AssetKind.AGENT,
             scope=record.scope,
@@ -462,6 +470,7 @@ class ProjectAssetResolver:
                 identity=version.identity,
                 user_context=version.user_context,
                 model_ref=version.model_ref,
+                model_settings=model_settings,
                 tool_groups=tuple(version.tool_groups),
                 skill_version_ids=skill_ids,
                 mcp_version_ids=mcp_ids,

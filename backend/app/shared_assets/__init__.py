@@ -40,6 +40,7 @@ from app.shared_assets.mcp_service import (
     McpVersionView,
 )
 from app.shared_assets.models import (
+    AgentModelSettings,
     AgentPayload,
     AssetKind,
     AssetScope,
@@ -79,6 +80,7 @@ from app.shared_assets.skill_service import (
 
 __all__ = [
     "AGENT_INSTRUCTION_FIELDS",
+    "AgentModelSettings",
     "AgentPayload",
     "AgentAssetView",
     "AgentInstructions",

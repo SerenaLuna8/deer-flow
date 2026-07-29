@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 
 from langchain.chat_models import BaseChatModel
 
@@ -8,6 +9,17 @@ from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
+
+_AGENT_MODEL_SETTING_FIELDS = frozenset(
+    {
+        "temperature",
+        "max_tokens",
+    }
+)
+_AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
+    "max_tokens",
+    "max_output_tokens",
+)
 
 
 def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
@@ -162,7 +174,67 @@ def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, **kwargs) -> BaseChatModel:
+def _provider_model_field_names(model_class: type[BaseChatModel]) -> set[str]:
+    names: set[str] = set()
+    for name, field in getattr(model_class, "model_fields", {}).items():
+        names.add(name)
+        alias = getattr(field, "alias", None)
+        if isinstance(alias, str):
+            names.add(alias)
+    return names
+
+
+def _validated_agent_model_overrides(
+    model_class: type[BaseChatModel],
+    model_name: str,
+    overrides: Mapping[str, object] | None,
+) -> dict[str, float | int]:
+    """Validate and map the bounded Agent-version sampling surface.
+
+    A canonical Agent ``max_tokens`` setting maps only to a field explicitly
+    declared by the selected provider class.  This prevents an immutable
+    version from silently forwarding an unsupported key into a provider
+    request body.
+    """
+
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, Mapping):
+        raise ValueError("Agent model overrides must be a mapping")
+    unknown = set(overrides) - _AGENT_MODEL_SETTING_FIELDS
+    if unknown:
+        raise ValueError(f"Unsupported Agent model setting: {sorted(unknown)[0]}")
+    supported_fields = _provider_model_field_names(model_class)
+    mapped: dict[str, float | int] = {}
+    for key, value in overrides.items():
+        if key == "temperature":
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not 0 <= value <= 2:
+                raise ValueError("Agent model setting temperature must be between 0 and 2")
+            if "temperature" not in supported_fields:
+                raise ValueError(f"Model {model_name} does not support Agent model setting temperature")
+            mapped["temperature"] = value
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 200_000:
+            raise ValueError("Agent model setting max_tokens must be an integer between 1 and 200000")
+        provider_field = next(
+            (candidate for candidate in _AGENT_MAX_TOKENS_PROVIDER_FIELDS if candidate in supported_fields),
+            None,
+        )
+        if provider_field is None:
+            raise ValueError(f"Model {model_name} does not support Agent model setting max_tokens")
+        mapped[provider_field] = value
+    return mapped
+
+
+def create_chat_model(
+    name: str | None = None,
+    thinking_enabled: bool = False,
+    *,
+    app_config: AppConfig | None = None,
+    attach_tracing: bool = True,
+    model_overrides: Mapping[str, object] | None = None,
+    **kwargs,
+) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -180,6 +252,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             the model) and ``session_id`` / ``user_id`` metadata never reach the trace
             because the model becomes a nested observation whose ``langfuse_*`` keys
             get stripped.
+        model_overrides: Exact per-Agent sampling defaults. Only
+            ``temperature`` and canonical ``max_tokens`` are accepted, and
+            each is mapped only when the selected provider declares support.
 
     Returns:
         A chat model instance.
@@ -209,6 +284,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             # forward unknown kwargs into the completion request payload.
             "pricing",
         },
+    )
+    agent_model_overrides = _validated_agent_model_overrides(
+        model_class,
+        name,
+        model_overrides,
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
@@ -250,6 +330,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # default instead of passing the same constructor argument twice.
         model_settings_from_config.pop("reasoning_effort", None)
 
+    # Apply exact Agent/request sampling values only after every global model
+    # profile and thinking-mode merge. This preserves the public precedence
+    # contract: request > exact Agent version > global configuration.
+    if agent_model_overrides:
+        if "max_tokens" in agent_model_overrides or "max_output_tokens" in agent_model_overrides:
+            model_settings_from_config.pop("max_tokens", None)
+            model_settings_from_config.pop("max_output_tokens", None)
+        model_settings_from_config.update(agent_model_overrides)
+
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_config.use, model_settings_from_config)
@@ -260,8 +349,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     from deerflow.models.openai_codex_provider import CodexChatModel
 
     if issubclass(model_class, CodexChatModel):
+        if model_overrides is not None and model_overrides.get("max_tokens") is not None:
+            raise ValueError(f"Model {name} does not support Agent model setting max_tokens")
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
+        model_settings_from_config.pop("max_output_tokens", None)
 
         # Use explicit reasoning_effort from frontend if provided (low/medium/high)
         explicit_effort = kwargs.pop("reasoning_effort", None)

@@ -93,6 +93,12 @@ class AgentVersionRow(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     soul: Mapped[str] = mapped_column(Text, nullable=False)
     model_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_settings: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     tool_groups: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"))
     supersedes_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_versions.id", ondelete="RESTRICT"), nullable=True)
     payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
@@ -116,8 +122,49 @@ class AgentVersionRow(Base):
             name="ck_agent_versions_workflow_status",
         ),
         CheckConstraint(
-            "payload_schema_version IN (1, 2)",
+            "payload_schema_version IN (1, 2, 3)",
             name="ck_agent_versions_payload_schema_version",
+        ),
+        CheckConstraint(
+            """
+            jsonb_typeof(model_settings) = 'object'
+            AND (
+                payload_schema_version = 3
+                OR model_settings = '{}'::jsonb
+            )
+            AND model_settings - 'temperature' - 'max_tokens'
+                - 'thinking_enabled' - 'reasoning_effort' = '{}'::jsonb
+            AND (
+                NOT (model_settings ? 'temperature')
+                OR (
+                    jsonb_typeof(model_settings->'temperature') = 'number'
+                    AND (model_settings->>'temperature')::numeric BETWEEN 0 AND 2
+                )
+            )
+            AND (
+                NOT (model_settings ? 'max_tokens')
+                OR (
+                    jsonb_typeof(model_settings->'max_tokens') = 'number'
+                    AND (model_settings->>'max_tokens')::numeric
+                        = trunc((model_settings->>'max_tokens')::numeric)
+                    AND (model_settings->>'max_tokens')::numeric
+                        BETWEEN 1 AND 200000
+                )
+            )
+            AND (
+                NOT (model_settings ? 'thinking_enabled')
+                OR jsonb_typeof(model_settings->'thinking_enabled') = 'boolean'
+            )
+            AND (
+                NOT (model_settings ? 'reasoning_effort')
+                OR (
+                    jsonb_typeof(model_settings->'reasoning_effort') = 'string'
+                    AND model_settings->>'reasoning_effort'
+                        IN ('low', 'medium', 'high')
+                )
+            )
+            """,
+            name="ck_agent_versions_model_settings",
         ),
         CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_agent_versions_checksum"),
         UniqueConstraint("agent_id", "version_number", name="uq_agent_versions_asset_number"),

@@ -1,4 +1,4 @@
-config_version: 28
+config_version: 29
 log_level: info
 logging:
   enhance:
@@ -162,6 +162,9 @@ summarization:
   - read
   - view
   - cat
+subagents:
+  # Hard total across every delegation batch in one exact private Run.
+  max_total_per_run: 6
 memory:
   enabled: true
   debounce_seconds: 30

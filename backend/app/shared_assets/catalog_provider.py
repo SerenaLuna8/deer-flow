@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
@@ -25,7 +26,13 @@ from app.shared_assets.errors import AssetValidationFailed, SharedAssetError
 from app.shared_assets.keyring import CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
 from app.shared_assets.mcp_service import McpService
-from app.shared_assets.models import AgentPayload, AssetKind, AssetScope, ResolvedMcpSnapshot
+from app.shared_assets.models import (
+    AgentModelSettings,
+    AgentPayload,
+    AssetKind,
+    AssetScope,
+    ResolvedMcpSnapshot,
+)
 from app.shared_assets.resolver import materialize_mcp_secrets as materialize_resolved_mcp_secrets
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_service import SkillService
@@ -373,6 +380,12 @@ class PostgresAssetCatalogProvider:
             ).all()
             if raw_skill_ids != tuple(row[0] for row in skill_rows) or raw_mcp_ids != tuple(row[0] for row in mcp_rows):
                 raise AssetCatalogUnavailable("system agent dependency catalog is invalid")
+            try:
+                model_settings = AgentModelSettings.model_validate({} if version.model_settings is None else version.model_settings)
+            except ValidationError:
+                raise AssetCatalogUnavailable("system agent catalog is invalid") from None
+            if version.payload_schema_version not in (1, 2, 3) or (version.payload_schema_version in (1, 2) and not model_settings.is_empty):
+                raise AssetCatalogUnavailable("system agent catalog is invalid")
             payload = AgentPayload(
                 description=version.description,
                 soul=version.soul,
@@ -380,8 +393,19 @@ class PostgresAssetCatalogProvider:
                 tool_groups=tuple(version.tool_groups),
                 skill_version_ids=tuple(uuid.UUID(str(row[0])) for row in skill_rows),
                 mcp_version_ids=tuple(uuid.UUID(str(row[0])) for row in mcp_rows),
+                payload_schema_version=version.payload_schema_version,
+                agents_instructions=version.agents_instructions,
+                identity=version.identity,
+                user_context=version.user_context,
+                model_settings=model_settings,
             )
-            if AgentService._payload_checksum(payload) != version.payload_checksum:
+            if (
+                AgentService._payload_checksum(
+                    payload,
+                    payload_schema_version=version.payload_schema_version,
+                )
+                != version.payload_checksum
+            ):
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
             snapshots.append(
                 AssetCatalogAgentSnapshot(
@@ -399,6 +423,11 @@ class PostgresAssetCatalogProvider:
                     mcp_version_ids=payload.mcp_version_ids,
                     skill_slugs=tuple(str(row[1]) for row in skill_rows),
                     mcp_slugs=tuple(str(row[1]) for row in mcp_rows),
+                    payload_schema_version=version.payload_schema_version,
+                    agents_instructions=version.agents_instructions,
+                    identity=version.identity,
+                    user_context=version.user_context,
+                    model_settings=MappingProxyType(model_settings.model_dump(exclude_none=True)),
                 )
             )
         return tuple(snapshots)

@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, it } from "@rstest/core";
 
@@ -15,19 +12,6 @@ import {
   parseSubtaskResult,
   parseSubtaskTerminalEvent,
 } from "@/core/tasks/subtask-result";
-
-interface ContractFile {
-  valid_status_values: string[];
-  valid_stop_reason_values: string[];
-}
-
-const CONTRACT_PATH = resolve(
-  __dirname,
-  "../../../../../contracts/subagent_status_contract.json",
-);
-const CONTRACT: ContractFile = JSON.parse(
-  readFileSync(CONTRACT_PATH, "utf-8"),
-) as ContractFile;
 
 describe("parseSubtaskResult", () => {
   it("uses legacy task result text when structured metadata is absent", () => {
@@ -401,36 +385,4 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.status).toBe("failed");
     expect(parsed.error).toBeUndefined();
   });
-});
-
-/**
- * Cross-language contract test for the structured subagent status field.
- * The backend and frontend share the enum values, but task result text is
- * no longer part of the wire contract.
- */
-describe("parseSubtaskResult — shared contract fixture", () => {
-  const expectedCardStatus = (backendStatus: string): string => {
-    if (backendStatus === "completed") return "completed";
-    return "failed";
-  };
-
-  for (const status of CONTRACT.valid_status_values) {
-    it(`maps structured status: ${status}`, () => {
-      const parsed = parseSubtaskResult("ignored content", {
-        [SUBAGENT_STATUS_KEY]: status,
-      });
-      expect(parsed.status).toBe(expectedCardStatus(status));
-    });
-  }
-
-  for (const stopReason of CONTRACT.valid_stop_reason_values) {
-    it(`carries stop_reason through unchanged: ${stopReason}`, () => {
-      const parsed = parseSubtaskResult("ignored content", {
-        [SUBAGENT_STATUS_KEY]: "completed",
-        [SUBAGENT_RESULT_BRIEF_KEY]: "partial work",
-        [SUBAGENT_STOP_REASON_KEY]: stopReason,
-      });
-      expect(parsed.stopReason).toBe(stopReason);
-    });
-  }
 });

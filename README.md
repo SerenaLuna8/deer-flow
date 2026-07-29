@@ -175,7 +175,6 @@ deer-flow/
 ├── deploy/helm/                     # Kubernetes/Helm 资源
 ├── scripts/                         # 根级安装、启动、诊断和部署编排
 ├── skills/public/                   # 生成 packaged system Skill archives 的 21 个源目录
-├── contracts/                       # 跨进程与发布验收契约
 ├── docs/                            # 跨模块设计文档
 ├── config.example.yaml              # 配置模板
 ├── Install.md                       # 面向 Coding Agent 的安装流程
@@ -197,12 +196,12 @@ deer-flow/
 | `make check-db` | 只读检查 PostgreSQL marker 与必需对象 |
 | `cd backend && make lint && make test` | 后端格式、静态检查与测试 |
 | `cd frontend && pnpm check && pnpm test` | 前端 lint、类型检查与单元测试 |
-| `POSTGRES_TEST_URL=... make test-project-saas-postgres` | 运行真实 PostgreSQL 发布门禁；只能使用可丢弃测试实例 |
+| `POSTGRES_TEST_URL=... make test-project-foundation-postgres` | 运行 M1-M7 真实 PostgreSQL 门禁；只能使用可丢弃测试实例 |
 
 完整命令列表运行 `make help`。
 
 GitHub Actions 由 `.github/workflows/project-saas-release-gates.yml` 统一执行完整后端测试（包含
-`tests/blocking_io/`）、固定 23 文件 PostgreSQL 门禁、前端单元测试、确定性 Chromium E2E、构建和安全检查。
+`tests/blocking_io/`）、固定 20 文件 M1-M7 PostgreSQL 门禁、前端单元测试、确定性 Chromium E2E、构建和安全检查。
 Replay E2E、发布、容器、Helm Chart 与版本校验继续使用各自的专用工作流。
 
 ## 文档

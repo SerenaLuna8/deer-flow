@@ -417,7 +417,6 @@ Python is 3.12+, Ruff uses double quotes and a 240-character line limit, and all
 interfaces should use precise types. Keep public errors stable and free of SQL, connection,
 credential, private resource, and exception detail.
 
-Historical pass counts do not certify the current checkout. `M8_RELEASE_POSTGRES_TESTS` keeps the
-20-file foundation prefix and appends three M8 PostgreSQL files; the current zero-skip gate is
-`make test-project-saas-postgres` from the repository root. Full host acceptance uses owned random
-`deerflow_test_*` databases and runs through `make release-acceptance`.
+Historical pass counts do not certify the current checkout. The current zero-skip PostgreSQL gate
+is `make test-project-foundation-postgres` from the repository root. It runs the ordered 20-file
+M1-M7 foundation list against owned random `deerflow_test_*` databases.

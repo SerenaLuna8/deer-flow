@@ -48,6 +48,7 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from app.shared_assets.models import (
+    AgentModelSettings,
     AssetKind,
     AssetScope,
     AssetSelection,
@@ -573,6 +574,7 @@ class PrivateAgentManifest:
     tool_groups: tuple[str, ...]
     skills: tuple[PrivateSkillManifest, ...]
     mcps: tuple[PrivateMcpManifest, ...]
+    model_settings: AgentModelSettings = AgentModelSettings()
 
     def __repr__(self) -> str:
         return (
@@ -619,6 +621,33 @@ def _safe_copy(value: object) -> object:
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     raise RunSnapshotAssetStale
+
+
+def _private_agent_manifest(
+    agent: ResolvedAgentSnapshot,
+    *,
+    skills: tuple[PrivateSkillManifest, ...],
+    mcps: tuple[PrivateMcpManifest, ...],
+) -> PrivateAgentManifest:
+    """Build the secret-free runtime manifest from one exact snapshot."""
+
+    return PrivateAgentManifest(
+        agent_asset_id=agent.asset_id,
+        agent_version_id=agent.version_id,
+        checksum=agent.checksum,
+        catalog_generation=agent.catalog_generation,
+        description=agent.payload.description,
+        payload_schema_version=agent.payload.payload_schema_version,
+        agents_instructions=agent.payload.agents_instructions,
+        soul=agent.payload.soul,
+        identity=agent.payload.identity,
+        user_context=agent.payload.user_context,
+        model_ref=agent.payload.model_ref,
+        model_settings=agent.payload.model_settings,
+        tool_groups=agent.payload.tool_groups,
+        skills=skills,
+        mcps=mcps,
+    )
 
 
 def _write_skill_tree(
@@ -746,6 +775,10 @@ class PrivateAgentRuntime:
     @property
     def model_ref(self) -> str:
         return self.safe_manifest.model_ref
+
+    @property
+    def model_settings(self) -> AgentModelSettings:
+        return self.safe_manifest.model_settings
 
     @property
     def run_id(self) -> str:
@@ -1774,19 +1807,8 @@ class PrivateAssetRuntime:
                 )
                 for snapshot in mcp_snapshots
             )
-            safe_manifest = PrivateAgentManifest(
-                agent_asset_id=agent.asset_id,
-                agent_version_id=agent.version_id,
-                checksum=agent.checksum,
-                catalog_generation=agent.catalog_generation,
-                description=agent.payload.description,
-                payload_schema_version=agent.payload.payload_schema_version,
-                agents_instructions=agent.payload.agents_instructions,
-                soul=agent.payload.soul,
-                identity=agent.payload.identity,
-                user_context=agent.payload.user_context,
-                model_ref=agent.payload.model_ref,
-                tool_groups=agent.payload.tool_groups,
+            safe_manifest = _private_agent_manifest(
+                agent,
                 skills=skill_manifests,
                 mcps=mcp_manifests,
             )

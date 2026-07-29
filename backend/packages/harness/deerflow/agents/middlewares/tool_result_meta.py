@@ -81,6 +81,33 @@ _UNKNOWN_ERROR: dict[str, object] = {
     "recommended_next_action": "try_alternative",
 }
 
+# Only rendered remote-page results may use their first heading as an HTTP error
+# signal. The same words can be legitimate output from local tools.
+_PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
+
+# Reuse the categories declared by _ERROR_RULES so shell classification cannot
+# drift from their recovery and next-action semantics.
+_ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
+
+_ERROR_SHELL_PHRASES: dict[str, str] = {
+    "unauthorized": "auth",
+    "proxy authentication required": "auth",
+    "forbidden": "permission",
+    "access denied": "permission",
+    "permission denied": "permission",
+    "not found": "not_found",
+    "too many requests": "rate_limited",
+    "internal server error": "internal",
+    "not implemented": "internal",
+    "bad gateway": "transient",
+    "service unavailable": "transient",
+    "service temporarily unavailable": "transient",
+    "gateway timeout": "transient",
+}
+
+# Generic leading words used by nginx, Apache, and IIS status headings.
+_STATUS_TITLE_FILLER: frozenset[str] = frozenset({"http", "error", "page", "the", "file", "or", "directory", "url", "resource"})
+
 # Pre-compiled at module load from _ERROR_RULES. Anchoring bare numeric codes (401, 403, 404,
 # 500) to word boundaries prevents substring hits on unrelated numbers like "took 500ms".
 # Computed here (after _ERROR_RULES) so the set is authoritative and thread-safe — no lazy
@@ -127,6 +154,25 @@ def _classify_error_text(text: str) -> dict[str, object]:
         if any(_match_keyword(kw, lower) for kw in keywords):
             return {**attrs}
     return {**_UNKNOWN_ERROR}
+
+
+def _as_status_line(title: str) -> str | None:
+    """Reduce an HTTP error-page title to its bare reason phrase."""
+    words = re.sub(r"[^0-9a-z]+", " ", title.lower()).split()
+    while words and (words[0] in _STATUS_TITLE_FILLER or (len(words[0]) == 3 and words[0].isdigit() and 400 <= int(words[0]) <= 599)):
+        words = words[1:]
+    return " ".join(words) or None
+
+
+def _classify_error_shell(msg: ToolMessage, content: str) -> dict[str, object] | None:
+    """Classify a fetched page whose first non-empty heading is an HTTP status."""
+    if msg.name not in _PAGE_CONTENT_TOOL_NAMES:
+        return None
+
+    title = next((line for line in content.splitlines() if line.strip()), "")
+    phrase = _as_status_line(title.lstrip("#").strip())
+    error_type = _ERROR_SHELL_PHRASES.get(phrase) if phrase else None
+    return {**_ATTRS_BY_ERROR_TYPE[error_type]} if error_type else None
 
 
 def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
@@ -190,6 +236,8 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     elif (json_error := _extract_json_error_text(content)) is not None:
         attrs = _classify_error_text(json_error)
         meta = _make_meta(status="error", source="tool_return", **attrs)
+    elif (shell_attrs := _classify_error_shell(msg, content)) is not None:
+        meta = _make_meta(status="error", source="content_analysis", **shell_attrs)
     elif any(m in content_lower for m in _PARTIAL_MARKERS):
         meta = _make_meta(
             status="partial_success",

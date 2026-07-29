@@ -29,8 +29,7 @@ export interface SubtaskResultUpdate {
  * result metadata fields are optional and bounded: ``subagent_result_brief``
  * carries a trimmed summary for completed tasks and
  * ``subagent_result_sha256`` carries the full-result digest. The
- * cross-language fixture at ``contracts/subagent_status_contract.json``
- * pins both sides to the same values.
+ * frontend keeps the same wire keys so it can interpret backend task results.
  */
 export const SUBAGENT_STATUS_KEY = "subagent_status";
 export const SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason";
@@ -39,9 +38,8 @@ export const SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief";
 export const SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256";
 /**
  * Why a guardrail cap ended a subagent run early (#3875 Phase 2). Mirrors the
- * Python ``SUBAGENT_STOP_REASON_VALUES`` and the shared fixture's
- * ``valid_stop_reason_values``. The field is optional/additive — older
- * frontends that only read ``subagent_status`` simply never see it.
+ * Python ``SUBAGENT_STOP_REASON_VALUES``. The field is optional/additive —
+ * older frontends that only read ``subagent_status`` simply never see it.
  */
 const SUBAGENT_STOP_REASON_VALUES = [
   "token_capped",

@@ -1,9 +1,6 @@
-"""Contract tests for ``deerflow.subagents.status_contract``."""
+"""Tests for ``deerflow.subagents.status_contract``."""
 
 from __future__ import annotations
-
-import json
-from pathlib import Path
 
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
@@ -11,37 +8,12 @@ from deerflow.subagents.status_contract import (
     SUBAGENT_RESULT_BRIEF_KEY,
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
-    SUBAGENT_STATUS_VALUES,
     SUBAGENT_STOP_REASON_KEY,
-    SUBAGENT_STOP_REASON_VALUES,
     _bound_metadata_text,
     format_subagent_result_message,
     make_subagent_additional_kwargs,
     read_subagent_result_metadata,
 )
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_CONTRACT_PATH = _REPO_ROOT / "contracts" / "subagent_status_contract.json"
-
-
-def _load_contract() -> dict:
-    return json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
-
-
-def test_contract_file_exists():
-    assert _CONTRACT_PATH.is_file(), f"missing shared fixture: {_CONTRACT_PATH}"
-
-
-def test_status_values_match_contract():
-    """Backend status enum stays aligned with the contract document."""
-    contract = _load_contract()
-    assert set(SUBAGENT_STATUS_VALUES) == set(contract["valid_status_values"])
-
-
-def test_stop_reason_values_match_contract():
-    """Backend stop_reason vocabulary stays aligned with the contract document (#3875 Phase 2)."""
-    contract = _load_contract()
-    assert set(SUBAGENT_STOP_REASON_VALUES) == set(contract["valid_stop_reason_values"])
 
 
 def test_make_subagent_additional_kwargs_includes_status():

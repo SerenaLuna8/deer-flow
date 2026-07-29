@@ -27,8 +27,6 @@
     "start": "next start",
     "test": "rstest",
     "test:e2e": "playwright test",
-    "test:e2e:m8": "playwright test --config playwright.m8.config.ts",
-    "test:e2e:m8:deterministic": "playwright test",
     "test:e2e:static": "playwright test --config playwright.static.config.ts",
     "typecheck": "tsc --noEmit"
   },

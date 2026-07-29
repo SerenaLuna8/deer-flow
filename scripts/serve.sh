@@ -364,31 +364,7 @@ else
     export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
 
-# M8 release acceptance gives every generated log/temp/pid file an
-# invocation-owned root. Ordinary operator launches retain the historical
-# repository root default.
-if [ -n "${DEER_FLOW_RUNTIME_ROOT:-}" ]; then
-    case "$DEER_FLOW_RUNTIME_ROOT" in
-        *[!A-Za-z0-9_./-]*)
-            echo "✗ DEER_FLOW_RUNTIME_ROOT contains unsupported characters."
-            exit 1
-            ;;
-    esac
-    if [ ! -d "$DEER_FLOW_RUNTIME_ROOT" ]; then
-        echo "✗ DEER_FLOW_RUNTIME_ROOT must name an existing directory."
-        exit 1
-    fi
-    RUNTIME_ROOT="$(cd "$DEER_FLOW_RUNTIME_ROOT" && pwd -P)"
-    case "$RUNTIME_ROOT/" in
-        "$REPO_ROOT"/*) ;;
-        *)
-            echo "✗ DEER_FLOW_RUNTIME_ROOT must be inside this worktree."
-            exit 1
-            ;;
-    esac
-else
-    RUNTIME_ROOT="$REPO_ROOT"
-fi
+RUNTIME_ROOT="$REPO_ROOT"
 LOG_ROOT="$RUNTIME_ROOT/logs"
 
 if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then

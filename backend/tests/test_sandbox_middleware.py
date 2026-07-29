@@ -531,7 +531,18 @@ def test_wrap_tool_call_merges_with_existing_command_update() -> None:
         return Command(
             update={
                 "messages": [tool_msg],
-                "viewed_images": {"a.png": {"base64": "x", "mime_type": "image/png"}},
+                "viewed_images": {
+                    "/mnt/user-data/uploads/a.png": {
+                        "mime_type": "image/png",
+                        "size": 1,
+                        "sha256": "a" * 64,
+                        "file_ref": {
+                            "path": "/mnt/user-data/uploads/a.png",
+                            "sandbox_id": "new-sandbox",
+                            "run_id": "run-1",
+                        },
+                    }
+                },
             },
             goto="next-node",
         )
@@ -542,7 +553,18 @@ def test_wrap_tool_call_merges_with_existing_command_update() -> None:
     assert result.goto == "next-node"
     assert isinstance(result.update, dict)
     assert result.update["messages"] == [tool_msg]
-    assert result.update["viewed_images"] == {"a.png": {"base64": "x", "mime_type": "image/png"}}
+    assert result.update["viewed_images"] == {
+        "/mnt/user-data/uploads/a.png": {
+            "mime_type": "image/png",
+            "size": 1,
+            "sha256": "a" * 64,
+            "file_ref": {
+                "path": "/mnt/user-data/uploads/a.png",
+                "sandbox_id": "new-sandbox",
+                "run_id": "run-1",
+            },
+        }
+    }
     assert result.update["sandbox"] == {"sandbox_id": "new-sandbox"}
 
 

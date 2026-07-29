@@ -41,6 +41,11 @@ class AssetCatalogAgentSnapshot:
     checksum: str = ""
     skill_slugs: tuple[str, ...] = ()
     mcp_slugs: tuple[str, ...] = ()
+    payload_schema_version: int = 1
+    agents_instructions: str = ""
+    identity: str = ""
+    user_context: str = ""
+    model_settings: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

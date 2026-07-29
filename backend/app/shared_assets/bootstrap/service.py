@@ -440,9 +440,11 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             description=payload.description,
             soul=payload.soul,
             model_ref=payload.model_ref,
+            model_settings={},
             tool_groups=list(payload.tool_groups),
             supersedes_version_id=None,
             payload_checksum=checksum,
+            payload_schema_version=1,
             submitted_at=None,
             reviewed_at=None,
             reviewed_by_user_id=None,
@@ -482,9 +484,11 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         description=payload.description,
         soul=payload.soul,
         model_ref=payload.model_ref,
+        model_settings={},
         tool_groups=list(payload.tool_groups),
         supersedes_version_id=None,
         payload_checksum=checksum,
+        payload_schema_version=1,
         created_by_user_id=str(BUILTIN_ASSET_USER_ID),
     )
     session.add_all([asset, version])

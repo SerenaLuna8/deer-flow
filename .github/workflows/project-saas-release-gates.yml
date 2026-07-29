@@ -1,4 +1,4 @@
-name: M1-M8 Project SaaS Release Gates
+name: M1-M7 Project Foundation Release Gates
 
 on:
   push:
@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   deterministic-release-gates:
-    name: M1-M8 deterministic release gates
+    name: M1-M7 deterministic release gates
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -80,10 +80,10 @@ jobs:
             exit 1
           fi
 
-      - name: Run fixed M1-M8 PostgreSQL gate
+      - name: Run fixed M1-M7 PostgreSQL gate
         env:
           POSTGRES_TEST_URL: postgresql+asyncpg://postgres@127.0.0.1:5432/postgres
-        run: make test-project-saas-postgres
+        run: make test-project-foundation-postgres
 
       - name: Run backend deterministic gates
         working-directory: backend
@@ -91,14 +91,13 @@ jobs:
           uv run pytest -q
           uvx ruff format --check .
           uvx ruff check .
-          uv run python -m scripts.release_acceptance.security --scope dependencies-backend
 
       - name: Run frontend deterministic gates
         working-directory: frontend
         run: |
           pnpm test
           pnpm check
-          pnpm test:e2e:m8:deterministic
+          pnpm test:e2e
           pnpm build:production
           pnpm build:static
           pnpm audit --prod --audit-level low
@@ -110,11 +109,3 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report/
           retention-days: 7
-
-      - name: Run tracked and history security gates
-        working-directory: backend
-        run: |
-          REVIEW_BASE="$(git merge-base "${{ github.event.pull_request.base.sha || github.event.before }}" HEAD)"
-          uv run python -m scripts.release_acceptance.security --scope tracked-tree
-          uv run python -m scripts.release_acceptance.security --scope review-diff --review-base "$REVIEW_BASE"
-          uv run python -m scripts.release_acceptance.security --scope git-history

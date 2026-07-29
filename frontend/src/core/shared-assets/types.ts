@@ -156,6 +156,15 @@ const credentialPayloadStructureSchema = z
     message: "Credential payload schema cannot be empty",
   });
 
+export const agentModelSettingsSchema = z
+  .object({
+    temperature: z.number().min(0).max(2).optional(),
+    max_tokens: z.number().int().min(1).max(200_000).optional(),
+    thinking_enabled: z.boolean().optional(),
+    reasoning_effort: z.enum(["low", "medium", "high"]).optional(),
+  })
+  .strict();
+
 export const agentVersionSchema = z
   .object({
     id: assetIdSchema,
@@ -169,6 +178,7 @@ export const agentVersionSchema = z
     user_context: z.string(),
     payload_schema_version: z.number().int().positive(),
     model_ref: z.string(),
+    model_settings: agentModelSettingsSchema.optional(),
     tool_groups: z.array(z.string()),
     skill_version_ids: z.array(assetIdSchema),
     mcp_version_ids: z.array(assetIdSchema),

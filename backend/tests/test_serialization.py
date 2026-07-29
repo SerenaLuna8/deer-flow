@@ -330,6 +330,55 @@ def test_serialize_channel_values_for_api_no_messages():
     assert result == {"title": "empty"}
 
 
+def test_serialize_channel_values_for_api_drops_legacy_viewed_image_base64():
+    from deerflow.runtime.serialization import serialize_channel_values_for_api
+
+    result = serialize_channel_values_for_api(
+        {
+            "viewed_images": {
+                "/mnt/user-data/uploads/legacy.png": {
+                    "mime_type": "image/png",
+                    "base64": "LEGACY_PERSISTED_IMAGE_BYTES",
+                },
+                "/mnt/user-data/uploads/current.png": {
+                    "mime_type": "image/png",
+                    "size": 42,
+                    "sha256": "a" * 64,
+                    "file_ref": {
+                        "path": "/mnt/user-data/uploads/current.png",
+                        "sandbox_id": "sandbox-1",
+                        "run_id": "run-1",
+                        "project_id": "project-1",
+                        "owner_user_id": "owner-1",
+                    },
+                },
+                "/Users/private/secret.svg": {
+                    "mime_type": "image/svg+xml",
+                    "size": 42,
+                    "sha256": "b" * 64,
+                    "file_ref": {
+                        "path": "/Users/private/secret.svg",
+                        "sandbox_id": "sandbox-secret",
+                        "run_id": "run-1",
+                    },
+                },
+            }
+        }
+    )
+
+    assert result["viewed_images"] == {
+        "/mnt/user-data/uploads/current.png": {
+            "mime_type": "image/png",
+            "size": 42,
+            "sha256": "a" * 64,
+        }
+    }
+    assert "LEGACY_PERSISTED_IMAGE_BYTES" not in str(result)
+    assert "sandbox-1" not in str(result)
+    assert "sandbox-secret" not in str(result)
+    assert "/Users/private" not in str(result)
+
+
 def test_serialize_values_mode_strips_base64_from_hidden_messages():
     """The SSE stream emits ``values`` snapshots of the full state, so it must
     strip base64 image data from hide_from_ui messages just like the REST

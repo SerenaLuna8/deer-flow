@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
-from app.shared_assets.models import AgentPayload, WorkflowStatus
+from app.shared_assets.models import AgentModelSettings, AgentPayload, WorkflowStatus
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionMcpRefRow, AgentVersionRow, AgentVersionSkillRefRow
 
 
@@ -198,6 +198,7 @@ def _payload(
     skill_version_ids: tuple[uuid.UUID, ...] = (),
     mcp_version_ids: tuple[uuid.UUID, ...] = (),
     soul: str = "Verify sources before answering.",
+    model_settings: AgentModelSettings | None = None,
 ) -> AgentPayload:
     return AgentPayload(
         description="Research analyst",
@@ -206,6 +207,7 @@ def _payload(
         tool_groups=("research",),
         skill_version_ids=skill_version_ids,
         mcp_version_ids=mcp_version_ids,
+        model_settings=model_settings or AgentModelSettings(),
     )
 
 
@@ -274,7 +276,14 @@ async def test_project_agent_publish_pins_dependencies_and_hides_other_project(
         draft = await service.create_version(
             editor,
             asset.id,
-            _payload(skill_version_ids=(skill_version_id,), mcp_version_ids=(mcp_version_id,)),
+            _payload(
+                skill_version_ids=(skill_version_id,),
+                mcp_version_ids=(mcp_version_id,),
+                model_settings=AgentModelSettings(
+                    temperature=0.2,
+                    thinking_enabled=False,
+                ),
+            ),
             expected_asset_version=1,
         )
         published = await service.publish(
@@ -285,6 +294,11 @@ async def test_project_agent_publish_pins_dependencies_and_hides_other_project(
         )
 
         assert published.workflow_status is WorkflowStatus.PUBLISHED
+        assert published.payload_schema_version == 3
+        assert published.model_settings == AgentModelSettings(
+            temperature=0.2,
+            thinking_enabled=False,
+        )
         assert published.skill_version_ids == (skill_version_id,)
         assert published.mcp_version_ids == (mcp_version_id,)
         assert (await service.get(editor, asset.id)).current_published_version_id == published.id
@@ -304,6 +318,16 @@ async def test_project_agent_publish_pins_dependencies_and_hides_other_project(
             async with engine.begin() as connection:
                 await connection.execute(
                     text("UPDATE agent_versions SET soul='mutated' WHERE id=:id"),
+                    {"id": published.id},
+                )
+        with pytest.raises(DBAPIError):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """UPDATE agent_versions
+                        SET model_settings='{"temperature":0.8}'::jsonb
+                        WHERE id=:id"""
+                    ),
                     {"id": published.id},
                 )
         with pytest.raises(dataclasses.FrozenInstanceError):

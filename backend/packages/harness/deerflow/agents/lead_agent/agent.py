@@ -64,6 +64,21 @@ def _get_runtime_config(config: RunnableConfig) -> dict:
     return cfg
 
 
+def _resolve_runtime_option(
+    cfg: dict,
+    key: str,
+    agent_value: object,
+    default: object,
+) -> object:
+    """Resolve ``request > exact Agent version > global`` without losing false."""
+
+    if key in cfg:
+        return cfg[key]
+    if agent_value is not None:
+        return agent_value
+    return default
+
+
 def _trusted_runtime_asset_context(config: dict) -> object | None:
     """Select only an opaque app-supplied context; never trust client dicts."""
 
@@ -250,6 +265,8 @@ def build_middlewares(
     runtime_skills: tuple[Skill, ...] | None = None,
     runtime_skills_root: Path | None = None,
     runtime_skills_container_path: str | None = None,
+    resolved_subagent_enabled: bool | None = None,
+    resolved_max_concurrent_subagents: int | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -270,6 +287,10 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        resolved_subagent_enabled: Server-resolved task-tool availability.
+            Private Runs pass this explicitly because their sanitized request
+            config intentionally contains no client-controlled authority flag.
+        resolved_max_concurrent_subagents: Server-resolved per-batch limit.
 
     Returns:
         List of middleware instances.
@@ -333,11 +354,10 @@ def build_middlewares(
     # Add MemoryMiddleware (after TitleMiddleware)
     middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
-    # Add ViewImageMiddleware only if the current model supports vision.
-    # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
+    # Always install checkpoint cleanup. Text-only models disable ephemeral
+    # image injection but still purge legacy base64 channels/messages.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
-        middlewares.append(ViewImageMiddleware())
+    middlewares.append(ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)))
 
     # Auto-promote deferred MCP schemas from PR1 routing metadata before the
     # deferred filter decides which schemas to hide for this model call.
@@ -363,10 +383,15 @@ def build_middlewares(
     middlewares.append(SystemMessageCoalescingMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = cfg.get("subagent_enabled", False)
-    if subagent_enabled:
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
-        middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
+    effective_subagent_enabled = bool(cfg.get("subagent_enabled", False)) if resolved_subagent_enabled is None else resolved_subagent_enabled
+    if effective_subagent_enabled:
+        effective_max_concurrent = cfg.get("max_concurrent_subagents", 3) if resolved_max_concurrent_subagents is None else resolved_max_concurrent_subagents
+        middlewares.append(
+            SubagentLimitMiddleware(
+                max_concurrent=effective_max_concurrent,
+                max_total=resolved_app_config.subagents.max_total_per_run,
+            )
+        )
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
     loop_detection_config = resolved_app_config.loop_detection
@@ -460,8 +485,32 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         subagent_enabled = "task" in tuple(getattr(private_runtime, "tool_groups", ()))
         max_concurrent_subagents = 3
         is_bootstrap = False
-
     agent_config = load_agent_config(agent_name) if not is_bootstrap and private_runtime is None else None
+    agent_version_model_settings = getattr(private_runtime, "model_settings", None) if private_runtime is not None else getattr(agent_config, "model_settings", None)
+    if agent_version_model_settings is not None:
+        thinking_enabled = bool(
+            _resolve_runtime_option(
+                cfg,
+                "thinking_enabled",
+                getattr(
+                    agent_version_model_settings,
+                    "thinking_enabled",
+                    None,
+                ),
+                True,
+            )
+        )
+        reasoning_effort = _resolve_runtime_option(
+            cfg,
+            "reasoning_effort",
+            getattr(
+                agent_version_model_settings,
+                "reasoning_effort",
+                None,
+            ),
+            None,
+        )
+
     runtime_skills = tuple(getattr(private_runtime, "skills", ())) if private_runtime is not None else None
     available_skills = {skill.name for skill in runtime_skills} if runtime_skills is not None else _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
@@ -484,6 +533,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+    exact_agent_thinking = getattr(agent_version_model_settings, "thinking_enabled", None) if agent_version_model_settings is not None else None
+    exact_agent_reasoning = getattr(agent_version_model_settings, "reasoning_effort", None) if agent_version_model_settings is not None else None
+    if "thinking_enabled" not in cfg and exact_agent_thinking is True and not model_config.supports_thinking:
+        raise ValueError(f"Model {model_name} does not support exact Agent thinking")
+    if "reasoning_effort" not in cfg and exact_agent_reasoning is not None and not model_config.supports_reasoning_effort:
+        raise ValueError(f"Model {model_name} does not support exact Agent reasoning effort")
     if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
         thinking_enabled = False
@@ -585,6 +640,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
                 deferred_setup=setup,
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=resolved_user_id,
+                resolved_subagent_enabled=subagent_enabled,
+                resolved_max_concurrent_subagents=max_concurrent_subagents,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -633,8 +690,32 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
     private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
+    agent_model_overrides: dict[str, object] = {}
+    if agent_version_model_settings is not None:
+        sampling_overrides = getattr(
+            agent_version_model_settings,
+            "sampling_overrides",
+            None,
+        )
+        if callable(sampling_overrides):
+            agent_model_overrides.update(sampling_overrides())
+    for key in ("temperature", "max_tokens"):
+        if key in cfg:
+            if cfg[key] is None:
+                agent_model_overrides.pop(key, None)
+            else:
+                agent_model_overrides[key] = cfg[key]
+    create_model_kwargs: dict[str, object] = {
+        "name": model_name,
+        "thinking_enabled": thinking_enabled,
+        "reasoning_effort": reasoning_effort,
+        "app_config": resolved_app_config,
+        "attach_tracing": False,
+    }
+    if agent_model_overrides:
+        create_model_kwargs["model_overrides"] = agent_model_overrides
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
+        model=create_chat_model(**create_model_kwargs),
         tools=final_tools,
         middleware=build_middlewares(
             config,
@@ -648,6 +729,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             runtime_skills=runtime_skills,
             runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
             runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
+            resolved_subagent_enabled=subagent_enabled,
+            resolved_max_concurrent_subagents=max_concurrent_subagents,
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,

@@ -148,12 +148,13 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
-    # + 1 SafetyFinishReasonMiddleware (all enabled by default).
+    # + 1 SafetyFinishReasonMiddleware (all enabled by default)
+    # + 1 ViewImageMiddleware in cleanup-only mode for text models.
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 13
+    assert len(middlewares) == 14
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -510,13 +511,16 @@ def test_subagent_runtime_middlewares_include_view_image_for_default_vision_mode
     assert any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
 
 
-def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch):
+def test_subagent_runtime_middlewares_keep_cleanup_only_view_image_for_text_model(
+    monkeypatch,
+):
     app_config = _make_app_config(supports_vision=False)
     _stub_runtime_middleware_imports(monkeypatch)
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
-    assert not any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
+    middleware = next(middleware for middleware in middlewares if isinstance(middleware, ViewImageMiddleware))
+    assert middleware.enable_injection is False
 
 
 def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_names(monkeypatch):

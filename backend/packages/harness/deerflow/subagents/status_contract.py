@@ -1,4 +1,4 @@
-"""Backend↔frontend contract for structured subagent result metadata.
+"""Structured subagent result metadata.
 
 ``task`` tool result text is model-visible display content. Runtime
 consumers read the structured facts carried inside
@@ -16,8 +16,6 @@ consumers read the structured facts carried inside
 - ``subagent_result_brief`` / ``subagent_result_sha256`` (optional):
   bounded completed-result metadata plus a digest of the full result.
 
-The shared fixture at ``contracts/subagent_status_contract.json`` pins
-the enum values across Python and TypeScript.
 """
 
 from __future__ import annotations
@@ -47,12 +45,11 @@ SubagentStatusValue = Literal[
     "polling_timed_out",
 ]
 
-#: Enumeration of every value ``subagent_status`` may take. Mirrors the
-#: ``valid_status_values`` array in the shared fixture; the contract test
-#: pins them against each other. Capped runs do NOT get their own status
-#: value (#3875 Phase 2): a cap that still produced output is ``completed``
-#: and a cap with no output is ``failed``, with the reason carried on the
-#: additive ``subagent_stop_reason`` field so old consumers keep working.
+#: Enumeration of every value ``subagent_status`` may take. Capped runs do
+#: NOT get their own status value (#3875 Phase 2): a cap that still produced
+#: output is ``completed`` and a cap with no output is ``failed``, with the
+#: reason carried on the additive ``subagent_stop_reason`` field so old
+#: consumers keep working.
 SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
     "completed",
     "failed",

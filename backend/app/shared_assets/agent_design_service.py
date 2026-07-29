@@ -13,11 +13,12 @@ import json
 import re
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,7 +52,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
 )
-from app.shared_assets.models import AgentPayload
+from app.shared_assets.models import AgentModelSettings, AgentPayload
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
     AgentDesignSessionRow,
@@ -141,6 +142,7 @@ class AgentDesignBlueprint:
     soul: str
     identity: str
     user_context: str
+    model_settings: AgentModelSettings = AgentModelSettings()
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,7 +692,7 @@ class AgentDesignService:
         if not isinstance(blueprint, AgentDesignBlueprint):
             raise TypeError("blueprint must be AgentDesignBlueprint")
         canonical = json.dumps(
-            AgentDesignService._jsonable(blueprint),
+            AgentDesignService._blueprint_json(blueprint),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -899,6 +901,7 @@ class AgentDesignService:
                             soul=result.documents.soul,
                             identity=result.documents.identity,
                             user_context=result.documents.user_context,
+                            model_settings=current.model_settings,
                         )
                         blueprint = self._validate_blueprint(
                             context,
@@ -1154,6 +1157,7 @@ class AgentDesignService:
             soul="",
             identity="",
             user_context="",
+            model_settings=AgentModelSettings(),
         )
 
     @staticmethod
@@ -1328,6 +1332,14 @@ class AgentDesignService:
     ) -> AgentDesignBlueprint:
         if not isinstance(blueprint, AgentDesignBlueprint):
             raise AssetValidationFailed(context.request_id)
+        if not isinstance(blueprint.model_settings, AgentModelSettings):
+            raise AssetValidationFailed(context.request_id)
+        try:
+            model_settings = AgentModelSettings.model_validate(
+                blueprint.model_settings,
+            )
+        except ValidationError:
+            raise AssetValidationFailed(context.request_id) from None
         if not all(
             isinstance(item, str)
             for item in (
@@ -1391,6 +1403,7 @@ class AgentDesignService:
             soul=documents.soul,
             identity=documents.identity,
             user_context=documents.user_context,
+            model_settings=model_settings,
         )
 
     @staticmethod
@@ -1483,7 +1496,8 @@ class AgentDesignService:
             soul=blueprint.soul,
             identity=blueprint.identity,
             user_context=blueprint.user_context,
-            payload_schema_version=2,
+            payload_schema_version=(3 if not blueprint.model_settings.is_empty else 2),
+            model_settings=blueprint.model_settings,
         )
 
     @staticmethod
@@ -1541,8 +1555,19 @@ class AgentDesignService:
 
     @staticmethod
     def _jsonable(value: object) -> object:
+        if isinstance(value, BaseModel):
+            return AgentDesignService._jsonable(value.model_dump(mode="json"))
         if is_dataclass(value):
-            return {key: AgentDesignService._jsonable(item) for key, item in asdict(value).items()}
+            document: dict[str, object] = {}
+            for field in fields(value):
+                item = getattr(value, field.name)
+                # Empty model settings did not exist in the v2 Builder request
+                # contract. Omitting them preserves idempotent retries across
+                # an in-place checkout upgrade.
+                if isinstance(item, AgentModelSettings) and item.is_empty:
+                    continue
+                document[field.name] = AgentDesignService._jsonable(item)
+            return document
         if isinstance(value, Mapping):
             return {str(key): AgentDesignService._jsonable(item) for key, item in value.items()}
         if isinstance(value, (tuple, list)):
@@ -1587,7 +1612,7 @@ class AgentDesignService:
     def _blueprint_json(
         blueprint: AgentDesignBlueprint,
     ) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "description": blueprint.description,
             "model_ref": blueprint.model_ref,
             "tool_groups": list(blueprint.tool_groups),
@@ -1598,6 +1623,9 @@ class AgentDesignService:
             "identity": blueprint.identity,
             "user_context": blueprint.user_context,
         }
+        if not blueprint.model_settings.is_empty:
+            document["model_settings"] = blueprint.model_settings.model_dump(exclude_none=True)
+        return document
 
     @staticmethod
     def _blueprint_from_json(
@@ -1616,6 +1644,7 @@ class AgentDesignService:
                 soul=str(raw["soul"]),
                 identity=str(raw["identity"]),
                 user_context=str(raw["user_context"]),
+                model_settings=AgentModelSettings.model_validate(raw.get("model_settings", {})),
             )
         except (KeyError, TypeError, ValueError):
             raise AssetValidationFailed("unknown") from None

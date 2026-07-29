@@ -34,6 +34,7 @@ from app.shared_assets.agent_design_service import (
 )
 from app.shared_assets.agent_service import AgentService
 from app.shared_assets.errors import AssetStorageUnavailable
+from app.shared_assets.models import AgentModelSettings
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -84,6 +85,7 @@ class AgentDesignBlueprintRequest(_StrictModel):
     soul: str
     identity: str
     user_context: str
+    model_settings: AgentModelSettings = Field(default_factory=AgentModelSettings)
 
 
 class AgentDesignBlueprintTurnRequest(_StrictModel):
@@ -134,6 +136,7 @@ class AgentDesignBlueprintResponse(_StrictModel):
     soul: str
     identity: str
     user_context: str
+    model_settings: AgentModelSettings
 
 
 class AgentDesignClarificationOptionResponse(_StrictModel):
@@ -263,6 +266,7 @@ def _blueprint(value: AgentDesignBlueprintRequest) -> AgentDesignBlueprint:
         soul=value.soul,
         identity=value.identity,
         user_context=value.user_context,
+        model_settings=value.model_settings,
     )
 
 

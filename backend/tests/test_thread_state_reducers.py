@@ -140,17 +140,97 @@ class TestMergeArtifacts:
 
 
 class TestMergeViewedImages:
-    """Sanity check for the existing viewed_images reducer."""
+    """Image state contains metadata-only references for one exact Run."""
 
     def test_merges_dicts(self):
-        existing = {"k1": {"base64": "x", "mime_type": "image/png"}}
-        new = {"k2": {"base64": "y", "mime_type": "image/jpeg"}}
+        existing = {
+            "/mnt/user-data/uploads/k1.png": {
+                "mime_type": "image/png",
+                "size": 10,
+                "sha256": "a" * 64,
+                "file_ref": {
+                    "path": "/mnt/user-data/uploads/k1.png",
+                    "sandbox_id": "sandbox-1",
+                    "run_id": "run-1",
+                },
+            }
+        }
+        new = {
+            "/mnt/user-data/uploads/k2.jpg": {
+                "mime_type": "image/jpeg",
+                "size": 20,
+                "sha256": "b" * 64,
+                "file_ref": {
+                    "path": "/mnt/user-data/uploads/k2.jpg",
+                    "sandbox_id": "sandbox-1",
+                    "run_id": "run-1",
+                },
+            }
+        }
         merged = merge_viewed_images(existing, new)
-        assert set(merged.keys()) == {"k1", "k2"}
+        assert set(merged) == {
+            "/mnt/user-data/uploads/k1.png",
+            "/mnt/user-data/uploads/k2.jpg",
+        }
 
     def test_empty_dict_clears(self):
-        existing = {"k1": {"base64": "x", "mime_type": "image/png"}}
+        existing = {
+            "/mnt/user-data/uploads/k1.png": {
+                "mime_type": "image/png",
+                "size": 10,
+                "sha256": "a" * 64,
+                "file_ref": {
+                    "path": "/mnt/user-data/uploads/k1.png",
+                    "sandbox_id": "sandbox-1",
+                    "run_id": "run-1",
+                },
+            }
+        }
         assert merge_viewed_images(existing, {}) == {}
+
+    def test_drops_legacy_checkpoint_base64(self):
+        legacy = {
+            "/mnt/user-data/uploads/legacy.png": {
+                "base64": "large-persisted-payload",
+                "mime_type": "image/png",
+            }
+        }
+
+        assert merge_viewed_images(legacy, None) == {}
+
+    def test_new_run_replaces_old_run_references(self):
+        path = "/mnt/user-data/uploads/image.png"
+        existing = {
+            path: {
+                "mime_type": "image/png",
+                "size": 10,
+                "sha256": "a" * 64,
+                "file_ref": {
+                    "path": path,
+                    "sandbox_id": "sandbox-1",
+                    "run_id": "run-1",
+                    "project_id": "project-1",
+                    "owner_user_id": "owner-1",
+                },
+            }
+        }
+        new_path = "/mnt/user-data/uploads/new.png"
+        new = {
+            new_path: {
+                "mime_type": "image/png",
+                "size": 11,
+                "sha256": "b" * 64,
+                "file_ref": {
+                    "path": new_path,
+                    "sandbox_id": "sandbox-2",
+                    "run_id": "run-2",
+                    "project_id": "project-1",
+                    "owner_user_id": "owner-1",
+                },
+            }
+        }
+
+        assert merge_viewed_images(existing, new) == new
 
 
 class TestMergeDelegations:

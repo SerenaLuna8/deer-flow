@@ -52,7 +52,6 @@ deer-flow/
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── deploy/helm/                    # Kubernetes/Helm resources
 ├── skills/public/                  # Reviewable and importable Skill sources
-├── contracts/                      # Cross-component JSON contracts (e.g. subagent status)
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
@@ -97,7 +96,8 @@ patch, or reuse the old schema. Runtime startup and `make check-db` are read-onl
 never create, upgrade, repair, or delete database objects.
 
 Release readiness is checkout-sensitive. Historical milestone evidence does not certify the
-current worktree; run the current focused gates and `make release-acceptance` for a release candidate.
+current worktree; run the current focused gates, including the M1-M7 PostgreSQL foundation gate
+when persistence or runtime boundaries change.
 Docker Compose, Kubernetes/Helm, browsers, model providers, and Sandbox modes require separate
 target-environment validation.
 
@@ -115,7 +115,6 @@ make install     # Install backend and frontend dependencies
 make setup-db    # 显式创建并完整初始化 PostgreSQL 目标库
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # 分批轮换 credential envelope
 make check-db    # 只读检查连接、schema marker 与必需表
-make release-acceptance  # M8 宿主机完整 candidate/review/final 验收（要求显式 live 环境）
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
@@ -171,12 +170,8 @@ These apply repo-wide; module guides own the module-specific detail.
   随机 `deerflow_test_*` 数据库。Release evidence 必须通过
   `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
   `.github/workflows/project-saas-release-gates.yml` 会在变量缺失时于 pytest 前硬失败。
-- **M8 final PostgreSQL gate** — `M8_RELEASE_POSTGRES_TESTS` 只允许在上述 20 文件前缀后追加
-  M8 isolation、capacity 和 release-contract 三个文件；`make test` 与
-  `make test-project-saas-postgres` 使用该 23 文件 0-skip 清单。完整 live 验收使用
-  `make release-acceptance`。
 - **Consolidated deterministic CI** — `.github/workflows/project-saas-release-gates.yml` 是后端完整
-  pytest（已递归收集 `tests/blocking_io/`）、固定 23 文件 PostgreSQL 门禁、前端单元测试、确定性
+  pytest（已递归收集 `tests/blocking_io/`）、固定 20 文件 M1-M7 PostgreSQL 门禁、前端单元测试、确定性
   Chromium E2E、构建与安全检查的唯一 CI 编排。不要为这些命令再新增独立重复 workflow；Replay E2E、
   发布、容器、Helm Chart 和版本检查仍保持专用 workflow。
 - **Single full-schema initialization** — `full_schema.sql` 是唯一完整 PostgreSQL schema

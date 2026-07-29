@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
@@ -18,6 +19,8 @@ from deerflow.agents.thread_state import ThreadState, merge_delegations
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.private_scope import PrivateResourceScope
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.subagents.status_contract import make_subagent_additional_kwargs
 
 
@@ -124,6 +127,362 @@ class TestBeforeModelCapture:
         assert out is not None
         assert out["delegations"][0]["id"] == "call_1"
         assert out["delegations"][0]["status"] == "in_progress"
+
+    def test_captured_delegation_has_exact_server_private_run_scope(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(
+            context={
+                "run_id": "run-42",
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset(),
+                "private_scope": PrivateResourceScope(
+                    project_id="project-42",
+                    owner_user_id="owner-42",
+                    membership_version=7,
+                ),
+            }
+        )
+        messages = [
+            HumanMessage(
+                content="research auth",
+                additional_kwargs={"run_id": "run-42"},
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "research auth",
+                            "prompt": "do it",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "call-42",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.after_model({"messages": messages}, runtime)
+
+        assert out is not None
+        assert out["delegations"][0] == {
+            "id": "call-42",
+            "project_id": "project-42",
+            "owner_user_id": "owner-42",
+            "run_id": "run-42",
+            "description": "research auth",
+            "subagent_type": "general-purpose",
+            "status": "in_progress",
+            "created_at": out["delegations"][0]["created_at"],
+        }
+
+    def test_current_run_marker_does_not_retag_older_thread_delegation(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(
+            context={
+                "run_id": "run-new",
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old-human", "old-ai"}),
+            }
+        )
+        messages = [
+            HumanMessage(
+                id="old-human",
+                content="old request",
+                additional_kwargs={"run_id": "run-old"},
+            ),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "old work",
+                            "prompt": "old",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            HumanMessage(
+                content="new request",
+                additional_kwargs={"run_id": "run-new"},
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "new work",
+                            "prompt": "new",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.before_model(
+            {"messages": messages, "delegations": []},
+            runtime,
+        )
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
+
+    def test_resumed_run_uses_pre_run_message_boundary_without_human_marker(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(
+            context={
+                "run_id": "run-new",
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {
+                    "old-human",
+                    "old-ai",
+                },
+            }
+        )
+        messages = [
+            HumanMessage(id="old-human", content="old request"),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "old work",
+                            "prompt": "old",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                id="new-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "new work",
+                            "prompt": "new",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.after_model(
+            {"messages": messages, "delegations": []},
+            runtime,
+        )
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
+
+    def test_resumed_run_new_tool_message_updates_existing_delegation(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(
+            context={
+                "run_id": "run-42",
+                "private_scope": PrivateResourceScope(
+                    project_id="project-42",
+                    owner_user_id="owner-42",
+                    membership_version=7,
+                ),
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {
+                    "old-human",
+                    "old-ai",
+                },
+            }
+        )
+        existing = {
+            "id": "reused-call",
+            "project_id": "project-42",
+            "owner_user_id": "owner-42",
+            "run_id": "run-42",
+            "description": "research auth",
+            "subagent_type": "general-purpose",
+            "status": "in_progress",
+            "created_at": "2026-07-11T00:00:00Z",
+        }
+        messages = [
+            HumanMessage(id="old-human", content="research auth"),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "research auth",
+                            "prompt": "do it",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "reused-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(
+                id="new-tool",
+                content="done",
+                tool_call_id="reused-call",
+                additional_kwargs={
+                    "subagent_status": "completed",
+                    "subagent_result_brief": "auth uses JWT",
+                },
+            ),
+        ]
+
+        out = middleware.after_model(
+            {"messages": messages, "delegations": [existing]},
+            runtime,
+        )
+
+        assert out is not None
+        assert out["delegations"] == [
+            {
+                **existing,
+                "status": "completed",
+                "result_brief": "auth uses JWT",
+                "result_sha256": out["delegations"][0]["result_sha256"],
+                "result_ref": "new-tool",
+            }
+        ]
+
+    def test_resumed_run_tool_result_updates_next_unfinished_reused_call_occurrence(
+        self,
+    ):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(
+            context={
+                "run_id": "run-42",
+                "private_scope": PrivateResourceScope(
+                    project_id="project-42",
+                    owner_user_id="owner-42",
+                    membership_version=7,
+                ),
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-ai"},
+            }
+        )
+        base = {
+            "id": "reused-call",
+            "project_id": "project-42",
+            "owner_user_id": "owner-42",
+            "run_id": "run-42",
+            "description": "research",
+            "subagent_type": "general-purpose",
+            "created_at": "2026-07-11T00:00:00Z",
+        }
+        existing = [
+            {
+                **base,
+                "occurrence": 1,
+                "status": "completed",
+                "result_brief": "first",
+            },
+            {
+                **base,
+                "occurrence": 2,
+                "status": "in_progress",
+            },
+        ]
+        messages = [
+            AIMessage(id="old-ai", content=""),
+            ToolMessage(
+                id="new-tool",
+                content="second done",
+                tool_call_id="reused-call",
+                additional_kwargs={
+                    "subagent_status": "completed",
+                    "subagent_result_brief": "second",
+                },
+            ),
+        ]
+
+        out = middleware.after_model(
+            {"messages": messages, "delegations": existing},
+            runtime,
+        )
+
+        assert out is not None
+        assert len(out["delegations"]) == 1
+        assert out["delegations"][0]["occurrence"] == 2
+        assert out["delegations"][0]["status"] == "completed"
+        assert out["delegations"][0]["result_brief"] == "second"
+
+    def test_resumed_run_reused_call_id_dispatch_gets_next_occurrence(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(
+            context={
+                "run_id": "run-42",
+                "private_scope": PrivateResourceScope(
+                    project_id="project-42",
+                    owner_user_id="owner-42",
+                    membership_version=7,
+                ),
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-ai"},
+            }
+        )
+        existing = {
+            "id": "reused-call",
+            "project_id": "project-42",
+            "owner_user_id": "owner-42",
+            "run_id": "run-42",
+            "description": "first",
+            "subagent_type": "general-purpose",
+            "status": "completed",
+            "created_at": "2026-07-11T00:00:00Z",
+        }
+        messages = [
+            AIMessage(id="old-ai", content=""),
+            AIMessage(
+                id="new-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "second",
+                            "subagent_type": "general-purpose",
+                        },
+                        "id": "reused-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        first = middleware.after_model(
+            {"messages": messages, "delegations": [existing]},
+            runtime,
+        )
+
+        assert first is not None
+        assert len(first["delegations"]) == 1
+        assert first["delegations"][0]["occurrence"] == 2
+        merged = merge_delegations([existing], first["delegations"])
+
+        repeated = middleware.after_model(
+            {"messages": messages, "delegations": merged},
+            runtime,
+        )
+
+        assert repeated is None
 
     def test_returns_none_when_no_delegations(self):
         middleware = DurableContextMiddleware()

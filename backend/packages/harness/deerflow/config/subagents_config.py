@@ -8,6 +8,18 @@ from deerflow.config.token_budget_config import TokenBudgetConfig
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN = 6
+MIN_TOTAL_SUBAGENTS_PER_RUN = 1
+MAX_TOTAL_SUBAGENTS_PER_RUN = 50
+
+
+def clamp_total_subagents_per_run(value: int) -> int:
+    """Clamp the per-Run delegation total to the enforced safety range."""
+    return max(
+        MIN_TOTAL_SUBAGENTS_PER_RUN,
+        min(MAX_TOTAL_SUBAGENTS_PER_RUN, value),
+    )
+
 
 def default_subagent_token_budget() -> TokenBudgetConfig:
     """Default per-run token budget for subagents (#3875 Phase 2).
@@ -100,6 +112,12 @@ class SubagentsAppConfig(BaseModel):
         default=None,
         ge=1,
         description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
+    )
+    max_total_per_run: int = Field(
+        default=DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+        ge=MIN_TOTAL_SUBAGENTS_PER_RUN,
+        le=MAX_TOTAL_SUBAGENTS_PER_RUN,
+        description=("Maximum total task delegations admitted by one lead-Agent Run. This bounds repeated legal-sized batches across model turns."),
     )
     token_budget: TokenBudgetConfig = Field(
         default_factory=default_subagent_token_budget,

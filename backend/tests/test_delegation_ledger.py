@@ -61,6 +61,91 @@ class TestMergeDelegations:
 
         assert out == [{**_entry("a", "completed"), "result_sha256": "x"}]
 
+    def test_same_id_preserves_original_private_run_scope_when_update_omits_it(self):
+        existing = [
+            {
+                **_entry("a", "in_progress"),
+                "project_id": "project-1",
+                "owner_user_id": "owner-1",
+                "run_id": "run-1",
+            }
+        ]
+        new = [_entry("a", "completed")]
+
+        out = merge_delegations(existing, new)
+
+        assert out[0]["project_id"] == "project-1"
+        assert out[0]["owner_user_id"] == "owner-1"
+        assert out[0]["run_id"] == "run-1"
+        assert out[0]["status"] == "completed"
+
+    def test_same_provider_call_id_in_different_runs_remains_distinct(self):
+        old = {
+            **_entry("reused-call", "completed"),
+            "project_id": "project-1",
+            "owner_user_id": "owner-1",
+            "run_id": "run-old",
+        }
+        new = {
+            **_entry("reused-call", "in_progress"),
+            "project_id": "project-1",
+            "owner_user_id": "owner-1",
+            "run_id": "run-new",
+        }
+
+        out = merge_delegations([old], [new])
+
+        assert [(entry["run_id"], entry["status"]) for entry in out] == [
+            ("run-old", "completed"),
+            ("run-new", "in_progress"),
+        ]
+
+    def test_same_provider_call_id_occurrences_in_one_run_remain_distinct(self):
+        first = {
+            **_entry("reused-call", "completed"),
+            "project_id": "project-1",
+            "owner_user_id": "owner-1",
+            "run_id": "run-1",
+            "occurrence": 1,
+        }
+        second = {
+            **_entry("reused-call", "in_progress"),
+            "project_id": "project-1",
+            "owner_user_id": "owner-1",
+            "run_id": "run-1",
+            "occurrence": 2,
+        }
+
+        out = merge_delegations([first], [second])
+
+        assert [(entry["id"], entry["occurrence"], entry["status"]) for entry in out] == [
+            ("reused-call", 1, "completed"),
+            ("reused-call", 2, "in_progress"),
+        ]
+
+    def test_legacy_entry_without_occurrence_is_compatible_with_first_occurrence(self):
+        existing = [
+            {
+                **_entry("reused-call", "in_progress"),
+                "project_id": "project-1",
+                "owner_user_id": "owner-1",
+                "run_id": "run-1",
+            }
+        ]
+        completed = {
+            **_entry("reused-call", "completed"),
+            "project_id": "project-1",
+            "owner_user_id": "owner-1",
+            "run_id": "run-1",
+            "occurrence": 1,
+        }
+
+        out = merge_delegations(existing, [completed])
+
+        assert len(out) == 1
+        assert out[0]["status"] == "completed"
+        assert out[0]["occurrence"] == 1
+
     def test_over_cap_keeps_most_recent_entries(self):
         from deerflow.agents import thread_state as thread_state_module
 
@@ -305,6 +390,58 @@ class TestExtractDelegations:
         ]
 
         assert [entry["id"] for entry in extract_delegations(msgs)] == ["call_1", "call_2", "call_3"]
+
+    def test_reused_provider_call_id_creates_distinct_ordered_occurrences(self):
+        msgs = [
+            _ai_task_call("provider-reused", "first task"),
+            _ai_task_call("provider-reused", "second task"),
+        ]
+
+        out = extract_delegations(msgs)
+
+        assert [(entry["id"], entry["occurrence"], entry["description"]) for entry in out] == [
+            ("provider-reused", 1, "first task"),
+            ("provider-reused", 2, "second task"),
+        ]
+
+    def test_reused_provider_call_id_pairs_tool_results_in_occurrence_order(self):
+        msgs = [
+            _ai_task_call("provider-reused", "first task"),
+            ToolMessage(
+                content="first result",
+                tool_call_id="provider-reused",
+                id="tool-first",
+                additional_kwargs={
+                    "subagent_status": "completed",
+                    "subagent_result_brief": "first result",
+                },
+            ),
+            _ai_task_call("provider-reused", "second task"),
+            ToolMessage(
+                content="second result",
+                tool_call_id="provider-reused",
+                id="tool-second",
+                additional_kwargs={
+                    "subagent_status": "failed",
+                    "subagent_error": "second result",
+                },
+            ),
+        ]
+
+        out = extract_delegations(msgs)
+
+        assert [
+            (
+                entry["occurrence"],
+                entry["status"],
+                entry["result_brief"],
+                entry["result_ref"],
+            )
+            for entry in out
+        ] == [
+            (1, "completed", "first result", "tool-first"),
+            (2, "failed", "second result", "tool-second"),
+        ]
 
     def test_large_result_is_bounded_but_hashed_from_full_result(self):
         big = "x" * 10000

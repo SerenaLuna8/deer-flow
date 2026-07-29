@@ -33,6 +33,7 @@ from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, Pr
 from app.shared_assets import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     AgentInstructions,
+    AgentModelSettings,
     AgentService,
     AssetConflict,
     AssetForbidden,
@@ -353,6 +354,7 @@ class AgentVersionItemResponse(_StrictModel):
     identity: str
     user_context: str
     model_ref: str
+    model_settings: AgentModelSettings
     tool_groups: list[str]
     skill_version_ids: list[uuid.UUID]
     mcp_version_ids: list[uuid.UUID]

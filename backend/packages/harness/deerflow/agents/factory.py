@@ -246,7 +246,7 @@ def _assemble_from_features(
 
             chain.append(MemoryMiddleware(agent_name=name))
 
-    # --- [10] Vision ---
+    # --- [10] Image checkpoint cleanup / optional vision injection ---
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):
             chain.append(feat.vision)
@@ -259,6 +259,12 @@ def _assemble_from_features(
             from deerflow.tools.builtins import view_image_tool
 
             extra_tools.append(view_image_tool)
+    else:
+        # Legacy image bytes must be removed even after switching to a
+        # text-only model. Injection and the view tool remain disabled.
+        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+
+        chain.append(ViewImageMiddleware(enable_injection=False))
 
     # --- [11] Subagent ---
     if feat.subagent is not False:

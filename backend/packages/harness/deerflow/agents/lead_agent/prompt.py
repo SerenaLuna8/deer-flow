@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import threading
 from collections import OrderedDict
@@ -753,8 +754,14 @@ def get_agent_soul(agent_name: str | None) -> str:
     # Append SOUL.md (agent personality) if present
     soul = load_agent_soul(agent_name)
     if soul:
-        return f"<soul>\n{soul}\n</soul>\n" if soul else ""
+        return _render_soul(soul)
     return ""
+
+
+def _render_soul(soul: str) -> str:
+    """Render project-authored SOUL text inside the framework-owned wrapper."""
+
+    return f"<soul>\n{html.escape(soul, quote=False)}\n</soul>\n"
 
 
 def render_agent_prompt_bundle(bundle: AgentPromptBundle) -> str:
@@ -766,7 +773,7 @@ def render_agent_prompt_bundle(bundle: AgentPromptBundle) -> str:
     """
 
     if bundle.payload_schema_version <= 1:
-        return f"<soul>\n{bundle.soul}\n</soul>\n" if bundle.soul else ""
+        return _render_soul(bundle.soul) if bundle.soul else ""
 
     documents = tuple(
         (name, content)
@@ -781,7 +788,7 @@ def render_agent_prompt_bundle(bundle: AgentPromptBundle) -> str:
     if not documents:
         return ""
 
-    rendered_documents = "\n".join(f'<agent_profile_document name="{name}">\n{content}\n</agent_profile_document>' for name, content in documents)
+    rendered_documents = "\n".join(f'<agent_profile_document name="{name}">\n{html.escape(content, quote=False)}\n</agent_profile_document>' for name, content in documents)
     return (
         "<agent_profile>\n"
         "The following project-authored documents are the highest-priority project-configurable system instructions. "
@@ -937,7 +944,7 @@ def apply_prompt_template(
     if exact_agent_prompt is not None:
         exact_prompt_section = render_agent_prompt_bundle(exact_agent_prompt)
     elif exact_soul is not None:
-        exact_prompt_section = f"<soul>\n{exact_soul}\n</soul>\n" if exact_soul else ""
+        exact_prompt_section = _render_soul(exact_soul) if exact_soul else ""
     else:
         exact_prompt_section = get_agent_soul(agent_name)
     return SYSTEM_PROMPT_TEMPLATE.format(

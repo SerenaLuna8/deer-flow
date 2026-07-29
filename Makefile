@@ -7,7 +7,6 @@
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
 	setup-db check-db reconcile-usage rotate-credentials import-project-skills \
 	test test-project-foundation-postgres print-project-foundation-postgres-tests \
-	test-project-saas-postgres print-project-saas-postgres-tests release-acceptance \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
 	docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway up down
@@ -34,11 +33,6 @@ PROJECT_FOUNDATION_POSTGRES_TESTS = \
 	tests/test_m7_process_boundary.py \
 	tests/test_m7_source_absence.py \
 	tests/test_m7_release_gate_postgres.py
-
-M8_RELEASE_POSTGRES_TESTS = $(PROJECT_FOUNDATION_POSTGRES_TESTS) \
-	tests/test_m8_isolation_matrix_postgres.py \
-	tests/test_m8_capacity_postgres.py \
-	tests/test_m8_release_gate_postgres.py
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
@@ -87,11 +81,9 @@ help:
 	@echo "  make rotate-credentials ARGS=...      轮换 Credential envelope"
 	@echo "  make import-project-skills ARGS=...   显式导入 Project Skill"
 	@echo ""
-	@echo "测试与发布验收："
-	@echo "  make test                             运行 M1-M8 PostgreSQL 发布门禁"
-	@echo "  make test-project-foundation-postgres 运行 M1-M7 PostgreSQL 诊断前缀"
-	@echo "  make test-project-saas-postgres       运行 M1-M8 PostgreSQL 发布门禁"
-	@echo "  make release-acceptance               运行完整 M8 宿主机验收"
+	@echo "测试："
+	@echo "  make test                             运行 M1-M7 PostgreSQL 发布门禁"
+	@echo "  make test-project-foundation-postgres 运行 M1-M7 PostgreSQL 发布门禁"
 	@echo "  make detect-thread-boundaries         检查异步和线程边界"
 	@echo "  make detect-blocking-io               检查后端阻塞 IO"
 	@echo ""
@@ -105,23 +97,14 @@ help:
 	@echo "  make up                               构建并启动 Compose 容器"
 	@echo "  make down                             停止 Compose 容器"
 
-# Tests and release acceptance
-test: test-project-saas-postgres
+# Tests
+test: test-project-foundation-postgres
 
 test-project-foundation-postgres:
 	@cd backend && DEER_FLOW_RELEASE_GATE_LABEL=M1-M7 uv run python tests/support/release_gate_plugin.py $(PROJECT_FOUNDATION_POSTGRES_TESTS) -ra
 
 print-project-foundation-postgres-tests:
 	@echo $(PROJECT_FOUNDATION_POSTGRES_TESTS)
-
-test-project-saas-postgres:
-	@cd backend && DEER_FLOW_RELEASE_GATE_LABEL=M1-M8 uv run python tests/support/release_gate_plugin.py $(M8_RELEASE_POSTGRES_TESTS) -ra
-
-print-project-saas-postgres-tests:
-	@echo $(M8_RELEASE_POSTGRES_TESTS)
-
-release-acceptance:
-	@cd backend && uv run python scripts/run_release_acceptance.py
 
 # Configuration and diagnostics
 setup:

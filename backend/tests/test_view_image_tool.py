@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import importlib
 import os
 from pathlib import Path
@@ -36,6 +37,51 @@ def _make_runtime(thread_data: dict[str, str]) -> SimpleNamespace:
     )
 
 
+class _PathBackedSandbox:
+    def __init__(self, thread_data: dict[str, str]) -> None:
+        self.id = "sandbox-test"
+        self._thread_data = thread_data
+        self._readers: dict[str, object] = {}
+
+    def _actual_path(self, virtual_path: str) -> Path:
+        roots = {
+            "/mnt/user-data/workspace": "workspace_path",
+            "/mnt/user-data/uploads": "uploads_path",
+            "/mnt/user-data/outputs": "outputs_path",
+        }
+        for virtual_root, state_key in roots.items():
+            if virtual_path == virtual_root or virtual_path.startswith(f"{virtual_root}/"):
+                relative = virtual_path[len(virtual_root) :].lstrip("/")
+                path = Path(self._thread_data[state_key]) / relative
+                if path.is_symlink():
+                    raise PermissionError(f"path traversal rejected: {virtual_path}")
+                return path
+        raise PermissionError(f"path traversal rejected: {virtual_path}")
+
+    def open_regular_file(self, path: str) -> str:
+        actual_path = self._actual_path(path)
+        reader = open(actual_path, "rb")
+        handle = f"reader-{len(self._readers)}"
+        self._readers[handle] = reader
+        return handle
+
+    def read_regular_file(self, handle: str, max_bytes: int) -> bytes:
+        return self._readers[handle].read(max_bytes)
+
+    def close_regular_file(self, handle: str) -> None:
+        reader = self._readers.pop(handle)
+        reader.close()
+
+
+@pytest.fixture(autouse=True)
+def _use_path_backed_sandbox(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        view_image_module,
+        "_image_sandbox",
+        lambda runtime: _PathBackedSandbox(runtime.state["thread_data"]),
+    )
+
+
 def _message_content(result) -> str:
     return result.update["messages"][0].content
 
@@ -68,8 +114,16 @@ def test_view_image_reads_virtual_uploads_path(tmp_path: Path) -> None:
 
     assert _message_content(result) == "Successfully read image"
     viewed_image = result.update["viewed_images"]["/mnt/user-data/uploads/sample.png"]
-    assert viewed_image["base64"] == base64.b64encode(PNG_BYTES).decode("utf-8")
-    assert viewed_image["mime_type"] == "image/png"
+    assert viewed_image == {
+        "mime_type": "image/png",
+        "size": len(PNG_BYTES),
+        "sha256": hashlib.sha256(PNG_BYTES).hexdigest(),
+        "file_ref": {
+            "path": "/mnt/user-data/uploads/sample.png",
+            "sandbox_id": "sandbox-test",
+            "run_id": "legacy:thread-1",
+        },
+    }
 
 
 def test_view_image_rejects_spoofed_extension(tmp_path: Path) -> None:

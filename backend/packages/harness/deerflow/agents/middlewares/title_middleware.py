@@ -187,10 +187,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     def _fallback_title(self, user_msg: str) -> str:
         config = self._get_title_config()
-        fallback_chars = min(config.max_chars, 50)
+        max_chars = max(config.max_chars, 0)
+        fallback_chars = min(max_chars, 50)
         if len(user_msg) > fallback_chars:
-            return user_msg[:fallback_chars].rstrip() + "..."
-        return user_msg if user_msg else "New Conversation"
+            ellipsis = "..."
+            if max_chars <= len(ellipsis):
+                return ellipsis[:max_chars]
+            body_chars = min(fallback_chars, max_chars - len(ellipsis))
+            return user_msg[:body_chars].rstrip() + ellipsis
+        fallback = user_msg if user_msg else "New Conversation"
+        return fallback[:max_chars]
 
     def _get_runnable_config(self) -> dict[str, Any]:
         """Inherit the parent RunnableConfig and add middleware tag.

@@ -577,6 +577,7 @@ CREATE TABLE agent_versions (
     description TEXT DEFAULT '' NOT NULL,
     soul TEXT NOT NULL,
     model_ref VARCHAR(255) NOT NULL,
+    model_settings JSONB DEFAULT '{}'::jsonb NOT NULL,
     tool_groups JSONB DEFAULT '[]'::jsonb NOT NULL,
     supersedes_version_id UUID,
     payload_checksum CHAR(64) NOT NULL,
@@ -592,7 +593,45 @@ CREATE TABLE agent_versions (
     payload_schema_version INTEGER DEFAULT 1 NOT NULL,
     PRIMARY KEY (id),
     CONSTRAINT ck_agent_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT ck_agent_versions_payload_schema_version CHECK (payload_schema_version IN (1, 2)),
+    CONSTRAINT ck_agent_versions_payload_schema_version CHECK (payload_schema_version IN (1, 2, 3)),
+    CONSTRAINT ck_agent_versions_model_settings CHECK (
+        jsonb_typeof(model_settings) = 'object'
+        AND (
+            payload_schema_version = 3
+            OR model_settings = '{}'::jsonb
+        )
+        AND model_settings - 'temperature' - 'max_tokens'
+            - 'thinking_enabled' - 'reasoning_effort' = '{}'::jsonb
+        AND (
+            NOT (model_settings ? 'temperature')
+            OR (
+                jsonb_typeof(model_settings->'temperature') = 'number'
+                AND (model_settings->>'temperature')::numeric BETWEEN 0 AND 2
+            )
+        )
+        AND (
+            NOT (model_settings ? 'max_tokens')
+            OR (
+                jsonb_typeof(model_settings->'max_tokens') = 'number'
+                AND (model_settings->>'max_tokens')::numeric
+                    = trunc((model_settings->>'max_tokens')::numeric)
+                AND (model_settings->>'max_tokens')::numeric
+                    BETWEEN 1 AND 200000
+            )
+        )
+        AND (
+            NOT (model_settings ? 'thinking_enabled')
+            OR jsonb_typeof(model_settings->'thinking_enabled') = 'boolean'
+        )
+        AND (
+            NOT (model_settings ? 'reasoning_effort')
+            OR (
+                jsonb_typeof(model_settings->'reasoning_effort') = 'string'
+                AND model_settings->>'reasoning_effort'
+                    IN ('low', 'medium', 'high')
+            )
+        )
+    ),
     CONSTRAINT ck_agent_versions_workflow_status CHECK (workflow_status IN ('draft', 'pending_approval', 'published', 'rejected')),
     CONSTRAINT ck_agent_versions_number CHECK (version_number >= 1),
     FOREIGN KEY(agent_id) REFERENCES agents (id) ON DELETE RESTRICT,

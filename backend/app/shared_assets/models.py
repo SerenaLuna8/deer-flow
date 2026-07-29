@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+
+from deerflow.config.agents_config import AgentModelSettings
 
 
 class AssetScope(StrEnum):
@@ -43,6 +45,7 @@ class AgentPayload:
     identity: str = ""
     user_context: str = ""
     payload_schema_version: int = 1
+    model_settings: AgentModelSettings = field(default_factory=AgentModelSettings)
 
 
 @dataclass(frozen=True)

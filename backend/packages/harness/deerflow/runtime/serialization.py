@@ -12,6 +12,20 @@ from __future__ import annotations
 
 from typing import Any
 
+_MAX_PUBLIC_VIEWED_IMAGE_BYTES = 20 * 1024 * 1024
+_PUBLIC_VIEWED_IMAGE_MIME_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+)
+_PUBLIC_VIEWED_IMAGE_ROOTS = (
+    "/mnt/user-data/workspace",
+    "/mnt/user-data/uploads",
+    "/mnt/user-data/outputs",
+)
+
 
 def serialize_lc_object(obj: Any) -> Any:
     """Recursively serialize a LangChain object to a JSON-serialisable dict."""
@@ -75,9 +89,10 @@ def strip_data_url_image_blocks(messages: list[dict[str, Any]]) -> list[dict[str
     """Remove ``data:``-scheme ``image_url`` blocks from *hide_from_ui* messages.
 
     The history and run-wait endpoints return checkpoint-persisted messages to
-    the frontend.  ``ViewImageMiddleware`` stores full base64 image payloads in
-    ``hide_from_ui`` human messages — these are internal model context and must
-    not be sent over the wire (huge response bodies, no UI value).
+    the frontend. Current ``ViewImageMiddleware`` injects image bytes only into
+    an ephemeral model request, but legacy checkpoints and custom middleware
+    may still contain hidden base64 image messages. Keep this API-boundary
+    filter as defense in depth so those payloads are never sent over the wire.
 
     Only content blocks of type ``image_url`` whose URL starts with ``data:``
     are stripped.  Text blocks, ``https://`` image URLs, and non-hidden
@@ -107,17 +122,63 @@ def strip_data_url_image_blocks(messages: list[dict[str, Any]]) -> list[dict[str
     return result
 
 
+def _viewed_images_for_api(value: object) -> dict[str, dict[str, object]]:
+    """Expose only bounded observation metadata, never bytes or locators."""
+
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for image_path, image_data in value.items():
+        if not isinstance(image_path, str) or not isinstance(image_data, dict):
+            continue
+        mime_type = image_data.get("mime_type")
+        size = image_data.get("size")
+        sha256 = image_data.get("sha256")
+        file_ref = image_data.get("file_ref")
+        project_id = file_ref.get("project_id") if isinstance(file_ref, dict) else None
+        owner_user_id = file_ref.get("owner_user_id") if isinstance(file_ref, dict) else None
+        if (
+            not any(image_path == root or image_path.startswith(f"{root}/") for root in _PUBLIC_VIEWED_IMAGE_ROOTS)
+            or mime_type not in _PUBLIC_VIEWED_IMAGE_MIME_TYPES
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 0 <= size <= _MAX_PUBLIC_VIEWED_IMAGE_BYTES
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+            or not isinstance(file_ref, dict)
+            or file_ref.get("path") != image_path
+            or not isinstance(file_ref.get("sandbox_id"), str)
+            or not file_ref["sandbox_id"]
+            or not isinstance(file_ref.get("run_id"), str)
+            or not file_ref["run_id"]
+            or (project_id is None) != (owner_user_id is None)
+            or (project_id is not None and (not isinstance(project_id, str) or not project_id or not isinstance(owner_user_id, str) or not owner_user_id))
+        ):
+            continue
+        result[image_path] = {
+            "mime_type": mime_type,
+            "size": size,
+            "sha256": sha256,
+        }
+    return result
+
+
 def serialize_channel_values_for_api(channel_values: dict[str, Any]) -> dict[str, Any]:
-    """Serialize channel values and strip base64 image data from messages.
+    """Serialize state while removing all persisted image bytes and locators.
 
     Convenience wrapper combining :func:`serialize_channel_values` with
     :func:`strip_data_url_image_blocks`.  Use this in all REST endpoints
     that return channel values to the frontend so that ``data:``-scheme
-    base64 image payloads are never sent over the wire.
+    base64 image payloads are never sent over the wire. Legacy
+    ``viewed_images.base64`` entries are dropped entirely; current entries
+    expose only MIME, size, and digest metadata.
     """
     result = serialize_channel_values(channel_values)
     if isinstance(result.get("messages"), list):
         result["messages"] = strip_data_url_image_blocks(result["messages"])
+    if "viewed_images" in result:
+        result["viewed_images"] = _viewed_images_for_api(result["viewed_images"])
     return result
 
 

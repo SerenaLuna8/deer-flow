@@ -30,6 +30,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.file_authority import RunFileAuthority
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.events.stream_base import StreamBridge
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -78,6 +79,7 @@ logger = logging.getLogger(__name__)
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 _PRIVATE_CLEANUP_MAX_ATTEMPTS = 3
+_PRIVATE_RUN_MESSAGE_BOUNDARY_ERROR = "Private Run pre-run message boundary is unavailable"
 
 
 def _repository_trace_user_id(record: RunRecord) -> str:
@@ -118,6 +120,11 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
+            if key in {
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+                "stop_reason",
+            }:
+                continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
@@ -179,6 +186,10 @@ class RunContext:
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
+        # Both are Worker-owned ephemeral values. Never retain a client value
+        # or a stale value from a reused config object.
+        existing_context.pop(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, None)
+        existing_context.pop("stop_reason", None)
         if "private_scope" in runtime_context or "__run_read_only_mounts" in runtime_context:
             existing_context["thread_id"] = runtime_context["thread_id"]
             existing_context["run_id"] = runtime_context["run_id"]
@@ -203,12 +214,13 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "__runtime_mcp_tools",
             "__skill_scoped_secrets",
             "__skill_secret_provider",
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         ):
             if key in runtime_context:
                 existing_context[key] = runtime_context[key]
         return
 
-    config["context"] = dict(runtime_context)
+    config["context"] = {key: value for key, value in runtime_context.items() if key != "stop_reason"}
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
@@ -370,6 +382,7 @@ async def run_agent(
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
+    private_message_boundary_required = ctx.private_scope is not None or record.scope is not None
 
     journal = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
@@ -543,10 +556,20 @@ async def run_agent(
                         "metadata": copy.deepcopy(getattr(ckpt_tuple, "metadata", {})),
                         "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
                     }
-                    pre_existing_message_ids = _collect_pre_existing_message_ids(pre_run_snapshot)
+                    pre_existing_message_ids = _collect_private_pre_existing_message_ids(pre_run_snapshot) if private_message_boundary_required else _collect_pre_existing_message_ids(pre_run_snapshot)
             except Exception:
                 snapshot_capture_failed = True
-                logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                if private_message_boundary_required:
+                    logger.warning(
+                        "Private Run pre-run message boundary is unavailable for run %s",
+                        run_id,
+                    )
+                    raise RuntimeError(_PRIVATE_RUN_MESSAGE_BOUNDARY_ERROR) from None
+                logger.warning(
+                    "Could not capture pre-run checkpoint snapshot for run %s",
+                    run_id,
+                    exc_info=True,
+                )
 
         # 2. Publish metadata — useStream needs both run_id AND thread_id
         await bridge.publish(
@@ -608,6 +631,7 @@ async def run_agent(
                     skill_secret_provider,
                     skill_container_path,
                 )
+        runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
         if deerflow_trace_id:
@@ -1647,6 +1671,36 @@ def _collect_pre_existing_message_ids(snapshot: dict[str, Any] | None) -> set[st
         msg_id = _message_id(msg)
         if msg_id is not None:
             ids.add(msg_id)
+    return ids
+
+
+def _collect_private_pre_existing_message_ids(
+    snapshot: dict[str, Any],
+) -> set[str]:
+    """Validate an exact private-Run checkpoint message boundary.
+
+    A present checkpoint with no messages is a valid first-run boundary.
+    Historical messages must all carry distinct stable IDs; otherwise a
+    resumed Run cannot distinguish old task dispatches from new results.
+    """
+    if not isinstance(snapshot, dict):
+        raise ValueError("invalid snapshot")
+    checkpoint = snapshot.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        raise ValueError("invalid checkpoint")
+    channel_values = checkpoint.get("channel_values", {})
+    if not isinstance(channel_values, dict):
+        raise ValueError("invalid checkpoint channels")
+    messages = channel_values.get("messages", [])
+    if not isinstance(messages, (list, tuple)):
+        raise ValueError("invalid checkpoint messages")
+
+    ids: set[str] = set()
+    for message in messages:
+        message_id = _message_id(message)
+        if message_id is None or message_id in ids:
+            raise ValueError("unstable checkpoint message identity")
+        ids.add(message_id)
     return ids
 
 

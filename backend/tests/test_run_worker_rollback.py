@@ -9,6 +9,8 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
@@ -49,6 +51,26 @@ def test_build_runtime_context_includes_app_config_when_present():
     assert context["app_config"] is app_config
 
 
+def test_build_runtime_context_rejects_forged_pre_run_message_boundary():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"forged-message"}},
+    )
+
+    assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in context
+
+
+def test_build_runtime_context_rejects_forged_stop_reason():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {"stop_reason": "forged-terminal-reason"},
+    )
+
+    assert "stop_reason" not in context
+
+
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
     app_config = object()
     config = {"context": {"thread_id": "caller-thread"}}
@@ -65,6 +87,182 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["thread_id"] == "caller-thread"
     assert config["context"]["run_id"] == "run-1"
     assert config["context"]["app_config"] is app_config
+
+
+def test_install_runtime_context_overwrites_pre_run_boundary_from_worker():
+    config = {
+        "context": {
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"forged-message"},
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"trusted-message"}),
+        },
+    )
+
+    assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"trusted-message"})
+
+
+def test_install_runtime_context_clears_stale_stop_reason():
+    config = {
+        "context": {
+            "stop_reason": "stale-terminal-reason",
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+        },
+    )
+
+    assert "stop_reason" not in config["context"]
+
+
+def test_install_runtime_context_never_installs_stop_reason():
+    config = {}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "stop_reason": "untrusted-terminal-reason",
+        },
+    )
+
+    assert "stop_reason" not in config["context"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "checkpointer",
+    [
+        SimpleNamespace(aget_tuple=AsyncMock(side_effect=RuntimeError("database detail must not leak"))),
+        SimpleNamespace(
+            aget_tuple=AsyncMock(
+                return_value=SimpleNamespace(
+                    config={
+                        "configurable": {
+                            "thread_id": "private-thread",
+                            "checkpoint_ns": "",
+                            "checkpoint_id": "checkpoint-1",
+                        }
+                    },
+                    checkpoint={"channel_values": {"messages": "malformed"}},
+                    metadata={},
+                    pending_writes=[],
+                )
+            )
+        ),
+        SimpleNamespace(
+            aget_tuple=AsyncMock(
+                return_value=SimpleNamespace(
+                    config={
+                        "configurable": {
+                            "thread_id": "private-thread",
+                            "checkpoint_ns": "",
+                            "checkpoint_id": "checkpoint-1",
+                        }
+                    },
+                    checkpoint={"channel_values": {"messages": [AIMessage(content="history without id")]}},
+                    metadata={},
+                    pending_writes=[],
+                )
+            )
+        ),
+    ],
+    ids=["read-failed", "malformed", "history-without-stable-id"],
+)
+async def test_private_run_fails_closed_when_pre_run_message_boundary_is_unavailable(
+    checkpointer,
+):
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="private-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory = MagicMock()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Private Run pre-run message boundary is unavailable"
+    factory.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_private_run_allows_first_empty_checkpoint():
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="private-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
+    captured = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["boundary"] = config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
+            yield {"messages": []}
+
+    def factory(*, config):
+        del config
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert captured["boundary"] == frozenset()
 
 
 @pytest.mark.anyio
@@ -101,6 +299,8 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
     assert captured["factory_context"]["app_config"] is app_config
     assert captured["astream_context"]["app_config"] is app_config
+    assert captured["factory_context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
+    assert captured["astream_context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
     fetched = await run_manager.get(record.run_id)
     assert fetched is not None
     assert fetched.status == RunStatus.success

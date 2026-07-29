@@ -37,10 +37,12 @@ def test_private_runtime_context_strips_client_authority_and_server_values_win()
         request_config={
             "thread_id": "forged-top-thread",
             "run_id": "forged-top-run",
+            "stop_reason": "forged-top-stop",
             "sandbox_id": "forged-other-sandbox",
             "context": {
                 "thread_id": "forged-context-thread",
                 "run_id": "forged-context-run",
+                "stop_reason": "forged-context-stop",
                 "model_name": "forged-model",
                 "is_bootstrap": True,
                 "subagent_enabled": True,
@@ -63,6 +65,7 @@ def test_private_runtime_context_strips_client_authority_and_server_values_win()
             "configurable": {
                 "thread_id": "forged-configurable-thread",
                 "run_id": "forged-configurable-run",
+                "stop_reason": "forged-configurable-stop",
                 "owner_user_id": "attacker",
                 "__private_scope": {"project_id": "attacker"},
                 "deerflow_private_scope": {"project_id": "attacker"},
@@ -76,6 +79,7 @@ def test_private_runtime_context_strips_client_authority_and_server_values_win()
             "disable_clarification": True,
             "thread_id": "forged-body-thread",
             "run_id": "forged-body-run",
+            "stop_reason": "forged-body-stop",
         },
     )
 
@@ -84,6 +88,9 @@ def test_private_runtime_context_strips_client_authority_and_server_values_win()
     assert "run_id" not in config
     assert "run_id" not in config["configurable"]
     assert "run_id" not in config["context"]
+    assert "stop_reason" not in config
+    assert "stop_reason" not in config["configurable"]
+    assert "stop_reason" not in config["context"]
     assert "private_scope" not in config["configurable"]
     assert "deerflow_private_scope" not in config["configurable"]
     assert config["context"]["private_scope"] is opaque

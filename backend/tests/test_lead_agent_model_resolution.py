@@ -11,6 +11,9 @@ import pytest
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import (
+    SubagentLimitMiddleware,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig
@@ -240,7 +243,16 @@ def test_private_runtime_default_model_ref_uses_injected_exact_model(
         return []
 
     monkeypatch.setattr(tools_module, "get_available_tools", fake_tools)
-    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *_args, **_kwargs: [])
+
+    def fake_middlewares(*_args, **kwargs):
+        captured["middleware_kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_middlewares",
+        fake_middlewares,
+    )
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **_kwargs: "exact prompt")
     monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
 
@@ -266,6 +278,8 @@ def test_private_runtime_default_model_ref_uses_injected_exact_model(
     }
     assert result["model"] == "exact model instance"
     assert captured["tool_kwargs"]["subagent_enabled"] is True
+    assert captured["middleware_kwargs"]["resolved_subagent_enabled"] is True
+    assert captured["middleware_kwargs"]["resolved_max_concurrent_subagents"] == 3
 
 
 @pytest.mark.parametrize("injected_model_name", [None, "forged-model"])
@@ -597,6 +611,81 @@ def test_build_middlewares_uses_loop_detection_config(monkeypatch):
     assert loop_detection.max_tracked_threads == 40
     assert loop_detection.tool_freq_warn == 50
     assert loop_detection.tool_freq_hard_limit == 60
+
+
+def test_build_middlewares_uses_operator_total_delegation_limit(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.subagents.max_total_per_run = 2
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_lead_runtime_middlewares",
+        lambda *, app_config, lazy_init=True: [],
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda *, app_config=None: None,
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_todo_list_middleware",
+        lambda is_plan_mode: None,
+    )
+
+    middlewares = lead_agent_module.build_middlewares(
+        {
+            "configurable": {
+                "is_plan_mode": False,
+                "subagent_enabled": True,
+                "max_total_subagents": 50,
+            }
+        },
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    limit = next(middleware for middleware in middlewares if isinstance(middleware, SubagentLimitMiddleware))
+    assert limit.max_total == 2
+
+
+def test_build_middlewares_uses_server_resolved_private_subagent_authority(
+    monkeypatch,
+):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_lead_runtime_middlewares",
+        lambda *, app_config, lazy_init=True: [],
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda *, app_config=None: None,
+    )
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_todo_list_middleware",
+        lambda is_plan_mode: None,
+    )
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {}},
+        model_name="safe-model",
+        app_config=app_config,
+        resolved_subagent_enabled=True,
+        resolved_max_concurrent_subagents=4,
+    )
+
+    limit = next(middleware for middleware in middlewares if isinstance(middleware, SubagentLimitMiddleware))
+    assert limit.max_concurrent == 4
+    assert limit.max_total == app_config.subagents.max_total_per_run
 
 
 def test_build_middlewares_omits_loop_detection_when_disabled(monkeypatch):

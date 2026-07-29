@@ -217,8 +217,12 @@ describe("shared asset contracts", () => {
       soul: "Be precise",
       identity: "# Identity\n\nYou are a reviewer.",
       user_context: "# User\n\nPrefer concise answers.",
-      payload_schema_version: 2,
+      payload_schema_version: 3,
       model_ref: "default",
+      model_settings: {
+        temperature: 0.2,
+        thinking_enabled: false,
+      },
       tool_groups: ["web"],
       skill_version_ids: [],
       mcp_version_ids: [],
@@ -238,10 +242,14 @@ describe("shared asset contracts", () => {
     ).toMatchObject({ data: [{ version_number: 1 }] });
     expect(agentVersion).toMatchObject({
       agents_instructions: "# Agent\n\nReview changes carefully.",
+      model_settings: {
+        temperature: 0.2,
+        thinking_enabled: false,
+      },
       soul: "Be precise",
       identity: "# Identity\n\nYou are a reviewer.",
       user_context: "# User\n\nPrefer concise answers.",
-      payload_schema_version: 2,
+      payload_schema_version: 3,
     });
 
     expect(() =>
