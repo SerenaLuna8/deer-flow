@@ -476,6 +476,8 @@ export const zhCN: Translations = {
       requeue: "重新排队安全任务",
       requeueing: "正在重新排队",
       requeueError: "无法完成安全重新排队。",
+      copyProjectId: "复制项目 UUID",
+      projectIdCopied: "已复制项目 UUID",
       statuses: {
         queued: "排队中",
         leased: "已租用",
@@ -497,14 +499,17 @@ export const zhCN: Translations = {
         unknown: "待确认",
       },
       filters: {
-        project: "项目标识",
+        label: "筛选任务",
+        project: "项目",
+        projectQuery: "搜索项目",
+        projectQueryPlaceholder: "按项目名称或短标识搜索",
         status: "状态",
         type: "任务类型",
         allStatuses: "全部状态",
         allTypes: "全部任务类型",
-        apply: "应用筛选",
-        clear: "清除",
-        invalidProject: "请输入有效的项目标识。",
+        apply: "查询",
+        clear: "重置",
+        invalidQuery: "搜索内容不能超过 120 个字符。",
       },
     },
     audit: {
@@ -761,7 +766,7 @@ export const zhCN: Translations = {
       backToProjects: "返回项目选择",
       projectGovernance: "项目共享资产代管",
       projectBoundary:
-        "仅治理共享 Agent、Skill、MCP、凭据与系统资产绑定；不会读取成员、聊天、运行、记忆、文件或其他用户私有内容。",
+        "仅治理所选项目自建的共享 Agent、Skill、MCP 和凭据；不会读取成员、聊天、运行、记忆、文件或其他用户私有内容。",
       projectId: "项目 UUID",
     },
     common: {
@@ -861,13 +866,11 @@ export const zhCN: Translations = {
         `系统提供 ${systemCount} · 项目自建 ${projectCount}`,
       project: {
         agentsTitle: "项目 Agent 代管",
-        agentsDescription: "查看所选项目的 Agent；系统 Agent 仅可绑定。",
+        agentsDescription: "查看所选项目自建的 Agent。",
         skillsTitle: "项目 Skill 代管",
-        skillsDescription:
-          "维护所选项目的完整 Skill 版本；系统 Skill 仅可绑定。",
+        skillsDescription: "维护所选项目自建 Skill 的完整版本。",
         mcpTitle: "项目 MCP 代管",
-        mcpDescription:
-          "维护所选项目的 MCP 定义、审批和凭据授权；系统 MCP 定义保持只读。",
+        mcpDescription: "维护所选项目自建 MCP 的定义、审批和凭据授权。",
         credentialsTitle: "项目凭据代管",
         credentialsDescription:
           "只治理所选项目的凭据安全元数据；凭据值写入后永不回显。",

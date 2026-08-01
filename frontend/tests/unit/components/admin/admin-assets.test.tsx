@@ -198,6 +198,7 @@ describe("admin asset access and credential safety", () => {
     expect(source).toContain('data-testid="admin-asset-pagination"');
     expect(source).toContain("adminAssetCatalogSummary");
     expect(source).toContain("filterAndSortAdminAssets");
+    expect(source).toContain("filterSystemAdminCatalogItems");
     expect(source).toContain("adminAssetCatalogPage");
     expect(source).toContain('"divide-border divide-y @min-[52rem]:hidden"');
     expect(source).toContain(
@@ -354,7 +355,7 @@ describe("admin asset access and credential safety", () => {
     expect(chinese).not.toContain("Project shared-asset governance");
   });
 
-  test("admin project override never falls back to member routes or global system authoring", () => {
+  test("admin project governance never falls back to member routes or global system authoring", () => {
     const pageSource = readFileSync(
       resolve(
         process.cwd(),
@@ -369,7 +370,8 @@ describe("admin asset access and credential safety", () => {
 
     expect(pageSource).toContain("useAdminProjectAssets");
     expect(pageSource).toContain("createAdminProjectCredential");
-    expect(pageSource).toContain("AdminProjectSystemBindingDialog");
+    expect(pageSource).toContain("filterAdminProjectCatalogItems");
+    expect(pageSource).not.toContain("AdminProjectSystemBindingDialog");
     expect(pageSource).not.toContain("useCurrentProject");
     expect(pageSource).not.toContain("createProjectCredential(");
     expect(pageSource).not.toContain("useMutation(");
@@ -382,7 +384,7 @@ describe("admin asset access and credential safety", () => {
     expect(apiSource).not.toContain("createAdminAsset(projectId");
   });
 
-  test("admin project override uses dense source directories and selected-only history", () => {
+  test("admin project governance uses project-only dense directories and selected-only history", () => {
     const pageSource = readFileSync(
       resolve(
         process.cwd(),
@@ -390,16 +392,10 @@ describe("admin asset access and credential safety", () => {
       ),
       "utf8",
     );
-    const bindingSource = readFileSync(
-      resolve(
-        process.cwd(),
-        "src/components/admin/assets/admin-project-system-binding-dialog.tsx",
-      ),
-      "utf8",
-    );
 
     expect(pageSource).toContain("AdminProjectAssetDirectory");
     expect(pageSource).toContain("AdminProjectCredentialDirectory");
+    expect(pageSource).toContain("filterAdminProjectCatalogItems");
     expect(pageSource).toContain('data-testid="admin-project-asset-directory"');
     expect(pageSource).toContain(
       'data-testid="admin-project-credential-directory"',
@@ -409,10 +405,8 @@ describe("admin asset access and credential safety", () => {
     expect(pageSource).toContain("projectCredentialCanDelete");
     expect(pageSource).not.toContain("<ProjectAssetCatalogView");
     expect(pageSource).not.toContain("<ProjectCredentialCatalogView");
-    expect(bindingSource).toContain("sm:max-w-2xl");
-    expect(bindingSource).toContain(
-      'data-testid="admin-project-binding-summary"',
-    );
+    expect(pageSource).not.toContain("AdminProjectSystemBindingDialog");
+    expect(pageSource).not.toContain("TabsTrigger");
     expect(pageSource).toContain(
       "xl:grid-cols-[minmax(13rem,1.7fr)_7rem_minmax(10rem,1fr)_8rem_auto]",
     );

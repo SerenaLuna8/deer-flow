@@ -115,8 +115,8 @@ export function projectNavigationItems(
       {
         href: `${base}/connections`,
         icon: CableIcon,
-        label: "Connections",
-        section: "work",
+        label: "渠道连接",
+        section: "management",
       },
     );
   }
@@ -441,7 +441,7 @@ export function ProjectDesktopNav({
     >
       {collapsed ? (
         <>
-          <div className="border-border/70 flex justify-center border-b p-2">
+          <div className="border-border/70 flex h-[4.75rem] items-center justify-center border-b">
             <Button
               type="button"
               size="icon"
@@ -459,23 +459,20 @@ export function ProjectDesktopNav({
         </>
       ) : (
         <>
-          <div className="border-foreground/15 border-b px-4 py-5">
-            <div className="flex items-start justify-between gap-2">
+          <div className="border-foreground/15 h-[4.75rem] border-b px-4">
+            <div className="flex h-full items-center justify-between gap-2">
               <ProjectBrand />
               <Button
                 type="button"
                 size="icon"
                 variant="ghost"
-                className="-mt-1 -mr-1 size-8 shrink-0"
+                className="-mr-1 size-8 shrink-0"
                 aria-label="收起菜单栏"
                 title="收起菜单栏"
                 onClick={() => onCollapsedChange?.(true)}
               >
                 <PanelLeftCloseIcon aria-hidden className="size-4" />
               </Button>
-            </div>
-            <div className="mt-5">
-              <ProjectIdentity project={project} />
             </div>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">

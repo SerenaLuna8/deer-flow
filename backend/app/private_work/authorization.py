@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.errors import PrivateWorkError, PrivateWorkUnavailable
 from app.projects.models import ProjectRole
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
@@ -21,6 +22,47 @@ _EXECUTABLE_ROLES = (
     ProjectRole.EDITOR.value,
     ProjectRole.RUNNER.value,
 )
+
+
+class PrivateRequestAuthorizationBoundary:
+    """Adapt request-scoped revalidation to an app-agnostic model boundary.
+
+    The checker owns one short database transaction and must return before the
+    external model call begins.  Harness code understands only the internal
+    ``AuthorizationRevoked`` control signal, so this adapter retains the
+    private HTTP-facing error for the owning request service to restore.
+    """
+
+    def __init__(
+        self,
+        checker: Callable[[], Awaitable[None]],
+        *,
+        request_id: str,
+    ) -> None:
+        self._checker = checker
+        self._request_id = request_id
+        self._private_error: PrivateWorkError | None = None
+
+    async def before_model_call(self) -> None:
+        try:
+            await self._checker()
+        except asyncio.CancelledError:
+            raise
+        except PrivateWorkError as error:
+            self._private_error = error
+            raise AuthorizationRevoked from None
+        except AuthorizationRevoked:
+            if self._private_error is None:
+                self._private_error = PrivateWorkUnavailable(self._request_id)
+            raise
+        except Exception:
+            self._private_error = PrivateWorkUnavailable(self._request_id)
+            raise AuthorizationRevoked from None
+
+    def private_error(self) -> PrivateWorkError:
+        """Return the stable private error recorded by the latest check."""
+
+        return self._private_error or PrivateWorkUnavailable(self._request_id)
 
 
 class PrivateRunAuthorizationService:

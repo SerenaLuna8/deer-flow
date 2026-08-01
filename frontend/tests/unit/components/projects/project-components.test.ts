@@ -10,6 +10,8 @@ rs.mock("next/navigation", () => ({
 }));
 
 import { ProjectCard } from "@/components/projects/project-card";
+import { ProjectHeader } from "@/components/projects/project-header";
+import { ProjectPageHeader } from "@/components/projects/project-page-header";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const project: Project = {
@@ -39,6 +41,55 @@ const project: Project = {
 };
 
 describe("project presentation contracts", () => {
+  test("ability pages use compact title-only headers", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProjectPageHeader, {
+        title: "Agent",
+        actions: createElement("button", null, "新建 Agent"),
+      }),
+    );
+    const assetShell = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/assets/project-asset-page-shell.tsx",
+      ),
+      "utf8",
+    );
+    const memoryPage = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/workspace/settings/memory-settings-page.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(html).toContain(">Agent</h1>");
+    expect(html).toContain("新建 Agent");
+    expect(html).not.toContain("<p");
+    expect(assetShell).not.toContain(
+      "eyebrow={`${project.display_name} · 项目资产`}",
+    );
+    expect(assetShell).not.toContain("description={description}");
+    expect(memoryPage).not.toContain(
+      "description={t.settings.memory.description}",
+    );
+  });
+
+  test("project overview uses a compact identity header", () => {
+    const html = renderToStaticMarkup(
+      createElement(ProjectHeader, { project }),
+    );
+
+    expect(html).toContain("Alpha Project");
+    expect(html).toContain("Shared research");
+    expect(html).toContain("py-3");
+    expect(html).toContain("h-[4.75rem]");
+    expect(html).toContain("size-10");
+    expect(html).not.toContain("py-6");
+    expect(html).not.toContain("size-14");
+    expect(html).not.toContain("text-3xl");
+  });
+
   test("workspace hides the redundant project section title", () => {
     const source = readFileSync(
       resolve(process.cwd(), "src/components/projects/project-workbench.tsx"),

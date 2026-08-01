@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bootstrap_identities import BUILTIN_SERVICE_USER_IDS
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
+from app.projects.default_skill_bindings import (
+    seed_new_project_system_skill_bindings,
+)
 from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
 from app.projects.models import BootstrapResult, BootstrapStatus, ProjectRole
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -85,6 +88,11 @@ async def bootstrap_default_project(
                 membership = ProjectMembershipRow(project_id=project.id, user_id=admin_id, role="admin")
                 session.add(membership)
                 await session.flush()
+                await seed_new_project_system_skill_bindings(
+                    session,
+                    project_id=project.id,
+                    actor_user_id=admin_id,
+                )
                 context = ProjectContext(
                     user_id=uuid.UUID(str(admin_id)),
                     project_id=project.id,

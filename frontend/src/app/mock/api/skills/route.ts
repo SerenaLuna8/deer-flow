@@ -66,14 +66,6 @@ export function GET() {
         enabled: true,
       },
       {
-        name: "vercel-deploy",
-        description:
-          'Deploy applications and websites to Vercel. Use this skill when the user requests deployment actions such as "Deploy my app", "Deploy this to production", "Create a preview deployment", "Deploy and give me the link", or "Push this live". No authentication required - returns preview URL and claimable deployment link.',
-        license: null,
-        category: "public",
-        enabled: true,
-      },
-      {
         name: "video-generation",
         description:
           "Use this skill when the user requests to generate, create, or imagine videos. Supports structured prompts and reference image for guided generation.",

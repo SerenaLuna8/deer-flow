@@ -5,7 +5,6 @@ import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from langchain_core.tools import tool
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
@@ -247,16 +246,14 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
     assert config["metadata"]["subagent_enabled"] is False
 
 
-@pytest.mark.parametrize("is_bootstrap", [False, True])
 def test_passive_discoverable_skills_never_filter_lead_candidates(
-    is_bootstrap: bool,
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     skill = dataclasses.replace(
         _runtime_skill(tmp_path),
-        name="bootstrap",
-        relative_path=Path("bootstrap"),
+        name="data-analysis",
+        relative_path=Path("data-analysis"),
         allowed_tools=("allowed_candidate",),
     )
 
@@ -328,7 +325,7 @@ def test_passive_discoverable_skills_never_filter_lead_candidates(
     )
 
     result = lead_agent_module._make_lead_agent(
-        {"configurable": {"is_bootstrap": is_bootstrap}},
+        {"configurable": {}},
         app_config=app_config,
     )
 

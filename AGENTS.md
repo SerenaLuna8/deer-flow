@@ -51,7 +51,7 @@ deer-flow/
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── deploy/helm/                    # Kubernetes/Helm resources
-├── skills/public/                  # Reviewable and importable Skill sources
+├── skills/public/                  # Sole source of packaged System Skill definitions
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
@@ -93,7 +93,11 @@ model-provider API keys before starting the role.
   graph code.
 - System Agent, Skill, and MCP definitions are seeded from the packaged, digest-checked catalog
   during explicit database setup. Runtime processes read only PostgreSQL catalog rows and exact
-  admitted snapshots. The seed creates no project binding, membership, Credential, or secret.
+  admitted snapshots. `skills/public/` is the sole source of System Skill entries; the catalog
+  generator replaces the complete Skill set while retaining packaged Agent and MCP entries. The
+  catalog seed itself creates no project binding, membership, Credential, or secret. Each newly
+  created project separately pins every current System Skill as an enabled project binding; an
+  existing project's bindings and administrator-disabled choices are never reconciled by setup.
 - System-admin operations expose bounded readiness and governance metadata only. They never return
   prompts, messages, Memory, file/artifact bodies, Run output, credentials, locators, or raw errors.
 

@@ -607,7 +607,16 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
             listed = await client.get(
                 "/api/admin/jobs",
                 params={
-                    "project_id": str(seed.owner_a.project_id),
+                    "project_query": "thread project a",
+                    "status": "dead",
+                    "type": "retention_purge",
+                },
+                headers=headers,
+            )
+            escaped_wildcard = await client.get(
+                "/api/admin/jobs",
+                params={
+                    "project_query": "%",
                     "status": "dead",
                     "type": "retention_purge",
                 },
@@ -650,6 +659,8 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
             "job_id",
             "dead_job_id",
             "project_id",
+            "project_slug",
+            "project_display_name",
             "job_type",
             "status",
             "retry_safety",
@@ -657,6 +668,10 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
             "public_error_code",
             "predecessor_dead_job_id",
         }
+        assert {item["project_display_name"] for item in items} == {"Thread Project A"}
+        assert all(item["project_slug"].startswith("thread-a-") for item in items)
+        assert escaped_wildcard.status_code == 200
+        assert escaped_wildcard.json() == {"items": [], "next_cursor": None}
         encoded = json.dumps(listed.json(), sort_keys=True)
         for forbidden in (
             "owner_user_id",
@@ -712,7 +727,7 @@ async def test_jobs_are_public_only_and_safe_requeue_is_atomic_and_project_exact
             after_requeue = await client.get(
                 "/api/admin/jobs",
                 params={
-                    "project_id": str(seed.owner_a.project_id),
+                    "project_query": "thread-a-",
                     "status": "dead",
                     "type": "retention_purge",
                 },
@@ -774,12 +789,26 @@ async def test_malformed_admin_requests_revalidate_current_role_before_returning
                 params={"cursor": "x" * 257},
                 headers=admin_headers,
             )
+            blank_job_query = await client.get(
+                "/api/admin/jobs",
+                params={"project_query": "   "},
+                headers=admin_headers,
+            )
+            oversized_job_query = await client.get(
+                "/api/admin/jobs",
+                params={"project_query": "x" * 121},
+                headers=admin_headers,
+            )
 
         assert unauthenticated.status_code == 401
         for response in (ordinary_query, ordinary_cursor, ordinary_body):
             _assert_public_not_found(response)
         assert admin.status_code == 422
         assert admin.json()["code"] == "RELIABILITY_INVALID"
+        assert blank_job_query.status_code == 422
+        assert blank_job_query.json()["code"] == "RELIABILITY_INVALID"
+        assert oversized_job_query.status_code == 422
+        assert oversized_job_query.json()["code"] == "RELIABILITY_INVALID"
     finally:
         await seed.engine.dispose()
 

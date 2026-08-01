@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -23,6 +23,12 @@ from app.projects.errors import (
     ProjectMemberQuotaExceeded,
 )
 from app.projects.models import BootstrapStatus
+from deerflow.persistence.shared_assets import (
+    ProjectSystemAgentBindingRow,
+    ProjectSystemMcpBindingRow,
+    ProjectSystemSkillBindingRow,
+    SkillRow,
+)
 
 
 @pytest.mark.postgres
@@ -80,6 +86,114 @@ async def test_default_bootstrap_states_idempotency_and_concurrency(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_new_default_project_enables_system_skills_once_without_reconciling_existing_bindings(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin_id = str(uuid.uuid4())
+    try:
+        skill_id = uuid.uuid4()
+        skill_version_id = uuid.uuid4()
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,'default-skill-admin@example.com','system_admin',:now,false,0)"""
+                ),
+                {"id": admin_id, "now": datetime.now(UTC)},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO skills
+                    (id,scope,slug,display_name,status,created_by_user_id)
+                    VALUES (:id,'system',:slug,:slug,'active',:actor)"""
+                ),
+                {
+                    "id": skill_id,
+                    "slug": f"default-bootstrap-{uuid.uuid4().hex[:8]}",
+                    "actor": admin_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO skill_versions
+                    (id,skill_id,version_number,workflow_status,scan_decision,payload_checksum,created_by_user_id)
+                    VALUES (:version,:skill,1,'draft','allow',:checksum,:actor)"""
+                ),
+                {
+                    "version": skill_version_id,
+                    "skill": skill_id,
+                    "checksum": uuid.uuid4().hex * 2,
+                    "actor": admin_id,
+                },
+            )
+            await connection.execute(
+                text("UPDATE skill_versions SET workflow_status='published' WHERE id=:version"),
+                {"version": skill_version_id},
+            )
+            await connection.execute(
+                text("UPDATE skills SET current_published_version_id=:version WHERE id=:skill"),
+                {"version": skill_version_id, "skill": skill_id},
+            )
+
+        async with factory() as session:
+            created = await bootstrap_default_project(session)
+        assert created.status is BootstrapStatus.CREATED
+        assert created.project_id is not None
+
+        async with factory() as session:
+            expected_count = await session.scalar(
+                select(func.count())
+                .select_from(SkillRow)
+                .where(
+                    SkillRow.scope == "system",
+                    SkillRow.project_id.is_(None),
+                    SkillRow.status == "active",
+                    SkillRow.current_published_version_id.is_not(None),
+                )
+            )
+            bindings = tuple((await session.execute(select(ProjectSystemSkillBindingRow).where(ProjectSystemSkillBindingRow.project_id == created.project_id).order_by(ProjectSystemSkillBindingRow.system_skill_id))).scalars().all())
+        assert expected_count == 1 and len(bindings) == expected_count
+        assert (bindings[0].system_skill_id, bindings[0].skill_version_id) == (
+            skill_id,
+            skill_version_id,
+        )
+        assert all(row.enabled and row.version == 1 for row in bindings)
+        selected = bindings[0]
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE project_system_skill_bindings
+                    SET enabled=false,version=version+1
+                    WHERE project_id=:project AND system_skill_id=:skill"""
+                ),
+                {"project": created.project_id, "skill": selected.system_skill_id},
+            )
+
+        async with factory() as session:
+            existing = await bootstrap_default_project(session)
+        assert existing.status is BootstrapStatus.EXISTING
+        async with factory() as session:
+            retained = await session.get(
+                ProjectSystemSkillBindingRow,
+                (created.project_id, selected.system_skill_id),
+            )
+            binding_count = await session.scalar(select(func.count()).select_from(ProjectSystemSkillBindingRow).where(ProjectSystemSkillBindingRow.project_id == created.project_id))
+            agent_binding_count = await session.scalar(select(func.count()).select_from(ProjectSystemAgentBindingRow).where(ProjectSystemAgentBindingRow.project_id == created.project_id))
+            mcp_binding_count = await session.scalar(select(func.count()).select_from(ProjectSystemMcpBindingRow).where(ProjectSystemMcpBindingRow.project_id == created.project_id))
+        assert retained is not None and retained.enabled is False and retained.version == 2
+        assert binding_count == expected_count
+        assert agent_binding_count == 0
+        assert mcp_binding_count == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_default_bootstrap_ignores_non_login_service_principals(
     migrated_postgres_database_url: str,
 ) -> None:
@@ -91,18 +205,31 @@ async def test_default_bootstrap_ignores_non_login_service_principals(
                 (BUILTIN_ASSET_USER_ID, BUILTIN_ASSET_EMAIL),
                 (BUILTIN_MODEL_USER_ID, BUILTIN_MODEL_EMAIL),
             ):
-                await connection.execute(
-                    text(
-                        """INSERT INTO users
-                        (id,email,system_role,created_at,needs_setup,token_version)
-                        VALUES (:id,:email,'user',:now,false,0)"""
-                    ),
-                    {
-                        "id": str(user_id),
-                        "email": email,
-                        "now": datetime.now(UTC),
-                    },
-                )
+                existing = (
+                    await connection.execute(
+                        text(
+                            """SELECT email,system_role,password_hash,oauth_provider,
+                                      oauth_id,needs_setup
+                            FROM users WHERE id=:id"""
+                        ),
+                        {"id": str(user_id)},
+                    )
+                ).one_or_none()
+                if existing is None:
+                    await connection.execute(
+                        text(
+                            """INSERT INTO users
+                            (id,email,system_role,created_at,needs_setup,token_version)
+                            VALUES (:id,:email,'user',:now,false,0)"""
+                        ),
+                        {
+                            "id": str(user_id),
+                            "email": email,
+                            "now": datetime.now(UTC),
+                        },
+                    )
+                else:
+                    assert existing == (email, "user", None, None, None, False)
         async with factory() as session:
             result = await bootstrap_default_project(session)
         assert result.status is BootstrapStatus.NO_USERS

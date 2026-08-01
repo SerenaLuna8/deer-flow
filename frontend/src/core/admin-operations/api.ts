@@ -215,8 +215,8 @@ export async function fetchAdminJobs(
   const parsedFilters = jobFiltersSchema.parse(filters);
   const params = new URLSearchParams({ limit: "50" });
   withCursor(params, cursor);
-  if (parsedFilters.project_id) {
-    params.set("project_id", parsedFilters.project_id);
+  if (parsedFilters.project_query) {
+    params.set("project_query", parsedFilters.project_query);
   }
   if (parsedFilters.status) params.set("status", parsedFilters.status);
   if (parsedFilters.type) params.set("type", parsedFilters.type);

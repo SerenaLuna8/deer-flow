@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,6 +13,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Overwrite
 from pydantic import ValidationError
+from sqlalchemy import update
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
 from app.gateway.deps import get_current_agent_runtime_config
@@ -28,6 +30,8 @@ from app.private_work.errors import (
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import ThreadAgentRef
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.persistence.projects.model import ProjectMembershipRow
+from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 
 
 def _app_config_with_models(*model_names: str) -> AppConfig:
@@ -161,6 +165,72 @@ async def test_manual_compact_materializes_current_dedicated_model() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_compact_validates_private_scope_before_dedicated_model_materialization(
+    seed: M4ThreadSeed,
+) -> None:
+    service, _, _, _, thread_id = await _create_service(seed)
+    exact_model = _app_config_with_models("summary-live").models[0]
+    materialize = AsyncMock(return_value=exact_model)
+    service._model_materializer = SimpleNamespace(
+        materialize_active=materialize,
+    )
+    source = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "test"},
+            "models": [
+                {
+                    "name": "stale-yaml-model",
+                    "use": "tests.fake:Model",
+                    "model": "provider/stale",
+                }
+            ],
+            "summarization": {"model_name": "summary-live"},
+        }
+    )
+
+    with pytest.raises(PrivateWorkForbidden):
+        await service.compact(
+            seed.viewer,
+            thread_id,
+            force=True,
+            keep=None,
+            app_config=source,
+        )
+    with pytest.raises(PrivateWorkNotFound):
+        await service.compact(
+            seed.owner_b,
+            thread_id,
+            force=True,
+            keep=None,
+            app_config=source,
+        )
+
+    async with seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(
+                run_id=str(uuid.uuid4()),
+                status="running",
+                metadata={},
+                kwargs={},
+                model_name="test-model",
+            ),
+        )
+    with pytest.raises(PrivateWorkConflict):
+        await service.compact(
+            seed.owner_a,
+            thread_id,
+            force=True,
+            keep=None,
+            app_config=source,
+        )
+
+    materialize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_manual_compact_falls_back_to_current_thread_agent_model() -> None:
     from app.private_work.chat_controls import ProjectChatControlService
 
@@ -188,6 +258,80 @@ async def test_manual_compact_falls_back_to_current_thread_agent_model() -> None
     materialize.assert_awaited_once_with("agent-live")
     assert [model.name for model in runtime.models] == ["agent-live"]
     assert runtime.summarization.model_name is None
+
+
+@pytest.mark.asyncio
+async def test_private_request_authorization_boundary_preserves_private_failure() -> None:
+    from app.private_work.authorization import PrivateRequestAuthorizationBoundary
+
+    checker = AsyncMock(side_effect=PrivateWorkForbidden("request-compact"))
+    boundary = PrivateRequestAuthorizationBoundary(
+        checker,
+        request_id="request-compact",
+    )
+
+    with pytest.raises(AuthorizationRevoked):
+        await boundary.before_model_call()
+
+    checker.assert_awaited_once_with()
+    error = boundary.private_error()
+    assert type(error) is PrivateWorkForbidden
+    assert error.request_id == "request-compact"
+
+
+@pytest.mark.asyncio
+async def test_prepare_compaction_forwards_request_authority_to_model_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.runtime import context_compaction
+
+    model_calls: list[str] = []
+
+    class _BoundaryAwareCompactionMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False):
+            del state, force
+            await check_authorization_boundary(
+                runtime.context,
+                "before_model_call",
+            )
+            model_calls.append("called")
+            raise AssertionError("revoked authority must stop before the model")
+
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: _BoundaryAwareCompactionMiddleware(),
+    )
+    boundary = SimpleNamespace(
+        before_model_call=AsyncMock(side_effect=AuthorizationRevoked()),
+    )
+    snapshot = SimpleNamespace(
+        config={
+            "configurable": {
+                "thread_id": "thread-a",
+                "checkpoint_ns": "",
+                "checkpoint_id": "checkpoint-a",
+            }
+        },
+        values={
+            "messages": [
+                HumanMessage(content="one", id="human-one"),
+                AIMessage(content="two", id="ai-two"),
+            ]
+        },
+    )
+
+    with pytest.raises(AuthorizationRevoked):
+        await context_compaction.prepare_thread_compaction(
+            MagicMock(),
+            "thread-a",
+            app_config=_app_config_with_models("test-model"),
+            snapshot=snapshot,
+            authorization_boundary=boundary,
+        )
+
+    boundary.before_model_call.assert_awaited_once_with()
+    assert model_calls == []
 
 
 @pytest.mark.asyncio
@@ -308,6 +452,93 @@ async def test_compact_rechecks_head_and_refuses_stale_prepared_write(
     assert controls.ProjectChatControlService._checkpoint_id(current) == mutated_checkpoint_id
     final_items = [item async for item in raw.alist(_config(thread_id))]
     assert len(final_items) == len(initial_items) + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_compact_revalidates_authority_immediately_before_summary_model(
+    seed: M4ThreadSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.private_work.chat_controls as controls
+    from deerflow.agents.middlewares.summarization_middleware import ContextCompactionResult
+    from deerflow.runtime import context_compaction
+
+    service, _, scoped, _, thread_id = await _create_service(seed)
+    saver = scoped.for_context(seed.owner_a)
+    root = await saver.aget_tuple(_config(thread_id))
+    assert root is not None
+    checkpoint, new_versions = _message_checkpoint(
+        [
+            HumanMessage(content="first", id="human-first"),
+            AIMessage(content="first answer", id="ai-first"),
+            HumanMessage(content="second", id="human-second"),
+            AIMessage(content="second answer", id="ai-second"),
+        ]
+    )
+    await saver.aput(
+        root.config,
+        checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        new_versions,
+    )
+
+    model_calls: list[str] = []
+
+    class _BoundaryAwareCompactionMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False):
+            del force
+            await check_authorization_boundary(
+                runtime.context,
+                "before_model_call",
+            )
+            model_calls.append("called")
+            messages = list(state["messages"])
+            return ContextCompactionResult(
+                summary_text="must not be generated",
+                messages_to_summarize=tuple(messages[:-1]),
+                preserved_messages=tuple(messages[-1:]),
+                total_tokens=len(messages),
+            )
+
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: _BoundaryAwareCompactionMiddleware(),
+    )
+    prepare = controls.prepare_thread_compaction
+
+    async def revoke_then_prepare(*args, **kwargs):
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                update(ProjectMembershipRow)
+                .where(ProjectMembershipRow.id == seed.owner_a.membership_id)
+                .values(
+                    status="removed",
+                    version=ProjectMembershipRow.version + 1,
+                    ended_at=datetime.now(UTC),
+                    ended_by_user_id=str(seed.owner_a.user_id),
+                    end_reason="removed",
+                )
+            )
+        return await prepare(*args, **kwargs)
+
+    monkeypatch.setattr(
+        controls,
+        "prepare_thread_compaction",
+        revoke_then_prepare,
+    )
+
+    with pytest.raises(PrivateWorkNotFound):
+        await service.compact(
+            seed.owner_a,
+            thread_id,
+            force=True,
+            keep=None,
+            app_config=_app_config_with_models("test-model"),
+        )
+
+    assert model_calls == []
 
 
 @pytest.mark.asyncio

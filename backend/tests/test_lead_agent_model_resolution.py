@@ -452,7 +452,7 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
     assert [tool.name for tool in result["tools"]] == ["bash"]
 
 
-def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
+def test_make_lead_agent_rejects_invalid_agent_name(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
@@ -465,7 +465,6 @@ def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
                     "thinking_enabled": False,
                     "is_plan_mode": False,
                     "subagent_enabled": False,
-                    "is_bootstrap": True,
                     "agent_name": "../../../tmp/evil",
                 }
             }

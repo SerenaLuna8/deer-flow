@@ -76,6 +76,7 @@ async def prepare_thread_compaction(
     agent_name: str | None = None,
     app_config: AppConfig | None = None,
     snapshot: Any | None = None,
+    authorization_boundary: object | None = None,
 ) -> PreparedThreadCompaction:
     """Summarize one checkpoint without persisting the prepared replacement."""
     resolved_app_config = app_config or get_app_config()
@@ -103,6 +104,8 @@ async def prepare_thread_compaction(
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
     if agent_name:
         runtime_context["agent_name"] = agent_name
+    if authorization_boundary is not None:
+        runtime_context["__authorization_boundary"] = authorization_boundary
     runtime = SimpleNamespace(context=runtime_context)
     result = await middleware.acompact_state(state, runtime, force=force)  # type: ignore[arg-type]
     if result is None:
@@ -160,6 +163,7 @@ async def compact_thread_context(
     user_id: str | None = None,
     agent_name: str | None = None,
     app_config: AppConfig | None = None,
+    authorization_boundary: object | None = None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     prepared = await prepare_thread_compaction(
@@ -170,5 +174,6 @@ async def compact_thread_context(
         user_id=user_id,
         agent_name=agent_name,
         app_config=app_config,
+        authorization_boundary=authorization_boundary,
     )
     return await commit_thread_compaction(accessor, prepared)

@@ -950,7 +950,13 @@ export function mergeMessages(
               messageRunId(message) ?? "",
             );
             return (
-              messageOrder !== undefined && messageOrder > admissionRunOrder
+              // A Run-admission HumanMessage is the first message of its Run.
+              // This matters after compaction: the checkpoint can retain only
+              // the Run's tail while the complete journal still owns the
+              // admission row. Insert before the same Run as well as later
+              // Runs, otherwise the admission prompt is appended after its
+              // own AI/history rows on refresh.
+              messageOrder !== undefined && messageOrder >= admissionRunOrder
             );
           });
     if (insertionIndex === -1) {

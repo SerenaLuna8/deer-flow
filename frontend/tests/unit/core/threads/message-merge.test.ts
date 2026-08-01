@@ -508,6 +508,89 @@ test("a stale live duplicate keeps its canonical history position before a later
   expect(state.latestOpenRequestId).toBe("clarification:latest");
 });
 
+test("compacted checkpoint tail keeps the Run admission human at the start of its history", () => {
+  const historyMessages = [
+    {
+      id: "human-early",
+      type: "human",
+      content: "early sentinel",
+    },
+    {
+      id: "ai-early",
+      type: "ai",
+      content: "early answer",
+    },
+    {
+      id: "human-middle",
+      type: "human",
+      content: "middle sentinel",
+    },
+    {
+      id: "ai-middle",
+      type: "ai",
+      content: "middle answer",
+    },
+    {
+      id: "human-late",
+      type: "human",
+      content: "late sentinel",
+    },
+    {
+      id: "ai-late",
+      type: "ai",
+      content: "persisted late answer",
+    },
+  ] as Message[];
+  const history = buildVisibleHistoryMessages(
+    historyMessages.map((content, index) => ({
+      run_id: "run-history",
+      seq: String(index + 1),
+      content,
+      metadata: {
+        caller: "lead_agent",
+        ...(index === 0 ? { source: "run_admission" as const } : {}),
+      },
+      created_at: `2026-07-23T00:00:0${index}Z`,
+    })),
+    new Set(),
+    [],
+  );
+  const checkpointTail = [
+    {
+      ...historyMessages[4],
+      content: "live late sentinel",
+    },
+    {
+      ...historyMessages[5],
+      content: "live late answer",
+    },
+  ] as Message[];
+  const optimisticHuman = {
+    id: "human-recall",
+    type: "human",
+    content: "recall every sentinel",
+  } as Message;
+
+  const merged = mergeMessages(
+    history,
+    checkpointTail,
+    [optimisticHuman],
+    [threadRun("run-history")],
+  );
+
+  expect(merged.map((message) => message.id)).toEqual([
+    "human-early",
+    "ai-early",
+    "human-middle",
+    "ai-middle",
+    "human-late",
+    "ai-late",
+    "human-recall",
+  ]);
+  expect(merged[4]?.content).toBe("live late sentinel");
+  expect(merged[5]?.content).toBe("live late answer");
+});
+
 test("mergeMessages keeps a visible history message when a hidden live message reuses its id", () => {
   const historyHuman = {
     id: "human-1",

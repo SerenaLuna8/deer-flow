@@ -8,7 +8,9 @@ import {
   adminCredentialTypeLabel,
   adminMcpTransportLabel,
   clampAdminAssetPage,
+  filterAdminProjectCatalogItems,
   filterAndSortAdminAssets,
+  filterSystemAdminCatalogItems,
   resetAdminAssetPage,
 } from "@/components/admin/assets/admin-asset-view-model";
 import type { AssetSummary } from "@/core/shared-assets";
@@ -35,6 +37,32 @@ function asset(
 }
 
 describe("admin asset catalog view model", () => {
+  test("separates platform system assets from one project's governed assets", () => {
+    const projectId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const otherProjectId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const systemAsset = asset(1);
+    const projectAsset = asset(2, {
+      scope: "project",
+      project_id: projectId,
+    });
+    const otherProjectAsset = asset(3, {
+      scope: "project",
+      project_id: otherProjectId,
+    });
+    const malformedSystemAsset = asset(4, { project_id: projectId });
+    const mixed = [
+      systemAsset,
+      projectAsset,
+      otherProjectAsset,
+      malformedSystemAsset,
+    ];
+
+    expect(filterSystemAdminCatalogItems(mixed)).toEqual([systemAsset]);
+    expect(filterAdminProjectCatalogItems(mixed, projectId)).toEqual([
+      projectAsset,
+    ]);
+  });
+
   test("localizes known Credential types and preserves unknown extension types", () => {
     const copy = {
       modelApiKey: "模型 API 密钥",

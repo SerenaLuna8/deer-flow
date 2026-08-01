@@ -17,6 +17,9 @@ const MCP_ID = "10000000-0000-4000-8000-000000000002";
 const MCP_VERSION_ID = "20000000-0000-4000-8000-000000000002";
 const SKILL_ID = "10000000-0000-4000-8000-000000000004";
 const CREDENTIAL_ID = "10000000-0000-4000-8000-000000000005";
+const PROJECT_SENTINEL_ID = "10000000-0000-4000-8000-000000000006";
+const PROJECT_CREDENTIAL_SENTINEL_ID = "10000000-0000-4000-8000-000000000007";
+const PROJECT_SENTINEL_PROJECT_ID = "10000000-0000-4000-8000-000000000008";
 
 const baseAsset = {
   scope: "system" as const,
@@ -49,6 +52,32 @@ const skill: AssetSummary = {
   id: SKILL_ID,
   slug: "research-skill",
   display_name: "Research Skill",
+};
+
+function projectSentinelAsset(kind: "Agent" | "Skill" | "MCP"): AssetSummary {
+  return {
+    ...baseAsset,
+    id: PROJECT_SENTINEL_ID,
+    scope: "project",
+    project_id: PROJECT_SENTINEL_PROJECT_ID,
+    slug: `project-only-${kind.toLowerCase()}`,
+    display_name: `Project-only ${kind} Sentinel`,
+  };
+}
+
+const projectCredentialSentinel: AdminCredential = {
+  id: PROJECT_CREDENTIAL_SENTINEL_ID,
+  scope: "project",
+  project_id: PROJECT_SENTINEL_PROJECT_ID,
+  name: "project-only-credential",
+  display_name: "Project-only Credential Sentinel",
+  credential_type: "token",
+  status: "active",
+  current_version_id: null,
+  version: 1,
+  created_by_user_id: "project-owner",
+  created_at: "2026-07-13T08:00:00+00:00",
+  updated_at: "2026-07-13T08:00:00+00:00",
 };
 
 const mcpVersion: McpVersion = {
@@ -175,7 +204,10 @@ async function mockAdminAssets(
     const method = request.method();
 
     if (path.endsWith("/api/admin/assets/agents") && method === "GET") {
-      await json(route, { items: agents, request_id: "request-agents" });
+      await json(route, {
+        items: [...agents, projectSentinelAsset("Agent")],
+        request_id: "request-agents",
+      });
       return;
     }
     if (path.endsWith("/api/admin/assets/agents") && method === "POST") {
@@ -271,7 +303,10 @@ async function mockAdminAssets(
       return;
     }
     if (path.endsWith("/api/admin/assets/skills") && method === "GET") {
-      await json(route, { items: [skillState], request_id: "request-skills" });
+      await json(route, {
+        items: [skillState, projectSentinelAsset("Skill")],
+        request_id: "request-skills",
+      });
       return;
     }
     if (
@@ -344,7 +379,10 @@ async function mockAdminAssets(
       return;
     }
     if (path.endsWith("/api/admin/assets/mcp-servers") && method === "GET") {
-      await json(route, { items: [mcpState], request_id: "request-mcp" });
+      await json(route, {
+        items: [mcpState, projectSentinelAsset("MCP")],
+        request_id: "request-mcp",
+      });
       return;
     }
     if (
@@ -524,7 +562,7 @@ async function mockAdminAssets(
     }
     if (path.endsWith("/api/admin/assets/credentials") && method === "GET") {
       await json(route, {
-        items: credential ? [credential] : [],
+        items: [...(credential ? [credential] : []), projectCredentialSentinel],
         request_id: "request-credentials",
       });
       return;
@@ -748,6 +786,9 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
   await expect(
     desktopAgentTable.getByText("Research Agent", { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Project-only Agent Sentinel", { exact: true }),
+  ).toHaveCount(0);
   const agentRow = desktopAgentTable
     .getByRole("row")
     .filter({ hasText: "Research Agent" });
@@ -777,6 +818,9 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
   await expect(
     page.getByRole("heading", { name: "System Skills" }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Project-only Skill Sentinel", { exact: true }),
+  ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Create Skill" })).toHaveCount(
     0,
   );
@@ -786,6 +830,9 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
 
   await page.getByRole("link", { name: "MCP" }).first().click();
   await expect(page.getByRole("heading", { name: "System MCP" })).toBeVisible();
+  await expect(
+    page.getByText("Project-only MCP Sentinel", { exact: true }),
+  ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Create MCP" })).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Create new version" }),
@@ -826,6 +873,9 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
   await expect(
     page.getByRole("heading", { name: "System Credentials" }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Project-only Credential Sentinel", { exact: true }),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Show plaintext" }),
   ).toHaveCount(0);

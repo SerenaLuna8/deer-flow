@@ -14,6 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.projects.asset_summary import project_asset_summary_columns
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
+from app.projects.default_skill_bindings import (
+    seed_new_project_system_skill_bindings,
+)
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, ProjectSlugConflict, ProjectValidationFailed
 from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectQuotaSummary, ProjectRole, ProjectView
 from app.projects.quota_summary import project_quota_summary_columns, project_quota_summary_from_row
@@ -146,6 +149,11 @@ class ProjectRepository:
                 membership.project_id = project.id
                 self.session.add(membership)
                 await self.session.flush()
+                await seed_new_project_system_skill_bindings(
+                    self.session,
+                    project_id=project.id,
+                    actor_user_id=user_id,
+                )
                 context = ProjectContext(
                     user_id,
                     project.id,

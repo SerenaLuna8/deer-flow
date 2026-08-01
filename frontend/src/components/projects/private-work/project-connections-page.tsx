@@ -154,7 +154,7 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
   return (
     <main className="mx-auto w-full max-w-6xl space-y-6 p-6 lg:p-8">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Connections</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">渠道连接</h1>
         <p className="text-muted-foreground mt-1 text-sm">
           将已配置的 IM 渠道绑定到当前项目与当前账号。
         </p>
@@ -162,12 +162,12 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
 
       {connections.isLoading || providers.isLoading ? (
         <p role="status" className="text-muted-foreground text-sm">
-          正在加载 Connections…
+          正在加载渠道连接…
         </p>
       ) : connections.error || providers.error ? (
         <div className="rounded-xl border p-5">
           <p role="alert" className="text-destructive text-sm">
-            无法加载 Connections，请稍后重试。
+            无法加载渠道连接，请稍后重试。
           </p>
           <Button
             type="button"
@@ -183,7 +183,7 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
         </div>
       ) : providers.data?.enabled === false ? (
         <div className="rounded-xl border border-dashed p-6 text-center">
-          <h2 className="font-medium">Connections 功能尚未启用</h2>
+          <h2 className="font-medium">渠道连接功能尚未启用</h2>
           <p className="text-muted-foreground mt-2 text-sm">
             当前部署没有启用项目连接功能。请联系系统管理员检查渠道配置并重启服务。
           </p>

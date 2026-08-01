@@ -402,6 +402,23 @@ class _FakeSkillDesignRepository:
         return creator
 
 
+class _AutoflushCheckingSkillDesignRepository(_FakeSkillDesignRepository):
+    async def load_draft_files(
+        self,
+        context,
+        session_id,
+        *,
+        for_update=False,
+    ):
+        row = await self.get(context, session_id)
+        assert (row.status == "awaiting_clarification") == (row.active_clarification_json is not None), "a PostgreSQL query would autoflush an invalid clarification state"
+        return await super().load_draft_files(
+            context,
+            session_id,
+            for_update=for_update,
+        )
+
+
 def _candidate_for(slug: str) -> CandidateResult:
     return CandidateResult(
         files=(
@@ -415,6 +432,55 @@ def _candidate_for(slug: str) -> CandidateResult:
     )
 
 
+def _multi_directory_candidate_for(slug: str) -> CandidateResult:
+    return CandidateResult(
+        files=(
+            SkillDesignGeneratedFile(
+                path="templates/action-report.md",
+                media_type="text/markdown",
+                content=("# 行动清单\n\n| 行动项 | 负责人 | 截止日期 | 状态 |\n| --- | --- | --- | --- |\n| {{action}} | {{owner}} | {{due_date}} | {{status}} |\n"),
+            ),
+            SkillDesignGeneratedFile(
+                path="references/extraction-rules.md",
+                media_type="text/markdown",
+                content=("# 提取规则\n\n负责人或截止日期缺失时写 `待确认`，不得臆测。\n\n- 输入：小王周五前整理报价。输出：负责人小王，截止日期周五。\n- 输入：跟进客户反馈。输出：负责人待确认，截止日期待确认。\n"),
+            ),
+            SkillDesignGeneratedFile(
+                path="scripts/normalize_actions.py",
+                media_type="text/x-python",
+                content=(
+                    "from __future__ import annotations\n\n"
+                    "import json\n"
+                    "import sys\n\n\n"
+                    "def normalize(text: str) -> list[dict[str, str]]:\n"
+                    "    return [\n"
+                    '        {"action": line.strip(), "owner": "待确认", '
+                    '"due_date": "待确认", "status": "未开始"}\n'
+                    "        for line in text.splitlines()\n"
+                    "        if line.strip()\n"
+                    "    ]\n\n\n"
+                    'if __name__ == "__main__":\n'
+                    "    json.dump(normalize(sys.stdin.read()), sys.stdout, ensure_ascii=False)\n"
+                ),
+            ),
+            SkillDesignGeneratedFile(
+                path="SKILL.md",
+                media_type="text/markdown",
+                content=(
+                    f"---\nname: {slug}\n"
+                    "description: Turn Chinese meeting notes into an owned, dated action list.\n"
+                    "---\n\n"
+                    "# Workflow\n\n"
+                    "1. Read `references/extraction-rules.md` before extracting actions.\n"
+                    "2. Normalize the notes with `scripts/normalize_actions.py`.\n"
+                    "3. Render the result with `templates/action-report.md`.\n"
+                ),
+            ),
+        ),
+        summary="包含脚本、参考资料和模板的候选 Skill 已生成。",
+    )
+
+
 class _CandidateSkillGenerator:
     def __init__(self, database: _FakeSkillDatabase) -> None:
         self.database = database
@@ -424,6 +490,13 @@ class _CandidateSkillGenerator:
         assert self.database.active_transactions == 0
         self.calls.append((request, skill_creator_content))
         return _candidate_for(request.skill_slug)
+
+
+class _MultiDirectoryCandidateSkillGenerator(_CandidateSkillGenerator):
+    async def generate(self, request, *, skill_creator_content):
+        assert self.database.active_transactions == 0
+        self.calls.append((request, skill_creator_content))
+        return _multi_directory_candidate_for(request.skill_slug)
 
 
 class _ConversationSkillGenerator(_CandidateSkillGenerator):
@@ -619,7 +692,7 @@ async def test_skill_design_generation_is_two_phase_and_keeps_full_conversation(
         database,
         generator=generator,
         skill_service=skill_service,
-        repository_factory=_FakeSkillDesignRepository,
+        repository_factory=_AutoflushCheckingSkillDesignRepository,
     )
     created = await service.create(
         context,
@@ -805,6 +878,82 @@ async def test_validate_and_commit_create_suspended_published_skill_atomically_a
         "completed",
         "completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_multi_directory_candidate_is_validated_and_committed_without_flattening_paths() -> None:
+    module = importlib.import_module("app.shared_assets.skill_design_service")
+    context = _editor_context()
+    database = _FakeSkillDatabase()
+    generator = _MultiDirectoryCandidateSkillGenerator(database)
+    skill_service = _FakeSkillService(database)
+    service = module.SkillDesignService(
+        database,
+        generator=generator,
+        skill_service=skill_service,
+        repository_factory=_FakeSkillDesignRepository,
+    )
+    created = await service.create(
+        context,
+        module.CreateSkillDesignSession(
+            slug="meeting-action-pack",
+            display_name="Meeting Action Pack",
+            idempotency_key="create-multi-directory",
+        ),
+    )
+    ready = await service.submit_turn(
+        context,
+        created.id,
+        module.SubmitSkillDesignTurn(
+            input=module.SkillDesignMessageTurn(
+                kind="message",
+                message="把中文会议纪要整理成行动清单，并使用脚本、规则文件和模板。",
+            ),
+            expected_revision=created.revision,
+            idempotency_key="turn-multi-directory",
+        ),
+    )
+
+    expected_paths = [
+        "SKILL.md",
+        "references/extraction-rules.md",
+        "scripts/normalize_actions.py",
+        "templates/action-report.md",
+    ]
+    assert [item.path for item in ready.files] == expected_paths
+    assert [item.path for item in database.files[created.id]] == expected_paths
+
+    validated = await service.validate(
+        context,
+        created.id,
+        module.ValidateSkillDesignSession(
+            expected_revision=ready.revision,
+            expected_draft_checksum=ready.draft_checksum,
+            idempotency_key="validate-multi-directory",
+        ),
+    )
+    assert validated.validation is not None
+    assert validated.validation.scan_decision == "allow"
+
+    committed = await service.commit(
+        context,
+        created.id,
+        module.CommitSkillDesignSession(
+            expected_revision=validated.revision,
+            expected_draft_checksum=validated.draft_checksum,
+            acknowledge_warnings=False,
+            idempotency_key="commit-multi-directory",
+        ),
+    )
+
+    assert committed.session.status is module.SkillDesignStatus.COMPLETED
+    assert committed.session.files == ()
+    assert database.files[created.id] == ()
+    assert len(skill_service.create_calls) == 1
+    preview = skill_service.create_calls[0][3]
+    assert [item.path for item in preview.files] == expected_paths
+    version = skill_service.versions[committed.skill.current_published_version_id]
+    assert [item.path for item in version.file_views] == expected_paths
 
 
 @pytest.mark.asyncio

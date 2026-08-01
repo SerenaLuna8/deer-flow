@@ -5,7 +5,6 @@ import {
   CoinsIcon,
   FolderOpenIcon,
   GlobeIcon,
-  LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
   NotebookPenIcon,
@@ -32,7 +31,6 @@ import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
   getReasoningDurationSeconds,
-  isClarificationOnlyProcessingGroup,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -53,26 +51,26 @@ export function MessageGroup({
   className,
   messages,
   isLoading = false,
+  renderTaskToolCall,
+  showAllSteps = false,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  renderTaskToolCall?: (taskId: string, messageId?: string) => React.ReactNode;
+  showAllSteps?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
 }) {
   const { t } = useI18n();
-  const [showAbove, setShowAbove] = useState(isStaticWebsiteOnly());
-  const [showLastThinking, setShowLastThinking] = useState(
-    isStaticWebsiteOnly(),
+  const [showAbove, setShowAbove] = useState(
+    isStaticWebsiteOnly() || isLoading || showAllSteps,
   );
   const steps = useMemo(
-    () =>
-      isClarificationOnlyProcessingGroup(messages)
-        ? []
-        : convertToSteps(messages),
-    [messages],
+    () => convertToSteps(messages, renderTaskToolCall !== undefined),
+    [messages, renderTaskToolCall],
   );
   const debugStepByMessageId = useMemo(
     () =>
@@ -107,15 +105,18 @@ export function MessageGroup({
     }
     return [];
   }, [lastToolCallStep, steps]);
-  const lastReasoningStep = useMemo(() => {
+  const afterLastToolCallReasoningSteps = useMemo(() => {
     if (lastToolCallStep) {
       const index = steps.indexOf(lastToolCallStep);
-      return steps.slice(index + 1).find((step) => step.type === "reasoning");
-    } else {
-      const filteredSteps = steps.filter((step) => step.type === "reasoning");
-      return filteredSteps[filteredSteps.length - 1];
+      return steps
+        .slice(index + 1)
+        .filter((step): step is CoTReasoningStep => step.type === "reasoning");
     }
+    return steps.filter(
+      (step): step is CoTReasoningStep => step.type === "reasoning",
+    );
   }, [lastToolCallStep, steps]);
+  const lastReasoningStep = afterLastToolCallReasoningSteps.at(-1);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
@@ -209,6 +210,14 @@ export function MessageGroup({
     );
   };
 
+  const getStepRenderKey = (step: CoTStep, prefix: string) => {
+    const sourceId =
+      typeof step.id === "string" && step.id.trim().length > 0
+        ? step.id
+        : steps.indexOf(step);
+    return `${prefix}-${sourceId}`;
+  };
+
   const renderToolCall = (
     step: CoTToolCallStep,
     options?: { isLast?: boolean },
@@ -220,7 +229,7 @@ export function MessageGroup({
 
     return (
       <ToolCall
-        key={step.id}
+        key={getStepRenderKey(step, "tool")}
         {...step}
         isLast={options?.isLast}
         isLoading={isLoading}
@@ -231,13 +240,90 @@ export function MessageGroup({
     );
   };
 
-  const lastReasoningDebugStep =
-    showTokenDebugSummaries && lastReasoningStep?.messageId
-      ? debugStepByMessageId.get(lastReasoningStep.messageId)
-      : undefined;
+  const renderProcessToolCall = (
+    step: CoTToolCallStep,
+    options?: { isLast?: boolean },
+  ) => {
+    if (step.name === "task" && step.id && renderTaskToolCall) {
+      return (
+        <div key={getStepRenderKey(step, "task")} className="w-full">
+          {renderTaskToolCall(step.id, step.messageId)}
+        </div>
+      );
+    }
+    return renderToolCall(step, options);
+  };
+
+  const renderReasoningRound = (
+    step: CoTReasoningStep,
+    {
+      defaultOpen,
+      isStreaming = false,
+    }: { defaultOpen?: boolean; isStreaming?: boolean } = {},
+  ) => {
+    const stepIndex = steps.indexOf(step);
+    const debugStep =
+      showTokenDebugSummaries && step.messageId
+        ? debugStepByMessageId.get(step.messageId)
+        : undefined;
+    const inlineThinkingToken = shouldInlineThinkingToken({
+      debugStep,
+      enabled: showTokenDebugSummaries,
+      thinkingLabel: t.common.thinking,
+      toolCallCount: step.messageId
+        ? (toolCallCountByMessageId.get(step.messageId) ?? 0)
+        : 0,
+      t,
+    });
+    return (
+      <div key={getStepRenderKey(step, "reasoning")} className="w-full">
+        {renderDebugSummary(step.messageId, stepIndex)}
+        <ThinkingDisclosure
+          className="mb-0"
+          defaultOpen={defaultOpen}
+          duration={step.reasoningDurationSeconds}
+          isStreaming={isStreaming}
+          statusDetail={inlineThinkingToken}
+        >
+          <ThinkingDisclosureContent>
+            <MarkdownContent
+              content={step.reasoning ?? ""}
+              isLoading={isStreaming}
+              rehypePlugins={rehypePlugins}
+            />
+          </ThinkingDisclosureContent>
+        </ThinkingDisclosure>
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    if (isLoading || showAllSteps) {
+      setShowAbove(true);
+    }
+  }, [isLoading, showAllSteps]);
 
   if (steps.length === 0) {
     return null;
+  }
+
+  if (showAllSteps) {
+    return (
+      <div className={cn("flex w-full flex-col gap-3", className)}>
+        {steps.map((step) => {
+          if (step.type === "reasoning") {
+            return renderReasoningRound(step, { defaultOpen: true });
+          }
+          const stepIndex = steps.indexOf(step);
+          return (
+            <div key={getStepRenderKey(step, "tool-round")} className="w-full">
+              {renderDebugSummary(step.messageId, stepIndex)}
+              {renderProcessToolCall(step)}
+            </div>
+          );
+        })}
+      </div>
+    );
   }
 
   if (
@@ -246,19 +332,18 @@ export function MessageGroup({
     steps.every((step) => step.type === "reasoning")
   ) {
     return (
-      <ThinkingDisclosure
-        className={className}
-        duration={lastReasoningStep.reasoningDurationSeconds}
-        isStreaming={isLoading}
-      >
-        <ThinkingDisclosureContent>
-          <MarkdownContent
-            content={lastReasoningStep.reasoning ?? ""}
-            isLoading={isLoading}
-            rehypePlugins={rehypePlugins}
-          />
-        </ThinkingDisclosureContent>
-      </ThinkingDisclosure>
+      <div className={cn("flex w-full flex-col gap-2", className)}>
+        {steps.map((step, index) => {
+          if (step.type !== "reasoning") {
+            return null;
+          }
+          const isLatest = index === steps.length - 1;
+          return renderReasoningRound(step, {
+            defaultOpen: isLoading && !isLatest ? true : undefined,
+            isStreaming: isLoading && isLatest,
+          });
+        })}
+      </div>
     );
   }
 
@@ -267,7 +352,7 @@ export function MessageGroup({
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
-      {aboveLastToolCallSteps.length > 0 && (
+      {aboveLastToolCallSteps.length > 0 && !showAllSteps && (
         <Button
           key="above"
           className="w-full items-start justify-start text-left"
@@ -299,24 +384,14 @@ export function MessageGroup({
             aboveLastToolCallSteps.flatMap((step) => {
               const stepIndex = steps.indexOf(step);
               if (step.type === "reasoning") {
-                return [
-                  renderDebugSummary(step.messageId, stepIndex),
-                  <ChainOfThoughtStep
-                    key={step.id}
-                    label={
-                      <MarkdownContent
-                        content={step.reasoning ?? ""}
-                        isLoading={isLoading}
-                        rehypePlugins={rehypePlugins}
-                      />
-                    }
-                  ></ChainOfThoughtStep>,
-                ];
+                return renderReasoningRound(step, {
+                  defaultOpen: isLoading,
+                });
               }
 
               return [
                 renderDebugSummary(step.messageId, stepIndex),
-                renderToolCall(step),
+                renderProcessToolCall(step),
               ];
             })}
           {renderDebugSummary(
@@ -325,73 +400,17 @@ export function MessageGroup({
           )}
           {lastToolCallStep && (
             <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              {renderToolCall(lastToolCallStep, { isLast: true })}
+              {renderProcessToolCall(lastToolCallStep, { isLast: true })}
             </FlipDisplay>
           )}
         </ChainOfThoughtContent>
       )}
-      {lastReasoningStep && (
-        <>
-          {renderDebugSummary(
-            lastReasoningStep.messageId,
-            steps.indexOf(lastReasoningStep),
-          )}
-          <Button
-            key={lastReasoningStep.id}
-            className="w-full items-start justify-start text-left"
-            variant="ghost"
-            onClick={() => setShowLastThinking(!showLastThinking)}
-          >
-            <div className="flex w-full items-center justify-between">
-              <ChainOfThoughtStep
-                className="font-normal"
-                label={
-                  <DebugStepLabel
-                    label={
-                      isLoading
-                        ? t.common.thinkingInProgress()
-                        : t.common.thoughtFor()
-                    }
-                    token={shouldInlineThinkingToken({
-                      debugStep: lastReasoningDebugStep,
-                      toolCallCount: lastReasoningStep.messageId
-                        ? (toolCallCountByMessageId.get(
-                            lastReasoningStep.messageId,
-                          ) ?? 0)
-                        : 0,
-                      enabled: showTokenDebugSummaries,
-                      thinkingLabel: t.common.thinking,
-                      t,
-                    })}
-                  />
-                }
-                icon={LightbulbIcon}
-              ></ChainOfThoughtStep>
-              <div>
-                <ChevronUp
-                  className={cn(
-                    "text-muted-foreground size-4",
-                    showLastThinking ? "" : "rotate-180",
-                  )}
-                />
-              </div>
-            </div>
-          </Button>
-          {showLastThinking && (
-            <ChainOfThoughtContent className="px-4 pb-2">
-              <ChainOfThoughtStep
-                key={lastReasoningStep.id}
-                label={
-                  <MarkdownContent
-                    content={lastReasoningStep.reasoning ?? ""}
-                    isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
-                  />
-                }
-              ></ChainOfThoughtStep>
-            </ChainOfThoughtContent>
-          )}
-        </>
+      {afterLastToolCallReasoningSteps.map((step) =>
+        renderReasoningRound(step, {
+          defaultOpen:
+            isLoading && step !== lastReasoningStep ? true : undefined,
+          isStreaming: isLoading && step === lastReasoningStep,
+        }),
       )}
     </ChainOfThought>
   );
@@ -779,7 +798,10 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
 
 type CoTStep = CoTReasoningStep | CoTToolCallStep;
 
-function convertToSteps(messages: Message[]): CoTStep[] {
+function convertToSteps(
+  messages: Message[],
+  includeTaskToolCalls = false,
+): CoTStep[] {
   const steps: CoTStep[] = [];
   const { toolCallResults } = indexToolCallData(messages);
   for (const message of messages) {
@@ -797,8 +819,8 @@ function convertToSteps(messages: Message[]): CoTStep[] {
       }
       for (const tool_call of message.tool_calls ?? []) {
         if (
-          tool_call.name === "task" ||
-          tool_call.name === "ask_clarification"
+          tool_call.name === "ask_clarification" ||
+          (tool_call.name === "task" && !includeTaskToolCalls)
         ) {
           continue;
         }

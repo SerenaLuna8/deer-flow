@@ -495,6 +495,8 @@ export const enUS: Translations = {
       requeue: "Requeue safe job",
       requeueing: "Requeueing",
       requeueError: "The safe requeue could not be completed.",
+      copyProjectId: "Copy project UUID",
+      projectIdCopied: "Project UUID copied",
       statuses: {
         queued: "Queued",
         leased: "Leased",
@@ -516,14 +518,17 @@ export const enUS: Translations = {
         unknown: "Unknown",
       },
       filters: {
-        project: "Project ID",
+        label: "Filter jobs",
+        project: "Project",
+        projectQuery: "Search projects",
+        projectQueryPlaceholder: "Search by project name or slug",
         status: "Status",
         type: "Job type",
         allStatuses: "All statuses",
         allTypes: "All job types",
-        apply: "Apply filters",
-        clear: "Clear",
-        invalidProject: "Enter a valid project UUID.",
+        apply: "Search",
+        clear: "Reset",
+        invalidQuery: "Search text must be 120 characters or fewer.",
       },
     },
     audit: {
@@ -799,7 +804,7 @@ export const enUS: Translations = {
       backToProjects: "Back to projects",
       projectGovernance: "Project shared-asset governance",
       projectBoundary:
-        "Governs shared Agents, Skills, MCP, Credentials, and system bindings only. It never reads members, chats, runs, Memory, files, or other private user content.",
+        "Governs only project-owned shared Agents, Skills, MCP, and Credentials in the selected project. It never reads members, chats, runs, Memory, files, or other private user content.",
       projectId: "Project UUID",
     },
     common: {
@@ -907,13 +912,12 @@ export const enUS: Translations = {
       project: {
         agentsTitle: "Project Agent governance",
         agentsDescription:
-          "Review Agents in the selected project. System Agents can only be bound.",
+          "Review project-owned Agents in the selected project.",
         skillsTitle: "Project Skill governance",
-        skillsDescription:
-          "Manage complete project Skill versions. System Skills can only be bound.",
+        skillsDescription: "Manage complete project-owned Skill versions.",
         mcpTitle: "Project MCP governance",
         mcpDescription:
-          "Manage project MCP definitions, approvals, and Credential Grants. System MCP definitions remain read-only.",
+          "Manage project-owned MCP definitions, approvals, and Credential Grants.",
         credentialsTitle: "Project Credential governance",
         credentialsDescription:
           "Govern only Credential security metadata for the selected project. Secret values are never returned after writing.",

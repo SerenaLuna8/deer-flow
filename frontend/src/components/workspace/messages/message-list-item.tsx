@@ -455,7 +455,6 @@ function MessageContent_({
       {showReasoning && reasoningContent && (
         <ThinkingDisclosure
           className="mb-3"
-          defaultOpen={false}
           duration={reasoningDuration}
           isStreaming={isLoading}
         >

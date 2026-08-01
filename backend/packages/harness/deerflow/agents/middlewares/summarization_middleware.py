@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, override, runtime_checkable
@@ -16,6 +17,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.config.summarization_config import validate_summary_prompt_template
 from deerflow.models import create_chat_model
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 
@@ -116,16 +118,20 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         that inspects the raw model (``profile`` / ``_get_ls_params``).
         """
         if not messages_to_summarize:
-            return "No previous conversation history."
+            return None
         prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
         if prompt is None:
-            return "Previous conversation was too long to summarize."
+            return None
         try:
             response = self._summary_model.invoke(
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
-            return response.text.strip()
+            summary = response.text.strip()
+            if not summary:
+                logger.warning("Summary model returned empty output; skipping compaction this turn")
+                return None
+            return summary
         except Exception:
             logger.exception("Summary generation failed; skipping compaction this turn")
             return None
@@ -139,10 +145,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     ) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         if not messages_to_summarize:
-            return "No previous conversation history."
+            return None
         prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
         if prompt is None:
-            return "Previous conversation was too long to summarize."
+            return None
         try:
             try:
                 parent_config = get_config()
@@ -156,7 +162,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
-            return response.text.strip()
+            summary = response.text.strip()
+            if not summary:
+                logger.warning("Summary model returned empty output; skipping compaction this turn")
+                return None
+            return summary
         except AuthorizationRevoked:
             raise
         except Exception:
@@ -208,48 +218,27 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
         return self._bound_text(text, max_tokens)
 
-    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
-        if self.trim_tokens_to_summarize is None:
-            trimmed_new_messages = formatted_messages
-            trimmed_previous_summary = previous_summary.strip() if previous_summary else ""
-        else:
-            max_tokens = max(1, self.trim_tokens_to_summarize)
-            if previous_summary:
-                new_message_tokens = max(1, max_tokens // 2)
-                previous_summary_tokens = max(1, max_tokens - new_message_tokens)
-                trimmed_previous_summary = self._trim_summary_section_text(
-                    previous_summary.strip(),
-                    previous_summary_tokens,
-                    strategy="last",
-                )
-                trimmed_new_messages = self._trim_summary_section_text(
-                    formatted_messages,
-                    new_message_tokens,
-                    strategy="first",
-                )
-            else:
-                trimmed_previous_summary = ""
-                trimmed_new_messages = self._trim_summary_section_text(
-                    formatted_messages,
-                    max_tokens,
-                    strategy="first",
-                )
-
+    @staticmethod
+    def _assemble_summary_input_text(
+        escaped_new_messages: str,
+        escaped_previous_summary: str,
+    ) -> str | None:
+        """Assemble already-escaped summary sections into the prompt payload."""
         parts: list[str] = []
-        if trimmed_previous_summary:
+        if escaped_previous_summary:
             parts.extend(
                 [
                     "<existing_summary>",
-                    trimmed_previous_summary,
+                    escaped_previous_summary,
                     "</existing_summary>",
                     "",
                 ]
             )
-        if trimmed_new_messages:
+        if escaped_new_messages:
             parts.extend(
                 [
                     "<new_messages>",
-                    trimmed_new_messages,
+                    escaped_new_messages,
                     "</new_messages>",
                 ]
             )
@@ -257,8 +246,118 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         return "\n".join(parts)
 
+    def _count_rendered_summary_prompt_tokens(self, input_text: str) -> int | None:
+        """Count the exact rendered prompt without exposing its durable contents."""
+        try:
+            validate_summary_prompt_template(self.summary_prompt)
+            rendered_prompt = self.summary_prompt.format(messages=input_text).rstrip()
+            return self.token_counter([HumanMessage(content=rendered_prompt)])
+        except Exception:
+            logger.debug("Failed to count rendered summary prompt; skipping compaction safely", exc_info=True)
+            return None
+
+    def _trim_escaped_summary_sections(
+        self,
+        escaped_new_messages: str,
+        escaped_previous_summary: str,
+        content_budget: int,
+    ) -> tuple[str, str]:
+        """Trim escaped section contents while preserving their useful edges."""
+        if content_budget <= 0:
+            return "", ""
+
+        if escaped_previous_summary and escaped_new_messages:
+            if content_budget == 1:
+                previous_summary_budget = 0
+                new_messages_budget = 1
+            else:
+                new_messages_budget = max(1, content_budget // 2)
+                previous_summary_budget = max(1, content_budget - new_messages_budget)
+        elif escaped_previous_summary:
+            previous_summary_budget = content_budget
+            new_messages_budget = 0
+        else:
+            previous_summary_budget = 0
+            new_messages_budget = content_budget
+
+        trimmed_previous_summary = (
+            self._trim_summary_section_text(
+                escaped_previous_summary,
+                previous_summary_budget,
+                strategy="last",
+            )
+            if previous_summary_budget
+            else ""
+        )
+        trimmed_new_messages = (
+            self._trim_summary_section_text(
+                escaped_new_messages,
+                new_messages_budget,
+                strategy="first",
+            )
+            if new_messages_budget
+            else ""
+        )
+        return trimmed_new_messages, trimmed_previous_summary
+
+    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
+        # Escape before applying any budget. Durable conversation text may contain
+        # closing tags, and ``&``, ``<`` and ``>`` expand during escaping. Trimming
+        # the raw text first can therefore produce a rendered prompt several times
+        # larger than ``trim_tokens_to_summarize``.
+        escaped_new_messages = html.escape(formatted_messages, quote=False)
+        escaped_previous_summary = html.escape(previous_summary.strip(), quote=False) if previous_summary else ""
+
+        if self.trim_tokens_to_summarize is None:
+            return self._assemble_summary_input_text(
+                escaped_new_messages,
+                escaped_previous_summary,
+            )
+
+        max_tokens = max(1, self.trim_tokens_to_summarize)
+        content_budget = max_tokens
+        # The tokenizer can merge section text with template/wrapper text, so an
+        # additive overhead estimate is not a hard upper bound. Instead, render
+        # and count the exact candidate, subtract any observed overflow, and only
+        # return a candidate whose final prompt is within the configured budget.
+        for _ in range(32):
+            trimmed_new_messages, trimmed_previous_summary = self._trim_escaped_summary_sections(
+                escaped_new_messages,
+                escaped_previous_summary,
+                content_budget,
+            )
+            input_text = self._assemble_summary_input_text(
+                trimmed_new_messages,
+                trimmed_previous_summary,
+            )
+            if input_text is None:
+                return None
+            rendered_tokens = self._count_rendered_summary_prompt_tokens(input_text)
+            if rendered_tokens is None:
+                return None
+            if rendered_tokens <= max_tokens:
+                return input_text
+
+            overflow = rendered_tokens - max_tokens
+            next_budget = content_budget - max(1, overflow)
+            if next_budget <= 0:
+                return None
+            content_budget = next_budget
+
+        logger.warning("Unable to fit rendered summary prompt within configured token budget; skipping compaction this turn")
+        return None
+
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
+        try:
+            validate_summary_prompt_template(self.summary_prompt)
+        except (KeyError, IndexError, TypeError, ValueError):
+            # Direct middleware construction can bypass ``SummarizationConfig``.
+            # Fail closed before any template rendering and without logging
+            # prompt or conversation contents.
+            logger.exception("Invalid summary prompt template; skipping compaction this turn")
+            return None
+
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
         if not trimmed_messages:
             trimmed_messages = messages_to_summarize[-1:]
@@ -270,7 +369,21 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary)
         if not formatted_messages:
             return None
-        return self.summary_prompt.format(messages=formatted_messages).rstrip()
+        try:
+            prompt = self.summary_prompt.format(messages=formatted_messages).rstrip()
+            if self.trim_tokens_to_summarize is not None:
+                rendered_tokens = self._count_rendered_summary_prompt_tokens(formatted_messages)
+                if rendered_tokens is None:
+                    return None
+                if rendered_tokens > max(1, self.trim_tokens_to_summarize):
+                    logger.warning("Rendered summary prompt exceeds configured token budget; skipping compaction this turn")
+                    return None
+            return prompt
+        except (KeyError, IndexError, TypeError, ValueError):
+            # Keep the final assembly fail-closed if formatting behavior changes
+            # after validation.
+            logger.exception("Invalid summary prompt template; skipping compaction this turn")
+            return None
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)
@@ -314,10 +427,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             return None
+        # Hooks may enqueue durable side effects, so fire them only after a valid
+        # non-empty summary exists and compaction is ready to be returned. Hook
+        # failures remain isolated in ``_fire_hooks`` and do not discard a valid
+        # summary or block the state update.
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -336,7 +453,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = await self._asummarize_with(
             messages_to_summarize,
             previous_summary=previous_summary,
@@ -344,6 +460,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         )
         if summary is None:
             return None
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),

@@ -309,7 +309,7 @@ authenticated user
 ## 10. 共享资产与凭据
 
 - Agent、Skill、MCP 同时支持 `system` 和 `project` scope；项目 Skill 显示名称在同一项目内大小写不敏感且不可重复，不同项目仍可同名；所有引用使用 UUID 和 scope。
-- 系统 Agent、Skill、MCP 由 packaged bootstrap catalog 管理，运行期只向 `system_admin` 提供 catalog 治理元数据；`skills/public/` 中的 21 个完整多文件 Skill 在开发期生成 digest 校验的 system Skill archives，并只在全新数据库 setup 时写入 catalog。项目绑定仍显式固定 system version，catalog 更新不自动升级既有绑定。项目 Agent 页面隐藏系统 Agent，以卡片展示项目自建 Agent；卡片可进入详情或为可执行的已发布 Agent 创建绑定对话。Agent 不暴露归档 mutation，生命周期在界面统一显示为启用/停用。列表不提供删除入口；详情页经过二次确认和 5 秒等待后可永久删除未被引用的项目 Agent 及全部版本。任何 Thread、Automation 或 Run snapshot 引用都返回冲突，不级联删除私有历史；系统 Agent 不可删除。
+- 系统 Agent、Skill、MCP 由 packaged bootstrap catalog 管理，运行期只向 `system_admin` 提供 catalog 治理元数据；`skills/public/` 中的 14 个完整多文件目录是全部 System Skill 的唯一来源，开发期生成 digest 校验的 archives，并只在全新数据库 setup 时写入 catalog。每个新建项目显式固定并默认启用当时全部 System Skill 的当前已发布版本；catalog 更新不补绑或升级既有项目，也不覆盖管理员的停用选择。项目 Agent 页面隐藏系统 Agent，以卡片展示项目自建 Agent；卡片可进入详情或为可执行的已发布 Agent 创建绑定对话。Agent 不暴露归档 mutation，生命周期在界面统一显示为启用/停用。列表不提供删除入口；详情页经过二次确认和 5 秒等待后可永久删除未被引用的项目 Agent 及全部版本。任何 Thread、Automation 或 Run snapshot 引用都返回冲突，不级联删除私有历史；系统 Agent 不可删除。
 - 项目资产由当前项目 Admin、Editor 按 capability 创建和发布；使用 credential 的项目 MCP 必须由项目 Admin 审批。
 - 项目 Skill 的 manifest name 必须等于资产 slug；每个 archive 及一次批量导入合计最多 100 MiB、16384 个文件。项目创建支持 multipart `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 和 `.tgz`，安全解析后剥离单一外层目录，并在一个事务中创建默认停用的资产和已发布首版。Gateway 与统一 Nginx 入口仅对 archive 创建路由开放 160 MiB JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。所有不可变项目 Skill 版本文件均计入项目 `storage_bytes`，Gateway 与显式导入 CLI 共用部署配额配置。项目 Skill 不提供归档；详情页经过二次确认和 5 秒等待后永久删除整个包及全部版本，并在同一事务释放逐版本配额。系统 Skill 或仍被 Agent/Run snapshot 引用的项目 Skill 拒绝删除。
 - Agent、Skill 和 MCP 每次执行记录准确版本 ID。

@@ -284,7 +284,7 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         config_path,
         {
             "title": {"prompt_template": "Custom title: {conversation}"},
-            "summarization": {"summary_prompt": "Custom summary"},
+            "summarization": {"summary_prompt": "Custom summary: {messages}"},
             "subagents": {"timeout_seconds": 42, "agents": {"reviewer": {"max_turns": 2}}},
             "guardrails": {"enabled": True, "fail_closed": False},
         },
@@ -296,7 +296,7 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
     try:
         get_app_config()
         assert get_title_config().prompt_template == "Custom title: {conversation}"
-        assert get_summarization_config().summary_prompt == "Custom summary"
+        assert get_summarization_config().summary_prompt == "Custom summary: {messages}"
         assert get_subagents_app_config().timeout_seconds == 42
         assert get_guardrails_config().enabled is True
 

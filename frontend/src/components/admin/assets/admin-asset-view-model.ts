@@ -8,6 +8,27 @@ import {
 
 export const ADMIN_ASSET_PAGE_SIZE = 20;
 
+type ScopedAdminCatalogItem = {
+  scope: "system" | "project";
+  project_id: string | null;
+};
+
+export function filterSystemAdminCatalogItems<
+  Item extends ScopedAdminCatalogItem,
+>(items: readonly Item[]): Item[] {
+  return items.filter(
+    (item) => item.scope === "system" && item.project_id === null,
+  );
+}
+
+export function filterAdminProjectCatalogItems<
+  Item extends ScopedAdminCatalogItem,
+>(items: readonly Item[], projectId: string): Item[] {
+  return items.filter(
+    (item) => item.scope === "project" && item.project_id === projectId,
+  );
+}
+
 type CredentialTypeCopy =
   Translations["adminAssets"]["common"]["credentialTypes"];
 type McpTransportCopy = Translations["adminAssets"]["common"]["transportTypes"];

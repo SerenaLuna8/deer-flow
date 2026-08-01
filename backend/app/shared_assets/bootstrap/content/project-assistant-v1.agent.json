@@ -9,6 +9,6 @@
     "bash",
     "task"
   ],
-  "skill_source_keys": ["builtin:skill:deerflow-core"],
+  "skill_source_keys": [],
   "mcp_source_keys": []
 }

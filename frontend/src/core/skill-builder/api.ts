@@ -107,6 +107,13 @@ async function request<TSchema extends z.ZodType>(
   try {
     payload = await response.json();
   } catch {
+    if (!response.ok) {
+      throw new SkillBuilderApiError(
+        response.status,
+        safeCode(response.status),
+        "Skill 设计请求失败",
+      );
+    }
     throw new SkillBuilderApiError(
       response.status,
       "SKILL_BUILDER_RESPONSE_INVALID",

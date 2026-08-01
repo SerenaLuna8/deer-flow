@@ -228,6 +228,51 @@ Reference:
 
 Final result: passed.
 
+### 2026-08-01 completed execution history follow-up
+
+The duration QA above sampled the fourth model call to prove that reasoning duration and whole-Run
+duration are independent; it is not a contract to discard the first three reasoning passes.
+
+- A completed assistant turn now places one default-collapsed `Execution details · N steps`
+  disclosure before the final message.
+- Expanding it preserves intermediate lead-Agent reasoning, non-publication tool calls, and
+  Subagent cards in message order. Every AI message renders its own `ThinkingDisclosure` with its
+  own observed duration; reasoning is not flattened into generic execution steps or merged across
+  model calls. Reasoning attached to a `present_files` message is retained, while the
+  `present_files` transition call and prose remain hidden.
+- Consecutive reasoning messages after the final tool are all rendered as separate disclosures.
+  The final answer's own reasoning remains outside the execution disclosure and appears exactly
+  once.
+- Finalized file rows remain after the answer, and exact Run duration remains a separate row.
+- The disclosure trigger and content share one Radix Collapsible root, so `aria-controls` resolves
+  to the actual content element.
+- Current-checkout verification: focused reasoning/projection tests passed; the full frontend suite
+  passed all 1,481 tests; frontend lint/type check passed; and an isolated auth-disabled production
+  build passed. Four deterministic Chromium private-chat scenarios passed together and captured
+  screenshot evidence: ordered reasoning/task/tool mixing, reasoning on a pre-terminal
+  `present_files` turn, two completed reasoning rounds plus a unique final reasoning disclosure,
+  and reasoning retained before a clarification card. The completed file scenario also verifies
+  default collapse, final file order, and reload reconstruction.
+
+Follow-up result: passed.
+
+### 2026-08-01 terminal reasoning placement correction
+
+This correction supersedes only the terminal-reasoning placement described in the completed
+execution history follow-up above. When a completed turn already has an `Execution details`
+history, the terminal AI message keeps its semantic identity but projects its reasoning as the
+last disclosure inside that history. The answer, published files, Token totals, and Run duration
+remain outside the disclosure, and the reasoning is suppressed in the answer body so it appears
+exactly once. Direct answers without preceding execution history retain their standalone reasoning
+disclosure; live and failed-before-answer presentation is unchanged.
+
+Current-checkout verification for this correction: the full frontend unit suite passed all 1,488
+tests, and focused message-file ESLint plus formatting/diff checks passed. Two deterministic
+Chromium scenarios passed against an isolated auth-disabled frontend and captured the ordered mixed
+tool flow plus the completed file result with terminal reasoning inside `Execution details`.
+Repository-wide TypeScript checking remains blocked by the existing `admin-jobs` locale contract
+mismatch outside these message-rendering files.
+
 ## Platform asset tab and content alignment follow-up
 
 ### Comparison target

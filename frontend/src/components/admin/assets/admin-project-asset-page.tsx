@@ -22,6 +22,7 @@ import {
 import {
   adminAssetErrorMessage,
   adminCredentialTypeLabel,
+  filterAdminProjectCatalogItems,
 } from "@/components/admin/assets/admin-asset-view-model";
 import {
   AdminPage,
@@ -46,11 +47,9 @@ import {
   projectCredentialCanDelete,
   projectCredentialShowsHistory,
 } from "@/components/projects/assets/project-assets-page";
-import { canManageSystemBinding } from "@/components/projects/assets/system-asset-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
@@ -81,12 +80,9 @@ import {
 } from "@/core/shared-assets";
 import { cn } from "@/lib/utils";
 
-import { AdminProjectSystemBindingDialog } from "./admin-project-system-binding-dialog";
-
 type MutableKind = Exclude<AssetListKind, "credentials">;
 type VersionedKind = Exclude<MutableKind, "agents">;
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
-type DirectorySource = "system" | "project";
 const ADMIN_PROJECT_ASSET_DETAIL_ID = "admin-project-asset-detail";
 const ADMIN_PROJECT_CREDENTIAL_DETAIL_ID = "admin-project-credential-detail";
 type DirectorySearchItem = {
@@ -348,33 +344,25 @@ function DirectoryEmpty({
 function AssetDirectoryRows({
   kind,
   items,
-  source,
   selectedProjectAssetId,
   onCreateVersion,
   onInspectProject,
-  onManageBinding,
 }: {
   kind: MutableKind;
   items: ProjectAssetItem[];
-  source: DirectorySource;
   selectedProjectAssetId: string | null;
   onCreateVersion: (item: ProjectAssetItem) => void;
   onInspectProject: (
     item: ProjectAssetItem,
     trigger: HTMLButtonElement,
   ) => void;
-  onManageBinding: (item: ProjectAssetItem) => void;
 }) {
   const { t } = useI18n();
   if (items.length === 0) {
     return (
       <DirectoryEmpty
         filtered={false}
-        emptyMessage={
-          source === "system"
-            ? t.adminAssets.catalog.noSystemAssets
-            : t.adminAssets.catalog.noProjectAssets
-        }
+        emptyMessage={t.adminAssets.catalog.noProjectAssets}
       />
     );
   }
@@ -384,34 +372,19 @@ function AssetDirectoryRows({
       <div className="bg-muted/25 text-muted-foreground hidden min-w-0 grid-cols-[minmax(13rem,1.7fr)_7rem_minmax(10rem,1fr)_8rem_auto] items-center gap-3 border-b px-4 py-2 text-xs font-medium xl:grid">
         <span>{t.adminAssets.catalog.identifier}</span>
         <span>{t.adminAssets.catalog.lifecycleStatus}</span>
-        <span>
-          {source === "system"
-            ? t.adminAssets.catalog.bindingStatus
-            : t.adminAssets.catalog.publicationStatus}
-        </span>
-        <span>
-          {source === "system"
-            ? t.adminAssets.catalog.bindingRevision
-            : t.adminAssets.common.assetVersion}
-        </span>
+        <span>{t.adminAssets.catalog.publicationStatus}</span>
+        <span>{t.adminAssets.common.assetVersion}</span>
         <span className="text-right">{t.adminAssets.catalog.actions}</span>
       </div>
       {items.map((item) => {
-        const selected =
-          source === "project" && selectedProjectAssetId === item.id;
-        const canCreateVersion =
-          source === "project" &&
-          projectAssetCanCreateVersion(kind, projectAssetCanAuthor(item, kind));
-        const canManageBinding =
-          source === "system" && canManageSystemBinding(item);
+        const selected = selectedProjectAssetId === item.id;
+        const canCreateVersion = projectAssetCanCreateVersion(
+          kind,
+          projectAssetCanAuthor(item, kind),
+        );
         const publication = item.current_published_version_id
           ? t.adminAssets.catalog.publishedAvailable
           : t.adminAssets.catalog.unpublished;
-        const bindingStatus = item.binding
-          ? item.binding.enabled
-            ? t.adminAssets.catalog.enabled
-            : t.adminAssets.catalog.closed
-          : t.adminAssets.catalog.notBound;
 
         return (
           <div
@@ -439,39 +412,18 @@ function AssetDirectoryRows({
             </div>
             <div className="min-w-0 text-sm">
               <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                {source === "system"
-                  ? t.adminAssets.catalog.bindingStatus
-                  : t.adminAssets.catalog.publicationStatus}
+                {t.adminAssets.catalog.publicationStatus}
               </span>
-              <span>{source === "system" ? bindingStatus : publication}</span>
-              {source === "system" ? (
-                <p className="text-muted-foreground mt-0.5 text-xs">
-                  {publication}
-                </p>
-              ) : null}
+              <span>{publication}</span>
             </div>
             <div className="min-w-0 text-sm tabular-nums">
               <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                {source === "system"
-                  ? t.adminAssets.catalog.bindingRevision
-                  : t.adminAssets.common.assetVersion}
+                {t.adminAssets.common.assetVersion}
               </span>
-              {source === "system"
-                ? (item.binding?.version ?? t.adminAssets.catalog.none)
-                : item.version}
+              {item.version}
             </div>
             <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end">
-              {canManageBinding ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onManageBinding(item)}
-                >
-                  {t.adminAssets.catalog.manageBinding}
-                </Button>
-              ) : null}
-              {source === "project" && kind !== "agents" ? (
+              {kind !== "agents" ? (
                 <Button
                   type="button"
                   size="sm"
@@ -507,103 +459,53 @@ function AdminProjectAssetDirectory({
   actions,
   data,
   kind,
+  projectId,
   selectedProjectAssetId,
   onCreateVersion,
   onInspectProject,
-  onManageBinding,
 }: {
   actions?: ReactNode;
   data: ProjectAssetList;
   kind: MutableKind;
+  projectId: string;
   selectedProjectAssetId: string | null;
   onCreateVersion: (item: ProjectAssetItem) => void;
   onInspectProject: (
     item: ProjectAssetItem,
     trigger: HTMLButtonElement,
   ) => void;
-  onManageBinding: (item: ProjectAssetItem) => void;
 }) {
   const { t } = useI18n();
-  const [source, setSource] = useState<DirectorySource>(() =>
-    data.project_items.length === 0 && data.system_items.length > 0
-      ? "system"
-      : "project",
-  );
   const [query, setQuery] = useState("");
-  const groups = [
-    {
-      value: "system",
-      label: t.adminAssets.common.systemProvided,
-      items: data.system_items,
-    },
-    {
-      value: "project",
-      label: t.adminAssets.common.projectOwned,
-      items: data.project_items,
-    },
-  ] as const;
+  const items = filterAdminProjectCatalogItems(data.project_items, projectId);
+  const filtered = filterAdminProjectDirectoryItems(items, query);
 
   return (
-    <Tabs
-      value={source}
-      onValueChange={(value) => setSource(value as DirectorySource)}
+    <div
       data-testid="admin-project-asset-directory"
       data-density="dense-directory"
       className="border-border/70 bg-card min-w-0 gap-0 overflow-hidden rounded-lg border"
     >
-      <div className="border-b px-3 pt-2">
-        <TabsList
-          variant="line"
-          aria-label={t.adminAssets.catalog.source}
-          className="w-fit"
-        >
-          {groups.map((group) => (
-            <TabsTrigger key={group.value} value={group.value}>
-              {group.label}
-              <span className="text-muted-foreground text-xs tabular-nums">
-                {group.items.length}
-              </span>
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </div>
       <DirectorySearch
         query={query}
         onQueryChange={setQuery}
         actions={actions}
       />
-      {groups.map((group) => {
-        const filtered = filterAdminProjectDirectoryItems(group.items, query);
-        return (
-          <TabsContent
-            key={group.value}
-            value={group.value}
-            className="min-w-0"
-          >
-            {filtered.length === 0 ? (
-              <DirectoryEmpty
-                filtered={query.trim().length > 0}
-                emptyMessage={
-                  group.value === "system"
-                    ? t.adminAssets.catalog.noSystemAssets
-                    : t.adminAssets.catalog.noProjectAssets
-                }
-              />
-            ) : (
-              <AssetDirectoryRows
-                kind={kind}
-                items={filtered}
-                source={group.value}
-                selectedProjectAssetId={selectedProjectAssetId}
-                onCreateVersion={onCreateVersion}
-                onInspectProject={onInspectProject}
-                onManageBinding={onManageBinding}
-              />
-            )}
-          </TabsContent>
-        );
-      })}
-    </Tabs>
+      {filtered.length === 0 ? (
+        <DirectoryEmpty
+          filtered={query.trim().length > 0}
+          emptyMessage={t.adminAssets.catalog.noProjectAssets}
+        />
+      ) : (
+        <AssetDirectoryRows
+          kind={kind}
+          items={filtered}
+          selectedProjectAssetId={selectedProjectAssetId}
+          onCreateVersion={onCreateVersion}
+          onInspectProject={onInspectProject}
+        />
+      )}
+    </div>
   );
 }
 
@@ -611,12 +513,14 @@ function AdminProjectCredentialDirectory({
   actions,
   data,
   pending,
+  projectId,
   selectedCredentialId,
   onInspect,
 }: {
   actions?: ReactNode;
   data: ProjectCredentialList;
   pending: boolean;
+  projectId: string;
   selectedCredentialId: string | null;
   onInspect: (
     credential: ProjectCredentialItem,
@@ -624,164 +528,111 @@ function AdminProjectCredentialDirectory({
   ) => void;
 }) {
   const { locale, t } = useI18n();
-  const [source, setSource] = useState<DirectorySource>(() =>
-    data.project_items.length === 0 && data.system_items.length > 0
-      ? "system"
-      : "project",
-  );
   const [query, setQuery] = useState("");
-  const groups = [
-    {
-      value: "system",
-      label: t.adminAssets.common.systemProvided,
-      items: data.system_items,
-    },
-    {
-      value: "project",
-      label: t.adminAssets.common.projectOwned,
-      items: data.project_items,
-    },
-  ] as const;
+  const items = filterAdminProjectCatalogItems(data.project_items, projectId);
+  const filtered = filterAdminProjectDirectoryItems(items, query);
 
   return (
-    <Tabs
-      value={source}
-      onValueChange={(value) => setSource(value as DirectorySource)}
+    <div
       data-testid="admin-project-credential-directory"
       data-density="dense-directory"
       className="border-border/70 bg-card min-w-0 gap-0 overflow-hidden rounded-lg border"
     >
-      <div className="border-b px-3 pt-2">
-        <TabsList
-          variant="line"
-          aria-label={t.adminAssets.catalog.credentialSource}
-        >
-          {groups.map((group) => (
-            <TabsTrigger key={group.value} value={group.value}>
-              {group.label}
-              <span className="text-muted-foreground text-xs tabular-nums">
-                {group.items.length}
-              </span>
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </div>
       <DirectorySearch
         query={query}
         onQueryChange={setQuery}
-        actions={source === "project" ? actions : undefined}
+        actions={actions}
       />
-      {groups.map((group) => {
-        const filtered = filterAdminProjectDirectoryItems(group.items, query);
-        return (
-          <TabsContent
-            key={group.value}
-            value={group.value}
-            className="min-w-0"
-          >
-            {filtered.length === 0 ? (
-              <DirectoryEmpty
-                filtered={query.trim().length > 0}
-                emptyMessage={t.adminAssets.catalog.emptyCredentials(
-                  group.value === "system"
-                    ? t.adminAssets.catalog.systemCredentials
-                    : t.adminAssets.catalog.projectCredentials,
+      {filtered.length === 0 ? (
+        <DirectoryEmpty
+          filtered={query.trim().length > 0}
+          emptyMessage={t.adminAssets.catalog.emptyCredentials(
+            t.adminAssets.catalog.projectCredentials,
+          )}
+        />
+      ) : (
+        <div className="min-w-0">
+          <div className="bg-muted/25 text-muted-foreground hidden min-w-0 grid-cols-[minmax(14rem,1.7fr)_7rem_9rem_7rem_12rem_auto] items-center gap-3 border-b px-4 py-2 text-xs font-medium xl:grid">
+            <span>{t.adminAssets.catalog.identifier}</span>
+            <span>{t.adminAssets.catalog.lifecycleStatus}</span>
+            <span>{t.adminAssets.common.type}</span>
+            <span>{t.adminAssets.common.metadataVersion}</span>
+            <span>{t.adminAssets.common.updatedAt}</span>
+            <span className="text-right">{t.adminAssets.catalog.actions}</span>
+          </div>
+          {filtered.map((credential) => {
+            const selected = selectedCredentialId === credential.id;
+            return (
+              <div
+                key={credential.id}
+                data-testid={`admin-project-credential-row-${credential.id}`}
+                data-selected={selected || undefined}
+                className={cn(
+                  "border-border/70 grid min-w-0 gap-3 border-b px-4 py-3 last:border-b-0 xl:grid-cols-[minmax(14rem,1.7fr)_7rem_9rem_7rem_12rem_auto] xl:items-center",
+                  selected && "bg-primary/5 ring-primary ring-1 ring-inset",
                 )}
-              />
-            ) : (
-              <div className="min-w-0">
-                <div className="bg-muted/25 text-muted-foreground hidden min-w-0 grid-cols-[minmax(14rem,1.7fr)_7rem_9rem_7rem_12rem_auto] items-center gap-3 border-b px-4 py-2 text-xs font-medium xl:grid">
-                  <span>{t.adminAssets.catalog.identifier}</span>
-                  <span>{t.adminAssets.catalog.lifecycleStatus}</span>
-                  <span>{t.adminAssets.common.type}</span>
-                  <span>{t.adminAssets.common.metadataVersion}</span>
-                  <span>{t.adminAssets.common.updatedAt}</span>
-                  <span className="text-right">
-                    {t.adminAssets.catalog.actions}
-                  </span>
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">
+                    {credential.display_name}
+                  </p>
+                  <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
+                    {credential.name}
+                  </p>
                 </div>
-                {filtered.map((credential) => {
-                  const selected =
-                    selectedCredentialId === credential.id &&
-                    group.value === "project";
-                  return (
-                    <div
-                      key={credential.id}
-                      data-testid={`admin-project-credential-row-${credential.id}`}
-                      data-selected={selected || undefined}
-                      className={cn(
-                        "border-border/70 grid min-w-0 gap-3 border-b px-4 py-3 last:border-b-0 xl:grid-cols-[minmax(14rem,1.7fr)_7rem_9rem_7rem_12rem_auto] xl:items-center",
-                        selected &&
-                          "bg-primary/5 ring-primary ring-1 ring-inset",
-                      )}
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground text-xs xl:hidden">
+                    {t.adminAssets.catalog.lifecycleStatus}
+                  </span>
+                  <AssetStatusBadge status={credential.status} />
+                </div>
+                <div className="min-w-0 text-sm">
+                  <span className="text-muted-foreground mr-2 text-xs xl:hidden">
+                    {t.adminAssets.common.type}
+                  </span>
+                  {adminCredentialTypeLabel(
+                    credential.credential_type,
+                    t.adminAssets.common.credentialTypes,
+                  )}
+                </div>
+                <div className="text-sm tabular-nums">
+                  <span className="text-muted-foreground mr-2 text-xs xl:hidden">
+                    {t.adminAssets.common.metadataVersion}
+                  </span>
+                  {credential.version}
+                </div>
+                <div className="min-w-0">
+                  <span className="text-muted-foreground mr-2 text-xs xl:hidden">
+                    {t.adminAssets.common.updatedAt}
+                  </span>
+                  <time className="text-muted-foreground text-xs">
+                    {new Date(credential.updated_at).toLocaleString(locale)}
+                  </time>
+                </div>
+                <div className="flex justify-start xl:justify-end">
+                  {projectCredentialShowsHistory(credential) ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      aria-pressed={selected}
+                      aria-controls={ADMIN_PROJECT_CREDENTIAL_DETAIL_ID}
+                      aria-expanded={selected}
+                      disabled={pending}
+                      onClick={(event) =>
+                        onInspect(credential, event.currentTarget)
+                      }
                     >
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">
-                          {credential.display_name}
-                        </p>
-                        <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
-                          {credential.name}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground text-xs xl:hidden">
-                          {t.adminAssets.catalog.lifecycleStatus}
-                        </span>
-                        <AssetStatusBadge status={credential.status} />
-                      </div>
-                      <div className="min-w-0 text-sm">
-                        <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                          {t.adminAssets.common.type}
-                        </span>
-                        {adminCredentialTypeLabel(
-                          credential.credential_type,
-                          t.adminAssets.common.credentialTypes,
-                        )}
-                      </div>
-                      <div className="text-sm tabular-nums">
-                        <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                          {t.adminAssets.common.metadataVersion}
-                        </span>
-                        {credential.version}
-                      </div>
-                      <div className="min-w-0">
-                        <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                          {t.adminAssets.common.updatedAt}
-                        </span>
-                        <time className="text-muted-foreground text-xs">
-                          {new Date(credential.updated_at).toLocaleString(
-                            locale,
-                          )}
-                        </time>
-                      </div>
-                      <div className="flex justify-start xl:justify-end">
-                        {group.value === "project" &&
-                        projectCredentialShowsHistory(credential) ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            aria-pressed={selected}
-                            aria-controls={ADMIN_PROJECT_CREDENTIAL_DETAIL_ID}
-                            aria-expanded={selected}
-                            disabled={pending}
-                            onClick={(event) =>
-                              onInspect(credential, event.currentTarget)
-                            }
-                          >
-                            {t.adminAssets.catalog.viewDetails}
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
+                      {t.adminAssets.catalog.viewDetails}
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-            )}
-          </TabsContent>
-        );
-      })}
-    </Tabs>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -806,7 +657,6 @@ function MutableAdminProjectAssets({
   const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
     null,
   );
-  const [bindingAssetId, setBindingAssetId] = useState<string | null>(null);
   const [selectedProjectAssetId, setSelectedProjectAssetId] = useState<
     string | null
   >(null);
@@ -843,19 +693,21 @@ function MutableAdminProjectAssets({
   }
 
   const data = query.data as ProjectAssetList;
-  const bindingAsset =
-    data.system_items.find((item) => item.id === bindingAssetId) ?? null;
+  const projectItems = filterAdminProjectCatalogItems(
+    data.project_items,
+    projectId,
+  );
   const selectedProjectAsset =
     kind === "agents"
       ? null
-      : (data.project_items.find(
-          (item) => item.id === selectedProjectAssetId,
-        ) ?? null);
+      : (projectItems.find((item) => item.id === selectedProjectAssetId) ??
+        null);
   return (
     <>
       <AdminProjectAssetDirectory
         kind={kind}
         data={data}
+        projectId={projectId}
         selectedProjectAssetId={selectedProjectAssetId}
         actions={
           kind !== "agents" ? (
@@ -865,7 +717,6 @@ function MutableAdminProjectAssets({
             </Button>
           ) : undefined
         }
-        onManageBinding={(item) => setBindingAssetId(item.id)}
         onCreateVersion={(item) => setVersionAsset(item)}
         onInspectProject={(item, trigger) => {
           selectedProjectAssetTriggerRef.current = trigger;
@@ -946,16 +797,6 @@ function MutableAdminProjectAssets({
           onSubmit={(input: VersionAuthoringInput) =>
             createVersion.mutate({ assetId: versionAsset.id, input })
           }
-        />
-      ) : null}
-      {bindingAsset ? (
-        <AdminProjectSystemBindingDialog
-          accountId={accountId}
-          projectId={projectId}
-          kind={kind}
-          item={bindingAsset}
-          open
-          onOpenChange={(open) => !open && setBindingAssetId(null)}
         />
       ) : null}
     </>
@@ -1168,8 +1009,12 @@ function AdminProjectCredentials({
     );
   }
   const data = query.data as ProjectCredentialList;
+  const projectCredentials = filterAdminProjectCatalogItems(
+    data.project_items,
+    projectId,
+  );
   const selectedCredential =
-    data.project_items.find(
+    projectCredentials.find(
       (credential) => credential.id === selectedCredentialId,
     ) ?? null;
   const selectedCredentialCanWrite = selectedCredential
@@ -1197,6 +1042,7 @@ function AdminProjectCredentials({
       <AdminProjectCredentialDirectory
         data={data}
         pending={secureWrite.pending}
+        projectId={projectId}
         selectedCredentialId={selectedCredentialId}
         actions={
           <Button
@@ -1456,9 +1302,6 @@ function AdminProjectCredentials({
                       current
                         ? {
                             ...current,
-                            system_items: current.system_items.filter(
-                              (item) => item.id !== snapshot.credentialId,
-                            ),
                             project_items: current.project_items.filter(
                               (item) => item.id !== snapshot.credentialId,
                             ),

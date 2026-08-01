@@ -61,7 +61,6 @@ from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
 
-_BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 _PRIVATE_RUNTIME_DEFAULT_MODEL_REF = "default"
 
@@ -477,9 +476,7 @@ def build_middlewares(
     return middlewares
 
 
-def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
-    if is_bootstrap:
-        return set(_BOOTSTRAP_SKILL_NAMES)
+def _available_skill_names(agent_config) -> set[str] | None:
     if agent_config and agent_config.skills is not None:
         return set(agent_config.skills)
     return None
@@ -566,15 +563,13 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
-    is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = None if private_runtime is not None else validate_agent_name(cfg.get("agent_name"))
     if private_runtime is not None:
         is_plan_mode = False
         subagent_enabled = "task" in tuple(getattr(private_runtime, "tool_groups", ()))
         max_concurrent_subagents = 3
-        is_bootstrap = False
-    agent_config = load_agent_config(agent_name) if not is_bootstrap and private_runtime is None else None
+    agent_config = load_agent_config(agent_name) if private_runtime is None else None
     agent_version_model_settings = getattr(private_runtime, "model_settings", None) if private_runtime is not None else getattr(agent_config, "model_settings", None)
     if agent_version_model_settings is not None:
         thinking_enabled = bool(
@@ -602,7 +597,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
 
     runtime_skills = tuple(getattr(private_runtime, "skills", ())) if private_runtime is not None else None
     runtime_skill_version_ids = _exact_runtime_skill_version_ids(private_runtime, runtime_skills) if runtime_skills is not None else None
-    available_skills = {skill.name for skill in runtime_skills} if runtime_skills is not None else _available_skill_names(agent_config, is_bootstrap)
+    available_skills = {skill.name for skill in runtime_skills} if runtime_skills is not None else _available_skill_names(agent_config)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = getattr(private_runtime, "model_ref", None) if private_runtime is not None else agent_config.model if agent_config and agent_config.model else None
 
@@ -691,69 +686,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     skill_search_enabled = resolved_app_config.skills.deferred_discovery
     container_base_path = resolved_app_config.skills.container_path if private_runtime is not None else resolved_app_config.skills.container_path
     runtime_skills_root = Path(getattr(private_runtime, "skill_root")) if private_runtime is not None else None
-
-    if is_bootstrap:
-        # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        # Keep the bootstrap skill set intentionally narrow so agent creation
-        # remains deterministic before the custom agent's own config exists.
-        bootstrap_skills = [skill for skill in available_skill_catalog if skill.name in _BOOTSTRAP_SKILL_NAMES]
-        skill_setup = build_skill_search_setup(
-            bootstrap_skills,
-            enabled=skill_search_enabled,
-            container_base_path=container_base_path,
-        )
-        raw_tools = get_available_tools(
-            model_name=model_name,
-            subagent_enabled=subagent_enabled,
-            app_config=resolved_app_config,
-            asset_context=_trusted_runtime_asset_context(cfg),
-        )
-        configured_tools = raw_tools
-        if non_interactive:
-            configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
-        final_tools, setup = assemble_deferred_tools(
-            configured_tools,
-            enabled=resolved_app_config.tool_search.enabled,
-        )
-        mcp_routing_middleware = build_mcp_routing_middleware(
-            final_tools,
-            setup,
-            top_k=resolved_app_config.tool_search.auto_promote_top_k,
-        )
-        if skill_setup.describe_skill_tool:
-            final_tools.append(skill_setup.describe_skill_tool)
-        return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
-            tools=final_tools,
-            middleware=normalize_middleware_state_schemas(
-                build_middlewares(
-                    config,
-                    model_name=model_name,
-                    available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                    app_config=resolved_app_config,
-                    deferred_setup=setup,
-                    mcp_routing_middleware=mcp_routing_middleware,
-                    user_id=resolved_user_id,
-                    resolved_subagent_enabled=subagent_enabled,
-                    resolved_max_concurrent_subagents=max_concurrent_subagents,
-                ),
-                mode,
-                snapshot_frequency,
-            ),
-            system_prompt=apply_prompt_template(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_names=setup.deferred_names,
-                user_id=resolved_user_id,
-                skill_names=skill_setup.skill_names or None,
-            ),
-            state_schema=get_thread_state_schema(
-                mode,
-                snapshot_frequency,
-            ),
-        )
 
     # Build discovery from the Agent-available Skill catalog. Availability is
     # not activation: only the exact-runtime middleware may apply allowed-tools.

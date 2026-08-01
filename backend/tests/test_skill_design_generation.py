@@ -60,6 +60,16 @@ async def test_skill_design_generation_uses_pinned_skill_creator_and_returns_str
                         "media_type": "text/markdown",
                         "content": "# Style\n\nUse short headings.",
                     },
+                    {
+                        "path": "scripts/render.py",
+                        "media_type": "text/x-python",
+                        "content": "def render(title: str) -> str:\n    return f'# {title}'\n",
+                    },
+                    {
+                        "path": "templates/report.md",
+                        "media_type": "text/markdown",
+                        "content": "# {{title}}\n",
+                    },
                 ],
                 "summary": "Created the Skill package.",
             }
@@ -81,6 +91,8 @@ async def test_skill_design_generation_uses_pinned_skill_creator_and_returns_str
     assert [item.path for item in result.files] == [
         "SKILL.md",
         "references/style.md",
+        "scripts/render.py",
+        "templates/report.md",
     ]
     assert caller.calls
     system_instruction, user_content = caller.calls[0]

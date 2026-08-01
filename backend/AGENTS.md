@@ -198,16 +198,25 @@ files only. It rejects unknown keys, duplicate source keys, path escape, symlink
 files, and digest mismatch. One transaction writes published system Agent, Skill, and MCP
 rows under the fixed non-login builtin principal. Repeated setup with the same catalog is
 idempotent; a conflict rolls back the whole seed. The seed never creates a Credential,
-project binding, membership, or secret.
+project binding, membership, or secret. Separately, each newly created project atomically pins
+every currently active System Skill's current published version in an enabled project binding;
+this applies to the default project only when that project is first created. Re-running default
+project bootstrap never reconciles bindings, re-enables an administrator-disabled Skill, or
+binds a later catalog addition into an existing project. System Agent and MCP bindings remain
+explicit opt-ins.
 
-The 21 directories under `../skills/public/` are maintained as complete multi-file system
-Skill archives, including `SKILL.md`, scripts, references, templates, and other regular
-files. Regenerate the checked-in archives and manifest entries from `backend/` with
+The 14 directories under `../skills/public/` are the sole source of truth for every System Skill
+entry. There are no separately maintained builtin Skill payloads. The generator replaces the
+complete packaged Skill set from those directories, adding missing entries and archives and
+removing every stale Skill entry and generated archive while retaining Agent and MCP entries.
+Archives include `SKILL.md`, scripts, references, templates, and other regular files. Regenerate the
+checked-in archives and manifest entries from `backend/` with
 `PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`; use `--check`
 to verify that they are current. Generation and bootstrap use the same bounded frontmatter,
 archive, and static-scan validation; generated destinations reject symlinks and are replaced
 atomically. Runtime processes never scan `skills/public/`, and setup does not create project
-bindings for these assets.
+bindings while seeding the catalog. A project-creation transaction applies the System Skill
+default bindings described above without changing the catalog bootstrap boundary.
 
 The runtime system catalog is bootstrap-only. Global `/api/admin/assets` Agent, Skill, and
 MCP definition/version routes expose governance metadata with GET only; Gateway and domain
@@ -314,7 +323,14 @@ bounded UTF-8 candidate files plus validated clarification/messages. Candidate e
 are revision-, checksum-, and idempotency-bound. Final commit revalidates the exact draft and
 atomically creates a suspended Skill with published version 1; it never enables, binds, or adds
 the Skill to an Agent. Cancel clears candidate bytes. Hard deletion tombstones completed Builder
-references before deleting the Skill package.
+references before deleting the Skill package. A clarification reply must transition the row to a
+database-valid `generating` state before any repository query that can trigger SQLAlchemy
+autoflush; `awaiting_clarification` may never be flushed with a cleared clarification payload.
+Candidate directories are implicit prefixes of canonical relative file paths rather than stored
+directory rows. `scripts/`, `references/`, `templates/`, and other safe nested paths share the
+same validation and persistence path; Builder cannot represent empty directories, binary files,
+symlinks, or executable mode bits. Validation and commit preserve every canonical path without
+flattening it into the published `skill_version_files` snapshot.
 Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` entries are logical UI documents
 backed by fields on the immutable Agent version; they are not filesystem assets or a separate
 version graph. Saving them against a published Agent atomically clones and publishes the current
@@ -456,6 +472,17 @@ selected state as two target checkpoints, excluding `sandbox` and `thread_data`,
 regeneration has a valid ancestor. Unknown middleware channels fail closed instead of being
 silently discarded.
 
+Manual compaction validates current project, membership, capabilities, Thread ownership, and
+incomplete-Run state in a short transaction before materializing the summary model or its
+Credential. A request authorization boundary revalidates the same authority immediately before
+the external summary-model call. Both transactions are closed before the model `await`; final
+checkpoint persistence still performs its own lock, revalidation, and CAS.
+
+Custom summarization prompts accept only the required `{messages}` replacement field (literal
+braces use `{{` and `}}`). Durable summary and message text is escaped before the final rendered
+prompt is token-bounded. Empty or failed model output is a no-op: it neither removes messages nor
+fires compaction hooks.
+
 Loop detection keeps the higher global frequency allowance for local file and shell workflows,
 but applies lower default frequency bounds to `web_search` and `web_fetch`. Varying remote
 queries must receive a stop warning and hard-stop before a private Run can exhaust its default
@@ -553,6 +580,11 @@ All private and governance APIs are project-scoped:
   `/api/projects/{project_id}/usage/token-series`, and
   `/api/projects/{project_id}/audit` for project governance;
 - `/api/admin/assets` and `/api/admin/operations` for authenticated system administration.
+
+The system-admin Job catalog searches projects through a bounded, case-insensitive
+`project_query` matched against public project display names and slugs. Its response carries both
+human project fields for the catalog and `project_id` for exact recovery coordinates; the legacy
+exact UUID filter remains API-only and must not become the primary operator workflow.
 
 Project input polish requires both `private_work.create` and `shared_assets.execute`, locks the
 Thread, and validates the exact Agent/Credential closure before the auxiliary model call.

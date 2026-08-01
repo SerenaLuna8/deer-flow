@@ -51,8 +51,10 @@ UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次
 - Agent 运行：持久化 Thread/Run、durable SSE、断线重连、取消、重试和 Worker lease。
 - 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
 - 会话模式：输入区只保留一个模式选择器；闪速、思考、Pro、Ultra 分别固定使用最低、低、中、高推理强度，不再提供可与模式冲突的独立推理深度设置。
+- 执行过程：复杂任务结束后，可在最终回答前展开按时间顺序保留的全部思考、工具调用和子任务，最终回答所属模型调用的思考也作为最后一步收在其中；每次模型调用的思考保持为独立的“已思考（用时 X 秒）”区块，不会合并成普通执行步骤或重复显示。外层默认折叠以保持页面简洁；没有前序执行过程的直接回答仍保留独立思考区块，任务执行中会逐轮保留思考并自动展开当前轮次。
 - 思考时长：完成态显示 Worker 从模型流中观测到的实际思考区间；任务总耗时继续单独展示，包含模型等待、工具和子任务时间，不会冒充思考时长。
-- 资产治理：System/Project Agent、Skill、MCP 和 Credential 的版本化发布、绑定与准入快照。
+- 资产治理：System/Project Agent、Skill、MCP 和 Credential 的版本化发布、绑定与准入快照；平台资产页只展示 System 资产，项目代管页只展示所选项目自建资产。
+- AI 创建 Skill：发送后立即显示用户消息和生成状态；补充信息可连续提交并自动保存，生成超过 60 秒时本地、Docker 与 Helm 入口都会继续等待服务端的受控结果。
 - Agent harness：Sub-Agent、Plan Mode、上下文压缩、长期 Memory、Guardrail、Tool Search 和循环检测。
 - Sandbox：支持 Local、容器和 Provisioner/Kubernetes provider；具体隔离能力取决于所选 provider。
 - 项目自动化：一次性或 Cron Automation，由独立 Scheduler 准入、Worker 执行。
@@ -194,7 +196,7 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 工作区顶部提供账号级通知铃铛和未读角标。向已注册邮箱发出的项目邀请会产生站内通知，接收者可在通知中直接接受并加入项目；通知列表、已读状态和接受操作严格绑定当前服务端认证账号。未注册邮箱不预建站内通知，仍通过不含服务端明文 token 的一次性邀请链接完成注册和兑换。通知 API 不返回邀请 token、token hash 或其他账号的通知数据。
 
-System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 21 个完整 Skill 目录会在开发期生成带 digest 的 packaged system Skill archive，并在 `make setup-db` 时作为系统资产写入。Setup 不会为项目自动绑定这些 Skill，项目管理员可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
+System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 14 个完整目录是全部 System Skill 的唯一来源：开发期生成器会用它们精确替换 packaged catalog 中的 Skill 集合，同时保留 System Agent 和 MCP。每个新建项目会在创建事务中把当时全部 System Skill 的当前已发布版本绑定为默认启用；以后重新 setup 不会向既有项目补绑新 Skill，也不会重新启用管理员已停用的 Skill。项目管理员仍可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
 
 项目 MCP 采用默认拒绝的执行策略：项目不能直接启动 `stdio` 子进程，只能使用平台运维在 `mcp_security.project_remote_allowed_endpoints` 中批准的精确 HTTPS `http`/`sse` 地址。任意环境变量、静态请求头和 OAuth 配置不会作为普通版本字段保存，认证值必须通过加密 Credential 的 header slot 提供。Worker 对工具发现和每次调用重新校验快照与端点、禁用重定向和环境代理，并执行平台级硬超时；生产环境还应配置 `mcp_security.egress_proxy_url`，由受控出口独立阻断私网、链路本地和云元数据地址。历史不兼容版本仍可审计读取，但 Project API 只返回远程 HTTPS origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。
 
@@ -202,7 +204,7 @@ System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 p
 
 Agent 不向用户提供创建版本、选择版本或发布版本的操作。项目与管理员代管项目 API 只保留内部 revision 历史的只读查询；Builder 确认和四项指令保存由后端内部原子维护不可变 revision，Run snapshot 仍固定实际使用的精确配置。
 
-项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。列表的新建菜单提供“AI 对话创建”“从空白创建”和“上传压缩包”三种入口。AI 对话创建会先建立仅绑定当前项目与账号的可恢复设计会话，固定当时已发布的系统 `skill-creator` 版本，并由无工具的一次性模型生成临时候选文件包；用户可以按目录预览和修改文件，每次变化后都要重新检查，最终确认才会原子创建默认停用、已发布版本 1 且尚未绑定任何 Agent 的项目 Skill。放弃会话会清除候选文件，未完成会话数量和文件大小均受限，敏感凭据样式的名称、消息或文件不会进入设计存储或模型输入。
+项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。列表的新建菜单提供“AI 对话创建”“从空白创建”和“上传压缩包”三种入口。AI 对话创建会先建立仅绑定当前项目与账号的可恢复设计会话，固定当时已发布的系统 `skill-creator` 版本，并由无工具的一次性模型生成临时候选文件包；用户可以按目录预览和修改文件，每次变化后都要重新检查，最终确认才会原子创建默认停用、已发布版本 1 且尚未绑定任何 Agent 的项目 Skill。Builder 通过文件的安全相对路径还原 `scripts/`、`references/`、`templates/` 等目录，只接受 UTF-8 文本文件，不能表示空目录、二进制文件或可执行权限位；当前人工编辑区可修改 AI 已生成的文件，新增、删除或重命名文件需要继续通过对话让 AI 更新候选包。放弃会话会清除候选文件，未完成会话数量和文件大小均受限，敏感凭据样式的名称、消息或文件不会进入设计存储或模型输入。
 
 从列表空白创建时，后端会在同一事务中创建默认停用的资产、版本 1 草稿以及根目录 `SKILL.md` 基础模板，不会留下没有版本文件的半成品，也不会自动发布；只有已发布版本才能通过列表或详情开关启用。详情不再提供空白版本入口，后续版本统一从当前选中版本点击“创建新版本”，修改并另存为新的不可变草稿。版本文件按真实目录树展示，只打开当前选中文件；新建文件需指定目标文件夹，并可在流程中创建嵌套目录。创建时也可用 `multipart/form-data` 上传 `.zip`、`.skill`（ZIP）、`.tar`、`.tar.gz` 或 `.tgz`；单一外层目录会自动剥离，资产创建和首版发布在同一事务完成，资产仍保持停用。单个 archive 及批量导入均限制为合计 100 MiB、最多 16384 个文件。Gateway 和统一 Nginx 入口只在 Skill archive 创建路由上允许最多 160 MiB 的 JSON/base64 或 multipart wire body，并在 JSON/Pydantic 或 multipart 路由处理前拒绝越界请求。每个不可变项目 Skill 版本的完整文件大小都会计入项目 `storage_bytes` 配额。项目自建 Skill 不提供归档或暂停：详情页二次确认并等待 5 秒后执行整包永久删除，原子删除全部文件和版本并释放对应配额；仍被 Agent 或已准入 Run 引用时返回 `409`，系统 Skill 永远不可删除。Worker 把系统 Skill 投影到 `/mnt/skills/public/<name>`，把项目 Skill 投影到 `/mnt/skills/custom/<asset_uuid>`；执行前按准入时固定的精确版本、checksum 和绑定重新校验，其他项目的 catalog 更新不会使当前 Run 失效。
 
@@ -223,7 +225,7 @@ deer-flow/
 ├── docker/                          # Compose、Nginx 和 Provisioner
 ├── deploy/helm/                     # Kubernetes/Helm 资源
 ├── scripts/                         # 根级安装、启动、诊断和部署编排
-├── skills/public/                   # 生成 packaged system Skill archives 的 21 个源目录
+├── skills/public/                   # 全部 14 个 packaged System Skill 的唯一源目录
 ├── docs/                            # 跨模块设计文档
 ├── config.example.yaml              # 配置模板
 ├── Install.md                       # 面向 Coding Agent 的安装流程

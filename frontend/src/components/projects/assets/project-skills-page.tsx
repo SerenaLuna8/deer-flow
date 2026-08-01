@@ -40,7 +40,6 @@ export function ProjectSkillsPage({
     <ProjectAssetPageShell
       kind="skills"
       title="Skill"
-      description="查看项目可用的具体技能、兼容性、扫描结果与文件快照，并维护项目自建 Skill 的版本。"
       initialSelectedAssetId={selectedAssetId}
       renderLead={({ project }) => (
         <ProjectSkillBuilderLead project={project} />

@@ -5,6 +5,12 @@ const SYSTEM_AGENT_ID = "40000000-0000-4000-8000-000000000002";
 const SYSTEM_AGENT_VERSION_ID = "40000000-0000-4000-8000-000000000003";
 const PROJECT_CREDENTIAL_ID = "40000000-0000-4000-8000-000000000004";
 const PROJECT_CREDENTIAL_VERSION_ID = "40000000-0000-4000-8000-000000000005";
+const PROJECT_AGENT_ID = "40000000-0000-4000-8000-000000000006";
+const SYSTEM_SKILL_ID = "40000000-0000-4000-8000-000000000007";
+const PROJECT_SKILL_ID = "40000000-0000-4000-8000-000000000008";
+const SYSTEM_MCP_ID = "40000000-0000-4000-8000-000000000009";
+const PROJECT_MCP_ID = "40000000-0000-4000-8000-000000000010";
+const SYSTEM_CREDENTIAL_ID = "40000000-0000-4000-8000-000000000011";
 const NOW = "2026-07-22T08:00:00+00:00";
 
 async function json(route: Route, body: unknown, status = 200) {
@@ -17,8 +23,6 @@ async function json(route: Route, body: unknown, status = 200) {
 
 async function mockAdminProjectAssets(page: Page) {
   const requestedPaths: string[] = [];
-  let bindingEnabled = false;
-  let bindingRequest: unknown = null;
   let credentialVisible = true;
   let credentialDeleteRequest: unknown = null;
 
@@ -117,43 +121,27 @@ async function mockAdminProjectAssets(page: Page) {
               "shared_assets.execute",
               "shared_assets.manage_bindings",
             ],
-            binding: bindingEnabled
-              ? {
-                  project_id: PROJECT_ID,
-                  kind: "agent",
-                  asset_id: SYSTEM_AGENT_ID,
-                  version_id: SYSTEM_AGENT_VERSION_ID,
-                  enabled: true,
-                  version: 1,
-                  created_by_user_id: "system-admin",
-                  updated_by_user_id: "system-admin",
-                  created_at: NOW,
-                  updated_at: NOW,
-                }
-              : null,
+            binding: null,
           },
         ],
-        project_items: [],
+        project_items: [
+          {
+            id: PROJECT_AGENT_ID,
+            scope: "project",
+            project_id: PROJECT_ID,
+            slug: "project-research-agent",
+            display_name: "Project Research Agent",
+            status: "active",
+            current_published_version_id: null,
+            version: 1,
+            created_by_user_id: "project-owner",
+            created_at: NOW,
+            updated_at: NOW,
+            capabilities: ["shared_assets.read", "shared_assets.edit"],
+            binding: null,
+          },
+        ],
         request_id: "admin-project-agents",
-      });
-      return;
-    }
-
-    if (pathname === `${base}/system-agent-bindings` && method === "POST") {
-      bindingRequest = request.postDataJSON();
-      bindingEnabled = true;
-      await json(route, {
-        project_id: PROJECT_ID,
-        kind: "agent",
-        asset_id: SYSTEM_AGENT_ID,
-        version_id: SYSTEM_AGENT_VERSION_ID,
-        enabled: true,
-        version: 1,
-        created_by_user_id: "system-admin",
-        updated_by_user_id: "system-admin",
-        created_at: NOW,
-        updated_at: NOW,
-        request_id: "admin-project-binding-enabled",
       });
       return;
     }
@@ -162,17 +150,68 @@ async function mockAdminProjectAssets(page: Page) {
       (pathname === `${base}/skills` || pathname === `${base}/mcp-servers`) &&
       method === "GET"
     ) {
+      const skill = pathname.endsWith("skills");
       await json(route, {
-        system_items: [],
-        project_items: [],
-        request_id: `admin-project-${pathname.endsWith("skills") ? "skills" : "mcp"}`,
+        system_items: [
+          {
+            id: skill ? SYSTEM_SKILL_ID : SYSTEM_MCP_ID,
+            scope: "system",
+            project_id: null,
+            slug: skill ? "packaged-review-skill" : "packaged-search-mcp",
+            display_name: skill
+              ? "Packaged Review Skill"
+              : "Packaged Search MCP",
+            status: "active",
+            current_published_version_id: null,
+            version: 1,
+            created_by_user_id: "bootstrap",
+            created_at: NOW,
+            updated_at: NOW,
+            capabilities: ["shared_assets.read"],
+            binding: null,
+          },
+        ],
+        project_items: [
+          {
+            id: skill ? PROJECT_SKILL_ID : PROJECT_MCP_ID,
+            scope: "project",
+            project_id: PROJECT_ID,
+            slug: skill ? "project-review-skill" : "project-search-mcp",
+            display_name: skill ? "Project Review Skill" : "Project Search MCP",
+            status: "active",
+            current_published_version_id: null,
+            version: 1,
+            created_by_user_id: "project-owner",
+            created_at: NOW,
+            updated_at: NOW,
+            capabilities: ["shared_assets.read", "shared_assets.edit"],
+            binding: null,
+          },
+        ],
+        request_id: `admin-project-${skill ? "skills" : "mcp"}`,
       });
       return;
     }
 
     if (pathname === `${base}/credentials` && method === "GET") {
       await json(route, {
-        system_items: [],
+        system_items: [
+          {
+            id: SYSTEM_CREDENTIAL_ID,
+            scope: "system",
+            project_id: null,
+            name: "system-token",
+            display_name: "System Token",
+            credential_type: "token",
+            status: "active",
+            current_version_id: null,
+            version: 1,
+            created_by_user_id: "bootstrap",
+            created_at: NOW,
+            updated_at: NOW,
+            capabilities: ["shared_assets.read"],
+          },
+        ],
         project_items: credentialVisible
           ? [
               {
@@ -245,7 +284,6 @@ async function mockAdminProjectAssets(page: Page) {
 
   return {
     requestedPaths,
-    bindingRequest: () => bindingRequest,
     credentialDeleteRequest: () => credentialDeleteRequest,
   };
 }
@@ -289,26 +327,19 @@ test("system admin selects one project and governs only its shared assets", asyn
     ).toBeVisible();
   }
 
-  const systemAgent = page.getByTestId(
-    `admin-project-asset-row-${SYSTEM_AGENT_ID}`,
+  const projectAgent = page.getByTestId(
+    `admin-project-asset-row-${PROJECT_AGENT_ID}`,
   );
-  await expect(systemAgent.getByText("Packaged Research Agent")).toBeVisible();
-  await systemAgent.getByRole("button", { name: "Manage binding" }).click();
-  const bindingDialog = page.getByRole("dialog", {
-    name: "Enable system asset",
-  });
-  await expect(bindingDialog).toContainText(
-    "never modifies the packaged system definition or version",
+  await expect(projectAgent.getByText("Project Research Agent")).toBeVisible();
+  await expect(
+    page.getByTestId(`admin-project-asset-row-${SYSTEM_AGENT_ID}`),
+  ).toHaveCount(0);
+  await expect(page.getByText("System provided", { exact: true })).toHaveCount(
+    0,
   );
-  await bindingDialog
-    .getByRole("button", { name: "Enable for this project" })
-    .click();
-  await expect(systemAgent.getByText("Enabled", { exact: true })).toBeVisible();
-  expect(state.bindingRequest()).toEqual({
-    asset_id: SYSTEM_AGENT_ID,
-    version_id: SYSTEM_AGENT_VERSION_ID,
-  });
-  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "Manage binding" }),
+  ).toHaveCount(0);
 
   await page
     .getByRole("navigation", {
@@ -319,6 +350,12 @@ test("system admin selects one project and governs only its shared assets", asyn
   await expect(
     page.getByRole("heading", { name: "Project Skill governance" }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Project Review Skill", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Packaged Review Skill", { exact: true }),
+  ).toHaveCount(0);
   await page
     .getByRole("navigation", {
       name: "Project asset governance navigation",
@@ -328,6 +365,12 @@ test("system admin selects one project and governs only its shared assets", asyn
   await expect(
     page.getByRole("heading", { name: "Project MCP governance" }),
   ).toBeVisible();
+  await expect(
+    page.getByText("Project Search MCP", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Packaged Search MCP", { exact: true }),
+  ).toHaveCount(0);
   await page
     .getByRole("navigation", {
       name: "Project asset governance navigation",
@@ -340,6 +383,7 @@ test("system admin selects one project and governs only its shared assets", asyn
   await expect(
     page.getByText("Project GitHub Token", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("System Token", { exact: true })).toHaveCount(0);
   await expect(
     page.getByTestId("admin-project-credential-directory"),
   ).toHaveAttribute("data-density", "dense-directory");

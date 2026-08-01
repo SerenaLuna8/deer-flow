@@ -31,6 +31,7 @@ import {
   AdminLoadingState,
   AdminMobileRecordList,
   AdminStatus,
+  AdminCopyButton,
   AdminTechnicalValue,
 } from "./admin-operations-ui";
 
@@ -151,12 +152,27 @@ export function AdminJobsStateView({
                   </div>
                 </td>
                 <td className="px-3 py-2.5">
-                  <AdminTechnicalValue
-                    compact
-                    value={job.project_id}
-                    copyLabel={localLabels.copy}
-                    copiedLabel={localLabels.copied}
-                  />
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="min-w-0">
+                      <p
+                        className="truncate text-sm font-medium"
+                        title={job.project_display_name}
+                      >
+                        {job.project_display_name}
+                      </p>
+                      <p
+                        className="text-muted-foreground mt-0.5 truncate font-mono text-xs"
+                        title={job.project_slug}
+                      >
+                        {job.project_slug}
+                      </p>
+                    </div>
+                    <AdminCopyButton
+                      value={job.project_id}
+                      copyLabel={labels.copyProjectId}
+                      copiedLabel={labels.projectIdCopied}
+                    />
+                  </div>
                 </td>
                 <td className="px-3 py-2.5 text-right">
                   {job.safe_to_requeue && onRequeue ? (
@@ -224,12 +240,25 @@ export function AdminJobsStateView({
                     <dt className="text-muted-foreground">
                       {labels.filters.project}
                     </dt>
-                    <dd className="mt-1">
-                      <AdminTechnicalValue
-                        compact
+                    <dd className="mt-1 flex min-w-0 items-center gap-2">
+                      <div className="min-w-0">
+                        <p
+                          className="truncate text-sm font-medium"
+                          title={job.project_display_name}
+                        >
+                          {job.project_display_name}
+                        </p>
+                        <p
+                          className="text-muted-foreground mt-0.5 truncate font-mono text-xs"
+                          title={job.project_slug}
+                        >
+                          {job.project_slug}
+                        </p>
+                      </div>
+                      <AdminCopyButton
                         value={job.project_id}
-                        copyLabel={localLabels.copy}
-                        copiedLabel={localLabels.copied}
+                        copyLabel={labels.copyProjectId}
+                        copiedLabel={labels.projectIdCopied}
                       />
                     </dd>
                   </div>
@@ -277,12 +306,12 @@ function idempotencyKey(): string {
 }
 
 export function parseAdminJobFilters(input: {
-  projectId: string;
+  projectQuery: string;
   status: string;
   type: string;
 }): AdminJobFilters | null {
   const result = jobFiltersSchema.safeParse({
-    project_id: input.projectId.trim() || undefined,
+    project_query: input.projectQuery.trim() || undefined,
     status: input.status || undefined,
     type: input.type || undefined,
   });
@@ -298,10 +327,10 @@ export function AdminJobs() {
 function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
   const { t } = useI18n();
   const localLabels = t.adminOperations.ui;
-  const projectInputRef = useRef<HTMLInputElement>(null);
+  const projectQueryInputRef = useRef<HTMLInputElement>(null);
   const [pager, setPager] = useState(INITIAL_ADMIN_CURSOR_STATE);
   const [filters, setFilters] = useState<AdminJobFilters>({});
-  const [projectId, setProjectId] = useState("");
+  const [projectQuery, setProjectQuery] = useState("");
   const [status, setStatus] = useState("");
   const [jobType, setJobType] = useState("");
   const [filterError, setFilterError] = useState(false);
@@ -313,7 +342,7 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
       ? { status: "error" }
       : { status: "ready", data: jobs.data };
   const resetFilters = () => {
-    setProjectId("");
+    setProjectQuery("");
     setStatus("");
     setJobType("");
     setFilterError(false);
@@ -321,6 +350,11 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
     setFilters({});
   };
   const hasFilters = Object.keys(filters).length > 0;
+  const canResetFilters =
+    hasFilters ||
+    projectQuery.trim().length > 0 ||
+    status.length > 0 ||
+    jobType.length > 0;
   return (
     <AdminPage>
       <AdminPageHeader
@@ -329,18 +363,18 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
       />
       <AdminSection contentClassName="p-3">
         <form
-          aria-label={t.adminOperations.jobs.filters.apply}
-          className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(16rem,1fr)_11rem_11rem_auto] xl:items-center"
+          aria-label={t.adminOperations.jobs.filters.label}
+          className="grid gap-2 sm:grid-cols-2 lg:flex lg:flex-wrap lg:items-center"
           onSubmit={(event) => {
             event.preventDefault();
             const parsed = parseAdminJobFilters({
-              projectId,
+              projectQuery,
               status,
               type: jobType,
             });
             if (!parsed) {
               setFilterError(true);
-              projectInputRef.current?.focus();
+              projectQueryInputRef.current?.focus();
               return;
             }
             setFilterError(false);
@@ -348,20 +382,25 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
             setFilters(parsed);
           }}
         >
-          <label className="relative block">
+          <label className="relative min-w-0 sm:col-span-2 lg:w-80">
             <span className="sr-only">
-              {t.adminOperations.jobs.filters.project}
+              {t.adminOperations.jobs.filters.projectQuery}
             </span>
             <SearchIcon
               aria-hidden
               className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
             />
             <Input
-              ref={projectInputRef}
+              ref={projectQueryInputRef}
               className="pl-9"
-              value={projectId}
-              onChange={(event) => setProjectId(event.target.value)}
-              placeholder="00000000-0000-0000-0000-000000000000"
+              value={projectQuery}
+              onChange={(event) => setProjectQuery(event.target.value)}
+              placeholder={
+                t.adminOperations.jobs.filters.projectQueryPlaceholder
+              }
+              maxLength={120}
+              autoComplete="off"
+              spellCheck={false}
               aria-invalid={filterError || undefined}
               aria-describedby={
                 filterError ? "admin-job-filter-error" : undefined
@@ -371,7 +410,7 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
               }
             />
           </label>
-          <label className="block">
+          <label className="min-w-0 lg:w-40">
             <span className="sr-only">
               {t.adminOperations.jobs.filters.status}
             </span>
@@ -404,7 +443,7 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
               ))}
             </select>
           </label>
-          <label className="block">
+          <label className="min-w-0 lg:w-44">
             <span className="sr-only">
               {t.adminOperations.jobs.filters.type}
             </span>
@@ -430,14 +469,15 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
               )}
             </select>
           </label>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-1 sm:col-span-2 lg:ml-auto">
             <Button type="submit" size="sm">
               {t.adminOperations.jobs.filters.apply}
             </Button>
             <Button
               type="button"
               size="sm"
-              variant="outline"
+              variant="ghost"
+              disabled={!canResetFilters}
               onClick={resetFilters}
             >
               {t.adminOperations.jobs.filters.clear}
@@ -446,9 +486,9 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
           {filterError ? (
             <AdminInlineAlert
               id="admin-job-filter-error"
-              className="sm:col-span-2 xl:col-span-4"
+              className="sm:col-span-2 lg:basis-full"
             >
-              {t.adminOperations.jobs.filters.invalidProject}
+              {t.adminOperations.jobs.filters.invalidQuery}
             </AdminInlineAlert>
           ) : null}
         </form>

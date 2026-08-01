@@ -15,7 +15,6 @@ import {
   hasActiveAssistantReasoning,
   hasContent,
   hasReasoning,
-  isClarificationOnlyProcessingGroup,
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
   parseUploadedFiles,
@@ -116,6 +115,9 @@ describe("assistant turn display projection", () => {
         id: "ai-present",
         type: "ai",
         content: "Written. Here it is:",
+        additional_kwargs: {
+          reasoning_content: "Publish the completed file.",
+        },
         tool_calls: [
           {
             id: "present-1",
@@ -157,11 +159,28 @@ describe("assistant turn display projection", () => {
         finalGroupIndex: 3,
         hiddenGroupIndexes: [1, 2],
         processStepCount: 4,
-        processGroupIndexes: [1, 2],
+        processGroupIndexes: [1, 2, 3],
         presentFilesGroupIndexes: [2],
         presentedFiles: ["/mnt/user-data/outputs/ReopenProof.java"],
       },
     ]);
+  });
+
+  test("keeps a direct reasoning answer out of the turn display when no process precedes it", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Answer directly" },
+      {
+        id: "ai-final",
+        type: "ai",
+        content: "Direct answer.",
+        additional_kwargs: { reasoning_content: "Formulate the answer." },
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+    expect(getAssistantTurnDisplays(groups)).toEqual([]);
   });
 
   test("keeps present-files visible until a terminal answer exists", () => {
@@ -184,7 +203,56 @@ describe("assistant turn display projection", () => {
     expect(getAssistantTurnDisplays(getMessageGroups(messages))).toEqual([]);
   });
 
-  test("hides completed subagent execution behind the terminal answer", () => {
+  test("keeps a non-publication tool that shares a present-files message", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Create and verify a file" },
+      {
+        id: "ai-present-and-verify",
+        type: "ai",
+        content: "The verified file is ready.",
+        tool_calls: [
+          {
+            id: "present-1",
+            name: "present_files",
+            args: { filepaths: ["/mnt/user-data/outputs/result.txt"] },
+          },
+          {
+            id: "verify-1",
+            name: "web_search",
+            args: { query: "verification" },
+          },
+        ],
+      },
+      {
+        id: "verify-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "verify-1",
+        content: "[]",
+      },
+      {
+        id: "present-result",
+        type: "tool",
+        name: "present_files",
+        tool_call_id: "present-1",
+        content: "ok",
+      },
+      { id: "ai-final", type: "ai", content: "Verification completed." },
+    ] as Message[];
+
+    expect(getAssistantTurnDisplays(getMessageGroups(messages))).toEqual([
+      {
+        finalGroupIndex: 2,
+        hiddenGroupIndexes: [1],
+        processStepCount: 1,
+        processGroupIndexes: [1],
+        presentFilesGroupIndexes: [1],
+        presentedFiles: ["/mnt/user-data/outputs/result.txt"],
+      },
+    ]);
+  });
+
+  test("projects completed subagent execution into the terminal turn", () => {
     const messages = [
       { id: "human-1", type: "human", content: "Compare two products" },
       {
@@ -236,8 +304,8 @@ describe("assistant turn display projection", () => {
       {
         finalGroupIndex: 2,
         hiddenGroupIndexes: [1],
-        processStepCount: 2,
-        processGroupIndexes: [1],
+        processStepCount: 3,
+        processGroupIndexes: [1, 2],
         presentFilesGroupIndexes: [],
         presentedFiles: [],
       },
@@ -417,11 +485,10 @@ test("detects reasoning after the latest human turn so a duplicate loading row i
   expect(hasActiveAssistantReasoning(answerOnlyTurn)).toBe(false);
 });
 
-test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
-  // Companion to #3868: only the message that also becomes an assistant bubble
-  // (content, no tool calls) is pulled out of the processing group. Reasoning
-  // attached to an intermediate tool-calling step still belongs above, with its
-  // tool steps.
+test("keeps tool-call and terminal reasoning in distinct semantic groups", () => {
+  // Companion to #3868: the terminal message remains in one assistant semantic
+  // group so usage is not counted twice. The completed-turn display projection
+  // may include that group's reasoning alongside the earlier tool steps.
   const messages = [
     { id: "human-1", type: "human", content: "Search and summarize" },
     {
@@ -458,49 +525,9 @@ test("keeps tool-call reasoning in the processing group while the final answer's
     "tool-1-result",
   ]);
   expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
-});
-
-test("recognizes clarification-only processing as redundant beside the standalone response card", () => {
-  const clarificationOnly = [
-    {
-      id: "ai-clarification",
-      type: "ai",
-      content: "",
-      additional_kwargs: { reasoning_content: "I need one preference." },
-      tool_calls: [
-        {
-          id: "call-clarification",
-          name: "ask_clarification",
-          args: { question: "Which direction?" },
-        },
-      ],
-    },
-    {
-      id: "tool-clarification",
-      type: "tool",
-      name: "ask_clarification",
-      tool_call_id: "call-clarification",
-      content: "Which direction?",
-    },
-  ] as Message[];
-  const mixedTools = [
-    clarificationOnly[0],
-    {
-      id: "ai-write",
-      type: "ai",
-      content: "",
-      tool_calls: [
-        {
-          id: "call-write",
-          name: "write_file",
-          args: { path: "/tmp/result.md" },
-        },
-      ],
-    },
-  ] as Message[];
-
-  expect(isClarificationOnlyProcessingGroup(clarificationOnly)).toBe(true);
-  expect(isClarificationOnlyProcessingGroup(mixedTools)).toBe(false);
+  expect(getAssistantTurnDisplays(groups)[0]?.processGroupIndexes).toEqual([
+    1, 2,
+  ]);
 });
 
 test("keeps a clarification card identity stable when stream hydration replaces the tool message id", () => {

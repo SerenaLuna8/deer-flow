@@ -960,9 +960,6 @@ class ChannelManager:
         # a conversation mapping. Project chat resolution happens later through
         # the scoped PostgreSQL inbound resolver.
         _, _, run_context = self._resolve_run_params(msg, "")
-        if run_context.get("is_bootstrap"):
-            return {"bootstrap"}
-
         agent_name = run_context.get("agent_name")
         if not isinstance(agent_name, str) or not agent_name.strip():
             return None

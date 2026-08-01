@@ -79,6 +79,21 @@ function renderCollapsedDesktopNav(project: Project) {
   );
 }
 
+function renderExpandedDesktopNav(project: Project) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectPrivateWorkProvider
+          accountId="22222222-2222-4222-8222-222222222222"
+          projectId={project.id}
+        >
+          <ProjectDesktopNav project={project} footer={null} />
+        </ProjectPrivateWorkProvider>
+      </QueryClientProvider>
+    </I18nProvider>,
+  );
+}
+
 describe("project shell navigation", () => {
   test("keeps overview standalone and groups project governance destinations", () => {
     const items = projectNavigationItems(
@@ -124,14 +139,14 @@ describe("project shell navigation", () => {
     );
 
     expect(readyItems.map((item) => item.label)).toEqual(
-      expect.arrayContaining(["会话", "Connections", "Memory"]),
+      expect.arrayContaining(["会话", "渠道连接", "Memory"]),
     );
     expect(readyItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           href: "/projects/alpha/connections",
-          label: "Connections",
-          section: "work",
+          label: "渠道连接",
+          section: "management",
         }),
       ]),
     );
@@ -149,7 +164,7 @@ describe("project shell navigation", () => {
       false,
       false,
     ).map((item) => item.label);
-    for (const label of ["会话", "Connections", "Memory"]) {
+    for (const label of ["会话", "渠道连接", "Memory"]) {
       expect(notReadyLabels).not.toContain(label);
       expect(featureDisabledLabels).not.toContain(label);
     }
@@ -194,6 +209,16 @@ describe("project shell navigation", () => {
     expect(html).not.toMatch(
       /<a[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/skills"/u,
     );
+  });
+
+  test("keeps the desktop divider aligned without repeating project identity", () => {
+    const expanded = renderExpandedDesktopNav(adminProject);
+    const collapsed = renderCollapsedDesktopNav(adminProject);
+
+    expect(expanded).toContain("DeerFlow");
+    expect(expanded).not.toContain("Alpha Project");
+    expect(expanded).toContain("h-[4.75rem]");
+    expect(collapsed).toContain("h-[4.75rem]");
   });
 
   test("keeps authorized function icons available when the desktop menu is collapsed", () => {

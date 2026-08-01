@@ -1,4 +1,10 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type Route,
+} from "@playwright/test";
 
 import type { Project } from "@/core/projects/types";
 
@@ -114,10 +120,17 @@ const projectArtifactMessages = [
 type MockPrivateWorkOptions = {
   metadataStatus?: number;
   stateMessages?: unknown[];
+  stateMessagesAfterCompact?: unknown[];
   stateMessagesAfterStream?: unknown[];
   initialStateGate?: Promise<void>;
   initialStateGateRequests?: string[];
   historyRunMessages?: unknown[];
+  /** Ordered newest-first, matching the private Run list contract. */
+  historyRuns?: Array<{
+    runId: string;
+    messages: unknown[];
+    createdAt: string;
+  }>;
   stateArtifacts?: string[];
   artifactFileStatus?: number;
   runBodies?: unknown[];
@@ -148,6 +161,27 @@ async function json(route: Route, body: unknown, status = 200) {
     contentType: "application/json",
     body: JSON.stringify(body),
   });
+}
+
+async function captureReasoningEvidence(
+  page: Page,
+  filename: string,
+  target?: Locator,
+) {
+  const directory = process.env.CAPTURE_REASONING_EVIDENCE_DIR?.trim();
+  if (!directory) {
+    return;
+  }
+  const path = `${directory}/${filename}.png`;
+  if (target) {
+    await target.screenshot({ path, animations: "disabled" });
+  } else {
+    await page.screenshot({
+      path,
+      fullPage: false,
+      animations: "disabled",
+    });
+  }
 }
 
 function latestVisibleSubmittedHumanMessage(
@@ -205,8 +239,20 @@ async function mockPrivateWork(
   const requests: string[] = [];
   let threadExists = includeThread;
   let hasStreamed = false;
+  let hasCompacted = false;
   let failedSubmittedMessage: Record<string, unknown> | null = null;
   let goal: Record<string, unknown> | null = null;
+  const historyRuns =
+    options.historyRuns ??
+    (options.historyRunMessages
+      ? [
+          {
+            runId: "run-history",
+            messages: options.historyRunMessages,
+            createdAt: "2026-07-15T02:00:00Z",
+          },
+        ]
+      : []);
   const initialStateMessages = options.stateMessages ?? [
     {
       type: "human",
@@ -261,7 +307,9 @@ async function mockPrivateWork(
           values: {
             title: "Owner research",
             messages: [
-              ...initialStateMessages,
+              ...(hasCompacted && options.stateMessagesAfterCompact
+                ? options.stateMessagesAfterCompact
+                : initialStateMessages),
               ...(hasStreamed && !options.streamTerminalStatus
                 ? (options.stateMessagesAfterStream ?? [
                     {
@@ -329,6 +377,7 @@ async function mockPrivateWork(
           options.compactGate.markStarted();
           await options.compactGate.promise;
         }
+        hasCompacted = true;
         return json(route, {
           thread_id: THREAD_ID,
           compacted: true,
@@ -653,20 +702,21 @@ async function mockPrivateWork(
           has_more: false,
         });
       }
-      if (
-        options.historyRunMessages &&
-        path.endsWith(`/threads/${THREAD_ID}/runs/run-history/messages`)
-      ) {
+      const historyRun = historyRuns.find((run) =>
+        path.endsWith(`/threads/${THREAD_ID}/runs/${run.runId}/messages`),
+      );
+      if (historyRun) {
+        const createdAt = new Date(historyRun.createdAt).getTime();
         return json(route, {
-          data: options.historyRunMessages.map((content, index) => ({
-            run_id: "run-history",
+          data: historyRun.messages.map((content, index) => ({
+            run_id: historyRun.runId,
             seq: String(index + 1),
             content,
             metadata: {
               caller: "lead_agent",
               ...(index === 0 ? { source: "run_admission" } : {}),
             },
-            created_at: `2026-07-15T02:00:0${index}Z`,
+            created_at: new Date(createdAt + index * 1_000).toISOString(),
           })),
           has_more: false,
         });
@@ -689,21 +739,21 @@ async function mockPrivateWork(
                   updated_at: "2026-07-15T03:00:01Z",
                 },
               ]
-            : options.historyRunMessages
-              ? [
-                  {
-                    run_id: "run-history",
-                    thread_id: THREAD_ID,
-                    assistant_id: null,
-                    status: "success",
-                    metadata: {},
-                    multitask_strategy: "reject",
-                    error: null,
-                    model_name: "test-model",
-                    created_at: "2026-07-15T02:00:00Z",
-                    updated_at: "2026-07-15T02:00:01Z",
-                  },
-                ]
+            : historyRuns.length > 0
+              ? historyRuns.map((run) => ({
+                  run_id: run.runId,
+                  thread_id: THREAD_ID,
+                  assistant_id: null,
+                  status: "success",
+                  metadata: {},
+                  multitask_strategy: "reject",
+                  error: null,
+                  model_name: "test-model",
+                  created_at: run.createdAt,
+                  updated_at: new Date(
+                    new Date(run.createdAt).getTime() + 1_000,
+                  ).toISOString(),
+                }))
               : [],
         );
       }
@@ -2065,6 +2115,160 @@ test("project goal and compact commands use only scoped control routes", async (
   expect(globalRequests).toEqual([]);
 });
 
+test("compaction keeps the full Sentinel timeline across refresh and continuation", async ({
+  page,
+}) => {
+  const earlySentinel = "COMPACTION-EARLY-SENTINEL-8e71";
+  const middleSentinel = "COMPACTION-MIDDLE-SENTINEL-4c29";
+  const lateSentinel = "COMPACTION-LATE-SENTINEL-a6d3";
+  const historyMessages = [
+    {
+      type: "human",
+      id: "msg-sentinel-early-human",
+      content: [{ type: "text", text: earlySentinel }],
+    },
+    {
+      type: "ai",
+      id: "msg-sentinel-early-ai",
+      content: "Early Sentinel recorded.",
+    },
+    {
+      type: "human",
+      id: "msg-sentinel-middle-human",
+      content: [{ type: "text", text: middleSentinel }],
+    },
+    {
+      type: "ai",
+      id: "msg-sentinel-middle-ai",
+      content: "Middle Sentinel recorded.",
+    },
+    {
+      type: "human",
+      id: "msg-sentinel-late-human",
+      content: [{ type: "text", text: lateSentinel }],
+    },
+    {
+      type: "ai",
+      id: "msg-sentinel-late-ai",
+      content: "Late Sentinel recorded.",
+    },
+  ];
+  const compactedCheckpointTail = historyMessages.slice(-2);
+  const recallHuman = {
+    type: "human",
+    id: "msg-sentinel-recall-human",
+    content: [
+      {
+        type: "text",
+        text: "Recall all three compaction Sentinels in chronological order.",
+      },
+    ],
+  };
+  const recallAnswer = [earlySentinel, middleSentinel, lateSentinel].join(
+    " -> ",
+  );
+  const recallAi = {
+    type: "ai",
+    id: "msg-sentinel-recall-ai",
+    content: recallAnswer,
+  };
+  const projectRequests = await mockPrivateWork(page, true, {
+    stateMessages: historyMessages,
+    stateMessagesAfterCompact: compactedCheckpointTail,
+    stateMessagesAfterStream: [recallHuman, recallAi],
+    historyRuns: [
+      {
+        runId: "run-sentinel-late",
+        messages: historyMessages.slice(4, 6),
+        createdAt: "2026-07-15T02:02:00Z",
+      },
+      {
+        runId: "run-sentinel-middle",
+        messages: historyMessages.slice(2, 4),
+        createdAt: "2026-07-15T02:01:00Z",
+      },
+      {
+        runId: "run-sentinel-early",
+        messages: historyMessages.slice(0, 2),
+        createdAt: "2026-07-15T02:00:00Z",
+      },
+    ],
+    streamValueSequence: [
+      {
+        title: "Owner research",
+        messages: [...compactedCheckpointTail, recallHuman, recallAi],
+        artifacts: [],
+        todos: [],
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  for (const sentinel of [earlySentinel, middleSentinel, lateSentinel]) {
+    await expect(page.getByText(sentinel, { exact: true })).toHaveCount(1);
+  }
+
+  const compactResponse = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      request.method() === "POST" &&
+      new URL(response.url()).pathname.endsWith(`/threads/${THREAD_ID}/compact`)
+    );
+  });
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  await textarea.fill("/compact");
+  const submit = page.getByRole("button", { name: "Submit" });
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await compactResponse;
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/compact`,
+      ),
+    )
+    .toBe(true);
+
+  await page.reload();
+  const sentinelLocators = [earlySentinel, middleSentinel, lateSentinel].map(
+    (sentinel) => page.getByText(sentinel, { exact: true }),
+  );
+  for (const locator of sentinelLocators) {
+    await expect(locator).toHaveCount(1);
+    await expect(locator).toBeVisible();
+  }
+  const sentinelTopPositions = await Promise.all(
+    sentinelLocators.map(async (locator) => (await locator.boundingBox())?.y),
+  );
+  expect(sentinelTopPositions.every((position) => position !== undefined)).toBe(
+    true,
+  );
+  expect(sentinelTopPositions[0]).toBeLessThan(sentinelTopPositions[1]!);
+  expect(sentinelTopPositions[1]).toBeLessThan(sentinelTopPositions[2]!);
+  await sentinelLocators[0]!.scrollIntoViewIfNeeded();
+  await captureReasoningEvidence(
+    page,
+    "context-compaction-sentinel-history-after-refresh",
+    page.locator("#chat"),
+  );
+
+  await textarea.fill(
+    "Recall all three compaction Sentinels in chronological order.",
+  );
+  await textarea.press("Enter");
+  const recallAnswerLocator = page.getByText(recallAnswer, { exact: true });
+  await expect(recallAnswerLocator).toBeVisible();
+  for (const locator of sentinelLocators) {
+    await expect(locator).toHaveCount(1);
+  }
+  await recallAnswerLocator.scrollIntoViewIfNeeded();
+  await captureReasoningEvidence(
+    page,
+    "context-compaction-sentinel-continuation",
+    page.locator("#chat"),
+  );
+});
+
 test("project branch action stays on the scoped thread endpoint", async ({
   page,
 }) => {
@@ -2868,6 +3072,180 @@ test("project history renders Mermaid and stopped subtask state", async ({
     .toBe(true);
 });
 
+test("completed project history preserves reasoning and mixed task tool order", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-mixed-process-request",
+        content: "Delegate two checks and verify between them",
+      },
+      {
+        type: "ai",
+        id: "msg-mixed-process",
+        run_id: "run-mixed-process",
+        content: "",
+        additional_kwargs: {
+          reasoning_content: "Plan the delegated checks in order.",
+          reasoning_duration_ms: 1_000,
+        },
+        tool_calls: [
+          {
+            id: "call-first-delegated-check",
+            name: "task",
+            args: {
+              subagent_type: "general-purpose",
+              description: "First delegated check",
+              prompt: "Run the first delegated check",
+            },
+          },
+          {
+            id: "call-between-checks-search",
+            name: "web_search",
+            args: { query: "delegated verification" },
+          },
+          {
+            id: "call-second-delegated-check",
+            name: "task",
+            args: {
+              subagent_type: "general-purpose",
+              description: "Second delegated check",
+              prompt: "Run the second delegated check",
+            },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        id: "msg-first-delegated-check-result",
+        name: "task",
+        tool_call_id: "call-first-delegated-check",
+        content: "Task Succeeded. Result: first check complete",
+      },
+      {
+        type: "tool",
+        id: "msg-between-checks-search-result",
+        name: "web_search",
+        tool_call_id: "call-between-checks-search",
+        content: "[]",
+      },
+      {
+        type: "tool",
+        id: "msg-second-delegated-check-result",
+        name: "task",
+        tool_call_id: "call-second-delegated-check",
+        content: "Task Succeeded. Result: second check complete",
+      },
+      {
+        type: "ai",
+        id: "msg-mixed-process-final",
+        run_id: "run-mixed-process",
+        content: "Both delegated checks are complete.",
+        additional_kwargs: {
+          reasoning_content: "Confirm both delegated checks succeeded.",
+          reasoning_duration_ms: 3_000,
+        },
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const completedTurn = page
+    .locator("[data-assistant-turn]")
+    .filter({ hasText: "Both delegated checks are complete." });
+  const processDisclosure = completedTurn.getByTestId(
+    "assistant-process-disclosure",
+  );
+  await processDisclosure
+    .getByRole("button", { name: /Execution details.*5 steps/ })
+    .click();
+
+  const processText = await processDisclosure.innerText();
+  const reasoningIndex = processText.indexOf(
+    "Plan the delegated checks in order.",
+  );
+  const firstTaskIndex = processText.indexOf("First delegated check");
+  const searchIndex = processText.indexOf("Search on the web for");
+  const secondTaskIndex = processText.indexOf("Second delegated check");
+  const finalReasoningIndex = processText.indexOf(
+    "Confirm both delegated checks succeeded.",
+  );
+  expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+  expect(reasoningIndex).toBeLessThan(firstTaskIndex);
+  expect(firstTaskIndex).toBeLessThan(searchIndex);
+  expect(searchIndex).toBeLessThan(secondTaskIndex);
+  expect(secondTaskIndex).toBeLessThan(finalReasoningIndex);
+  await expect(processDisclosure).toContainText("Thought (1 second)");
+  await expect(processDisclosure).toContainText(
+    "Confirm both delegated checks succeeded.",
+  );
+  await expect(
+    processDisclosure
+      .getByTestId("thinking-disclosure")
+      .filter({ hasText: "Thought (3 seconds)" }),
+  ).toHaveCount(1);
+  await expect(
+    completedTurn
+      .getByTestId("thinking-disclosure")
+      .filter({ hasText: "Thought (3 seconds)" }),
+  ).toHaveCount(1);
+  await captureReasoningEvidence(page, "reasoning-task-tool-order");
+});
+
+test("present-files history keeps its own reasoning before a terminal answer", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-present-reasoning-request",
+        content: "Present the checked report",
+      },
+      {
+        type: "ai",
+        id: "msg-present-reasoning",
+        content: "The checked report is ready.",
+        additional_kwargs: {
+          reasoning_content: "Select only the checked report for delivery.",
+          reasoning_duration_ms: 2_000,
+        },
+        tool_calls: [
+          {
+            id: "call-present-reasoning",
+            name: "present_files",
+            args: { filepaths: [PRESENTED_ARTIFACT_PATH] },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        id: "msg-present-reasoning-result",
+        name: "present_files",
+        tool_call_id: "call-present-reasoning",
+        content: "Successfully presented files",
+      },
+    ],
+    stateArtifacts: [PRESENTED_ARTIFACT_PATH],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const reasoningDisclosure = page
+    .getByTestId("thinking-disclosure")
+    .filter({ hasText: "Thought (2 seconds)" });
+  await expect(reasoningDisclosure).toHaveCount(1);
+  await reasoningDisclosure.getByRole("button").click();
+  await expect(
+    reasoningDisclosure.getByText(
+      "Select only the checked report for delivery.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await captureReasoningEvidence(page, "reasoning-present-files");
+});
+
 test("project history preserves plain-text edge cases", async ({ page }) => {
   const source = "const price = '$5';\n> > > nested marker";
   await mockPrivateWork(page, true, {
@@ -2933,6 +3311,10 @@ test("a live file write collapses project navigation, opens preview, and present
     type: "ai",
     id: "msg-live-artifact-write",
     content: "",
+    additional_kwargs: {
+      reasoning_content: "Plan the requested project report.",
+      reasoning_duration_ms: 4_000,
+    },
     tool_calls: [
       {
         id: "write-live-project-file",
@@ -2956,6 +3338,10 @@ test("a live file write collapses project navigation, opens preview, and present
     type: "ai",
     id: "msg-live-artifact-present",
     content: "The live report is ready.",
+    additional_kwargs: {
+      reasoning_content: "Publish only the completed project report.",
+      reasoning_duration_ms: 2_000,
+    },
     tool_calls: [
       {
         id: "present-live-project-file",
@@ -3048,43 +3434,91 @@ test("a live file write collapses project navigation, opens preview, and present
       .getByText("project-report.md", { exact: true }),
   ).toBeVisible();
   await expect(page.getByTestId("assistant-delivered-files")).toHaveCount(1);
+  const processDisclosure = page.getByTestId("assistant-process-disclosure");
+  await expect(processDisclosure).toHaveCount(1);
+  const processTrigger = processDisclosure.getByRole("button", {
+    name: /Execution details.*4 steps/,
+  });
+  await expect(processTrigger).toHaveAttribute("aria-expanded", "false");
+  await processTrigger.click();
+  await expect(processTrigger).toHaveAttribute("aria-expanded", "true");
   await expect(
-    page.getByTestId("assistant-process-disclosure"),
-  ).toHaveCount(0);
-  await expect(page.getByTestId("thinking-disclosure")).toHaveAttribute(
-    "data-state",
-    "closed",
+    processDisclosure.getByText("Plan the requested project report.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    processDisclosure.getByText("Writing live project report", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    processDisclosure.getByText("Publish only the completed project report.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    processDisclosure.getByText("Confirm the requested file is ready.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const processReasoningDisclosures = processDisclosure.getByTestId(
+    "thinking-disclosure",
   );
-  await expect(page.getByTestId("thinking-disclosure")).toContainText(
+  await expect(processReasoningDisclosures).toHaveCount(3);
+  await expect(processReasoningDisclosures.nth(0)).toContainText(
+    "Thought (4 seconds)",
+  );
+  await expect(processReasoningDisclosures.nth(1)).toContainText(
+    "Thought (2 seconds)",
+  );
+  await expect(processReasoningDisclosures.nth(2)).toContainText(
     "Thought (19 seconds)",
   );
-  await expect(page.getByTestId("thinking-disclosure")).not.toContainText(
-    "45s",
+  const processText = await processDisclosure.innerText();
+  expect(
+    processText.indexOf("Plan the requested project report."),
+  ).toBeLessThan(processText.indexOf("Writing live project report"));
+  expect(processText.indexOf("Writing live project report")).toBeLessThan(
+    processText.indexOf("Publish only the completed project report."),
   );
-  await expect(page.getByTestId("run-duration")).toContainText(
-    "Completed in 45s",
-  );
-  const thinkingTrigger = page
-    .getByTestId("thinking-disclosure")
-    .getByRole("button", { name: "Thought (19 seconds)" });
-  await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "false");
-  await thinkingTrigger.click();
-  await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "true");
-  await expect(
-    page.getByText("Confirm the requested file is ready.", { exact: true }),
-  ).toBeVisible();
-  await thinkingTrigger.click();
-  await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "false");
+  expect(
+    processText.indexOf("Publish only the completed project report."),
+  ).toBeLessThan(processText.indexOf("Confirm the requested file is ready."));
   const completedAssistantTurn = page
     .locator("[data-assistant-turn]")
     .filter({ hasText: "Project report completed." });
+  const finalProcessThinkingDisclosure = processDisclosure
+    .getByTestId("thinking-disclosure")
+    .filter({ hasText: "Thought (19 seconds)" });
+  await expect(finalProcessThinkingDisclosure).toHaveCount(1);
+  await expect(finalProcessThinkingDisclosure).toHaveAttribute(
+    "data-state",
+    "open",
+  );
+  await expect(finalProcessThinkingDisclosure).not.toContainText("45s");
+  await expect(
+    completedAssistantTurn.getByTestId("thinking-disclosure"),
+  ).toHaveCount(3);
+  await expect(page.getByTestId("run-duration")).toContainText(
+    "Completed in 45s",
+  );
+  await expect(
+    processDisclosure.getByText("Confirm the requested file is ready.", {
+      exact: true,
+    }),
+  ).toHaveCount(1);
+  await completedAssistantTurn.evaluate((turn) =>
+    turn.scrollIntoView({ block: "center" }),
+  );
+  await captureReasoningEvidence(
+    page,
+    "reasoning-completed-file-turn",
+    completedAssistantTurn,
+  );
   const completedTurnOrder = await completedAssistantTurn.evaluate((turn) => {
-    const thinking = turn.querySelector(
-      '[data-testid="thinking-disclosure"]',
+    const process = turn.querySelector(
+      '[data-testid="assistant-process-disclosure"]',
     );
-    const answer = Array.from(
-      turn.querySelectorAll("p"),
-    ).find((element) =>
+    const answer = Array.from(turn.querySelectorAll("p")).find((element) =>
       element.textContent?.includes("Project report completed."),
     );
     const deliveredFiles = turn.querySelector(
@@ -3096,17 +3530,23 @@ test("a live file write collapses project navigation, opens preview, and present
 
     return {
       answerTop: answer?.getBoundingClientRect().top ?? null,
-      deliveredFilesTop:
-        deliveredFiles?.getBoundingClientRect().top ?? null,
+      deliveredFilesTop: deliveredFiles?.getBoundingClientRect().top ?? null,
+      processTop: process?.getBoundingClientRect().top ?? null,
       runDurationTop: runDuration?.getBoundingClientRect().top ?? null,
-      thinkingTop: thinking?.getBoundingClientRect().top ?? null,
+      thinkingOutsideProcess: Array.from(
+        turn.querySelectorAll('[data-testid="thinking-disclosure"]'),
+      ).filter(
+        (element) =>
+          !element.closest('[data-testid="assistant-process-disclosure"]'),
+      ).length,
     };
   });
-  expect(completedTurnOrder.thinkingTop).not.toBeNull();
+  expect(completedTurnOrder.processTop).not.toBeNull();
+  expect(completedTurnOrder.thinkingOutsideProcess).toBe(0);
   expect(completedTurnOrder.answerTop).not.toBeNull();
   expect(completedTurnOrder.deliveredFilesTop).not.toBeNull();
   expect(completedTurnOrder.runDurationTop).not.toBeNull();
-  expect(completedTurnOrder.thinkingTop!).toBeLessThan(
+  expect(completedTurnOrder.processTop!).toBeLessThan(
     completedTurnOrder.answerTop!,
   );
   expect(completedTurnOrder.answerTop!).toBeLessThan(
@@ -3116,7 +3556,17 @@ test("a live file write collapses project navigation, opens preview, and present
     completedTurnOrder.runDurationTop!,
   );
   await page.reload();
-  await expect(page.getByTestId("thinking-disclosure")).toContainText(
+  await expect(processTrigger).toHaveAttribute("aria-expanded", "false");
+  await processTrigger.click();
+  await expect(processTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(processReasoningDisclosures).toHaveCount(3);
+  await expect(processReasoningDisclosures.nth(0)).toContainText(
+    "Thought (4 seconds)",
+  );
+  await expect(processReasoningDisclosures.nth(1)).toContainText(
+    "Thought (2 seconds)",
+  );
+  await expect(processReasoningDisclosures.nth(2)).toContainText(
     "Thought (19 seconds)",
   );
   await expect(page.getByTestId("run-duration")).toContainText(
@@ -3866,6 +4316,10 @@ test("project human-input answer stays hidden and scoped in the run body", async
         type: "ai",
         id: "msg-human-input-call",
         content: "",
+        additional_kwargs: {
+          reasoning_content: "I need the target environment before deployment.",
+          reasoning_duration_ms: 2_000,
+        },
         tool_calls: [
           {
             id: "call-project-clarification",
@@ -3917,6 +4371,18 @@ test("project human-input answer stays hidden and scoped in the run body", async
   await expect(page.getByText("Need your help", { exact: true })).toHaveCount(
     1,
   );
+  const clarificationReasoning = page
+    .getByTestId("thinking-disclosure")
+    .filter({ hasText: "Thought (2 seconds)" });
+  await expect(clarificationReasoning).toHaveCount(1);
+  await clarificationReasoning.getByRole("button").click();
+  await expect(
+    clarificationReasoning.getByText(
+      "I need the target environment before deployment.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await captureReasoningEvidence(page, "reasoning-clarification");
 
   const staging = humanInputCard.getByRole("radio", { name: "staging" });
   await expect(staging).toHaveAttribute("aria-checked", "false");

@@ -151,10 +151,10 @@ def _is_skills_path(path: str) -> bool:
 def _extract_skill_name_from_skills_path(path: str) -> str | None:
     """Extract a skill name from a virtual skills path.
 
-    /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
+    /mnt/skills/public/data-analysis/SKILL.md → "data-analysis"
     /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
     /mnt/skills/legacy/my-skill/references/... → "my-skill"
-    /mnt/skills/public/bootstrap/ → "bootstrap"
+    /mnt/skills/public/data-analysis/ → "data-analysis"
     Returns None if the path doesn't contain a recognizable skill name pattern.
     """
     skills_prefix = _get_skills_container_path()

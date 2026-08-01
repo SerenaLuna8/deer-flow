@@ -87,6 +87,85 @@ def test_generator_write_rejects_symlink_destination(
     assert catalog_path.read_bytes() == b"old catalog\n"
 
 
+def test_generator_derives_public_catalog_from_current_source_directories(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "skills" / "public"
+    skill_root = source_root / "current-skill"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_bytes(b"---\nname: current-skill\ndescription: Current generated Skill.\n---\n# Current Skill\n")
+    bootstrap_root = tmp_path / "bootstrap"
+    output_root = bootstrap_root / "content" / "public-skills"
+    output_root.mkdir(parents=True)
+    catalog_path = bootstrap_root / "catalog.json"
+    stale_path = output_root / "stale-skill-v1.skill.json"
+    stale_path.write_bytes(b"stale archive\n")
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "source_key": "builtin:skill:deerflow-core",
+                        "kind": "skill",
+                        "slug": "deerflow-core",
+                        "display_name": "DeerFlow Core",
+                        "version": 1,
+                        "payload_path": "content/deerflow-core-v1.skill.md",
+                        "sha256": "0" * 64,
+                    },
+                    {
+                        "source_key": "builtin:skill:stale-skill",
+                        "kind": "skill",
+                        "slug": "stale-skill",
+                        "display_name": "stale-skill",
+                        "version": 1,
+                        "payload_path": "content/public-skills/stale-skill-v1.skill.json",
+                        "payload_format": "skill_archive_v1",
+                        "sha256": "1" * 64,
+                    },
+                    {
+                        "source_key": "builtin:mcp:retained-mcp",
+                        "kind": "mcp",
+                        "slug": "retained-mcp",
+                        "display_name": "Retained MCP",
+                        "version": 1,
+                        "payload_path": "content/retained-mcp-v1.mcp.json",
+                        "sha256": "2" * 64,
+                    },
+                    {
+                        "source_key": "builtin:agent:retained-agent",
+                        "kind": "agent",
+                        "slug": "retained-agent",
+                        "display_name": "Retained Agent",
+                        "version": 1,
+                        "payload_path": "content/retained-agent-v1.agent.json",
+                        "sha256": "3" * 64,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generator, "_SOURCE_ROOT", source_root)
+    monkeypatch.setattr(generator, "_BOOTSTRAP_ROOT", bootstrap_root)
+    monkeypatch.setattr(generator, "_OUTPUT_ROOT", output_root)
+    monkeypatch.setattr(generator, "_CATALOG_PATH", catalog_path)
+
+    catalog_bytes, payloads = generator._expected_outputs()
+    generator._write(catalog_bytes, payloads)
+
+    generated_catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [(entry["kind"], entry["slug"]) for entry in generated_catalog["entries"]] == [
+        ("skill", "current-skill"),
+        ("mcp", "retained-mcp"),
+        ("agent", "retained-agent"),
+    ]
+    assert {path.name for path in output_root.iterdir()} == {"current-skill-v1.skill.json"}
+    assert generator._check(catalog_bytes, payloads)
+
+
 def _assert_skill_creator_builder_contract(instructions: str) -> None:
     assert "skill_manage" not in instructions
     builder_heading = "## DeerFlow Skill Builder"

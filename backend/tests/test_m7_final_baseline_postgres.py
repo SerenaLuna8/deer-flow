@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import importlib.util
 import json
 import uuid
@@ -23,6 +24,9 @@ from app.private_work.thread_repository import PrivateThreadRepository, ThreadAg
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.quotas.integration import ProjectQuotaEnforcer
+from app.quotas.models import QuotaSourceRef
+from app.quotas.service import QuotaService
 from app.shared_assets.agent_design_service import (
     AgentDesignService,
     CreateAgentDesignSession,
@@ -31,27 +35,50 @@ from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.errors import AssetConflict, AssetNotFound
 from app.shared_assets.skill_design_generation import (
     CandidateResult,
+    ClarificationQuestion,
+    NeedsClarificationResult,
     SkillDesignGeneratedFile,
     SkillDesignGenerationRequest,
 )
 from app.shared_assets.skill_design_service import (
     CancelSkillDesignSession,
+    CommitSkillDesignSession,
     CreateSkillDesignSession,
+    SkillDesignClarificationResponse,
+    SkillDesignClarificationTurn,
     SkillDesignMessageTurn,
     SkillDesignService,
     SkillDesignStatus,
     SubmitSkillDesignTurn,
+    ValidateSkillDesignSession,
 )
 from app.shared_assets.skill_service import CreateSkill, SkillService
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence import bootstrap as bootstrap_module
 from deerflow.persistence.auth_sessions import AuthSessionRepository, AuthSessionRow
 from deerflow.persistence.base import Base
-from deerflow.persistence.shared_assets import SkillDesignDraftFileRow, SkillDesignOperationRow
+from deerflow.persistence.shared_assets import (
+    SkillDesignDraftFileRow,
+    SkillDesignOperationRow,
+    SkillVersionFileRow,
+)
 from deerflow.persistence.user.model import UserRow
 from scripts.check_postgres import check_postgres
 from scripts.setup_postgres import PostgresSetupError, _bootstrap_existing
 
 CURRENT_SCHEMA_MARKER = "full_schema_v1"
+
+
+def _skill_builder_quota_source_ref(payload: bytes) -> QuotaSourceRef:
+    return QuotaSourceRef(
+        key_id="skill-builder-postgres-test",
+        hmac_hex=hmac.new(
+            b"skill-builder-postgres-test-key",
+            payload,
+            hashlib.sha256,
+        ).hexdigest(),
+    )
+
 
 LEGACY_RELATIONS = {
     "automation_cutover_state",
@@ -309,6 +336,78 @@ class _PostgresSkillDesignGenerator:
                 ),
             ),
             summary="候选 Skill 已生成。",
+        )
+
+
+class _PostgresMultiDirectorySkillDesignGenerator(_PostgresSkillDesignGenerator):
+    async def generate(
+        self,
+        request: SkillDesignGenerationRequest,
+        *,
+        skill_creator_content: str,
+    ) -> CandidateResult:
+        assert "Skill Creator" in skill_creator_content
+        self.calls += 1
+        return CandidateResult(
+            files=(
+                SkillDesignGeneratedFile(
+                    path="SKILL.md",
+                    media_type="text/markdown",
+                    content=(
+                        f"---\nname: {request.skill_slug}\n"
+                        "description: Turn Chinese meeting notes into an owned, dated action list.\n"
+                        "---\n\n"
+                        "# Workflow\n\n"
+                        "1. Read `references/extraction-rules.md` before extracting actions.\n"
+                        "2. Normalize the notes with `scripts/normalize_actions.py`.\n"
+                        "3. Render the result with `templates/action-report.md`.\n"
+                    ),
+                ),
+                SkillDesignGeneratedFile(
+                    path="references/extraction-rules.md",
+                    media_type="text/markdown",
+                    content=("# Extraction rules\n\nUse `待确认` when an owner or due date is missing. Never infer missing details.\n"),
+                ),
+                SkillDesignGeneratedFile(
+                    path="scripts/normalize_actions.py",
+                    media_type="text/x-python",
+                    content=("def normalize_actions(lines: list[str]) -> list[str]:\n    return [line.strip() for line in lines if line.strip()]\n"),
+                ),
+                SkillDesignGeneratedFile(
+                    path="templates/action-report.md",
+                    media_type="text/markdown",
+                    content=("# Action report\n\n| Action | Owner | Due date | Status |\n| --- | --- | --- | --- |\n| {{action}} | {{owner}} | {{due_date}} | {{status}} |\n"),
+                ),
+            ),
+            summary="包含脚本、参考资料和模板的候选 Skill 已生成。",
+        )
+
+
+class _PostgresClarifyingSkillDesignGenerator(_PostgresSkillDesignGenerator):
+    async def generate(
+        self,
+        request: SkillDesignGenerationRequest,
+        *,
+        skill_creator_content: str,
+    ) -> CandidateResult | NeedsClarificationResult:
+        if self.calls == 0:
+            assert "Skill Creator" in skill_creator_content
+            self.calls += 1
+            return NeedsClarificationResult(
+                questions=(
+                    ClarificationQuestion(
+                        id="supported-language",
+                        prompt="这个 Skill 需要支持哪种编程语言？",
+                        reason="需要确定生成代码的语言边界。",
+                        kind="single_select",
+                        required=True,
+                        options=("Python", "TypeScript"),
+                    ),
+                )
+            )
+        return await super().generate(
+            request,
+            skill_creator_content=skill_creator_content,
         )
 
 
@@ -792,6 +891,183 @@ async def test_skill_builder_is_owner_scoped_and_cancel_physically_clears_candid
             ("cancel", "completed"),
             ("turn", "completed"),
         ]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_skill_builder_commits_multi_directory_candidate_to_published_version(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    owner = _project_context(seed.owner_a)
+    generator = _PostgresMultiDirectorySkillDesignGenerator()
+    skill_service = SkillService(
+        seed.factory,
+        quota=ProjectQuotaEnforcer(
+            QuotaService(
+                seed.factory,
+                QuotaConfig(),
+                source_ref_hasher=_skill_builder_quota_source_ref,
+            )
+        ),
+    )
+    service = SkillDesignService(
+        seed.factory,
+        generator=generator,
+        skill_service=skill_service,
+    )
+    expected_paths = [
+        "SKILL.md",
+        "references/extraction-rules.md",
+        "scripts/normalize_actions.py",
+        "templates/action-report.md",
+    ]
+    try:
+        await bootstrap_system_assets(seed.factory)
+        created = await service.create(
+            owner,
+            CreateSkillDesignSession(
+                slug="postgres-meeting-action-pack",
+                display_name="PostgreSQL Meeting Action Pack",
+                idempotency_key="create-postgres-meeting-action-pack",
+            ),
+        )
+        ready = await service.submit_turn(
+            owner,
+            created.id,
+            SubmitSkillDesignTurn(
+                input=SkillDesignMessageTurn(
+                    kind="message",
+                    message="使用规则、脚本和模板，把中文会议纪要转换为行动清单。",
+                ),
+                expected_revision=created.revision,
+                idempotency_key="generate-postgres-meeting-action-pack",
+            ),
+        )
+
+        assert [item.path for item in ready.files] == expected_paths
+        validated = await service.validate(
+            owner,
+            created.id,
+            ValidateSkillDesignSession(
+                expected_revision=ready.revision,
+                expected_draft_checksum=ready.draft_checksum,
+                idempotency_key="validate-postgres-meeting-action-pack",
+            ),
+        )
+        assert validated.validation is not None
+        assert validated.validation.scan_decision == "allow"
+
+        committed = await service.commit(
+            owner,
+            created.id,
+            CommitSkillDesignSession(
+                expected_revision=validated.revision,
+                expected_draft_checksum=validated.draft_checksum,
+                acknowledge_warnings=False,
+                idempotency_key="commit-postgres-meeting-action-pack",
+            ),
+        )
+
+        assert committed.session.status is SkillDesignStatus.COMPLETED
+        assert committed.session.files == ()
+        assert committed.skill.status == "suspended"
+        version_id = committed.skill.current_published_version_id
+        assert version_id is not None
+        async with seed.factory() as session:
+            version_files = tuple((await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version_id).order_by(SkillVersionFileRow.path))).scalars())
+            remaining_draft_files = tuple(
+                (
+                    await session.execute(
+                        select(SkillDesignDraftFileRow).where(
+                            SkillDesignDraftFileRow.session_id == created.id,
+                        )
+                    )
+                ).scalars()
+            )
+
+        assert [item.path for item in version_files] == expected_paths
+        assert [item.content for item in version_files] == [next(file.content.encode("utf-8") for file in ready.files if file.path == item.path) for item in version_files]
+        assert all(item.sha256 == hashlib.sha256(item.content).hexdigest() for item in version_files)
+        assert remaining_draft_files == ()
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_skill_builder_clarification_reply_transitions_atomically_before_autoflush(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    owner = _project_context(seed.owner_a)
+    generator = _PostgresClarifyingSkillDesignGenerator()
+    service = SkillDesignService(seed.factory, generator=generator)
+    try:
+        await bootstrap_system_assets(seed.factory)
+        created = await service.create(
+            owner,
+            CreateSkillDesignSession(
+                slug="postgres-code-writer",
+                display_name="PostgreSQL Code Writer",
+                idempotency_key="create-postgres-code-writer",
+            ),
+        )
+        clarification = await service.submit_turn(
+            owner,
+            created.id,
+            SubmitSkillDesignTurn(
+                input=SkillDesignMessageTurn(
+                    kind="message",
+                    message="写代码",
+                ),
+                expected_revision=created.revision,
+                idempotency_key="describe-postgres-code-writer",
+            ),
+        )
+
+        assert clarification.status is SkillDesignStatus.AWAITING_CLARIFICATION
+        assert clarification.active_clarification is not None
+        selected = clarification.active_clarification.options[0]
+        ready = await service.submit_turn(
+            owner,
+            created.id,
+            SubmitSkillDesignTurn(
+                input=SkillDesignClarificationTurn(
+                    kind="clarification",
+                    response=SkillDesignClarificationResponse(
+                        version=1,
+                        kind="human_input_response",
+                        source=clarification.active_clarification.source,
+                        request_id=clarification.active_clarification.request_id,
+                        response_kind="option",
+                        value=selected.value,
+                        option_id=selected.id,
+                    ),
+                ),
+                expected_revision=clarification.revision,
+                idempotency_key="answer-postgres-code-writer",
+            ),
+        )
+
+        assert ready.status is SkillDesignStatus.DRAFT_READY
+        assert ready.active_clarification is None
+        assert generator.calls == 2
+        assert [message.content for message in ready.messages].count(selected.value) == 1
+        async with seed.engine.connect() as connection:
+            stored = (
+                await connection.execute(
+                    text(
+                        """SELECT status,active_clarification_json IS NULL
+                           FROM skill_design_sessions
+                           WHERE id=:session_id"""
+                    ),
+                    {"session_id": created.id},
+                )
+            ).one()
+        assert stored == ("draft_ready", True)
     finally:
         await seed.engine.dispose()
 

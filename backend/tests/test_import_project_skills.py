@@ -77,7 +77,7 @@ async def test_repository_public_skills_are_complete_regular_archives() -> None:
     service = SkillService(lambda: None)  # type: ignore[arg-type,return-value]
     previews = [await service.preview_archive(_editor_context(), source.files) for source in sources]
 
-    assert len(sources) == 21
+    assert len(sources) == 14
     assert len({str(preview.frontmatter["name"]).casefold() for preview in previews}) == len(previews)
     assert all(any(file.path == "SKILL.md" for file in preview.files) for preview in previews)
 
@@ -728,8 +728,8 @@ async def test_repository_public_skills_import_into_fresh_setup_project(
             quota_config=QuotaConfig(),
         )
 
-        assert summary.discovered_count == 21
-        assert summary.created_count == 21
+        assert summary.discovered_count == 14
+        assert summary.created_count == 14
         assert summary.replaced_count == 0
         async with engine.connect() as connection:
             assert (
@@ -740,7 +740,7 @@ async def test_repository_public_skills_import_into_fresh_setup_project(
                     ),
                     {"project_id": project_id},
                 )
-            ) == 21
+            ) == 14
             assert (
                 await connection.scalar(
                     text(
@@ -751,8 +751,8 @@ async def test_repository_public_skills_import_into_fresh_setup_project(
                     ),
                     {"project_id": project_id},
                 )
-            ) == 21
+            ) == 14
             assert await connection.scalar(text("SELECT count(*) FROM skills WHERE scope='system'")) == system_skill_count
-            assert await connection.scalar(text("SELECT count(*) FROM audit_logs")) == 63
+            assert await connection.scalar(text("SELECT count(*) FROM audit_logs")) == 42
     finally:
         await engine.dispose()

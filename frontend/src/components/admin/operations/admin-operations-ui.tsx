@@ -278,8 +278,6 @@ export function AdminTechnicalValue({
   copyLabel: string;
   value: string;
 }) {
-  const [copied, setCopied] = useState(false);
-
   return (
     <span
       data-slot="admin-technical-value"
@@ -294,27 +292,51 @@ export function AdminTechnicalValue({
       >
         {value}
       </code>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
+      <AdminCopyButton
+        value={value}
+        copyLabel={copyLabel}
+        copiedLabel={copiedLabel}
         className="size-7 shrink-0"
-        aria-label={copied ? copiedLabel : copyLabel}
-        title={copied ? copiedLabel : copyLabel}
-        onClick={() => {
-          if (!navigator.clipboard) return;
-          void navigator.clipboard
-            .writeText(value)
-            .then(() => setCopied(true))
-            .catch(() => setCopied(false));
-        }}
-      >
-        {copied ? (
-          <CheckIcon aria-hidden className="size-3.5" />
-        ) : (
-          <CopyIcon aria-hidden className="size-3.5" />
-        )}
-      </Button>
+      />
     </span>
+  );
+}
+
+export function AdminCopyButton({
+  className,
+  copiedLabel,
+  copyLabel,
+  value,
+}: {
+  className?: string;
+  copiedLabel: string;
+  copyLabel: string;
+  value: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      data-slot="admin-copy-button"
+      className={cn("size-7 shrink-0", className)}
+      aria-label={copied ? copiedLabel : copyLabel}
+      title={copied ? copiedLabel : copyLabel}
+      onClick={() => {
+        if (!navigator.clipboard) return;
+        void navigator.clipboard
+          .writeText(value)
+          .then(() => setCopied(true))
+          .catch(() => setCopied(false));
+      }}
+    >
+      {copied ? (
+        <CheckIcon aria-hidden className="size-3.5" />
+      ) : (
+        <CopyIcon aria-hidden className="size-3.5" />
+      )}
+    </Button>
   );
 }

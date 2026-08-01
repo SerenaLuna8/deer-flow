@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest import mock
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents import create_agent
@@ -80,6 +80,7 @@ def _middleware(
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
     model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="compressed summary"))
     model.with_config.return_value = model
     return DeerFlowSummarizationMiddleware(
         model=model,
@@ -286,6 +287,84 @@ def test_before_summarization_hook_not_called_when_threshold_not_met() -> None:
 
     assert captured == []
     assert result is None
+
+
+def test_hook_runs_only_after_summary_model_returns_valid_text() -> None:
+    call_order: list[str] = []
+    model = MagicMock()
+    model.with_config.return_value = model
+
+    def _summarize(*args, **kwargs):
+        call_order.append("summary")
+        return SimpleNamespace(text="compressed summary")
+
+    model.invoke.side_effect = _summarize
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        before_summarization=[lambda _: call_order.append("hook")],
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is not None
+    assert call_order == ["summary", "hook"]
+
+
+def test_empty_summary_retries_do_not_enqueue_hooks() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = DeerFlowSummarizationMiddleware(
+        model=_StaticChatModel(text=" \n\t "),
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        before_summarization=[captured.append],
+    )
+
+    first_result = middleware.before_model({"messages": _messages()}, _runtime())
+    retry_result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert first_result is None
+    assert retry_result is None
+    assert captured == []
+
+
+def test_failed_summary_does_not_enqueue_hook() -> None:
+    captured: list[SummarizationEvent] = []
+    model = MagicMock()
+    model.with_config.return_value = model
+    model.invoke.side_effect = RuntimeError("summary model unavailable")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        before_summarization=[captured.append],
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    assert captured == []
+
+
+@pytest.mark.anyio
+async def test_async_empty_summary_does_not_enqueue_hook() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = DeerFlowSummarizationMiddleware(
+        model=_StaticChatModel(text=" \n\t "),
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        before_summarization=[captured.append],
+    )
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    assert captured == []
 
 
 def test_before_summarization_hook_exception_does_not_block_compression(caplog: pytest.LogCaptureFixture) -> None:

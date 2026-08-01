@@ -429,7 +429,15 @@ def _helm_legacy_findings(repo_root: Path) -> list[str]:
         if not path.is_file():
             continue
         relative = path.relative_to(repo_root).as_posix()
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Ignore only the known macOS metadata file that can appear in a
+            # local chart tree. Any other undecodable file fails closed so a
+            # malformed or binary source cannot bypass the absence scan.
+            if path.name == ".DS_Store":
+                continue
+            raise
         for literal in REMOVED_HELM_LITERALS:
             if literal in text:
                 findings.append(f"{relative}:{literal}")
@@ -728,6 +736,23 @@ def test_helm_gate_mutation_rejects_removed_values(tmp_path: Path) -> None:
         path.write_text(content, encoding="utf-8")
 
         assert _helm_legacy_findings(case_root) != []
+
+
+def test_helm_gate_ignores_only_known_macos_metadata(tmp_path: Path) -> None:
+    metadata_root = tmp_path / "metadata"
+    metadata_path = metadata_root / "deploy" / "helm" / "deer-flow" / ".DS_Store"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_bytes(b"\xff")
+
+    assert _helm_legacy_findings(metadata_root) == []
+
+    unknown_root = tmp_path / "unknown"
+    unknown_path = unknown_root / "deploy" / "helm" / "deer-flow" / "unexpected.bin"
+    unknown_path.parent.mkdir(parents=True)
+    unknown_path.write_bytes(b"\xff")
+
+    with pytest.raises(UnicodeDecodeError):
+        _helm_legacy_findings(unknown_root)
 
 
 def test_rendered_helm_chart_has_no_extensions_redis_or_legacy_global_routes() -> None:

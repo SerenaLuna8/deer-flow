@@ -253,6 +253,23 @@ export type AssistantTurnDisplayOptions = {
   isCurrentTurnLoading?: boolean;
 };
 
+function hasDisplayableReasoning(message: Message): boolean {
+  const reasoning = extractReasoningContentFromMessage(message);
+  return typeof reasoning === "string" && reasoning.trim().length > 0;
+}
+
+function hasDisplayableProcessStep(message: Message): boolean {
+  return (
+    message.type === "ai" &&
+    (hasDisplayableReasoning(message) ||
+      (message.tool_calls ?? []).some(
+        (toolCall) =>
+          toolCall.name !== "present_files" &&
+          toolCall.name !== "ask_clarification",
+      ))
+  );
+}
+
 /**
  * Projects safe semantic message groups into a calmer visual turn without
  * mutating their tool-result associations.
@@ -273,10 +290,7 @@ export function getAssistantTurnDisplays(
     if (group.type !== "assistant") {
       continue;
     }
-    if (
-      isCurrentTurnLoading &&
-      finalGroupIndex === groups.length - 1
-    ) {
+    if (isCurrentTurnLoading && finalGroupIndex === groups.length - 1) {
       continue;
     }
 
@@ -302,9 +316,20 @@ export function getAssistantTurnDisplays(
     }
 
     const presentFilesGroupIndexes = hiddenGroupIndexes.filter(
-      (groupIndex) =>
-        groups[groupIndex]?.type === "assistant:present-files",
+      (groupIndex) => groups[groupIndex]?.type === "assistant:present-files",
     );
+    const processGroupIndexes = hiddenGroupIndexes.filter((groupIndex) => {
+      const candidate = groups[groupIndex];
+      return (
+        candidate?.type === "assistant:processing" ||
+        candidate?.type === "assistant:subagent" ||
+        (candidate?.type === "assistant:present-files" &&
+          candidate.messages.some(hasDisplayableProcessStep))
+      );
+    });
+    if (group.messages.some(hasDisplayableReasoning)) {
+      processGroupIndexes.push(finalGroupIndex);
+    }
     const presentedFiles = Array.from(
       new Set(
         presentFilesGroupIndexes.flatMap((groupIndex) =>
@@ -314,27 +339,29 @@ export function getAssistantTurnDisplays(
         ),
       ),
     );
-    const processStepCount = [
-      ...hiddenGroupIndexes.flatMap(
-        (groupIndex) => groups[groupIndex]?.messages ?? [],
-      ),
-      ...group.messages,
-    ].reduce((count, message) => {
-      if (message.type !== "ai") {
-        return count;
-      }
-      const visibleToolCalls = (message.tool_calls ?? []).filter(
-        (toolCall) =>
-          toolCall.name !== "task" && toolCall.name !== "ask_clarification",
-      );
-      return count + visibleToolCalls.length + (hasReasoning(message) ? 1 : 0);
-    }, 0);
+    const processStepCount = processGroupIndexes
+      .flatMap((groupIndex) => groups[groupIndex]?.messages ?? [])
+      .reduce((count, message) => {
+        if (message.type !== "ai") {
+          return count;
+        }
+        const visibleToolCalls = (message.tool_calls ?? []).filter(
+          (toolCall) =>
+            toolCall.name !== "ask_clarification" &&
+            toolCall.name !== "present_files",
+        );
+        return (
+          count +
+          visibleToolCalls.length +
+          (hasDisplayableReasoning(message) ? 1 : 0)
+        );
+      }, 0);
 
     displays.push({
       finalGroupIndex,
       hiddenGroupIndexes,
       processStepCount,
-      processGroupIndexes: [...hiddenGroupIndexes],
+      processGroupIndexes,
       presentFilesGroupIndexes,
       presentedFiles,
     });
@@ -779,31 +806,6 @@ export function hasPresentFiles(message: Message) {
 
 export function isClarificationToolMessage(message: Message) {
   return message.type === "tool" && message.name === "ask_clarification";
-}
-
-export function isClarificationOnlyProcessingGroup(messages: Message[]) {
-  let hasClarification = false;
-
-  for (const message of messages) {
-    if (message.type === "ai") {
-      for (const toolCall of message.tool_calls ?? []) {
-        if (toolCall.name !== "ask_clarification") {
-          return false;
-        }
-        hasClarification = true;
-      }
-      continue;
-    }
-
-    if (message.type === "tool") {
-      if (message.name !== "ask_clarification") {
-        return false;
-      }
-      hasClarification = true;
-    }
-  }
-
-  return hasClarification;
 }
 
 export function extractPresentFilesFromMessage(message: Message) {

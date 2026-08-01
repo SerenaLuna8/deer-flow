@@ -85,6 +85,8 @@ skills:
 summarization:
   # Deployment-owned prompt text remains in YAML; enablement, thresholds and
   # model selection are managed at /admin/settings/system.
+  # A custom non-null prompt must include {messages}; write literal braces as
+  # {{ and }}. No other replacement fields are supported.
   summary_prompt: null
 database:
   url: $DATABASE_URL

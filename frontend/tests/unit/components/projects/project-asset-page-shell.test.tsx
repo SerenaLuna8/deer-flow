@@ -6,6 +6,7 @@ import {
   createProjectSkillDeleteSnapshot,
   projectAssetDetailCanManageSystemBinding,
   projectAssetDetailShowsVersionHistory,
+  projectAssetDetailSummaryGridColumns,
   ProjectAssetDetailHeader,
   ProjectSkillDetailActions,
   versionActionDisabled,
@@ -227,6 +228,18 @@ describe("project asset list", () => {
     expect(projectAssetDetailShowsVersionHistory("agents")).toBe(false);
     expect(projectAssetDetailShowsVersionHistory("skills")).toBe(true);
     expect(projectAssetDetailShowsVersionHistory("mcp-servers")).toBe(true);
+  });
+
+  test("places the three system Skill summary fields in one row", () => {
+    expect(projectAssetDetailSummaryGridColumns("skills", "system")).toBe(
+      "sm:grid-cols-3",
+    );
+    expect(projectAssetDetailSummaryGridColumns("skills", "project")).toBe(
+      "sm:grid-cols-2",
+    );
+    expect(projectAssetDetailSummaryGridColumns("mcp-servers", "system")).toBe(
+      "sm:grid-cols-2",
+    );
   });
 
   test("renders a project Skill enable switch and keeps detail access independent", () => {

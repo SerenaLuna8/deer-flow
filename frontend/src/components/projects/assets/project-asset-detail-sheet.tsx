@@ -83,6 +83,15 @@ export function projectAssetDetailShowsVersionHistory(
   return kind !== "agents";
 }
 
+export function projectAssetDetailSummaryGridColumns(
+  kind: MutableAssetKind,
+  scope: ProjectAssetItem["scope"],
+): string {
+  return kind === "skills" && scope === "system"
+    ? "sm:grid-cols-3"
+    : "sm:grid-cols-2";
+}
+
 export function effectiveAssetVersion(
   scope: ProjectAssetItem["scope"],
   bindingEnabled: boolean,
@@ -664,7 +673,9 @@ export function ProjectAssetDetailSheet({
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="space-y-6 px-6 py-5">
               {showsVersionHistory ? (
-                <section className="grid gap-3 sm:grid-cols-2">
+                <section
+                  className={`grid gap-3 ${projectAssetDetailSummaryGridColumns(kind, item.scope)}`}
+                >
                   <div className="bg-muted/35 rounded-xl p-4">
                     <p className="text-muted-foreground text-xs">
                       {item.scope === "system" ? "系统最新发布" : "当前发布"}

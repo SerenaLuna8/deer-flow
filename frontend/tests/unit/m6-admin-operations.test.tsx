@@ -63,6 +63,7 @@ import {
   adminJobsQueryOptions,
   adminProjectLifecycleMutationOptions,
   adminProjectsQueryOptions,
+  fetchAdminJobs,
   operationsOverviewQueryOptions,
   safeRequeueMutationOptions,
 } from "@/core/admin-operations/api";
@@ -155,6 +156,8 @@ const jobs: AdminJobPage = {
       job_id: JOB_A,
       dead_job_id: DEAD_JOB_A,
       project_id: PROJECT_A,
+      project_slug: "alpha-project",
+      project_display_name: "Alpha Project",
       job_type: "retention_purge",
       status: "dead",
       retry_safety: "safe",
@@ -282,7 +285,7 @@ describe("M6 system operations console", () => {
     ]);
     expect(
       adminJobsQueryKey(ACCOUNT_A, "cursor-2", {
-        project_id: PROJECT_A,
+        project_query: "alpha",
         status: "dead",
         type: "retention_purge",
       }),
@@ -291,7 +294,7 @@ describe("M6 system operations console", () => {
       "jobs",
       "cursor-2",
       {
-        project_id: PROJECT_A,
+        project_query: "alpha",
         status: "dead",
         type: "retention_purge",
       },
@@ -328,25 +331,47 @@ describe("M6 system operations console", () => {
     expect(() => adminOperationsRoot("not-a-uuid")).toThrow();
   });
 
-  test("normalizes public job filters and rejects malformed project coordinates", () => {
+  test("normalizes human-readable project job filters and rejects oversized queries", () => {
     expect(
       parseAdminJobFilters({
-        projectId: ` ${PROJECT_A} `,
+        projectQuery: "  Alpha Project  ",
         status: "dead",
         type: "retention_purge",
       }),
     ).toEqual({
-      project_id: PROJECT_A,
+      project_query: "Alpha Project",
       status: "dead",
       type: "retention_purge",
     });
     expect(
       parseAdminJobFilters({
-        projectId: "not-a-project",
+        projectQuery: "x".repeat(121),
         status: "",
         type: "",
       }),
     ).toBeNull();
+  });
+
+  test("sends the human project query without exposing UUID filtering in the UI client", async () => {
+    rs.mocked(fetchWithAuth).mockResolvedValueOnce(response(jobs));
+
+    await expect(
+      fetchAdminJobs(ACCOUNT_A, null, {
+        project_query: "Alpha Project",
+        status: "dead",
+        type: "retention_purge",
+      }),
+    ).resolves.toEqual(jobs);
+
+    const [input] = rs.mocked(fetchWithAuth).mock.calls.at(-1) ?? [];
+    const requestedUrl =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input?.url ?? "");
+    expect(requestedUrl).toContain("project_query=Alpha+Project");
+    expect(requestedUrl).not.toContain("project_id=");
   });
 
   test("normalizes public project filters without leaking private coordinates", () => {

@@ -226,6 +226,21 @@ def test_load_skill_archive_package_supports_bounded_zip64_metadata() -> None:
     ]
 
 
+def test_load_skill_archive_package_discards_empty_directory_entries() -> None:
+    files = load_skill_archive_package(
+        _zip(
+            {
+                "meeting-brief/SKILL.md": _manifest(),
+                "meeting-brief/templates/": b"",
+            }
+        ),
+        filename="meeting-brief.zip",
+        request_id="req-empty-directory",
+    )
+
+    assert [item.path for item in files] == ["SKILL.md"]
+
+
 @pytest.mark.parametrize(
     ("filename", "payload"),
     [

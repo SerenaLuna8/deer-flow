@@ -56,6 +56,7 @@ import {
   hasReasoning,
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
+  type MessageGroup as MessageGroupModel,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import {
@@ -78,6 +79,7 @@ import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
 
+import { AssistantProcessDisclosure } from "./assistant-process-disclosure";
 import {
   HumanInputCard,
   type HumanInputSubmitResult,
@@ -115,6 +117,40 @@ type MessageEditSession = {
   messageId: string;
   draft: string;
 };
+
+function getPresentFilesProcessMessages(messages: Message[]): Message[] {
+  const visibleToolCallIds = new Set(
+    messages.flatMap((message) =>
+      message.type === "ai"
+        ? (message.tool_calls ?? []).flatMap((toolCall) =>
+            toolCall.name !== "present_files" &&
+            toolCall.name !== "ask_clarification" &&
+            toolCall.id
+              ? [toolCall.id]
+              : [],
+          )
+        : [],
+    ),
+  );
+
+  return messages.flatMap((message): Message[] => {
+    if (message.type === "ai") {
+      const visibleToolCalls = (message.tool_calls ?? []).filter(
+        (toolCall) =>
+          toolCall.name !== "present_files" &&
+          toolCall.name !== "ask_clarification",
+      );
+      return hasReasoning(message) || visibleToolCalls.length > 0
+        ? [{ ...message, tool_calls: visibleToolCalls }]
+        : [];
+    }
+    return message.type === "tool" &&
+      message.tool_call_id &&
+      visibleToolCallIds.has(message.tool_call_id)
+      ? [message]
+      : [];
+  });
+}
 
 function LoadMoreHistoryIndicator({
   isLoading,
@@ -933,6 +969,219 @@ export function MessageList({
     [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
   );
 
+  const hydrateSubtasks = (groupMessages: Message[]) => {
+    const subtaskRunIsActive = isSubtaskRunActive(
+      groupMessages,
+      messages,
+      thread.isLoading,
+    );
+    const tasks = new Set<Subtask>();
+    const taskIds = new Set<string>();
+
+    for (const message of groupMessages) {
+      if (message.type !== "ai") {
+        continue;
+      }
+      for (const toolCall of message.tool_calls ?? []) {
+        if (toolCall.name !== "task" || !toolCall.id) {
+          continue;
+        }
+        const status = derivePendingSubtaskStatus(
+          toolCall.id,
+          groupMessages,
+          subtaskRunIsActive,
+        );
+        const task: Subtask = {
+          id: toolCall.id,
+          subagent_type: toolCall.args.subagent_type,
+          description: toolCall.args.description,
+          prompt: toolCall.args.prompt,
+          status,
+          statusSource: "inferred",
+        };
+        updateSubtask(task);
+        tasks.add(task);
+        taskIds.add(toolCall.id);
+      }
+    }
+
+    for (const message of groupMessages) {
+      if (
+        message.type !== "tool" ||
+        !message.tool_call_id ||
+        !taskIds.has(message.tool_call_id)
+      ) {
+        continue;
+      }
+      const parsed = parseSubtaskResult(
+        extractTextFromMessage(message),
+        message.additional_kwargs,
+      );
+      updateSubtask({
+        id: message.tool_call_id,
+        ...parsed,
+        statusSource: "tool_result",
+      });
+    }
+
+    return tasks;
+  };
+
+  const renderSubagentGroup = (
+    group: MessageGroupModel,
+    {
+      groupIsLoading,
+      includeTokenUsage = true,
+      showAllSteps = false,
+      turnUsageMessages,
+    }: {
+      groupIsLoading: boolean;
+      includeTokenUsage?: boolean;
+      showAllSteps?: boolean;
+      turnUsageMessages?: Message[] | null;
+    },
+  ): ReactNode => {
+    if (group.type !== "assistant:subagent") {
+      return null;
+    }
+
+    const tasks = hydrateSubtasks(group.messages);
+
+    const results: ReactNode[] = [];
+    const subagentDebugMessageIds: string[] = [];
+    if (tasks.size > 0 && !showAllSteps) {
+      results.push(
+        <div
+          key="subtask-count"
+          className="text-muted-foreground pt-2 text-sm font-normal"
+        >
+          {t.subtasks.executing(tasks.size)}
+        </div>,
+      );
+    }
+    const message = group.messages.find((message) => message.type === "ai");
+    if (message) {
+      if (!hasReasoning(message) && message.id) {
+        subagentDebugMessageIds.push(message.id);
+      }
+      if (hasReasoning(message) || (message.tool_calls?.length ?? 0) > 0) {
+        results.push(
+          <MessageGroup
+            key={"thinking-group-" + message.id}
+            messages={group.messages}
+            isLoading={groupIsLoading}
+            renderTaskToolCall={(taskId) => (
+              <SubtaskCard
+                key={"task-group-" + taskId}
+                taskId={taskId}
+                threadId={threadId}
+                runId={(message as { run_id?: string }).run_id}
+              />
+            )}
+            showAllSteps={showAllSteps}
+            tokenDebugSteps={tokenDebugSteps.filter(
+              (step) => step.messageId === message.id,
+            )}
+            showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
+          />,
+        );
+      }
+    }
+
+    return (
+      <div
+        key={"subtask-group-" + group.id}
+        className="relative z-1 flex flex-col gap-2"
+      >
+        {results}
+        {includeTokenUsage &&
+          renderTokenUsage({
+            messages: group.messages,
+            turnUsageMessages,
+            debugMessageIds: subagentDebugMessageIds,
+          })}
+      </div>
+    );
+  };
+
+  const renderCompletedProcessGroup = (groupIndex: number): ReactNode => {
+    const group = groupedMessages[groupIndex];
+    if (!group) {
+      return null;
+    }
+    if (group.type === "assistant") {
+      // The terminal answer keeps its semantic message group, but its reasoning
+      // facet belongs at the end of an existing completed execution history.
+      // MessageGroup projects only reasoning/tool steps, so the answer text is
+      // still rendered exactly once by MessageListItem below.
+      return (
+        <div key={"completed-final-reasoning-" + group.id} className="w-full">
+          <MessageGroup
+            messages={group.messages}
+            showAllSteps={true}
+            tokenDebugSteps={tokenDebugSteps.filter((step) =>
+              group.messages.some((message) => message.id === step.messageId),
+            )}
+            showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
+          />
+        </div>
+      );
+    }
+    if (group.type === "assistant:subagent") {
+      return renderSubagentGroup(group, {
+        groupIsLoading: false,
+        includeTokenUsage: false,
+        showAllSteps: true,
+      });
+    }
+    if (group.type === "assistant:present-files") {
+      hydrateSubtasks(group.messages);
+      const processMessages = getPresentFilesProcessMessages(group.messages);
+      const sourceMessageById = new Map(
+        processMessages.flatMap((message) =>
+          message.type === "ai" && message.id ? [[message.id, message]] : [],
+        ),
+      );
+      return processMessages.length > 0 ? (
+        <div key={"completed-process-group-" + group.id} className="w-full">
+          <MessageGroup
+            messages={processMessages}
+            renderTaskToolCall={(taskId, messageId) => (
+              <SubtaskCard
+                key={"task-group-" + taskId}
+                taskId={taskId}
+                threadId={threadId}
+                runId={
+                  (
+                    sourceMessageById.get(messageId ?? "") as {
+                      run_id?: string;
+                    }
+                  )?.run_id
+                }
+              />
+            )}
+            showAllSteps={true}
+          />
+        </div>
+      ) : null;
+    }
+    if (group.type !== "assistant:processing") {
+      return null;
+    }
+    return (
+      <div key={"completed-process-group-" + group.id} className="w-full">
+        <MessageGroup
+          messages={group.messages}
+          showAllSteps={true}
+          tokenDebugSteps={tokenDebugSteps.filter((step) =>
+            group.messages.some((message) => message.id === step.messageId),
+          )}
+          showTokenDebugSummaries={tokenUsageInlineMode === "step_debug"}
+        />
+      </div>
+    );
+  };
+
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
@@ -1031,6 +1280,17 @@ export function MessageList({
                       group.type === "assistant" && "group/assistant-turn",
                     )}
                   >
+                    {group.type === "assistant" &&
+                      turnDisplay &&
+                      turnDisplay.processGroupIndexes.length > 0 && (
+                        <AssistantProcessDisclosure
+                          stepCount={turnDisplay.processStepCount}
+                        >
+                          {turnDisplay.processGroupIndexes.map(
+                            renderCompletedProcessGroup,
+                          )}
+                        </AssistantProcessDisclosure>
+                      )}
                     {group.messages.map((msg) => {
                       const item = (
                         <MessageListItem
@@ -1040,6 +1300,11 @@ export function MessageList({
                             groupIndex === groupedMessages.length - 1
                           }
                           threadId={threadId}
+                          showReasoning={
+                            !turnDisplay?.processGroupIndexes.includes(
+                              groupIndex,
+                            )
+                          }
                           runId={
                             group.type === "assistant"
                               ? (msg as { run_id?: string }).run_id
@@ -1247,8 +1512,48 @@ export function MessageList({
                     files.push(...presentFiles);
                   }
                 }
+                const processMessages = getPresentFilesProcessMessages(
+                  group.messages,
+                );
+                hydrateSubtasks(group.messages);
+                const sourceMessageById = new Map(
+                  processMessages.flatMap((message) =>
+                    message.type === "ai" && message.id
+                      ? [[message.id, message]]
+                      : [],
+                  ),
+                );
                 return (
                   <div className="w-full" key={group.id}>
+                    {processMessages.length > 0 && (
+                      <MessageGroup
+                        className="mb-3"
+                        messages={processMessages}
+                        isLoading={groupIsLoading}
+                        renderTaskToolCall={(taskId, messageId) => (
+                          <SubtaskCard
+                            key={"task-group-" + taskId}
+                            taskId={taskId}
+                            threadId={threadId}
+                            runId={
+                              (
+                                sourceMessageById.get(messageId ?? "") as {
+                                  run_id?: string;
+                                }
+                              )?.run_id
+                            }
+                          />
+                        )}
+                        tokenDebugSteps={tokenDebugSteps.filter((step) =>
+                          processMessages.some(
+                            (message) => message.id === step.messageId,
+                          ),
+                        )}
+                        showTokenDebugSummaries={
+                          tokenUsageInlineMode === "step_debug"
+                        }
+                      />
+                    )}
                     {group.messages[0] && hasContent(group.messages[0]) && (
                       <MarkdownContent
                         content={extractContentFromMessage(group.messages[0])}
@@ -1272,114 +1577,10 @@ export function MessageList({
                   </div>
                 );
               } else if (group.type === "assistant:subagent") {
-                const subtaskRunIsActive = isSubtaskRunActive(
-                  group.messages,
-                  messages,
-                  thread.isLoading,
-                );
-                const tasks = new Set<Subtask>();
-                for (const message of group.messages) {
-                  if (message.type === "ai") {
-                    for (const toolCall of message.tool_calls ?? []) {
-                      if (toolCall.name === "task") {
-                        const taskId = toolCall.id;
-                        if (!taskId) {
-                          continue;
-                        }
-                        const status = derivePendingSubtaskStatus(
-                          taskId,
-                          group.messages,
-                          subtaskRunIsActive,
-                        );
-                        const task: Subtask = {
-                          id: taskId,
-                          subagent_type: toolCall.args.subagent_type,
-                          description: toolCall.args.description,
-                          prompt: toolCall.args.prompt,
-                          status,
-                          statusSource: "inferred",
-                        };
-                        updateSubtask(task);
-                        tasks.add(task);
-                      }
-                    }
-                  } else if (message.type === "tool") {
-                    const taskId = message.tool_call_id;
-                    if (taskId) {
-                      const parsed = parseSubtaskResult(
-                        extractTextFromMessage(message),
-                        message.additional_kwargs,
-                      );
-                      updateSubtask({
-                        id: taskId,
-                        ...parsed,
-                        statusSource: "tool_result",
-                      });
-                    }
-                  }
-                }
-
-                const results: React.ReactNode[] = [];
-                const subagentDebugMessageIds: string[] = [];
-                if (tasks.size > 0) {
-                  results.push(
-                    <div
-                      key="subtask-count"
-                      className="text-muted-foreground pt-2 text-sm font-normal"
-                    >
-                      {t.subtasks.executing(tasks.size)}
-                    </div>,
-                  );
-                }
-                for (const message of group.messages.filter(
-                  (message) => message.type === "ai",
-                )) {
-                  if (hasReasoning(message)) {
-                    results.push(
-                      <MessageGroup
-                        key={"thinking-group-" + message.id}
-                        messages={[message]}
-                        isLoading={groupIsLoading}
-                        tokenDebugSteps={tokenDebugSteps.filter(
-                          (step) => step.messageId === message.id,
-                        )}
-                        showTokenDebugSummaries={
-                          tokenUsageInlineMode === "step_debug"
-                        }
-                      />,
-                    );
-                  } else if (message.id) {
-                    subagentDebugMessageIds.push(message.id);
-                  }
-                  const taskIds = message.tool_calls?.flatMap((toolCall) =>
-                    toolCall.name === "task" && toolCall.id
-                      ? [toolCall.id]
-                      : [],
-                  );
-                  for (const taskId of taskIds ?? []) {
-                    results.push(
-                      <SubtaskCard
-                        key={"task-group-" + taskId}
-                        taskId={taskId}
-                        threadId={threadId}
-                        runId={(message as { run_id?: string }).run_id}
-                      />,
-                    );
-                  }
-                }
-                return (
-                  <div
-                    key={"subtask-group-" + group.id}
-                    className="relative z-1 flex flex-col gap-2"
-                  >
-                    {results}
-                    {renderTokenUsage({
-                      messages: group.messages,
-                      turnUsageMessages,
-                      debugMessageIds: subagentDebugMessageIds,
-                    })}
-                  </div>
-                );
+                return renderSubagentGroup(group, {
+                  groupIsLoading,
+                  turnUsageMessages,
+                });
               }
               return (
                 <div key={"group-" + group.id} className="w-full">

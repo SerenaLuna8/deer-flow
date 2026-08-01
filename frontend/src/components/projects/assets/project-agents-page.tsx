@@ -567,7 +567,6 @@ export function ProjectAgentsPage({
     <ProjectAssetPageShell
       kind="agents"
       title="Agent"
-      description="创建和管理具有专属 Prompt 与能力的自定义 Agent。系统默认 Main 不在此列表中展示。"
       layout="agent-cards"
       initialSelectedAssetId={selectedAssetId}
       renderLead={({ project, data }) => (

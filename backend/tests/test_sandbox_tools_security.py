@@ -133,11 +133,11 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
     ):
-        output = "Reading: /home/user/deer-flow/skills/public/bootstrap/SKILL.md"
+        output = "Reading: /home/user/deer-flow/skills/public/data-analysis/SKILL.md"
         masked = mask_local_paths_in_output(output, _THREAD_DATA)
 
         assert "/home/user/deer-flow/skills" not in masked
-        assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
+        assert "/mnt/skills/public/data-analysis/SKILL.md" in masked
 
 
 def test_mask_local_paths_compiled_patterns_are_cached() -> None:
@@ -195,7 +195,7 @@ def test_reject_path_traversal_blocks_backslash_dotdot() -> None:
 def test_reject_path_traversal_allows_normal_paths() -> None:
     # Should not raise
     _reject_path_traversal("/mnt/user-data/workspace/file.txt")
-    _reject_path_traversal("/mnt/skills/public/bootstrap/SKILL.md")
+    _reject_path_traversal("/mnt/skills/public/data-analysis/SKILL.md")
     _reject_path_traversal("/mnt/user-data/workspace/sub/dir/file.py")
 
 
@@ -271,7 +271,7 @@ def test_validate_local_tool_path_rejects_none_thread_data() -> None:
 def test_resolve_skills_path_rejects_global_skill() -> None:
     """A global Skill path is never authorized outside an admitted-run mount."""
     with pytest.raises(PermissionError, match="not authorized by this run"):
-        _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
+        _resolve_skills_path("/mnt/skills/public/data-analysis/SKILL.md")
 
 
 def test_resolve_skills_path_rejects_global_root() -> None:
@@ -284,7 +284,7 @@ def test_resolve_skills_path_does_not_probe_host_configuration() -> None:
     """Fail closed without consulting a host Skill directory."""
     with patch("deerflow.sandbox.tools._get_skills_host_path") as host_path:
         with pytest.raises(PermissionError, match="not authorized by this run"):
-            _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
+            _resolve_skills_path("/mnt/skills/public/data-analysis/SKILL.md")
     host_path.assert_not_called()
 
 
@@ -334,10 +334,10 @@ def test_replace_virtual_paths_in_command_does_not_replace_skills_paths() -> Non
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
     ):
-        cmd = "cat /mnt/skills/public/bootstrap/SKILL.md"
+        cmd = "cat /mnt/skills/public/data-analysis/SKILL.md"
         result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
         # Skills paths should remain as virtual paths (not resolved)
-        assert "/mnt/skills/public/bootstrap/SKILL.md" in result
+        assert "/mnt/skills/public/data-analysis/SKILL.md" in result
         assert "/home/user/deer-flow/skills" not in result
 
 
@@ -753,7 +753,7 @@ def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) 
 def test_is_skills_path_recognises_default_prefix() -> None:
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         assert _is_skills_path("/mnt/skills") is True
-        assert _is_skills_path("/mnt/skills/public/bootstrap/SKILL.md") is True
+        assert _is_skills_path("/mnt/skills/public/data-analysis/SKILL.md") is True
         assert _is_skills_path("/mnt/skills-extra/foo") is False
         assert _is_skills_path("/mnt/user-data/workspace") is False
 
@@ -763,7 +763,7 @@ def test_validate_local_tool_path_allows_skills_read_only() -> None:
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         # Should not raise
         validate_local_tool_path(
-            "/mnt/skills/public/bootstrap/SKILL.md",
+            "/mnt/skills/public/data-analysis/SKILL.md",
             _THREAD_DATA,
             read_only=True,
         )
@@ -774,7 +774,7 @@ def test_validate_local_tool_path_blocks_skills_write() -> None:
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         with pytest.raises(PermissionError, match="Write access to skills path is not allowed"):
             validate_local_tool_path(
-                "/mnt/skills/public/bootstrap/SKILL.md",
+                "/mnt/skills/public/data-analysis/SKILL.md",
                 _THREAD_DATA,
                 read_only=False,
             )
@@ -784,7 +784,7 @@ def test_validate_local_bash_command_paths_allows_skills_path() -> None:
     """bash commands referencing /mnt/skills should be allowed."""
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         validate_local_bash_command_paths(
-            "cat /mnt/skills/public/bootstrap/SKILL.md",
+            "cat /mnt/skills/public/data-analysis/SKILL.md",
             _THREAD_DATA,
         )
 
@@ -859,7 +859,7 @@ def test_validate_local_tool_path_skills_custom_container_path() -> None:
         # The default /mnt/skills should not match since container path is /custom/skills
         with pytest.raises(PermissionError, match="Only paths under"):
             validate_local_tool_path(
-                "/mnt/skills/public/bootstrap/SKILL.md",
+                "/mnt/skills/public/data-analysis/SKILL.md",
                 _THREAD_DATA,
                 read_only=True,
             )

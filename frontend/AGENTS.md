@@ -162,6 +162,9 @@ AI group by `(run_id, tool_call_id)`, including late/replayed and result-before-
 order. Legacy rows without a Run ID are isolated to one Human turn. Never attach an unknown
 orphan tool result to the most recent or final assistant group, and always synthesize a stable
 non-empty group key when legacy messages have no ID.
+After checkpoint compaction, a Run-admission HumanMessage may exist only in the complete journal
+while the materialized checkpoint retains that Run's tail. History/live merging must restore the
+admission before the first message of the same Run, not append it after the Run on refresh.
 
 Thread history must enumerate the complete newest-first Run catalog before offering per-Run
 message pagination. Never rely on the LangGraph SDK's default `runs.list()` limit of 10:
@@ -193,15 +196,24 @@ exist: it clears the detail selection, opens the file list, and exposes each fil
 separate keyboard-operable open button that does not overlap download/delete controls.
 After a terminal assistant answer exists, the UI keeps the safe semantic groups unchanged but
 projects any immediately preceding processing, Subagent, and `present_files` groups into one
-result: the final message's reasoning disclosure first, terminal answer next, then compact
-published-file rows. The completed disclosure reads the server-observed
-`additional_kwargs.reasoning_duration_ms`, floors it to whole seconds, and uses “under 1 second”
-for an observed sub-second interval. Missing or invalid legacy values remain the neutral
+result. Earlier lead-Agent reasoning, tool calls, Subagent cards, and the terminal message's own
+reasoning render in chronological order inside one compact, collapsed-by-default “Execution
+details” disclosure before the final answer.
+Every AI message keeps its own `ThinkingDisclosure`; reasoning must never be flattened into a
+generic execution step or combined with a later model call. Each disclosure reads that message's
+server-observed `additional_kwargs.reasoning_duration_ms`, floors it to whole seconds, and uses
+“under 1 second” for an observed sub-second interval. Opening the process disclosure shows the
+complete ordered history without a second “more steps” fold. In a completed turn that has this
+execution history, the terminal message's reasoning appears exactly once as its last reasoning
+disclosure; the answer and compact published-file rows remain outside and follow it. A simple
+direct answer with no preceding execution history keeps its own standalone reasoning disclosure.
+Missing or invalid legacy durations remain the neutral
 “Reasoning” label; the UI never substitutes Run duration. Exact Run duration remains a separate
 “Completed in” row after the result because it includes model latency, tools, Subagents, queues,
-and wait time. Completed execution detail and `present_files` transition prose are not repeated
-beside the result. In-flight, failed-before-answer, and clarification groups retain their original
-presentation so active work still has visible progress.
+and wait time. `present_files` transition prose is not repeated beside the result. During a live
+Run, every reasoning round remains represented and the current round opens automatically;
+failed-before-answer and clarification groups retain their original presentation so active work
+still has visible progress.
 
 Subtask state folds effective model and cumulative Token metadata from `task_started`,
 `task_running`, terminal custom events, and the authoritative terminal ToolMessage. Older delayed
@@ -247,7 +259,16 @@ when the first candidate package appears, locks conversation while local file ed
 and requires an explicit checksum-bound validation before one atomic commit. Warnings require
 acknowledgement; commit publishes version 1 while leaving the Skill suspended and unbound.
 Skill Builder queries and mutations use their own account+project root and are aborted and removed
-with the active private-work scope.
+with the active private-work scope. A message turn clears the composer and renders an optimistic
+user bubble immediately; the pending mutation's expected revision scopes that bubble so the
+canonical server message replaces it without duplication. Network or failed-session responses
+restore the submitted draft, and backend-unavailable errors use localized copy instead of exposing
+raw storage or proxy messages.
+The candidate workbench reconstructs folders from slash-separated file paths, so generated
+`scripts/`, `references/`, and `templates/` files remain independently selectable and editable.
+It does not persist empty folders or flatten nested paths. Builder currently exposes manual
+replacement of existing generated files only; creating, deleting, or renaming files is done by a
+subsequent AI candidate update even though the server draft-update contract supports those ops.
 
 Blank Project Skill creation remains one scoped backend mutation that atomically creates the
 disabled asset plus version 1 Draft containing a backend-valid root `SKILL.md`; the frontend must
@@ -297,6 +318,11 @@ System MCP may expose only the dedicated Credential-grant configuration flow; th
 Credential version IDs plus expected active grant revisions and does not republish or alter
 the MCP definition. System Credential lifecycle controls and project-scoped asset override
 authoring are separate surfaces and remain mutable.
+Platform asset pages render only exact System-scope rows. The system-admin project-governance
+routes render only rows owned by the selected project and never expose the System catalog or its
+binding controls there; mixed-scope responses are filtered again at the presentation boundary.
+This does not change member-facing project asset pages, which still combine authorized System
+bindings with project-owned assets where runtime selection requires both.
 
 Credential create/replace is an imperative authenticated request, not a TanStack mutation.
 Secret-bearing form values must never enter QueryCache or MutationCache, must be cleared after
@@ -374,6 +400,10 @@ Admin operation pages mount no query until the authenticated identity is confirm
 exception, locator, or secret fields. Closed/degraded readiness displays unavailable state,
 not fabricated zero counts. Safe requeue is shown only when the server returns exact
 eligibility for a parentless retention-purge predecessor.
+
+The Job catalog searches by project display name or slug and renders those human fields as the
+primary project identity. Project UUID remains available only through an accessible copy action
+for support and recovery workflows; it is not a user-facing search input or row label.
 
 Platform administration uses one compact shell for operations, projects, jobs, audit, assets,
 model settings, and system settings: a persistent 64px collapsed / 240px expanded desktop rail, a page-context top

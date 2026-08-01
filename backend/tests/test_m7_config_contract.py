@@ -182,7 +182,7 @@ sandbox:
 title:
   prompt_template: 'custom {max_words} {user_msg} {assistant_msg}'
 summarization:
-  summary_prompt: custom summary
+  summary_prompt: 'custom summary: {messages}'
 tool_output:
   storage_subdir: .custom-results
 subagents:
@@ -194,7 +194,7 @@ subagents:
     config = AppConfig.from_file(str(config_path))
 
     assert config.title.prompt_template.startswith("custom")
-    assert config.summarization.summary_prompt == "custom summary"
+    assert config.summarization.summary_prompt == "custom summary: {messages}"
     assert config.tool_output.storage_subdir == ".custom-results"
     assert config.subagents.timeout_seconds == 123
 

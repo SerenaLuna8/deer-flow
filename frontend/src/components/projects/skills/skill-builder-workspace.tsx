@@ -97,7 +97,10 @@ function SkillBuilderMessageBubble({
 }) {
   if (role === "user") {
     return (
-      <div className="flex justify-end">
+      <div
+        className="flex justify-end"
+        data-testid="skill-builder-user-message"
+      >
         <div className="bg-muted max-w-[88%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
           <SafeStreamdown>{content}</SafeStreamdown>
         </div>
@@ -157,6 +160,7 @@ function SkillBuilderProgress({ session }: { session: SkillBuilderSession }) {
 export function SkillBuilderConversationView({
   session,
   composerText,
+  pendingUserMessage,
   canAuthor,
   dirty,
   pending,
@@ -167,6 +171,7 @@ export function SkillBuilderConversationView({
 }: {
   session: SkillBuilderSession;
   composerText: string;
+  pendingUserMessage?: string | null;
   canAuthor: boolean;
   dirty: boolean;
   pending: boolean;
@@ -181,7 +186,9 @@ export function SkillBuilderConversationView({
     skillBuilderComposerDisabled(session, pending, dirty) || !canAuthor;
   const clarificationOpen = Boolean(session.active_clarification);
   const generating =
-    session.status === "generating" || session.status === "committing";
+    Boolean(pendingUserMessage) ||
+    session.status === "generating" ||
+    session.status === "committing";
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -220,6 +227,10 @@ export function SkillBuilderConversationView({
             content={message.content}
           />
         ))}
+
+        {pendingUserMessage ? (
+          <SkillBuilderMessageBubble role="user" content={pendingUserMessage} />
+        ) : null}
 
         {session.active_clarification ? (
           <section className="border-border/70 rounded-2xl border px-4">
@@ -396,6 +407,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const previousChecksumRef = useRef<string | null>(null);
   const allowLeaveRef = useRef(false);
   const session = sessionQuery.data;
+  const pendingUserMessage =
+    submitTurn.isPending &&
+    submitTurn.variables?.input.kind === "message" &&
+    session?.revision === submitTurn.variables.expected_revision
+      ? submitTurn.variables.input.message
+      : null;
   const canAuthor = skillBuilderCanAuthor(project.capabilities);
   const changes = useMemo(
     () => (session ? skillBuilderDraftChanges(session.files, drafts) : []),
@@ -576,14 +593,19 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       expected_revision: session.revision,
       idempotency_key: key,
     }));
+    setComposerText("");
     submitTurn.mutate(command, {
       onSuccess: (response) => {
-        if (response.data.status === "failed") return;
+        if (response.data.status === "failed") {
+          setComposerText((current) => current || message);
+          return;
+        }
         idempotency.complete("message-turn", signature);
-        setComposerText("");
       },
-      onError: (error) =>
-        refreshAfterConflict("message-turn", signature, error),
+      onError: (error) => {
+        setComposerText((current) => current || message);
+        refreshAfterConflict("message-turn", signature, error);
+      },
     });
   }
 
@@ -877,6 +899,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               <SkillBuilderConversationView
                 session={session}
                 composerText={composerText}
+                pendingUserMessage={pendingUserMessage}
                 canAuthor={canAuthor}
                 dirty={dirty}
                 pending={mutationPending}

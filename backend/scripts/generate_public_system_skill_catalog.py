@@ -15,7 +15,7 @@ from pathlib import Path
 from app.shared_assets.bootstrap.skill_archive import dump_skill_archive
 from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.skill_service import _analyze_skill_files
-from scripts.import_project_skills import load_project_skill_sources
+from scripts.import_project_skills import ProjectSkillImportError, load_project_skill_sources
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_ROOT = _REPOSITORY_ROOT / "skills" / "public"
@@ -24,7 +24,6 @@ _CATALOG_PATH = _BOOTSTRAP_ROOT / "catalog.json"
 _OUTPUT_ROOT = _BOOTSTRAP_ROOT / "content" / "public-skills"
 _PAYLOAD_PREFIX = "content/public-skills/"
 _SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
-_EXPECTED_SKILL_COUNT = 21
 
 
 def _skill_name(files) -> str:
@@ -43,14 +42,12 @@ def _skill_name(files) -> str:
 
 def _expected_outputs() -> tuple[bytes, dict[str, bytes]]:
     raw_catalog = json.loads(_CATALOG_PATH.read_text(encoding="utf-8"))
-    retained_entries = [entry for entry in raw_catalog["entries"] if not str(entry.get("payload_path", "")).startswith(_PAYLOAD_PREFIX)]
+    retained_entries = [entry for entry in raw_catalog["entries"] if entry.get("kind") != "skill"]
     generated_entries: list[dict[str, object]] = []
     payloads: dict[str, bytes] = {}
     seen_names: set[str] = set()
 
     sources = load_project_skill_sources(_SOURCE_ROOT)
-    if len(sources) != _EXPECTED_SKILL_COUNT:
-        raise ValueError("public Skill catalog count is invalid")
     for source in sources:
         name = _skill_name(source.files)
         if name in seen_names:
@@ -154,7 +151,14 @@ def main() -> int:
     args = parser.parse_args()
     try:
         catalog_bytes, payloads = _expected_outputs()
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        ProjectSkillImportError,
+    ):
         print("error: public system Skill catalog generation failed", file=sys.stderr)
         return 1
     if args.check:

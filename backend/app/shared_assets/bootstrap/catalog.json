@@ -72,25 +72,6 @@
       "sha256": "2a99fe96df03cd61d1eec4e53a871bb9bbe007e496e38e4b076203221dd5fd7c"
     },
     {
-      "source_key": "builtin:skill:deerflow-core",
-      "kind": "skill",
-      "slug": "deerflow-core",
-      "display_name": "DeerFlow Core",
-      "version": 1,
-      "payload_path": "content/deerflow-core-v1.skill.md",
-      "sha256": "7c4ad88ee087dd9c0f9aa386f2c067c08706befeae442f1e2b451524619e3f03"
-    },
-    {
-      "source_key": "builtin:skill:find-skills",
-      "kind": "skill",
-      "slug": "find-skills",
-      "display_name": "find-skills",
-      "version": 1,
-      "payload_path": "content/public-skills/find-skills-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "fc5e8d039c282b378b73edd555cb9de5ef324dec22193d237c97b0209070e651"
-    },
-    {
       "source_key": "builtin:skill:frontend-design",
       "kind": "skill",
       "slug": "frontend-design",
@@ -111,26 +92,6 @@
       "sha256": "01ccc5ed04854abeda7be80013676f8c4c9539ab8c3d46b9a4e569a4e137fa6b"
     },
     {
-      "source_key": "builtin:skill:image-generation",
-      "kind": "skill",
-      "slug": "image-generation",
-      "display_name": "image-generation",
-      "version": 1,
-      "payload_path": "content/public-skills/image-generation-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "2dddc0110ac007f67fc3910e8fcfcb6d50b348a3f0bad73dff63e32577e766d4"
-    },
-    {
-      "source_key": "builtin:skill:music-generation",
-      "kind": "skill",
-      "slug": "music-generation",
-      "display_name": "music-generation",
-      "version": 1,
-      "payload_path": "content/public-skills/music-generation-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "9ec15d2960ce33e12a980b1e193261ecbf32d6017655d85bed7f9b5c83035ecc"
-    },
-    {
       "source_key": "builtin:skill:newsletter-generation",
       "kind": "skill",
       "slug": "newsletter-generation",
@@ -139,26 +100,6 @@
       "payload_path": "content/public-skills/newsletter-generation-v1.skill.json",
       "payload_format": "skill_archive_v1",
       "sha256": "570796893db146b2e0354b7085ea95a37e0b3e307e0d414b348ab6e9f2ffc995"
-    },
-    {
-      "source_key": "builtin:skill:podcast-generation",
-      "kind": "skill",
-      "slug": "podcast-generation",
-      "display_name": "podcast-generation",
-      "version": 1,
-      "payload_path": "content/public-skills/podcast-generation-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "c65b179f31b47806cb9ecc7edb62f1f71bb43b0b41eae251d8092e341ce6d5c8"
-    },
-    {
-      "source_key": "builtin:skill:ppt-generation",
-      "kind": "skill",
-      "slug": "ppt-generation",
-      "display_name": "ppt-generation",
-      "version": 1,
-      "payload_path": "content/public-skills/ppt-generation-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "b9207269d956be9e5a9425f2d248b33bbda8509d86b96901c4116c3fd0745ff2"
     },
     {
       "source_key": "builtin:skill:skill-creator",
@@ -191,26 +132,6 @@
       "sha256": "4190ad7d4db02836a1d38e6383dbe3d65632ff2b9867a0a8b558d776f1223c87"
     },
     {
-      "source_key": "builtin:skill:vercel-deploy",
-      "kind": "skill",
-      "slug": "vercel-deploy",
-      "display_name": "vercel-deploy",
-      "version": 1,
-      "payload_path": "content/public-skills/vercel-deploy-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "fdd0c9fd6dc802e6b6e0af59746049a113a1473893d79faf8ac6a4ca1e81e726"
-    },
-    {
-      "source_key": "builtin:skill:video-generation",
-      "kind": "skill",
-      "slug": "video-generation",
-      "display_name": "video-generation",
-      "version": 1,
-      "payload_path": "content/public-skills/video-generation-v1.skill.json",
-      "payload_format": "skill_archive_v1",
-      "sha256": "32060bc5443192edb070c0fa48f174cbdff89062027e50db40aef32356308788"
-    },
-    {
       "source_key": "builtin:skill:web-design-guidelines",
       "kind": "skill",
       "slug": "web-design-guidelines",
@@ -236,7 +157,7 @@
       "display_name": "Main",
       "version": 1,
       "payload_path": "content/project-assistant-v1.agent.json",
-      "sha256": "1545e960f515eb1b8471e24bbb7b3bf406016bc6daa327dc7237fcbcbb741c7e"
+      "sha256": "773217fba6f7a3182b2cac920ef310ed08422fc0a6b79e3b4eae70d843ac1196"
     }
   ]
 }

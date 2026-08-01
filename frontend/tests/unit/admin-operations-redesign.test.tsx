@@ -38,6 +38,8 @@ import {
   retreatAdminCursor,
 } from "@/components/admin/ui/admin-page";
 import { I18nProvider } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 const PROJECT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -48,6 +50,43 @@ function render(view: React.ReactNode, locale: "en-US" | "zh-CN" = "en-US") {
 }
 
 describe("admin operations visual system", () => {
+  test("uses a human-readable project search in the compact jobs toolbar", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/admin/operations/admin-jobs.tsx"),
+      "utf8",
+    );
+
+    expect(zhCN.adminOperations.jobs.filters).toMatchObject({
+      label: "筛选任务",
+      project: "项目",
+      projectQuery: "搜索项目",
+      projectQueryPlaceholder: "按项目名称或短标识搜索",
+      apply: "查询",
+      clear: "重置",
+    });
+    expect(enUS.adminOperations.jobs.filters).toMatchObject({
+      label: "Filter jobs",
+      project: "Project",
+      projectQuery: "Search projects",
+      projectQueryPlaceholder: "Search by project name or slug",
+      apply: "Search",
+      clear: "Reset",
+    });
+    expect(source).toContain(
+      'className="grid gap-2 sm:grid-cols-2 lg:flex lg:flex-wrap lg:items-center"',
+    );
+    expect(source).toContain("lg:w-80");
+    expect(source).toContain("SearchIcon");
+    expect(source).toContain("project_display_name");
+    expect(source).toContain("project_slug");
+    expect(source).toContain("copyProjectId");
+    expect(source).toContain('variant="ghost"');
+    expect(source).toContain("disabled={!canResetFilters}");
+    expect(source).not.toContain("HashIcon");
+    expect(source).not.toContain("projectPlaceholder");
+    expect(source).not.toContain("00000000-0000-0000-0000-000000000000");
+  });
+
   test("uses one dense metric and readiness language for the overview", () => {
     const html = render(
       <OperationsOverviewStateView
@@ -188,6 +227,8 @@ describe("admin operations visual system", () => {
                   job_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                   dead_job_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
                   project_id: PROJECT_ID,
+                  project_slug: "alpha-project",
+                  project_display_name: "Alpha Project",
                   job_type: "retention_purge",
                   status: "dead",
                   retry_safety: "safe",
@@ -238,7 +279,11 @@ describe("admin operations visual system", () => {
     expect(jobs).toContain("<table");
     expect(jobs).toContain("<thead");
     expect(jobs).toContain("Job ID");
-    expect(jobs).toContain("Project ID");
+    expect(jobs).toContain("Project");
+    expect(jobs).toContain("Alpha Project");
+    expect(jobs).toContain("alpha-project");
+    expect(jobs).toContain("Copy project UUID");
+    expect(jobs).not.toContain(PROJECT_ID);
     expect(jobs).toContain('data-status="dead"');
     expect(jobs).toContain("Requeue safe job");
     expect(jobs).toContain("PURGE_FAILED");
@@ -275,6 +320,8 @@ describe("admin operations visual system", () => {
                   job_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                   dead_job_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
                   project_id: PROJECT_ID,
+                  project_slug: "alpha-project",
+                  project_display_name: "Alpha Project",
                   job_type: "retention_purge",
                   status: "dead",
                   retry_safety: "safe",

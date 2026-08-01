@@ -1148,6 +1148,15 @@ class SkillDesignService:
                         )
                     else:
                         self._append_turn_input(context, row, command.input)
+                    row.status = SkillDesignStatus.GENERATING.value
+                    row.active_clarification_json = None
+                    row.validation_json = None
+                    row.validated_draft_checksum = None
+                    row.error_code = None
+                    row.error_message = None
+                    row.progress_json = self._progress_json(SkillDesignStatus.GENERATING)
+                    row.revision += 1
+                    self._reset_operation(operation)
                     files = await repository.load_draft_files(
                         context,
                         row.id,
@@ -1177,15 +1186,6 @@ class SkillDesignService:
                             for item in files
                         ),
                     )
-                    row.status = SkillDesignStatus.GENERATING.value
-                    row.active_clarification_json = None
-                    row.validation_json = None
-                    row.validated_draft_checksum = None
-                    row.error_code = None
-                    row.error_message = None
-                    row.progress_json = self._progress_json(SkillDesignStatus.GENERATING)
-                    row.revision += 1
-                    self._reset_operation(operation)
                     await session.flush()
                     return (
                         row.revision,

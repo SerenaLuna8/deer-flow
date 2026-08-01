@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
+from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from support.m4_private_work import (
@@ -25,9 +26,16 @@ from app.private_work.authorization import (
     PrivateRunAuthorizationBoundary,
     PrivateRunAuthorizationService,
 )
+from app.private_work.chat_controls import ProjectChatControlService
+from app.private_work.checkpoint_state import (
+    bind_scoped_checkpoint_state,
+    checkpoint_config,
+    snapshot_checkpoint_id,
+)
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
+    PrivateWorkConflict,
     PrivateWorkForbidden,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
@@ -41,7 +49,7 @@ from app.private_work.run_admission import (
     PrivateRunAdmissionService,
     PrivateRunInboundAuthority,
 )
-from app.private_work.run_repository import PrivateRunCreate
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import (
     PrivateThreadRecord,
     PrivateThreadRepository,
@@ -57,6 +65,8 @@ from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.models import AssetKind, AssetSelection, SkillArchiveFile
 from app.shared_assets.skill_service import CreateSkill, SkillService
 from deerflow.agents.memory.storage import create_empty_memory
+from deerflow.agents.middlewares.summarization_middleware import ContextCompactionResult
+from deerflow.config.app_config import AppConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
@@ -78,6 +88,83 @@ from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 async def _payload_chunks(payload: bytes):
     yield payload
+
+
+def _compaction_app_config(
+    database_url: str,
+    mode: str,
+) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "sandbox": {"use": "test"},
+            "database": {
+                "url": database_url,
+                "checkpoint_channel_mode": mode,
+                "checkpoint_delta": {"snapshot_frequency": 100},
+            },
+            "summarization": {
+                "enabled": True,
+                "model_name": "release-summary-model",
+                "keep": {"type": "messages", "value": 2},
+            },
+        }
+    )
+
+
+class _DeterministicCompactionMiddleware:
+    """Exercise persistence and authorization without calling a provider."""
+
+    def __init__(self, observed_message_ids: list[tuple[str | None, ...]]) -> None:
+        self._observed_message_ids = observed_message_ids
+
+    async def acompact_state(self, state, _runtime, *, force: bool = False):
+        assert force is True
+        messages = list(state["messages"])
+        self._observed_message_ids.append(tuple(message.id for message in messages))
+        if len(messages) < 3:
+            return None
+        return ContextCompactionResult(
+            summary_text="release-summary: request-one and answer-one",
+            messages_to_summarize=tuple(messages[:-2]),
+            preserved_messages=tuple(messages[-2:]),
+            total_tokens=123,
+        )
+
+
+def _compaction_service(scenario: M4ReleaseScenario) -> ProjectChatControlService:
+    return ProjectChatControlService(
+        scenario.seed.factory,
+        scenario.project_checkpointer,
+        scenario.thread_service,
+        DbRunEventStore(scenario.seed.factory),
+    )
+
+
+async def _seed_compaction_messages(
+    scenario: M4ReleaseScenario,
+    *,
+    thread_id: str,
+    app_config: AppConfig,
+):
+    accessor = bind_scoped_checkpoint_state(
+        scenario.project_checkpointer,
+        scenario.seed.owner_a,
+        app_config,
+        as_node="release_compaction_seed",
+    )
+    messages = (
+        HumanMessage(content="request one", id="release-human-1"),
+        AIMessage(content="answer one", id="release-ai-1"),
+        HumanMessage(content="request two", id="release-human-2"),
+        AIMessage(content="answer two", id="release-ai-2"),
+    )
+    for message in messages:
+        await accessor.aupdate(
+            checkpoint_config(thread_id),
+            {"messages": [message]},
+            as_node="release_compaction_seed",
+        )
+    return accessor, messages
 
 
 class _TwoPartyGate:
@@ -1234,6 +1321,297 @@ async def test_exact_agent_snapshots_checkpoint_scope_and_revocation_fail_closed
             )
         with pytest.raises(AuthorizationRevoked):
             await boundary.before_checkpoint_write()
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint_mode", ("full", "delta"))
+async def test_manual_compaction_materializes_summary_and_retained_tail_in_postgres(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint_mode: str,
+) -> None:
+    import deerflow.runtime.context_compaction as context_compaction
+
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    observed_message_ids: list[tuple[str | None, ...]] = []
+    middleware = _DeterministicCompactionMiddleware(observed_message_ids)
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+    try:
+        app_config = _compaction_app_config(
+            migrated_postgres_database_url,
+            checkpoint_mode,
+        )
+        thread = await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=f"release-compaction-{checkpoint_mode}",
+            agent=ThreadAgentRef(scenario.seed.project_agent_id, "project"),
+        )
+        accessor, messages = await _seed_compaction_messages(
+            scenario,
+            thread_id=thread.thread_id,
+            app_config=app_config,
+        )
+        before = await accessor.aget(checkpoint_config(thread.thread_id))
+        assert [message.id for message in before.values["messages"]] == [message.id for message in messages]
+
+        raw_before = await scenario.raw_checkpointer.aget_tuple(checkpoint_config(thread.thread_id))
+        assert raw_before is not None
+        if checkpoint_mode == "delta":
+            assert raw_before.metadata["deerflow_checkpoint_channel_mode"] == "delta"
+            assert "messages" not in raw_before.checkpoint["channel_values"]
+        else:
+            assert "deerflow_checkpoint_channel_mode" not in raw_before.metadata
+            assert [message.id for message in raw_before.checkpoint["channel_values"]["messages"]] == [message.id for message in messages]
+
+        service = _compaction_service(scenario)
+        with pytest.raises(PrivateWorkNotFound):
+            await service.compact(
+                scenario.seed.owner_b,
+                thread.thread_id,
+                force=True,
+                keep=None,
+                app_config=app_config,
+            )
+        with pytest.raises(PrivateWorkNotFound):
+            await service.compact(
+                scenario.seed.project_b_owner_a,
+                thread.thread_id,
+                force=True,
+                keep=None,
+                app_config=app_config,
+            )
+        with pytest.raises(PrivateWorkForbidden):
+            await service.compact(
+                scenario.seed.viewer,
+                thread.thread_id,
+                force=True,
+                keep=None,
+                app_config=app_config,
+            )
+        assert observed_message_ids == []
+
+        result = await service.compact(
+            scenario.seed.owner_a,
+            thread.thread_id,
+            force=True,
+            keep=None,
+            app_config=app_config,
+        )
+
+        assert result.compacted is True
+        assert result.removed_message_count == 2
+        assert result.preserved_message_count == 2
+        assert result.summary_updated is True
+        assert result.checkpoint_id is not None
+        assert result.total_tokens == 123
+        assert observed_message_ids == [tuple(message.id for message in messages)]
+
+        latest = await accessor.aget(checkpoint_config(thread.thread_id))
+        assert snapshot_checkpoint_id(latest) == result.checkpoint_id
+        assert latest.values["summary_text"] == "release-summary: request-one and answer-one"
+        assert [message.id for message in latest.values["messages"]] == [
+            "release-human-2",
+            "release-ai-2",
+        ]
+        raw_latest = await scenario.raw_checkpointer.aget_tuple(
+            checkpoint_config(
+                thread.thread_id,
+                checkpoint_id=result.checkpoint_id,
+            )
+        )
+        assert raw_latest is not None
+        assert raw_latest.config["configurable"]["checkpoint_id"] == result.checkpoint_id
+        if checkpoint_mode == "delta":
+            assert raw_latest.metadata["deerflow_checkpoint_channel_mode"] == "delta"
+            assert "messages" not in raw_latest.checkpoint["channel_values"]
+        else:
+            assert "deerflow_checkpoint_channel_mode" not in raw_latest.metadata
+            assert [message.id for message in raw_latest.checkpoint["channel_values"]["messages"]] == [
+                "release-human-2",
+                "release-ai-2",
+            ]
+        history = await accessor.ahistory(
+            checkpoint_config(thread.thread_id),
+            limit=2,
+        )
+        assert [[message.id for message in snapshot.values["messages"]] for snapshot in history] == [
+            ["release-human-2", "release-ai-2"],
+            [message.id for message in messages],
+        ]
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint_mode", ("full", "delta"))
+async def test_manual_compaction_postgres_compare_and_swap_rejects_a_new_head(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint_mode: str,
+) -> None:
+    import app.private_work.chat_controls as chat_controls
+    import deerflow.runtime.context_compaction as context_compaction
+
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    observed_message_ids: list[tuple[str | None, ...]] = []
+    middleware = _DeterministicCompactionMiddleware(observed_message_ids)
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+    original_prepare = context_compaction.prepare_thread_compaction
+    try:
+        app_config = _compaction_app_config(
+            migrated_postgres_database_url,
+            checkpoint_mode,
+        )
+        thread = await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=f"release-compaction-cas-{checkpoint_mode}",
+            agent=ThreadAgentRef(scenario.seed.project_agent_id, "project"),
+        )
+        accessor, messages = await _seed_compaction_messages(
+            scenario,
+            thread_id=thread.thread_id,
+            app_config=app_config,
+        )
+        source = await accessor.aget(checkpoint_config(thread.thread_id))
+        source_checkpoint_id = snapshot_checkpoint_id(source)
+        assert source_checkpoint_id is not None
+
+        raced_checkpoint_id: str | None = None
+
+        async def prepare_then_advance_head(reader, selected_thread_id, **kwargs):
+            nonlocal raced_checkpoint_id
+            prepared = await original_prepare(
+                reader,
+                selected_thread_id,
+                **kwargs,
+            )
+            raced = await accessor.aupdate(
+                checkpoint_config(selected_thread_id),
+                {"title": "newer concurrent head"},
+                as_node="release_compaction_seed",
+            )
+            raced_checkpoint_id = raced["configurable"]["checkpoint_id"]
+            return prepared
+
+        monkeypatch.setattr(
+            chat_controls,
+            "prepare_thread_compaction",
+            prepare_then_advance_head,
+        )
+
+        with pytest.raises(PrivateWorkConflict):
+            await _compaction_service(scenario).compact(
+                scenario.seed.owner_a,
+                thread.thread_id,
+                force=True,
+                keep=None,
+                app_config=app_config,
+            )
+
+        assert raced_checkpoint_id is not None
+        assert raced_checkpoint_id != source_checkpoint_id
+        assert observed_message_ids == [tuple(message.id for message in messages)]
+        current = await accessor.aget(checkpoint_config(thread.thread_id))
+        assert snapshot_checkpoint_id(current) == raced_checkpoint_id
+        assert current.values["title"] == "newer concurrent head"
+        assert [message.id for message in current.values["messages"]] == [message.id for message in messages]
+        assert not current.values.get("summary_text")
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_status", "finalization_status"),
+    (
+        ("pending", "pending"),
+        ("running", "pending"),
+        ("success", "finalizing"),
+    ),
+)
+async def test_manual_compaction_rejects_incomplete_postgres_run(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    run_status: str,
+    finalization_status: str,
+) -> None:
+    import deerflow.runtime.context_compaction as context_compaction
+
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    observed_message_ids: list[tuple[str | None, ...]] = []
+    middleware = _DeterministicCompactionMiddleware(observed_message_ids)
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: middleware,
+    )
+    try:
+        app_config = _compaction_app_config(
+            migrated_postgres_database_url,
+            "full",
+        )
+        thread = await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=f"release-compaction-active-{run_status}-{finalization_status}",
+            agent=ThreadAgentRef(scenario.seed.project_agent_id, "project"),
+        )
+        accessor, messages = await _seed_compaction_messages(
+            scenario,
+            thread_id=thread.thread_id,
+            app_config=app_config,
+        )
+        before = await accessor.aget(checkpoint_config(thread.thread_id))
+        before_checkpoint_id = snapshot_checkpoint_id(before)
+        assert before_checkpoint_id is not None
+
+        run_id = str(uuid.uuid4())
+        async with scenario.seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).create(
+                scope=scenario.seed.owner_a.resource_scope,
+                thread_id=thread.thread_id,
+                request=PrivateRunCreate(
+                    run_id=run_id,
+                    status=run_status,
+                    model_name="release-model",
+                ),
+            )
+            if finalization_status == "finalizing":
+                await session.execute(
+                    text("UPDATE runs SET finalization_status='finalizing' WHERE project_id=:project_id AND owner_user_id=:owner_user_id AND run_id=:run_id"),
+                    {
+                        "project_id": scenario.seed.owner_a.project_id,
+                        "owner_user_id": str(scenario.seed.owner_a.user_id),
+                        "run_id": run_id,
+                    },
+                )
+
+        with pytest.raises(PrivateWorkConflict):
+            await _compaction_service(scenario).compact(
+                scenario.seed.owner_a,
+                thread.thread_id,
+                force=True,
+                keep=None,
+                app_config=app_config,
+            )
+
+        assert observed_message_ids == []
+        current = await accessor.aget(checkpoint_config(thread.thread_id))
+        assert snapshot_checkpoint_id(current) == before_checkpoint_id
+        assert [message.id for message in current.values["messages"]] == [message.id for message in messages]
+        assert not current.values.get("summary_text")
     finally:
         await scenario.close()
 

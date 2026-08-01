@@ -169,6 +169,35 @@ describe("Skill Builder UI", () => {
     expect(html).toContain("等待你回答上方问题");
   });
 
+  test("renders a pending user turn before the Builder response completes", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <SkillBuilderConversationView
+          session={{
+            ...session,
+            status: "interviewing",
+            messages: [],
+            files: [],
+            draft_checksum: null,
+            validation: null,
+          }}
+          composerText=""
+          pendingUserMessage="写代码"
+          canAuthor
+          dirty={false}
+          pending
+          errorMessage={null}
+          onComposerTextChange={() => undefined}
+          onSubmitMessage={() => undefined}
+          onSubmitClarification={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("写代码");
+    expect(html).toContain("skill-creator 正在生成候选文件");
+  });
+
   test("renders one selected candidate file, validation warning and disabled-by-default commit", () => {
     const html = renderToStaticMarkup(
       <SkillBuilderCandidateWorkbench
@@ -217,13 +246,18 @@ describe("Skill Builder UI", () => {
     ).toContain("已存在同名 Skill");
     expect(
       skillBuilderErrorMessage(
-        new SkillBuilderApiError(
-          429,
-          "SKILL_BUILDER_LIMIT_EXCEEDED",
-          "quota",
-        ),
+        new SkillBuilderApiError(429, "SKILL_BUILDER_LIMIT_EXCEEDED", "quota"),
       ),
     ).toContain("会话已达到上限");
+    expect(
+      skillBuilderErrorMessage(
+        new SkillBuilderApiError(
+          503,
+          "SKILL_BUILDER_UNAVAILABLE",
+          "Asset storage unavailable",
+        ),
+      ),
+    ).toBe("Skill 设计服务暂时不可用，请稍后重试。");
   });
 
   test("keeps drafts for multiple selected files and exposes all three list creation paths", () => {

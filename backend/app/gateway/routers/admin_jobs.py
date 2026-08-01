@@ -30,6 +30,8 @@ class AdminJobResponse(BaseModel):
     job_id: uuid.UUID
     dead_job_id: uuid.UUID | None
     project_id: uuid.UUID
+    project_slug: str = Field(min_length=3, max_length=63, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    project_display_name: str = Field(min_length=1, max_length=120)
     job_type: Literal["private_run", "automation_run", "retention_purge"]
     status: Literal[
         "queued",
@@ -76,6 +78,8 @@ def _response(item: AdminJobRecord) -> AdminJobResponse:
         job_id=item.job_id,
         dead_job_id=item.dead_job_id,
         project_id=item.project_id,
+        project_slug=item.project_slug,
+        project_display_name=item.project_display_name,
         job_type=item.job_type,
         status=item.status,
         retry_safety=item.retry_safety,
@@ -91,6 +95,7 @@ async def list_admin_jobs(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: Annotated[str | None, Query(max_length=256)] = None,
     project_id: uuid.UUID | None = None,
+    project_query: Annotated[str | None, Query(min_length=1, max_length=120)] = None,
     status: Literal[
         "queued",
         "leased",
@@ -107,13 +112,15 @@ async def list_admin_jobs(
     session: AsyncSession = Depends(project_session),
 ) -> AdminJobPageResponse:
     async with session.begin():
-        await current_system_context(session, identity)
+        context = await current_system_context(session, identity)
         page = await SystemOperationsRepository(session).list_jobs(
             limit=limit,
             cursor=cursor,
             project_id=project_id,
+            project_query=project_query,
             status=status,
             job_type=type,
+            request_id=context.request_id,
         )
         return AdminJobPageResponse(
             items=[_response(item) for item in page.items],

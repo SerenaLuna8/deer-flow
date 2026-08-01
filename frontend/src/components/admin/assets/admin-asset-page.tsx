@@ -93,6 +93,7 @@ import {
   adminMcpTransportLabel,
   adminAssetErrorMessage,
   filterAndSortAdminAssets,
+  filterSystemAdminCatalogItems,
   type AdminAssetCatalogFilters,
   type AdminAssetPublicationFilter,
   type AdminAssetUpdatedSort,
@@ -2185,8 +2186,9 @@ function CredentialList({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const secureWrite = useSecureCredentialWrite(accountId);
   const rotationStatus = useAdminCredentialRotationStatus(accountId);
+  const items = filterSystemAdminCatalogItems(data.items);
   const selected =
-    data.items.find((credential) => credential.id === selectedId) ?? null;
+    items.find((credential) => credential.id === selectedId) ?? null;
 
   return (
     <div className="min-w-0">
@@ -2232,7 +2234,7 @@ function CredentialList({
       ) : null}
       <div className="mb-4 flex items-center justify-between gap-3">
         <p className="text-muted-foreground text-xs">
-          {t.adminAssets.pages.credentialCount(data.items.length)}
+          {t.adminAssets.pages.credentialCount(items.length)}
         </p>
         <Button
           type="button"
@@ -2245,11 +2247,11 @@ function CredentialList({
           {t.adminAssets.common.createCredential}
         </Button>
       </div>
-      {data.items.length === 0 ? (
+      {items.length === 0 ? (
         <EmptyState label={t.adminAssets.navigation.credential} />
       ) : (
         <CredentialCatalogDirectory
-          items={data.items}
+          items={items}
           selectedId={selectedId}
           onSelect={(credential) => setSelectedId(credential.id)}
         />
@@ -2306,13 +2308,14 @@ function SystemAssetList({
   refreshing: boolean;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selected = data.items.find((asset) => asset.id === selectedId) ?? null;
+  const items = filterSystemAdminCatalogItems(data.items);
+  const selected = items.find((asset) => asset.id === selectedId) ?? null;
 
   return (
     <div className="min-w-0 space-y-4">
       <SystemCatalogDirectory
         kind={kind}
-        items={data.items}
+        items={items}
         selectedId={selectedId}
         onSelect={(asset) => setSelectedId(asset.id)}
         onRefresh={onRefresh}

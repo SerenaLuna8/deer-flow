@@ -27,10 +27,12 @@ export function ThinkingDisclosure({
   defaultOpen,
   duration: observedDuration,
   isStreaming = false,
+  statusDetail,
   ...props
 }: Omit<ReasoningProps, "defaultOpen" | "onOpenChange" | "open"> & {
   children?: ReactNode;
   defaultOpen?: boolean;
+  statusDetail?: ReactNode;
 }) {
   const [isOpen, setIsOpen] = useState(defaultOpen ?? isStreaming);
   const previousIsStreaming = useRef(isStreaming);
@@ -66,6 +68,7 @@ export function ThinkingDisclosure({
       <ThinkingDisclosureTrigger
         completedDuration={observedDuration}
         hasContent={children != null}
+        statusDetail={statusDetail}
       />
       {children}
     </Reasoning>
@@ -94,9 +97,11 @@ export function ThinkingDisclosureContent({
 function ThinkingDisclosureTrigger({
   completedDuration,
   hasContent,
+  statusDetail,
 }: {
   completedDuration?: number;
   hasContent: boolean;
+  statusDetail?: ReactNode;
 }) {
   const { isOpen, isStreaming, startTime } = useReasoning();
 
@@ -114,6 +119,11 @@ function ThinkingDisclosureTrigger({
         isStreaming={isStreaming}
         startTime={startTime}
       />
+      {statusDetail != null && (
+        <span className="text-muted-foreground/70 font-mono text-[11px]">
+          {statusDetail}
+        </span>
+      )}
       {hasContent && (
         <ChevronRightIcon
           className={cn(

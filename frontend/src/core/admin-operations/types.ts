@@ -151,6 +151,12 @@ export const adminJobSchema = z
     job_id: z.string().uuid(),
     dead_job_id: z.string().uuid().nullable(),
     project_id: z.string().uuid(),
+    project_slug: z
+      .string()
+      .min(3)
+      .max(63)
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
+    project_display_name: z.string().min(1).max(120),
     job_type: z.enum(["private_run", "automation_run", "retention_purge"]),
     status: z.enum([
       "queued",
@@ -207,7 +213,7 @@ export const projectFiltersSchema = z
 
 export const jobFiltersSchema = z
   .object({
-    project_id: z.string().uuid().optional(),
+    project_query: z.string().min(1).max(120).optional(),
     status: z
       .enum([
         "queued",

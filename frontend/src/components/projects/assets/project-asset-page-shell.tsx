@@ -1173,7 +1173,6 @@ function ProjectAssetCatalog({
 export function ProjectAssetPageShell({
   kind,
   title,
-  description,
   layout = "default",
   initialSelectedAssetId = null,
   renderList,
@@ -1183,7 +1182,6 @@ export function ProjectAssetPageShell({
 }: {
   kind: MutableAssetKind;
   title: string;
-  description: string;
   layout?: ProjectAssetPageLayout;
   initialSelectedAssetId?: string | null;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
@@ -1210,9 +1208,7 @@ export function ProjectAssetPageShell({
     <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
       <ProjectPageHeader
         className="mb-5"
-        eyebrow={`${project.display_name} · 项目资产`}
         title={title}
-        description={description}
         actions={
           layout === "agent-cards" &&
           agentBuilderCanAuthor(project.capabilities) ? (

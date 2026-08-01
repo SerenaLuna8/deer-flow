@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -14,8 +14,61 @@ from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound, Pro
 from app.projects.models import CreateProject, ProjectChanges
 from app.projects.repository import ProjectRepository
 from deerflow.persistence.shared_assets.agent_model import AgentRow
+from deerflow.persistence.shared_assets.binding_model import (
+    ProjectSystemAgentBindingRow,
+    ProjectSystemMcpBindingRow,
+    ProjectSystemSkillBindingRow,
+)
 from deerflow.persistence.shared_assets.mcp_model import McpServerRow
-from deerflow.persistence.shared_assets.skill_model import SkillRow
+from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
+
+
+async def _insert_system_skill(
+    connection,
+    *,
+    actor_id: uuid.UUID,
+    slug: str,
+    status: str = "active",
+    publish: bool = True,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    skill_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    await connection.execute(
+        text(
+            """INSERT INTO skills
+            (id,scope,slug,display_name,status,created_by_user_id)
+            VALUES (:id,'system',:slug,:slug,:status,:actor)"""
+        ),
+        {
+            "id": skill_id,
+            "slug": slug,
+            "status": status,
+            "actor": str(actor_id),
+        },
+    )
+    await connection.execute(
+        text(
+            """INSERT INTO skill_versions
+            (id,skill_id,version_number,workflow_status,scan_decision,payload_checksum,created_by_user_id)
+            VALUES (:version,:skill,1,'draft','allow',:checksum,:actor)"""
+        ),
+        {
+            "version": version_id,
+            "skill": skill_id,
+            "checksum": uuid.uuid4().hex * 2,
+            "actor": str(actor_id),
+        },
+    )
+    if publish:
+        await connection.execute(
+            text("UPDATE skill_versions SET workflow_status='published' WHERE id=:version"),
+            {"version": version_id},
+        )
+        await connection.execute(
+            text("UPDATE skills SET current_published_version_id=:version WHERE id=:skill"),
+            {"version": version_id, "skill": skill_id},
+        )
+    return skill_id, version_id
 
 
 @pytest.mark.asyncio
@@ -96,6 +149,82 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
             outsider_context = context.__class__(outsider, context.project_id, context.membership_id, context.role, context.capabilities, context.membership_version, "req")
             with pytest.raises(ProjectNotFound):
                 await ProjectRepository(session).get(outsider_context)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_project_pins_every_active_published_system_skill_by_default(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner = uuid.uuid4()
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,'default-skills@example.com','user',:now,false,0)"""
+                ),
+                {"id": str(owner), "now": datetime.now(UTC)},
+            )
+            active_skill = await _insert_system_skill(
+                connection,
+                actor_id=owner,
+                slug=f"default-active-{uuid.uuid4().hex[:8]}",
+            )
+            await _insert_system_skill(
+                connection,
+                actor_id=owner,
+                slug=f"default-suspended-{uuid.uuid4().hex[:8]}",
+                status="suspended",
+            )
+            await _insert_system_skill(
+                connection,
+                actor_id=owner,
+                slug=f"default-draft-{uuid.uuid4().hex[:8]}",
+                publish=False,
+            )
+
+        async with factory() as session:
+            context = await ProjectRepository(session).create_with_admin(
+                owner,
+                CreateProject("default-skills", "Default Skills"),
+                "req-default-skills",
+            )
+
+        async with factory() as session:
+            expected = tuple(
+                (
+                    await session.execute(
+                        select(SkillRow.id, SkillRow.current_published_version_id)
+                        .join(
+                            SkillVersionRow,
+                            SkillVersionRow.id == SkillRow.current_published_version_id,
+                        )
+                        .where(
+                            SkillRow.scope == "system",
+                            SkillRow.project_id.is_(None),
+                            SkillRow.status == "active",
+                            SkillRow.current_published_version_id.is_not(None),
+                            SkillVersionRow.workflow_status == "published",
+                        )
+                        .order_by(SkillRow.id)
+                    )
+                ).all()
+            )
+            bindings = tuple((await session.execute(select(ProjectSystemSkillBindingRow).where(ProjectSystemSkillBindingRow.project_id == context.project_id).order_by(ProjectSystemSkillBindingRow.system_skill_id))).scalars().all())
+            agent_binding_count = await session.scalar(select(func.count()).select_from(ProjectSystemAgentBindingRow).where(ProjectSystemAgentBindingRow.project_id == context.project_id))
+            mcp_binding_count = await session.scalar(select(func.count()).select_from(ProjectSystemMcpBindingRow).where(ProjectSystemMcpBindingRow.project_id == context.project_id))
+
+        assert expected == (active_skill,)
+        assert tuple((row.system_skill_id, row.skill_version_id) for row in bindings) == expected
+        assert all(row.enabled and row.version == 1 for row in bindings)
+        assert all(row.created_by_user_id == str(owner) and row.updated_by_user_id == str(owner) for row in bindings)
+        assert agent_binding_count == 0
+        assert mcp_binding_count == 0
     finally:
         await engine.dispose()
 

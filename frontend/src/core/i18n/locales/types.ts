@@ -412,6 +412,8 @@ export interface Translations {
       requeue: string;
       requeueing: string;
       requeueError: string;
+      copyProjectId: string;
+      projectIdCopied: string;
       statuses: {
         queued: string;
         leased: string;
@@ -433,14 +435,17 @@ export interface Translations {
         unknown: string;
       };
       filters: {
+        label: string;
         project: string;
+        projectQuery: string;
+        projectQueryPlaceholder: string;
         status: string;
         type: string;
         allStatuses: string;
         allTypes: string;
         apply: string;
         clear: string;
-        invalidProject: string;
+        invalidQuery: string;
       };
     };
     audit: {

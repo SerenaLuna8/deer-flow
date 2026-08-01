@@ -139,6 +139,8 @@ class AdminJobRecord:
     job_id: uuid.UUID
     dead_job_id: uuid.UUID | None
     project_id: uuid.UUID
+    project_slug: str
+    project_display_name: str
     job_type: JobType
     status: JobStatus
     retry_safety: str
@@ -369,35 +371,62 @@ class SystemOperationsRepository:
         limit: int,
         cursor: str | None,
         project_id: uuid.UUID | None,
+        project_query: str | None,
         status: JobStatus | None,
         job_type: JobType | None,
+        request_id: str,
     ) -> AdminJobPage:
         selected_cursor = _decode_cursor(cursor, kind="job")
         successor = aliased(JobRow)
-        statement = select(
-            JobRow.id,
-            DeadJobRow.job_id.label("dead_job_id"),
-            JobRow.project_id,
-            JobRow.job_type,
-            JobRow.status,
-            JobRow.retry_safety,
-            func.coalesce(
-                DeadJobRow.public_error_code,
-                JobRow.public_error_code,
-            ).label("public_error_code"),
-            JobRow.predecessor_dead_job_id,
-            (~exists(select(successor.id).where(successor.predecessor_dead_job_id == JobRow.id))).label("has_no_successor"),
-        ).outerjoin(
-            DeadJobRow,
-            and_(
-                DeadJobRow.job_id == JobRow.id,
-                DeadJobRow.project_id == JobRow.project_id,
-            ),
+        statement = (
+            select(
+                JobRow.id,
+                DeadJobRow.job_id.label("dead_job_id"),
+                JobRow.project_id,
+                ProjectRow.slug.label("project_slug"),
+                ProjectRow.display_name.label("project_display_name"),
+                JobRow.job_type,
+                JobRow.status,
+                JobRow.retry_safety,
+                func.coalesce(
+                    DeadJobRow.public_error_code,
+                    JobRow.public_error_code,
+                ).label("public_error_code"),
+                JobRow.predecessor_dead_job_id,
+                (~exists(select(successor.id).where(successor.predecessor_dead_job_id == JobRow.id))).label("has_no_successor"),
+            )
+            .join(
+                ProjectRow,
+                ProjectRow.id == JobRow.project_id,
+            )
+            .outerjoin(
+                DeadJobRow,
+                and_(
+                    DeadJobRow.job_id == JobRow.id,
+                    DeadJobRow.project_id == JobRow.project_id,
+                ),
+            )
         )
         if selected_cursor is not None:
             statement = statement.where(JobRow.id < selected_cursor)
         if project_id is not None:
             statement = statement.where(JobRow.project_id == project_id)
+        if project_query is not None:
+            normalized_query = project_query.strip().lower()
+            if not normalized_query:
+                raise ReliabilityInvalid(request_id)
+            statement = statement.where(
+                or_(
+                    func.lower(ProjectRow.slug).contains(
+                        normalized_query,
+                        autoescape=True,
+                    ),
+                    func.lower(ProjectRow.display_name).contains(
+                        normalized_query,
+                        autoescape=True,
+                    ),
+                )
+            )
         if status is not None:
             statement = statement.where(JobRow.status == status)
         if job_type is not None:
@@ -429,6 +458,8 @@ class SystemOperationsRepository:
                     JobRow.id,
                     DeadJobRow.job_id.label("dead_job_id"),
                     JobRow.project_id,
+                    ProjectRow.slug.label("project_slug"),
+                    ProjectRow.display_name.label("project_display_name"),
                     JobRow.job_type,
                     JobRow.status,
                     JobRow.retry_safety,
@@ -438,6 +469,10 @@ class SystemOperationsRepository:
                     ).label("public_error_code"),
                     JobRow.predecessor_dead_job_id,
                     (~exists(select(successor.id).where(successor.predecessor_dead_job_id == JobRow.id))).label("has_no_successor"),
+                )
+                .join(
+                    ProjectRow,
+                    ProjectRow.id == JobRow.project_id,
                 )
                 .outerjoin(
                     DeadJobRow,
@@ -460,6 +495,8 @@ def _job_record(row) -> AdminJobRecord:
         job_id=row.id,
         dead_job_id=row.dead_job_id,
         project_id=row.project_id,
+        project_slug=row.project_slug,
+        project_display_name=row.project_display_name,
         job_type=row.job_type,
         status=row.status,
         retry_safety=row.retry_safety,

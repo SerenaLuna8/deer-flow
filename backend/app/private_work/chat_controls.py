@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import deerflow.utils.llm_text as llm_text
+from app.private_work.authorization import PrivateRequestAuthorizationBoundary
 from app.private_work.checkpoint_lineage import (
     CheckpointLineageError,
     find_settled_checkpoint_before_message,
@@ -67,6 +68,7 @@ from deerflow.runtime.context_compaction import (
 )
 from deerflow.runtime.events.store import RunEventStore
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
@@ -215,10 +217,13 @@ class ProjectChatControlService:
         """Prepare outside locks, then compare-and-swap under a second lock."""
 
         context = require_issued_private_work_context(context)
-        runtime_config = await self._materialize_compaction_config(
-            context,
-            thread_id,
-            app_config,
+        authorization_boundary = PrivateRequestAuthorizationBoundary(
+            lambda: self._validate_control_authority(
+                context,
+                thread_id,
+                reject_incomplete_run=True,
+            ),
+            request_id=context.request_id,
         )
         saver = self._saver(context)
         try:
@@ -234,13 +239,18 @@ class ProjectChatControlService:
                 locked_state = bind_transaction_checkpoint_state(
                     saver,
                     session,
-                    runtime_config,
+                    app_config,
                     as_node="manual_compaction",
                 )
                 source = await locked_state.aget(checkpoint_config(thread_id))
                 if snapshot_checkpoint_id(source) is None:
                     raise PrivateWorkNotFound(context.request_id)
 
+            runtime_config = await self._materialize_compaction_config(
+                context,
+                thread_id,
+                app_config,
+            )
             prepared = await prepare_thread_compaction(
                 self._state(
                     context,
@@ -253,6 +263,7 @@ class ProjectChatControlService:
                 user_id=str(context.user_id),
                 app_config=runtime_config,
                 snapshot=source,
+                authorization_boundary=authorization_boundary,
             )
             if not prepared.result.compacted:
                 return prepared.result
@@ -281,6 +292,8 @@ class ProjectChatControlService:
                     locked_state,
                     prepared,
                 )
+        except AuthorizationRevoked:
+            raise authorization_boundary.private_error() from None
         except ContextCompactionDisabled:
             raise PrivateWorkConflict(context.request_id) from None
         except ContextCompactionFailed:

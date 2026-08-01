@@ -11,7 +11,7 @@ export function ProjectPageHeader({
   className,
 }: {
   title: string;
-  description: string;
+  description?: string;
   eyebrow?: string;
   icon?: ReactNode;
   actions?: ReactNode;
@@ -40,9 +40,11 @@ export function ProjectPageHeader({
             {title}
           </h1>
         </div>
-        <p className="text-muted-foreground mt-1 max-w-3xl text-sm leading-5">
-          {description}
-        </p>
+        {description ? (
+          <p className="text-muted-foreground mt-1 max-w-3xl text-sm leading-5">
+            {description}
+          </p>
+        ) : null}
       </div>
       {actions ? <div className="shrink-0">{actions}</div> : null}
     </header>

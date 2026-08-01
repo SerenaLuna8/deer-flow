@@ -235,4 +235,24 @@ describe("skill builder api", () => {
       code: "SKILL_BUILDER_LIMIT_EXCEEDED",
     } satisfies Partial<SkillBuilderApiError>);
   });
+
+  test("classifies a non-JSON gateway timeout as unavailable", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      new Response("<html><title>504 Gateway Time-out</title></html>", {
+        status: 504,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    await expect(
+      submitSkillBuilderTurn(projectId, sessionId, {
+        input: { kind: "message", message: "写代码" },
+        expected_revision: 3,
+        idempotency_key: "timeout-key",
+      }),
+    ).rejects.toMatchObject({
+      status: 504,
+      code: "SKILL_BUILDER_UNAVAILABLE",
+    } satisfies Partial<SkillBuilderApiError>);
+  });
 });

@@ -45,6 +45,9 @@ export function skillBuilderErrorMessage(error: unknown): string {
   if (error.code === "SKILL_BUILDER_NETWORK_ERROR") {
     return "无法连接 Skill 设计服务，请检查网络后重试。";
   }
+  if (error.code === "SKILL_BUILDER_UNAVAILABLE") {
+    return "Skill 设计服务暂时不可用，请稍后重试。";
+  }
   return error.message || "Skill 设计服务暂时不可用，请稍后重试。";
 }
 

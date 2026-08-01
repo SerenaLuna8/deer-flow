@@ -471,7 +471,6 @@ export function MemorySettingsView({
       >
         <ProjectPageHeader
           title={t.settings.memory.title}
-          description={t.settings.memory.description}
           actions={
             !isLoading && !error && memory ? (
               <>

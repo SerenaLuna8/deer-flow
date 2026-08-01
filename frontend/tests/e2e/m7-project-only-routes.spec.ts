@@ -88,7 +88,7 @@ test("private surfaces render only inside the selected project shell", async ({
   for (const [path, heading] of [
     ["chats", "会话"],
     ["memory", "Memory"],
-    ["connections", "Connections"],
+    ["connections", "渠道连接"],
   ] as const) {
     await page.goto(`/projects/alpha/${path}`);
     await expect(page).toHaveURL(new RegExp(`/projects/alpha/${path}$`, "u"));

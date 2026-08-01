@@ -123,6 +123,7 @@ def test_packaged_agent_does_not_require_reserved_invalid_remote_mcp() -> None:
         "bash",
         "task",
     ]
+    assert agent_payload["skill_source_keys"] == []
 
     for source_key in agent_payload["mcp_source_keys"]:
         mcp_entry = entries[source_key]
@@ -147,10 +148,22 @@ def test_packaged_catalog_contains_complete_public_skill_archives() -> None:
     skill_entries = [entry for entry in catalog.entries if entry.kind == "skill"]
     archived_entries = [entry for entry in skill_entries if entry.payload_format == "skill_archive_v1"]
 
-    assert len(skill_entries) == 22
-    assert len(archived_entries) == 21
+    removed_slugs = {
+        "find-skills",
+        "image-generation",
+        "music-generation",
+        "podcast-generation",
+        "ppt-generation",
+        "vercel-deploy",
+        "video-generation",
+    }
+
+    assert len(skill_entries) == 14
+    assert len(archived_entries) == 14
+    assert "bootstrap" in expected
+    assert removed_slugs.isdisjoint(expected)
+    assert removed_slugs.isdisjoint(entry.slug for entry in archived_entries)
     assert {entry.slug for entry in archived_entries} == set(expected)
-    assert "vercel-deploy" in expected
     assert "vercel-deploy-claimable" not in expected
     for entry in archived_entries:
         archive_files = archive_module.load_skill_archive(
@@ -169,14 +182,16 @@ async def test_bootstrap_catalog_is_atomic_and_idempotent(m7_database: M7Databas
     assert first.counts == second.counts
     assert first.created > 0
     assert second.created == 0
-    assert first.counts == {"agent": 1, "skill": 22, "mcp": 1}
+    assert first.counts == {"agent": 1, "skill": 14, "mcp": 1}
     async with m7_database.session_factory() as session:
         system_skill_count = await session.scalar(select(func.count()).select_from(SkillRow).where(SkillRow.scope == "system"))
         project_skill_count = await session.scalar(select(func.count()).select_from(SkillRow).where(SkillRow.scope == "project"))
         skill_file_count = await session.scalar(select(func.count()).select_from(SkillVersionFileRow))
-    assert system_skill_count == 22
+        agent_skill_ref_count = await session.scalar(select(func.count()).select_from(AgentVersionSkillRefRow))
+    assert system_skill_count == 14
     assert project_skill_count == 0
-    assert skill_file_count == 89
+    assert skill_file_count == 72
+    assert agent_skill_ref_count == 0
 
 
 @pytest.mark.postgres
@@ -302,7 +317,7 @@ async def test_bootstrap_rejects_canonical_version_metadata_drift(
 ) -> None:
     await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
     async with m7_database.session_factory() as session, session.begin():
-        skill = (await session.execute(select(SkillVersionRow).join(SkillRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillRow.source_key == "builtin:skill:deerflow-core"))).scalar_one()
+        skill = (await session.execute(select(SkillVersionRow).join(SkillRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillRow.source_key == "builtin:skill:skill-creator"))).scalar_one()
         skill.review_note = "not canonical"
 
     with pytest.raises(_bootstrap_module().BootstrapConflict):
@@ -331,8 +346,19 @@ async def test_bootstrap_rejects_canonical_agent_reference_drift(
 ) -> None:
     await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
     async with m7_database.session_factory() as session, session.begin():
+        agent_version_id = await session.scalar(select(AgentVersionRow.id).join(AgentRow, AgentVersionRow.agent_id == AgentRow.id).where(AgentRow.source_key == "builtin:agent:project-assistant"))
+        skill_version_id = await session.scalar(select(SkillVersionRow.id).join(SkillRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillRow.source_key == "builtin:skill:skill-creator"))
+        assert agent_version_id is not None
+        assert skill_version_id is not None
         await session.execute(text("ALTER TABLE agent_version_skill_refs DISABLE TRIGGER USER"))
-        await session.execute(delete(AgentVersionSkillRefRow))
+        session.add(
+            AgentVersionSkillRefRow(
+                agent_version_id=agent_version_id,
+                skill_version_id=skill_version_id,
+                sort_order=0,
+            )
+        )
+        await session.flush()
         await session.execute(text("ALTER TABLE agent_version_skill_refs ENABLE TRIGGER USER"))
 
     with pytest.raises(_bootstrap_module().BootstrapConflict):
@@ -365,7 +391,7 @@ async def test_bootstrap_rejects_canonical_mcp_version_and_slot_drift(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_bootstrap_agent_graph_contains_only_executable_canonical_refs(
+async def test_bootstrap_main_agent_has_no_hard_asset_refs(
     m7_database: M7Database,
 ) -> None:
     await _bootstrap_module().bootstrap_system_assets(m7_database.session_factory)
@@ -374,8 +400,7 @@ async def test_bootstrap_agent_graph_contains_only_executable_canonical_refs(
         skill_refs = (await session.execute(select(AgentVersionSkillRefRow).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars().all()
         mcp_refs = (await session.execute(select(AgentVersionMcpRefRow).where(AgentVersionMcpRefRow.agent_version_id == version.id).order_by(AgentVersionMcpRefRow.sort_order))).scalars().all()
 
-        assert len(skill_refs) == 1
-        assert skill_refs[0].sort_order == 0
+        assert skill_refs == []
         assert mcp_refs == []
 
 
@@ -857,7 +882,7 @@ async def test_bootstrap_rejects_builtin_project_binding_actor_references(
                 **actor_values,
             )
         elif binding_kind == "skill":
-            asset = (await session.execute(select(SkillRow).where(SkillRow.source_key == "builtin:skill:deerflow-core"))).scalar_one()
+            asset = (await session.execute(select(SkillRow).where(SkillRow.source_key == "builtin:skill:skill-creator"))).scalar_one()
             binding = ProjectSystemSkillBindingRow(
                 project_id=project_id,
                 system_skill_id=asset.id,
