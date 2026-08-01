@@ -369,6 +369,15 @@ async def test_repository_lists_all_ready_kinds_with_bounded_stable_keyset(priva
             ("b/workspace.md", "workspace"),
             ("c/output.txt", "output"),
         ]
+        offset_page = await repository.list_ready(
+            scope=seed.owner_a_scope,
+            thread_id=threads["owner_a"],
+            offset=2,
+            limit=2,
+        )
+        assert [(item.logical_path, item.kind) for item in offset_page] == [
+            ("c/output.txt", "output"),
+        ]
         assert (
             await repository.list_ready(
                 scope=seed.owner_b_scope,
@@ -390,4 +399,22 @@ async def test_repository_lists_all_ready_kinds_with_bounded_stable_keyset(priva
                 scope=seed.owner_a_scope,
                 thread_id=threads["owner_a"],
                 limit=101,
+            )
+        for invalid_offset in (-1, 1 << 63):
+            with pytest.raises(PrivateFileConflict):
+                await repository.list_ready(
+                    scope=seed.owner_a_scope,
+                    thread_id=threads["owner_a"],
+                    offset=invalid_offset,
+                )
+        with pytest.raises(PrivateFileConflict):
+            await repository.list_ready(
+                scope=seed.owner_a_scope,
+                thread_id=threads["owner_a"],
+                after=(
+                    first_page[-1].logical_path,
+                    first_page[-1].version,
+                    first_page[-1].id,
+                ),
+                offset=1,
             )

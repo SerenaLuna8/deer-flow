@@ -71,6 +71,33 @@ def test_github_block_minimal_uses_defaults() -> None:
     assert cfg.github.recursion_limit is None
 
 
+def test_github_blank_logins_normalize_to_none_and_real_logins_are_trimmed() -> None:
+    cfg = AgentConfig(
+        name="x",
+        github={
+            "bot_login": "   ",
+            "bindings": [
+                {
+                    "repo": "a/b",
+                    "triggers": {
+                        "issue_comment": {
+                            "mention_login": "\t",
+                        },
+                        "pull_request_review": {
+                            "mention_login": "  deerflow-reviewer  ",
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    assert cfg.github is not None
+    assert cfg.github.bot_login is None
+    assert cfg.github.bindings[0].triggers["issue_comment"].mention_login is None
+    assert cfg.github.bindings[0].triggers["pull_request_review"].mention_login == "deerflow-reviewer"
+
+
 def test_github_recursion_limit_parses() -> None:
     cfg = AgentConfig(name="refactorer", github={"recursion_limit": 500})
     assert cfg.github is not None

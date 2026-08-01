@@ -24,6 +24,7 @@ from app.channels.message_bus import (
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
+    extract_provider_delivery_id,
 )
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
@@ -73,8 +74,6 @@ INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
-INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
-
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
@@ -1047,20 +1046,7 @@ class ChannelManager:
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
         metadata = msg.metadata or {}
-        message_id = None
-        for key in INBOUND_DEDUPE_METADATA_KEYS:
-            value = metadata.get(key)
-            if value:
-                message_id = str(value)
-                break
-        if message_id is None:
-            raw_message = metadata.get("raw_message")
-            if isinstance(raw_message, Mapping):
-                for key in INBOUND_DEDUPE_METADATA_KEYS:
-                    value = raw_message.get(key)
-                    if value:
-                        message_id = str(value)
-                        break
+        message_id = extract_provider_delivery_id(msg)
         if message_id is None:
             return None
 
@@ -1208,6 +1194,12 @@ class ChannelManager:
             await self._reject_unbound_channel_message(
                 msg,
                 bound_identity_rejection=_BoundIdentityRejection(),
+            )
+            return
+
+        if result.disposition == "duplicate_delivery":
+            logger.info(
+                "[Manager] duplicate project inbound ignored after durable admission check",
             )
             return
 
@@ -1663,7 +1655,7 @@ class ChannelManager:
 
         if kind == "models":
             names = [m["name"] for m in data.get("models", [])]
-            return ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No models configured."
+            return ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No active models. Ask a platform administrator to configure one in System Settings."
         return str(data)
 
     # -- error helper ------------------------------------------------------

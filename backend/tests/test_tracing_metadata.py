@@ -161,3 +161,20 @@ def test_deerflow_trace_id_explicit_argument_wins(monkeypatch):
         )
 
     assert result["deerflow_trace_id"] == "explicit-trace"
+
+
+def test_deerflow_trace_id_can_be_kept_internal_when_langfuse_correlation_is_disabled(
+    monkeypatch,
+):
+    _enable_langfuse(monkeypatch)
+
+    with request_trace_context("internal-worker-trace"):
+        result = tracing_metadata.build_langfuse_trace_metadata(
+            thread_id="thread-abc",
+            user_id="user-42",
+            deerflow_trace_id="internal-worker-trace",
+            include_deerflow_trace_id=False,
+        )
+
+    assert result["langfuse_session_id"] == "thread-abc"
+    assert "deerflow_trace_id" not in result

@@ -818,6 +818,7 @@ class McpService:
                 or len({slot.name for slot in slots}) != len(slots)
             ):
                 raise ValueError
+            slots = tuple(sorted(slots, key=lambda slot: slot.name))
             if transport == "stdio":
                 if not command or url is not None:
                     raise ValueError
@@ -899,7 +900,17 @@ class McpService:
     def _copy_json_mapping(cls, value: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(value, Mapping):
             raise ValueError
-        encoded = json.dumps(value, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        # Historical rows are reconstructed behind MappingProxyType so callers
+        # cannot mutate persisted definition data during transition checks.
+        # json.dumps does not recognize mappingproxy directly even though it
+        # satisfies Mapping; copy the top-level view before the JSON round-trip.
+        encoded = json.dumps(
+            dict(value),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         decoded = json.loads(encoded)
         if not isinstance(decoded, dict):
             raise ValueError

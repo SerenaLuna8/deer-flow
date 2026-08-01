@@ -347,6 +347,7 @@ class DiscordChannel(Channel):
                     text=text,
                     msg_type=msg_type,
                     thread_ts=thread_id,
+                    provider_delivery_id=str(message.id),
                     metadata={
                         "guild_id": str(guild.id) if guild else None,
                         "channel_id": str(message.channel.id),
@@ -455,6 +456,7 @@ class DiscordChannel(Channel):
             text=text,
             msg_type=msg_type,
             thread_ts=thread_id,
+            provider_delivery_id=str(message.id),
             metadata={
                 "guild_id": str(guild.id) if guild else None,
                 "channel_id": str(message.channel.id),

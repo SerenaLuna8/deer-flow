@@ -7,12 +7,14 @@ Supports two authentication modes:
      - Requires anthropic-beta: oauth-2025-04-20,claude-code-20250219
      - Requires billing header in system prompt for all OAuth requests
 
-Auto-loads credentials from explicit runtime handoff:
-  - $ANTHROPIC_API_KEY environment variable
-  - $CLAUDE_CODE_OAUTH_TOKEN or $ANTHROPIC_AUTH_TOKEN
-  - $CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
-  - $CLAUDE_CODE_CREDENTIALS_PATH
-  - ~/.claude/.credentials.json
+Credential sources:
+  - Standard API keys are supplied by the exact PostgreSQL model Credential
+    materialized at the execution boundary.
+  - The ``claude_code`` adapter may use the explicit local CLI OAuth handoff:
+    - $CLAUDE_CODE_OAUTH_TOKEN or $ANTHROPIC_AUTH_TOKEN
+    - $CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
+    - $CLAUDE_CODE_CREDENTIALS_PATH
+    - ~/.claude/.credentials.json
 """
 
 import hashlib
@@ -44,12 +46,9 @@ OAUTH_BILLING_HEADER = os.environ.get("ANTHROPIC_BILLING_HEADER", _DEFAULT_BILLI
 class ClaudeChatModel(ChatAnthropic):
     """ChatAnthropic with OAuth Bearer auth, prompt caching, and smart thinking.
 
-    Config example:
-        - name: claude-sonnet-4.6
-          use: deerflow.models.claude_provider:ClaudeChatModel
-          model: claude-sonnet-4-6
-          max_tokens: 16384
-          enable_prompt_caching: true
+    Configure this class through the allowlisted ``claude_code`` System
+    Settings adapter. The database version stores the provider model and
+    secret-free options such as ``max_tokens`` and ``enable_prompt_caching``.
     """
 
     # Custom fields

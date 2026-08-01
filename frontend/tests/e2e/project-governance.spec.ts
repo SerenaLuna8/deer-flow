@@ -538,10 +538,11 @@ test("authenticated SSO callback executes before returning to invite redemption"
   await page.route("**/api/v1/auth/me", async (route) => {
     authChecks += 1;
     await json(route, {
-      id: "default",
+      id: "40000000-0000-4000-8000-000000000001",
       email: "default@test.local",
       system_role: "system_admin",
       needs_setup: false,
+      oauth_provider: null,
     });
   });
 
@@ -560,10 +561,11 @@ test("local login and SSO callback reject escaping next paths but keep /invite",
   await mockProjectGovernance(page);
   await page.route("**/api/v1/auth/me", async (route) => {
     await json(route, {
-      id: "default",
+      id: "40000000-0000-4000-8000-000000000001",
       email: "default@test.local",
       system_role: "system_admin",
       needs_setup: false,
+      oauth_provider: null,
     });
   });
 

@@ -6,15 +6,19 @@
 
 - 公共祖先：`3be3969f8fc3f2d2b6d36ef5c26fa5593d916f2a`
 - `main`：`e317f7b8`
-- `dev`：`8a91e957`
+- `dev` 分析基线：`8a91e957`
+- 当前状态：Module 12 已落到本地 `dev` 工作区；本文不把未提交工作区伪装成新的提交 SHA
 
 结论：
 
 1. `main` 是“全局 JSON 配置 + Gateway 内全局工具缓存 + per-user/thread stdio session pool”架构，适合单实例可编辑配置，但配置、工具和秘密不是 Run 的不可变闭包。
 2. `dev` 已把 MCP 改成 PostgreSQL system/project 共享资产：definition version 不可变、Credential slot/grant 独立审批、Agent version 精确引用、Run 准入固化 exact version/grant，Worker 每次发现和调用都重新校验并短暂解密。
-3. `main` 最值得移植的局部修复有两个：外部 tool name 的 `^[A-Za-z0-9_-]+$` 边界校验，以及 OAuth refresh 在跨 event-loop/thread 场景下的锁与取消安全。前者是 `dev` 已确认缺失；后者应按 `dev` 的 one-shot 调用拓扑验证后选择性移植。
+3. exact discovery 的外部 tool name 边界已移植：只接受字符串且必须完全匹配 `[A-Za-z0-9_-]+`；一个非法工具会令已准入的 exact MCP version 整体 fail-closed。
 4. `main` 的 config file cache、`/api/mcp/config`、全局 session pool 和 masked secret round-trip 不能恢复到 `dev`；它们会绕过 exact snapshot、项目 policy、Credential grant 和 Worker-only 执行。
 5. `dev` 的 one-shot MCP client 是隔离优先的设计：每次发现/调用重建连接，牺牲 stateful server 连续性和延迟，换取无跨 Run session 污染。它是明确取舍，不应误判为实现缺陷。
+6. deferred prompt 转义和 private MCP result provenance 净化在本轮开始时已存在于当前工作区，本轮对完整链路做了回归验证，没有重复实现。
+7. System OAuth discovery/call 会创建不同 manager，但均留在同一 Worker owner loop/thread；保留 `asyncio.Lock`，不移植 `main` 的 `threading.Lock`。rotated refresh token 则需要新的 run-owned token state，不能靠两行临时 config mutation 假装支持。
+8. Agent Builder 带 MCP 依赖的 v1 现在先以 Draft 写 child refs，再在同一事务内发布；真实浏览器已完成三轮 DeepSeek + Cloudflare MCP 调用，其中第三轮发生在页面刷新之后。
 
 ## 2. `main` 源码地图
 
@@ -622,6 +626,8 @@ Run exact snapshot
        MultiServerMCPClient
        get_tools()
   -> _discover_exact_mcp()
+       原始 name 必须是 str 且完全匹配 `[A-Za-z0-9_-]+`
+       任一非法 name 令 exact MCP version 整体 fail-closed
        bound count/description/schema
        resolve bounded local `$ref`
        construct safe Pydantic args model
@@ -648,12 +654,14 @@ proxy.ainvoke(arguments)
 proxy 带：
 
 ```text
-metadata={"deerflow_private_mcp": True}
+tag_private_mcp_tool(proxy)       # 写入可信 private-MCP provenance
 tag_mcp_tool(proxy)
 可选 tag_mcp_routing(proxy, routing)
 ```
 
-Subagent 只能从内部 `__runtime_mcp_tools` 取得带该 metadata 的 exact proxies，并 marshal 回 owner Worker loop；它不执行 global MCP discovery。
+`ToolResultSanitizationMiddleware` 从实际注册的 `request.tool` 读取该 provenance；模型在 tool-call metadata 中伪造同名字段不能影响决定。Subagent 只能从内部 `__runtime_mcp_tools` 取得 exact proxies，并 marshal 回 owner Worker loop；它不执行 global MCP discovery。
+
+System OAuth 的 discovery 和 call 各自创建一个 one-shot manager，但实测 manager 都运行在同一个 Worker owner loop/thread；Subagent 调用同样 marshal 回该 owner loop。
 
 ### 11.7 schema、网络和超时
 
@@ -687,6 +695,28 @@ get_cached_mcp_tools(...) -> []
 
 `_load_admitted_mcp_config()` 固定抛 `AssetCatalogUnavailable("global MCP discovery was removed...")`。这是 fail-closed tombstone，不是待恢复功能。
 
+### 11.9 Agent Builder 的 MCP 依赖原子发布
+
+真实 UI 提交暴露了一个 PostgreSQL 约束缺陷：Builder 原来直接创建
+`workflow_status=published` 的 Agent v1，再插入 `agent_version_mcp_refs`。数据库的
+`published version child rows are immutable` 触发器会拒绝 child ref，Gateway 因而返回
+503。
+
+`AgentService.create_project_from_design_in_session()` 现在在同一事务内按以下顺序执行：
+
+```text
+创建 suspended Agent asset
+  -> 创建 Draft Agent v1
+  -> 插入完整 Skill/MCP exact-version refs
+  -> 将 v1 切换为 Published 并 flush
+  -> 更新 current_published_version_id
+  -> 完成 Builder session
+```
+
+事务提交前不会向其他请求暴露中间 Draft。单元测试锁定 repository 接收 Draft 的顺序，
+真实 PostgreSQL 测试同时断言最终 parent 为 Published、MCP child ref 存在且 published
+pointer 正确。
+
 ## 12. `main` 与 `dev` 逐项差异
 
 | 主题 | `main` final | `dev` 当前 | 判断 |
@@ -702,112 +732,124 @@ get_cached_mcp_tools(...) -> []
 | discovery failure | per-server fail-soft | admitted exact asset失败会终止 Run | `dev` 应 fail-closed |
 | schema | adapter schema | bounded copy/ref/Pydantic | `dev` 更强 |
 | secret echo | 无通用阻断 | schema/result literal guard | `dev` 更强 |
-| tool name | regex identifier | 只检查非空和 <=255 | `dev` 回归 |
-| deferred prompt | validated + escaped | raw sorted names | 与 name 回归叠加 |
-| OAuth lock | cancellation-safe `threading.Lock` | `asyncio.Lock` | 需按调用拓扑审计 |
-| rotated refresh | 保存在内存 config | 丢弃 rotated token | System OAuth 风险 |
+| tool name | regex identifier；坏 tool 单独丢弃 | 严格字符串类型 + regex fullmatch；坏 tool 令 exact version fail-closed | 已移植并适配 exact 语义 |
+| deferred prompt | validated + escaped | name、routing name/keyword 已 HTML 转义，description/schema 做 authority-tag neutralization | 已验证 |
+| OAuth lock | cancellation-safe `threading.Lock` | one-shot manager 留在 owner loop/thread，使用 `asyncio.Lock` | 不移植 OS lock |
+| rotated refresh | 保存在长寿命内存 config | discovery/call 重建 config/manager，rotation 无跨调用 state | 未来 run-owned token state |
 | initial OAuth | per-server fail-soft | helper fail-hard | exact asset 与全局语义不同 |
-| result injection | name-based web sanitizer不含任意 MCP | proxy 有 provenance 但 sanitizer 未用 | `dev` 可补 |
+| result injection | name-based web sanitizer 不含任意 MCP | private proxy 可信 provenance；sanitizer 从实际 `request.tool` 判断 | 已验证，模型伪造 metadata 无效 |
 
-## 13. 已确认缺陷与风险
+## 13. 已确认问题、处理状态与剩余风险
 
-### 13.1 `dev`：MCP tool name 未做 identifier 校验
+### 13.1 exact MCP tool name 边界已修复
 
-`PrivateAgentRuntime._discover_exact_mcp()` 当前只检查：
+`PrivateAgentRuntime._discover_exact_mcp()` 现在先读取原始 name，并在 description、schema、
+routing 或 proxy 构造之前要求：
 
 ```text
-name 非空
-len(name) <= 255
+isinstance(raw_name, str)
+re.compile(r"[A-Za-z0-9_-]+\Z").fullmatch(raw_name)
 ```
 
-没有 `main::_VALID_MCP_TOOL_NAME`。随后 name 被：
+非字符串、closing tag、换行、Markdown、空格、Unicode 和控制字符全部拒绝。与 `main`
+全局配置中“只丢弃一个坏 tool”不同，`dev` 的 admitted exact MCP version 会整体
+fail-closed；这样不会在准入后静默改变能力集合。
 
-1. 放入 `_DiscoveredMcpTool`；
-2. 用于 `StructuredTool.from_function(name=...)`；
-3. 标为 MCP；
-4. 进入 `assemble_deferred_tools()`；
-5. `get_deferred_tools_prompt_section()` 用 `"\n".join(sorted(deferred_names))` 裸插值。
+### 13.2 deferred prompt 与 MCP result provenance 已具备并验证
 
-恶意 server 可返回带换行、反引号或尖括号的 name，伪造 `<available-deferred-tools>` 内容。该缺失由源码链确认。
+当前 renderer 对 deferred name、routing name/keyword 做 HTML 转义，并中和远端
+description/schema 中的 authority-like tags。private MCP proxy 通过
+`tag_private_mcp_tool()` 写可信 provenance，sanitizer 从实际注册的 `request.tool`
+读取；模型伪造 tool-call metadata 不会获得或取消净化。
 
-### 13.2 `dev`：MCP 结果 prompt injection
+tool name 校验仍是主边界，renderer 转义只是纵深防御。Credential literal echo guard 与
+prompt-injection sanitizer 仍是两个独立边界。
 
-private proxy 已有 `deerflow_private_mcp=True`，但 `ToolResultSanitizationMiddleware` 仍只按内置 web tool name 净化。远程 MCP result 可携带 framework tags，且不会命中。
+### 13.3 System OAuth rotation 不能局部移植
 
-这与“禁止结果回显 Credential literal”不同：secret echo guard 不是 prompt-injection sanitizer。
+Project MCP 禁止 OAuth；风险只涉及 packaged System MCP。`dev` 的 discovery 和实际 call
+会分别重建 `McpOAuthConfig` 与 `OAuthTokenManager`。即使 `_fetch_token()` 把 rotated
+refresh token 写回当前临时 config，discovery 结束时该 state 仍会被丢弃；第一次工具调用又
+会从 Credential 解密旧 token。
 
-### 13.3 `dev`：System OAuth rotation
+因此不能移植 `main` 的两行内存 mutation 并用 manager 单测宣称能力完成。未来实现必须是
+run-owned、owner-loop-owned token state，至少绑定 exact MCP version 和 Credential
+fingerprint，并定义加密持久化、撤销、Worker crash/retry 与清理语义。
 
-`OAuthTokenManager._fetch_token()` 不保存响应中的 rotated `refresh_token`。Project MCP 禁止 OAuth，所以项目主路径不受影响；packaged System MCP 若使用 rotating refresh grant，第二次 refresh 可能失败。
+### 13.4 OAuth owner-loop 审计已完成
 
-### 13.4 `dev`：OAuth cross-loop 兼容风险
+System OAuth 的 discovery 和 call 实测使用两个不同 manager，但 loop ID 与 thread ID
+各自只有一个；Subagent proxy 仍 marshal 回 Worker owner loop。取消一个等待
+`asyncio.Lock` 的同 loop caller 后，owner 与后续 caller 都能完成，且只发生一次 token
+fetch。
 
-当前每 server 使用 `asyncio.Lock`。Private one-shot manager 通常在一个 Worker loop 内创建和销毁，尚不能仅凭 diff 断言主路径死锁；但若 System MCP interceptor/同步 wrapper 让同一 manager 跨 loop/thread 复用，则会重现 `main` 已修复问题。
+当前生产路径没有把同一 manager 分享给多个 event loop/thread，不需要 `main` 的
+`threading.Lock + to_thread + shield`。未来若拓扑改变，仍应优先 owner-loop marshal，
+而不是在 event loop 上同步等待 OS lock。
 
-因此这是必须用调用点和跨线程测试验证的风险，不应无条件整段替换。
+### 13.5 Agent+MCP Builder 发布顺序已修复
 
-### 13.5 `dev`：stateful MCP 能力变化
+真实 UI commit 原先在 child ref 之前发布 parent，触发 PostgreSQL immutable-child
+约束并返回 503。现在同一事务先以 Draft 创建 v1 和所有依赖 refs，再发布并移动 pointer。
+单元红测与真实随机 PostgreSQL 红测都命中过原缺陷，并在修复后通过。
+
+### 13.6 `dev`：stateful MCP 能力变化
 
 one-shot 每次调用重新 discovery/connection，Playwright 一类依赖 session 状态的 MCP 不能延续页面/登录状态，并产生额外网络成本。它同时消除了跨 Run session 污染。若产品需要 stateful 行为，应设计 run-owned、owner-loop-owned、exact-version-keyed pool，而不是恢复全局 `MCPSessionPool`。
 
-### 13.6 `main`：配置 API 错误细节和跨进程 RMW
+### 13.7 `main`：配置 API 错误细节和跨进程 RMW
 
 `main` 的 PUT 500 返回 `str(e)`，可能泄漏路径或配置细节；`_mcp_config_write_lock` 只保护单进程，多 Gateway writer 仍可丢更新。这两点都说明旧文件 API 不适合作为 `dev` 平台权威。
 
-## 14. 可移植落点
+## 14. 移植执行与状态
 
-### P0：在 exact discovery 边界校验 tool name
+### P0 已完成：exact discovery tool name
 
-目标：
+- 生产落点：`backend/app/private_work/asset_runtime.py`
+- TDD：`backend/tests/test_private_asset_runtime.py`
+- 语义：原始字符串 + exact regex；任一坏 tool 令整个 exact version fail-closed
 
-- `backend/app/private_work/asset_runtime.py::PrivateAgentRuntime._discover_exact_mcp`
-- 新增 `backend/tests/test_private_asset_runtime.py` 用例
+测试覆盖合法 sibling 与非法 name 混合，以及 closing tag、换行、Markdown、空格、
+Unicode、控制字符、整数和 `None`。
 
-规则：
+### P0 已有实现、本轮验证：deferred prompt
 
-```text
-^[A-Za-z0-9_-]+$
-```
+- 生产落点：`backend/packages/harness/deerflow/tools/builtins/tool_search.py`
+- 测试：`test_tool_search.py`、`test_mcp_routing_prompt.py`、`test_deferred_setup.py`
 
-应在复制 description/schema/routing 和构造 proxy 之前执行。与 `main` 的全局“丢弃单个坏 tool”不同，`dev` 的 admitted exact asset 应 fail-closed 整个 MCP version，避免 silently 改变已准入能力集合。
+name 和 routing 文本已转义，description/schema 已中和 authority tags。本轮保留并回归该
+实现，没有重复编写第二套 renderer。
 
-### P0：锁定 deferred prompt 不变量
+### P1 已有实现、本轮验证：private MCP result provenance
 
-目标：
+- 生产落点：`mcp_metadata.py`、`tool_result_sanitization_middleware.py`
+- 测试：`test_mcp_routing_metadata.py`、`test_tool_result_sanitization_middleware.py`
 
-- `backend/packages/harness/deerflow/tools/builtins/tool_search.py::get_deferred_tools_prompt_section`
-- deferred catalog tests
+决定只信任实际注册的 `request.tool.metadata["deerflow_private_mcp"] is True`，不信任模型
+提供的 tool-call metadata，也不用工具名称子串推测来源。
 
-即使 discovery 已校验，renderer 仍建议 `html.escape(name, quote=False)` 作为纵深防御，并测试 closing tag/newline 不可进入。校验仍是主边界，转义不是允许任意 name 的理由。
+### P0 已完成：Agent Builder 原子发布顺序
 
-### P1：按 provenance 净化 MCP result
+- 生产落点：`backend/app/shared_assets/agent_service.py`
+- 单元红绿测试：`test_shared_asset_agent_service.py`
+- 真实 PostgreSQL 红绿测试：`integration/test_m3_agent_assets_postgres.py`
 
-目标：
+Builder 现在先写 Draft parent 和完整 refs，再发布 v1；事务提交后 asset 为 suspended、
+v1 为 Published、MCP ref 与 current published pointer 同时存在。
 
-- `backend/packages/harness/deerflow/agents/middlewares/tool_result_sanitization_middleware.py::_should_sanitize`
-- `backend/tests/test_tool_result_sanitization_middleware.py`
+### P1 已完成审计：OAuth owner-loop
 
-读取 server-created `request.tool.metadata["deerflow_private_mcp"] is True`；不要接受客户端 tool call args 中的 metadata，也不要用名称子串猜测。
+- `test_private_asset_runtime.py` 证明 discovery/call manager 不同但 loop/thread 相同
+- `test_task_tool_core_logic.py` 锁定 Subagent owner-loop marshal
+- `test_mcp_oauth.py` 锁定同 loop waiter cancellation 不泄漏锁
 
-### P1：System OAuth rotation
+结论是保留 `asyncio.Lock`，不移植 `threading.Lock`。
 
-目标：
+### 未来架构项：rotated System OAuth token state
 
-- `backend/packages/harness/deerflow/mcp/oauth.py::OAuthTokenManager._fetch_token`
-- `backend/tests/test_mcp_oauth.py`
-
-仅更新 run-local/in-memory `McpOAuthConfig`，不写数据库、snapshot 或日志。测试 two-refresh 使用新 refresh token。
-
-### P1：跨 loop OAuth 审计
-
-先为以下路径增加测试：
-
-- owner Worker loop 的 one-shot system OAuth；
-- Subagent marshal；
-- sync wrapper 若仍可达；
-- cancellation while waiting。
-
-只有确认 manager 跨 loop 共享时，才移植 `threading.Lock + shielded to_thread acquire`。不能把 OS lock 同步阻塞在 event loop。
+不能只修改 `_fetch_token()`。需要 run-owned、owner-loop-owned state，绑定 exact version
+和 Credential fingerprint，并明确 rotation 的加密、撤销、retry、crash recovery 与清理。
+在该架构落地前，不宣称 rotating refresh grant 已支持。
 
 ### P2：若需要 stateful MCP，设计 run-owned pool
 
@@ -861,8 +903,67 @@ project_id + owner_user_id + run_id + exact mcp_version_id
 | result | MCP 返回 framework tags | provenance sanitizer 转义 |
 | authz | membership/lease 在 materialize 后撤销 | dispatch 前再次拒绝 |
 | isolation | 同 tool/version 在不同 project/owner | Credential、proxy、结果不交叉 |
-| OAuth | rotating refresh 两次刷新 | 第二次使用新 refresh token |
+| OAuth | rotating refresh 两次刷新 | 未来 run-owned token state 落地后才可验收 |
 | OAuth | 同 loop 并发 | 只获取一次 token |
-| OAuth | cross-loop/cancel（若路径可达） | 无 deadlock、无泄漏锁 |
+| OAuth | owner-loop waiter cancel | 无 deadlock、无泄漏锁；当前 manager cross-loop 不可达 |
 | cleanup | discovery/call/cancel/close error | client bounded close，material/derived secrets clear |
 | stateful | one-shot server 连续两调用 | 行为明确记录；若不支持应给出产品可理解限制 |
+| Builder | Agent v1 引用 exact MCP version | Draft 阶段写 child refs，最终 parent/pointer 均 Published |
+| 浏览器 | project MCP 详情 | 只回显 HTTPS origin，不回放 `/mcp` path |
+| 浏览器 | Agent Builder exact 依赖 | 设计稿明确显示 `1 个 MCP` |
+| 浏览器 | 同会话三轮真实模型调用 | 每轮都有 exact `search_cloudflare_documentation` 工具事件与真实结果 |
+| 浏览器 | 刷新后第三轮 | 历史恢复，同一 exact MCP version 再次调用成功 |
+
+## 17. 实施结果与浏览器证据
+
+### 17.1 真实验收环境
+
+验收使用 Cloudflare 官方无鉴权文档 MCP：
+
+```text
+https://docs.mcp.cloudflare.com/mcp
+```
+
+项目 endpoint policy 临时只加入这一个精确 URL，并保持 `require_egress_proxy=true`；
+出口通过只监听 `127.0.0.1`、只允许 `docs.mcp.cloudflare.com:443` 的受限 CONNECT proxy。
+没有关闭 controlled-egress 要求，也没有把环境代理重新交给 adapter。
+
+Agent Builder 的模型生成入口当前不能从项目资产中自主选择 MCP，因此先通过受校验的
+`blueprint_update` 固化 exact MCP version。随后仍由真实 UI 执行创建、启用、创建会话与
+三轮调用。第一次 UI commit 正是在这里暴露 503 发布顺序缺陷；完成单元与 PostgreSQL
+红绿修复后，UI commit 返回 200。
+
+### 17.2 三轮真实模型与 MCP 调用
+
+三轮均使用页面显示的 DeepSeek 模型，且每轮页面都出现：
+
+```text
+Use "project_249592a659194b25_search_cloudflare_documentation" tool
+```
+
+结果摘要：
+
+1. Round 1：返回 `Remote MCP Server`、`Servers for Cloudflare` 两个官方文档 URL。
+2. Round 2：同一会话再次调用，返回 `Transport`、`Agent API` 两个官方文档 URL。
+3. 刷新浏览器后 Round 3：历史恢复，再次调用同一 exact tool，返回
+   `Authorization`、`Secure MCP Servers` 两个 URL，并显示
+   `ROUND-3-REFRESH-OK`。
+
+Worker 记录三个 Run 均为 success；每轮分别执行一次 discovery 和一次实际 call 的
+one-shot MCP client，HTTP 请求成功并协商 MCP protocol `2025-11-25`。内层 adapter 在
+没有 `tool_call_id` 的 callback 上产生 raw content-block list warning；审计确认外层
+ToolNode 随后生成标准 ToolMessage。真实数据库三个 Run 各自恰好持久化一条
+`llm.tool.result`，没有结果丢失或重放失败，因此该 warning 是非阻塞日志噪声，不伪造
+tool_call_id，也不额外持久化内层结果。
+
+### 17.3 截图
+
+| 证据 | 证明内容 |
+| --- | --- |
+| `evidence/12-mcp/01-project-mcp-published-origin-redacted.jpg` | project MCP v1 已发布；UI 只回显 HTTPS origin；无 Credential |
+| `evidence/12-mcp/02-agent-blueprint-one-mcp.jpg` | Builder 设计稿固定 `0 个 Skill · 1 个 MCP` |
+| `evidence/12-mcp/03-real-mcp-rounds-1-2.jpg` | 同一会话第二轮可见 exact MCP tool 事件、真实 URL、token 与完成时间 |
+| `evidence/12-mcp/04-real-mcp-round3-after-refresh.jpg` | 刷新后第三轮再次调用 exact tool，并返回 `ROUND-3-REFRESH-OK` 与真实 URL |
+
+所有证据图都经过人工检查，不包含账号邮箱、密码、Cookie、Credential 或完整 endpoint
+path。详细命令、计数与清理状态见 `evidence/12-mcp/README.md`。

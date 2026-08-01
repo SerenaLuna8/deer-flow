@@ -96,17 +96,23 @@ DeerFlow addresses this through **context engineering** — deliberate control o
 
 This is one of the most important ideas in DeerFlow. Good agent behavior is not only about a stronger model. It is also about giving the model the right working set at the right time.
 
-## Configuration drives behavior
+## Explicit configuration authorities drive behavior
 
-All meaningful behaviors in DeerFlow are controlled through `config.yaml`. The system is designed so that operators can change how the agent behaves — which models to use, whether summarization is active, how subagents are limited, what tools are available — without touching code.
+DeerFlow separates configuration by authority. Infrastructure and process
+policy live in `config.yaml`; versioned model definitions, capabilities,
+provider settings, default selection, and exact Credential references live in
+PostgreSQL System Settings. Operators can change behavior without touching
+code, while each admitted Run freezes the exact model version it will use.
 
 This design principle has three implications:
 
-1. **Reproducibility**: a config file is a complete description of the agent's behavior at a point in time.
-2. **Deployability**: the same code runs differently in different environments because the config is different.
-3. **Auditability**: what the agent can and cannot do is visible in one place.
+1. **Reproducibility**: process configuration plus immutable Run snapshots describe the effective behavior at a point in time.
+2. **Deployability**: the same code can use different infrastructure and governed model catalogs in different environments.
+3. **Auditability**: model changes are versioned database operations rather than untracked YAML edits.
 
-Environment variable interpolation (`api_key: $OPENAI_API_KEY`) keeps secrets out of committed config files while preserving the same structure.
+Model provider keys are encrypted System Credentials. They are selected by
+exact version in `/admin/settings/models` and decrypted only at the execution
+boundary; they are not model settings or `config.yaml` environment references.
 
 ## Summary
 
@@ -118,7 +124,7 @@ Environment variable interpolation (`api_key: $OPENAI_API_KEY`) keeps secrets ou
 | Skills for specialization   | Domain capability injected on demand, keeping the base clean   |
 | Sandbox for execution       | Isolated workspace for real file and command work              |
 | Context engineering         | Active management of what the agent sees to stay effective     |
-| Config-driven               | All key behaviors are controlled through `config.yaml`         |
+| Explicit authorities        | Process YAML and versioned database settings have separate roles |
 
 <Cards num={2}>
   <Cards.Card title="Lead Agent" href="/docs/harness/lead-agent" />

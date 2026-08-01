@@ -1,10 +1,12 @@
+import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
 import { AuthProvider } from "@/core/auth/AuthProvider";
+import { privateReturnPathFromHeaders } from "@/core/auth/private-return-path";
 import { getServerSideUser } from "@/core/auth/server";
-import { assertNever } from "@/core/auth/types";
+import { assertNever, buildLoginUrl } from "@/core/auth/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +27,15 @@ export default async function ProjectsLayout({
     case "system_setup_required":
       redirect("/setup");
     case "unauthenticated":
-      redirect("/login");
+      redirect(
+        buildLoginUrl(
+          privateReturnPathFromHeaders(
+            await headers(),
+            ["/projects"],
+            "/workspace",
+          ),
+        ),
+      );
     case "gateway_unavailable":
       return (
         <QueryClientProvider>

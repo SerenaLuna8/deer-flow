@@ -1,5 +1,9 @@
 # 14. Channels 模块：项目入站解析、去重与 Provider 修复
 
+> 执行状态说明：第 1–14 节保留本轮移植前的基线、差异分析和设计判断；
+> 第 15–19 节记录本轮实际移植落点、自动化结果和浏览器验收。
+> 前文所述“当前 dev 缺失”均指移植前基线，最终状态以第 16–19 节为准。
+
 ## 1. 分析边界与结论
 
 本文分析 `main@e317f7b8` 在 IM Channels 和 GitHub webhook 上的更新，并对照
@@ -685,3 +689,236 @@ Migration 测试只提供 main 行为证据，不能进入 `dev` 的 single-full
 
 完成标准是“provider delivery → authoritative project scope → durable Run → scoped outbound”
 整条链可证明，而不是只看到某个平台返回了 200。
+
+## 15. 本轮移植计划与执行顺序
+
+本轮没有复制 `main` 的旧 Channels Manager、Gateway StreamBridge 或
+`webhook_deliveries` migration，而是按当前 `dev` 的 Worker-only、single-full-schema
+边界执行：
+
+1. 固定
+   `ProjectInboundDispatcher → ConnectionInboundResolver → PrivateRunAdmissionService`
+   的调用顺序，继续由持久 connection/membership/conversation 提供
+   project/owner/Thread authority；
+2. 先写失败测试，再移植 GitHub、Feishu、WeCom 的确定性局部修复；
+3. 为 Provider adapter 建立显式 `provider_delivery_id` 合同，旧 metadata 提取只保留为
+   兼容入口；
+4. 把 cross-pod 去重放进 `PrivateRunAdmissionService.admit()` 的权威事务，而不是
+   Resolver、Gateway 独立 store 或进程内缓存；
+5. 在同一事务中完成 delivery 查询/绑定、Run、Job、snapshot、quota 和 audit，并定义
+   `duplicate_delivery` 控制流；
+6. 依次执行聚焦回归、完整后端、真实 PostgreSQL M1–M7 门禁；
+7. 自动化门禁通过后再做真实浏览器验收。没有外部 Provider 凭据时，只证明本地
+   UI/API 禁用态、项目作用域和 webhook fail-closed，不冒充外部平台收发成功。
+
+## 16. 实际移植落点
+
+### 16.1 Provider delivery identity
+
+`InboundMessage` 新增显式 `provider_delivery_id`。以下 adapter 均在接收边界填写平台稳定
+标识：
+
+| Provider | 稳定标识 |
+| --- | --- |
+| Slack | event `ts` |
+| Telegram | message ID |
+| Discord | message ID |
+| DingTalk | message ID |
+| WeCom | `msgid` |
+| WeChat | provider message ID；客户端生成的 `client_id` 不作为 durable identity |
+| Feishu | message ID |
+| GitHub | `X-GitHub-Delivery` |
+
+`extract_provider_delivery_id()` 处理显式字段和旧 metadata 兼容形态，但它只用于 Manager
+进程内的减压去重。durable project admission 只接受 adapter 显式填写的非空字段；metadata-only
+消息会返回 `PRIVATE_WORK_INVALID`，不会退回正文 hash、时间戳或客户端伪造的 project/owner
+字段。
+
+### 16.2 Project-scoped durable dedupe
+
+新增：
+
+- `app/private_work/inbound_dedupe.py`；
+- `PrivateRunInboundDelivery`；
+- `ProjectInboundDeliveryRepository`；
+- `channel_inbound_deliveries`；
+- `PrivateRunAdmissionServerContext.inbound_delivery`；
+- `ProjectInboundDispatchResult.disposition`。
+
+最终唯一范围是：
+
+```text
+project_id
++ owner_user_id
++ connection_id
++ provider
++ external_conversation_id
++ normalized external_topic_id
++ SHA-256(provider_delivery_id)
+```
+
+原始 provider delivery ID 不写 PostgreSQL，dataclass 的 `repr` 也不显示原值；摘要保持原始
+大小写差异。`PrivateRunInboundAuthority` 继续只表达持久 authority，delivery identity
+没有塞入 authority，而是在 server context 中与 authority 强制成对出现。
+
+准入锁顺序和事务边界是：
+
+```text
+project + membership FOR UPDATE
+→ exact connection FOR UPDATE
+→ exact conversation/topic mapping FOR UPDATE
+→ exact Thread FOR UPDATE
+→ scoped delivery lookup
+   ├─ exists: 返回已绑定 Run 的 duplicate disposition
+   └─ missing: 继续
+→ active Run conflict
+→ exact Agent closure + snapshot
+→ Run + Job
+→ delivery → Run bind
+→ quota + audit + snapshot consistency
+→ commit
+```
+
+因此相同 conversation/topic 的两个 Gateway 实例会在持久 conversation 行上串行化；
+第二个事务在 active-Run conflict 之前看到 delivery，返回 duplicate，而不是误报 Thread
+busy。
+
+### 16.3 Duplicate 和失败语义
+
+重复 delivery：
+
+- 不创建第二个 Run、Job 或 snapshot；
+- 不再次 reserve quota；
+- 不再次写 `run_admitted` audit；
+- 不等待或再次调用模型；
+- 不读取旧答案冒充新回复；
+- `ChannelManager` 在 durable duplicate disposition 后直接返回；
+- 不发布第二条 outbound。
+
+delivery bind 与 Run/Job/quota/audit 位于同一事务。snapshot、quota、audit 或数据库失败时，
+delivery、Run、Job 一起回滚，数据库异常 fail-closed，不降级为内存去重。
+
+本轮没有采用 `main` 的 10 分钟 TTL，也没有新增可刷新 retention 时间。delivery row 与
+精确 Run/conversation 生命周期绑定；其持久行存在期间，相同 scoped delivery 始终 no-op。
+Run 或 conversation 按既有 retention 被删除后，外键 cascade 同步清除 delivery。
+
+### 16.4 GitHub、Feishu、WeCom
+
+GitHub 已完成：
+
+- `allow_authors` 大小写不敏感；
+- 当前 owner/user + Agent 匹配项内的 redundant review comment gate；只有 paired
+  `pull_request_review` 接受 `submitted` 且不要求 mention 时才抑制 companion inline
+  comment；
+- paired review prompt 提示用 `gh api` 读取被合并 review 覆盖的 inline comments；
+- 空白 `mention_login` / `bot_login` 规范为 unset，非空值去除首尾空白；
+- 503/200 运维说明修正：GitHub 不自动 retry，503 用于保留 operator-visible failed
+  delivery，随后由人工/API redelivery；已知 delivery 即使误回 200 仍可人工/API redeliver，
+  但不会进入正常 failed-delivery 恢复集合；
+- 验签后、fan-out 前强制非空 `X-GitHub-Delivery`，避免 200 ack 后才在 durable launcher
+  因缺少稳定 ID 失败。
+
+Feishu 的 file reply/create、card reply/create/update 和 reaction 均检查 SDK
+`success()`。file 失败返回 false；card 失败进入现有 retry/fallback；reaction 失败只 warning，
+不会把伪成功 message ID 写入映射。
+
+WeCom 对 `quote`、`quote.text`、`content` 显式为 `null` 的形态逐层防御；空 text/quote 不发布，
+正常 text 与 quote 保持组合。
+
+### 16.5 已具备、未重复移植
+
+- bare `connect` guard；
+- cumulative/delta stream merge；
+- project Provider allowlist；
+- GitHub HMAC verify-then-parse；
+- exact connection/conversation authority revalidation；
+- project/owner scoped outbound；
+- Worker-only durable Run。
+
+### 16.6 明确未移植
+
+1. `main` 的 process-local busy follow-up buffer；active Run 仍按当前 reject 合同处理；
+2. concurrent first-message 的 loser Thread 自动补偿；
+3. Provider publish 前 reaction/working-card 的事务性去重；
+4. 网络级 exactly-once outbound；本轮只保证 durable duplicate 不再次进入 outbound 路径；
+   如果 Gateway 在首个 Run 已提交、但 outbound 发布前崩溃，当前没有补发 outbox，回复可能丢失；
+5. Feishu 聚合批消息中每个成员的独立 delivery identity；当前以 adapter 选定的锚点消息标识；
+6. 外部 GitHub、Feishu、WeCom、Slack 等真实收发 E2E。当前本地没有这些 Provider 的测试凭据，
+   因而不能声称实际平台的 `delivery → Run → outbound` 已通过。
+7. 当前 GitHub registry 仍 fail-closed 且不提供 project-backed binding。未来启用多项目
+   registry 时，paired review gate 必须使用明确的 project/binding identity；现有
+   `(user_id, agent.name)` 不能作为跨项目唯一 binding key。
+
+## 17. TDD 与自动化证据
+
+本轮先补失败用例，再修改实现。覆盖范围包括：
+
+- delivery identity 非空、大小写敏感、原值不进入持久化行或 dataclass `repr`；
+- authority 与 delivery 必须成对，durable launcher 不接受 metadata-only fallback；
+- duplicate 不创建第二个 Run/Job/snapshot，不重复 quota/audit/outbound；
+- 两个独立 admission service 并发接收同一 scoped delivery 时只创建一套持久对象；
+- 相同 provider ID 在不同 topic 中不互相抑制；
+- audit 失败时 delivery、Run、Job、snapshot 一起回滚，随后可安全重试；
+- GitHub 缺失 delivery header、非 object JSON、503 错误脱敏和 review action gate；
+- WeChat 不把客户端生成的 `client_id` 当作 durable delivery identity；
+- Feishu SDK business failure 与 WeCom null quote。
+
+最终门禁结果：
+
+| 门禁 | 结果 |
+| --- | --- |
+| Module 14 Channels/GitHub/Provider 聚焦套件 | `534 passed, 41 skipped, 0 failed` |
+| durable admission PostgreSQL 聚焦用例 | `3 passed, 0 skipped` |
+| 后端完整测试 | `7714 passed, 1020 skipped, 0 failed` |
+| 固定 M1–M7 真实 PostgreSQL gate | `273 passed, 0 skipped` |
+| Ruff check | `All checks passed` |
+| Ruff format check | `1146 files already formatted` |
+| `git diff --check` | 通过 |
+
+`full_schema.sql`、最终 schema contract 和 canonical digest 已同步。当前 digest 为：
+
+```text
+1192cc0d286f8195f91460b2571ad206a44f46cd4aa4e1bde5d4bebeff91df94
+```
+
+PostgreSQL 测试和浏览器验收只创建独立的 `deerflow_test_*` 数据库。浏览器验收使用的
+`deerflow_test_m14_20260730_a71c9e` 已在验收后删除；查询确认剩余数量为 `0`，没有修补、
+复用或删除原业务数据库。
+
+## 18. 真实浏览器验收与外部 E2E 边界
+
+2026-07-30 在 `http://localhost:2026` 使用新空库完成真实浏览器验收。浏览器实际完成：
+
+1. 初始化隔离测试管理员并进入默认项目；
+2. 打开 `/projects/default-project/connections`；
+3. 页面向精确 project UUID 的 Connections 与 Provider API 发起请求，Gateway 均返回
+   `200`；
+4. 项目页明确显示“Connections 功能尚未启用”；
+5. 打开 `/admin/operations`，Database、Schema、Worker fleet、Stream、Quota、Audit
+   均为 Ready，8 个 Channel Provider 均显示 Unavailable；
+6. 在未配置 `GITHUB_WEBHOOK_SECRET` 且未开启 unverified dev mode 时，对
+   `/api/webhooks/github` 的本地请求返回 `404`，Gateway 日志同时确认该 router 未挂载。
+
+截图：
+
+| 文件 | 证明内容 |
+| --- | --- |
+| [01-project-connections-disabled.png](evidence/14-channels/01-project-connections-disabled.png) | 默认项目 Connections 页面显示部署未启用项目连接能力 |
+| [02-admin-channel-providers-unavailable.png](evidence/14-channels/02-admin-channel-providers-unavailable.png) | 系统核心组件 Ready；DingTalk、Discord、Feishu、GitHub、Slack、Telegram、WeChat、WeCom 均为 Unavailable |
+| [完整验收记录](evidence/14-channels/README.md) | 浏览器范围、自动化门禁、数据库清理和未声明通过的外部边界 |
+
+这些截图证明本地 UI/API 项目作用域、禁用状态和 webhook fail-closed。它们不证明外部
+Provider 的签名 delivery、模型执行或 outbound。durable duplicate 的核心证据来自真实
+PostgreSQL 并发、作用域分离和事务回滚测试。
+
+## 19. 本轮结论
+
+Module 14 已完成确定性 Provider 修复和 project-scoped durable inbound delivery
+admission。相同 scoped delivery 不会形成第二个 Run、Job、snapshot、quota、audit 或
+outbound；数据库失败不会静默降级为内存去重。
+
+当前本地配置下的项目 Connections UI/API、运维 Provider 状态与 GitHub webhook
+fail-closed 已完成真实浏览器/本地 HTTP 验收。durable busy follow-up、首次 conversation
+并发 loser Thread 补偿、Provider 前置副作用去重、outbound recovery/exactly-once 和真实
+外部 Provider E2E 仍是明确边界；在提供实际 Provider 凭据并完成平台侧 delivery/redelivery
+验证前，不宣称整条外部 Channels 链路已完成生产验收。

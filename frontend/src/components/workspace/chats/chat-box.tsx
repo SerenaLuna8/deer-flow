@@ -11,6 +11,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import {
+  mergeDurableArtifactPaths,
+  resolveDurableArtifactSelection,
+} from "@/core/artifacts/preview";
 import { useI18n } from "@/core/i18n/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -78,19 +82,29 @@ const ChatBox: React.FC<{
   );
   const sidecar = useMaybeSidecar();
   const sidecarOpen = sidecar?.open ?? false;
+  const durableSelectedArtifact = useMemo(() => {
+    if (thread.isLoading || projectFiles.isFetching) {
+      return undefined;
+    }
+    return resolveDurableArtifactSelection(
+      selectedArtifact,
+      projectFiles.data?.files ?? [],
+    );
+  }, [
+    projectFiles.data?.files,
+    projectFiles.isFetching,
+    selectedArtifact,
+    thread.isLoading,
+  ]);
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   const threadArtifacts = useMemo(() => {
     const stateArtifacts = Array.isArray(thread.values.artifacts)
       ? thread.values.artifacts
       : [];
-    return Array.from(
-      new Set([
-        ...stateArtifacts,
-        ...(projectFiles.data?.files.flatMap((file) =>
-          file.logical_path ? [file.logical_path] : [],
-        ) ?? []),
-      ]),
+    return mergeDurableArtifactPaths(
+      stateArtifacts,
+      projectFiles.data?.files ?? [],
     );
   }, [projectFiles.data?.files, thread.values.artifacts]);
 
@@ -127,6 +141,15 @@ const ChatBox: React.FC<{
     setArtifacts,
     threadArtifacts,
   ]);
+
+  useEffect(() => {
+    if (
+      durableSelectedArtifact &&
+      durableSelectedArtifact !== selectedArtifact
+    ) {
+      selectArtifact(durableSelectedArtifact, true);
+    }
+  }, [durableSelectedArtifact, selectArtifact, selectedArtifact]);
 
   const activeRightPanel = useMemo(
     () =>

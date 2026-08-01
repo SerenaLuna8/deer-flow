@@ -215,6 +215,94 @@ class TestHumanInputPayload:
         assert "options" not in payload
 
 
+class TestHumanInputFormV2:
+    def test_form_payload_is_versioned_and_normalized(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Please provide deployment details.",
+                "clarification_type": "missing_info",
+                "options": ["legacy fallback"],
+                "fields": [
+                    {
+                        "name": "environment",
+                        "label": "Environment",
+                        "type": "select",
+                        "required": True,
+                        "options": [" staging ", "production"],
+                    },
+                    {
+                        "name": "notes",
+                        "type": "textarea",
+                        "placeholder": "Optional notes",
+                    },
+                ],
+            },
+            tool_call_id="call-form",
+            request_id="clarification:call-form",
+        )
+
+        assert payload == {
+            "version": 2,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": "clarification:call-form",
+            "tool_call_id": "call-form",
+            "clarification_type": "missing_info",
+            "question": "Please provide deployment details.",
+            "input_mode": "form",
+            "fields": [
+                {
+                    "name": "environment",
+                    "label": "Environment",
+                    "type": "select",
+                    "required": True,
+                    "options": [
+                        {
+                            "id": "environment-option-1",
+                            "label": "staging",
+                            "value": "staging",
+                        },
+                        {
+                            "id": "environment-option-2",
+                            "label": "production",
+                            "value": "production",
+                        },
+                    ],
+                },
+                {
+                    "name": "notes",
+                    "label": "notes",
+                    "type": "textarea",
+                    "required": False,
+                    "placeholder": "Optional notes",
+                },
+            ],
+        }
+
+    def test_invalid_form_atomically_degrades_to_v1_text(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details?",
+                "clarification_type": "missing_info",
+                "fields": [
+                    {"name": "safe", "type": "text"},
+                    {"name": "constructor", "type": "text"},
+                ],
+            },
+            tool_call_id="call-form",
+            request_id="clarification:call-form",
+        )
+
+        assert payload["version"] == 1
+        assert payload["input_mode"] == "free_text"
+        assert "fields" not in payload
+
+    def test_clarification_tool_schema_exposes_form_fields(self):
+        from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+        assert "fields" in ask_clarification_tool.args
+
+
 class TestClarificationCommandIdempotency:
     """Clarification tool-call retries should not duplicate messages in state."""
 

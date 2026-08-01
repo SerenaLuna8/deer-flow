@@ -167,12 +167,14 @@ export type CompatibleClientOptions = {
   apiUrl?: string;
   isMock?: boolean;
   runMetadataStorage?: RunMetadataStorage;
+  durableRunStreams?: boolean;
 };
 
 export function createCompatibleClient({
   apiUrl: configuredApiUrl,
   isMock,
   runMetadataStorage,
+  durableRunStreams = false,
 }: CompatibleClientOptions = {}): LangGraphClient {
   const apiUrl = configuredApiUrl ?? getLangGraphBaseURL(isMock);
   console.log(`Creating API client with base URL: ${apiUrl}`);
@@ -210,11 +212,15 @@ export function createCompatibleClient({
 
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   client.runs.joinStream = async function* (threadId, runId, options) {
-    // Short-circuit reconnects to runs that have already finished: otherwise a
-    // reload after the backend's stream bridge is reaped blocks forever on a
-    // drained condition variable, pinning ``isLoading`` true so the first
-    // post-reload message is routed to ``stop`` instead of ``submit``.
-    if (threadId && (await shouldSkipReconnect(client, threadId, runId))) {
+    // Ephemeral bridges need this terminal preflight: after their buffers are
+    // reaped, joining a finished Run can block forever. Durable project
+    // streams deliberately bypass it because their persisted terminal frame
+    // is part of the UI's authoritative replay.
+    if (
+      !durableRunStreams &&
+      threadId &&
+      (await shouldSkipReconnect(client, threadId, runId))
+    ) {
       clearReconnectRun(threadId, runId, runMetadataStorage);
       return;
     }

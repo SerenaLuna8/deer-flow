@@ -199,6 +199,11 @@ BANNED_LEGACY_SYMBOLS_BY_PATH = {
 }
 
 HISTORICAL_MARKDOWN_PREFIXES = (
+    # Read-only migration analyses deliberately quote removed main/dev routes
+    # and symbols while documenting why they must not be restored. They are
+    # evidence, not active operator or product guidance.
+    "docs/2026-07-29-dev-main-module-code-analysis.md",
+    "docs/dev-main-code-analysis/",
     "frontend/public/demo/threads/",
     "frontend/src/content/en/posts/",
     "frontend/src/content/zh/posts/",
@@ -230,6 +235,7 @@ ACTIVE_MARKDOWN_PREFIXES = (
 CONFIG_TOMBSTONES = frozenset(
     {
         "agents_api",
+        "authorization",
         "extensions",
         "extensions_config",
         "legacy_event_store",
@@ -279,13 +285,37 @@ def _production_files() -> tuple[Path, ...]:
     backend_files = (path for root in backend_roots for path in root.rglob("*") if path.is_file() and path.suffix == ".py")
     frontend_root = REPO_ROOT / "frontend" / "src"
     frontend_files = (path for path in frontend_root.rglob("*") if path.is_file() and _is_frontend_production_source(path))
-    nginx_root = REPO_ROOT / "docker" / "nginx"
-    nginx_files = (path for path in nginx_root.rglob("*") if path.is_file() and path.suffix == ".conf")
+    docker_root = REPO_ROOT / "docker"
+    docker_files = (path for path in docker_root.rglob("*") if path.is_file() and (path.suffix.lower() in {".conf", ".py", ".sh", ".yaml", ".yml"} or path.name.startswith("Dockerfile")))
+    root_scripts = (path for path in (REPO_ROOT / "scripts").rglob("*") if path.is_file() and path.suffix.lower() in {".py", ".sh"})
     helm_root = REPO_ROOT / "deploy" / "helm" / "deer-flow"
     helm_files = (path for path in helm_root.rglob("*") if path.is_file() and path.suffix.lower() in {".txt", ".tpl", ".yaml", ".yml"})
     public_skills_root = REPO_ROOT / "skills" / "public"
     public_skill_sources = (path for path in public_skills_root.rglob("*") if path.is_file() and path.suffix.lower() in {".py", ".sh"})
-    return tuple(sorted((*backend_files, *frontend_files, *nginx_files, *helm_files, *public_skill_sources)))
+    return tuple(
+        sorted(
+            (
+                *backend_files,
+                *frontend_files,
+                *docker_files,
+                *root_scripts,
+                *helm_files,
+                *public_skill_sources,
+            )
+        )
+    )
+
+
+def test_production_source_inventory_includes_deployment_entrypoints() -> None:
+    relative_paths = {path.relative_to(REPO_ROOT).as_posix() for path in _production_files()}
+    assert {
+        "docker/docker-compose.yaml",
+        "docker/docker-compose-dev.yaml",
+        "docker/provisioner/app.py",
+        "scripts/deploy.sh",
+        "scripts/docker.sh",
+        "scripts/serve.sh",
+    } <= relative_paths
 
 
 def _active_markdown_docs(repo_root: Path) -> tuple[Path, ...]:
@@ -703,7 +733,14 @@ def test_helm_gate_mutation_rejects_removed_values(tmp_path: Path) -> None:
 def test_rendered_helm_chart_has_no_extensions_redis_or_legacy_global_routes() -> None:
     chart = REPO_ROOT / "deploy" / "helm" / "deer-flow"
     result = subprocess.run(
-        ["helm", "template", "m7-source-gate", str(chart)],
+        [
+            "helm",
+            "template",
+            "m7-source-gate",
+            str(chart),
+            "--set-string",
+            "postgresql.external.databaseUrl=postgresql://postgres:test@db:5432/deerflow",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -983,6 +1020,11 @@ def test_active_doc_inventory_mutation_scans_new_docs_across_active_roots(tmp_pa
     near_miss = tmp_path / "docs" / "superpowers" / "specs-current" / "guide.md"
     near_miss.parent.mkdir(parents=True)
     near_miss.write_text("Call `/api/threads`.\n", encoding="utf-8")
+    migration_analysis = tmp_path / "docs" / "dev-main-code-analysis" / "07-streaming.md"
+    migration_analysis.parent.mkdir(parents=True)
+    migration_analysis.write_text("Historical comparison of `/api/threads`.\n", encoding="utf-8")
+    dated_analysis = tmp_path / "docs" / "2026-07-29-dev-main-module-code-analysis.md"
+    dated_analysis.write_text("Historical comparison of `/api/threads`.\n", encoding="utf-8")
 
     documents = _active_markdown_docs(tmp_path)
     assert {path.relative_to(tmp_path).as_posix() for path in documents} == {

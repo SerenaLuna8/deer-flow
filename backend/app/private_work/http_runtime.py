@@ -4,12 +4,14 @@ import copy
 import json
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from fastapi import Request
 
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkUnavailable
+from app.private_work.inbound_dedupe import DuplicateInboundDelivery
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
     PrivateRunAdmissionService,
@@ -18,6 +20,11 @@ from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.runtime_context import prepare_private_run_config
 from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.runtime.secret_context import redact_config_secrets
+from deerflow.trace_context import (
+    generate_trace_id,
+    get_current_trace_id,
+    normalize_trace_id,
+)
 
 
 def format_sse(
@@ -82,6 +89,7 @@ async def start_private_run(
     persisted_command = copy.deepcopy(raw_command) if isinstance(raw_command, Mapping) else None
     raw_stream_mode = getattr(body, "stream_mode", None)
     stream_mode = list(raw_stream_mode) if isinstance(raw_stream_mode, list) else ["values"]
+    origin_trace_id = get_current_trace_id() or normalize_trace_id(context.request_id) or generate_trace_id()
     create_request = PrivateRunCreate(
         run_id=run_id or str(uuid.uuid4()),
         assistant_id=None,
@@ -94,21 +102,30 @@ async def start_private_run(
             "stream_subgraphs": getattr(body, "stream_subgraphs", False) is True,
         },
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
+        origin_trace_id=origin_trace_id,
     )
     if type(server_context) is PrivateRunAdmissionServerContext:
-        trusted_admission_context = server_context
+        trusted_admission_context = replace(
+            server_context,
+            origin_trace_id=origin_trace_id,
+        )
     elif isinstance(server_context, Mapping) and server_context.get("non_interactive") is True:
         trusted_admission_context = PrivateRunAdmissionServerContext(
             non_interactive=True,
+            origin_trace_id=origin_trace_id,
         )
     else:
-        trusted_admission_context = None
+        trusted_admission_context = PrivateRunAdmissionServerContext(
+            origin_trace_id=origin_trace_id,
+        )
     admitted = await admission_service.admit(
         context,
         thread_id,
         create_request,
         server_context=trusted_admission_context,
     )
+    if admitted.inbound_delivery_replay:
+        raise DuplicateInboundDelivery(admitted.run.run_id)
     return RunRecord(
         run_id=admitted.run.run_id,
         thread_id=admitted.thread_id,

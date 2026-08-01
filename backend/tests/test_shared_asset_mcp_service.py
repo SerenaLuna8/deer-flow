@@ -4,7 +4,7 @@ import dataclasses
 import importlib
 import inspect
 import uuid
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import InvalidRequestError
@@ -729,6 +729,121 @@ def test_mcp_definition_keeps_packaged_system_oauth_read_compatible() -> None:
     )
 
     assert normalized.oauth["token_url"] == "https://identity.example.test/oauth/token"
+
+
+def test_mcp_transition_revalidates_historical_json_mapping_proxies() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.ADMIN)
+    url = "https://historical.example.test/mcp"
+    service = service_module.McpService(
+        lambda: None,
+        endpoint_policy=_endpoint_policy(url),
+    )
+    row = SimpleNamespace(
+        description="Historical MCP definition",
+        transport="http",
+        command=None,
+        args=[],
+        url=url,
+        non_secret_env={},
+        non_secret_headers={},
+        oauth_metadata={},
+        routing={"strategy": {"order": ["primary", "secondary"]}},
+        tool_overrides={"search": {"enabled": True}},
+        timeout_seconds=30,
+        payload_checksum="",
+    )
+    record = SimpleNamespace(row=row, slots=())
+    historical = service._definition_from_record(record)
+    assert isinstance(historical.routing, MappingProxyType)
+    row.payload_checksum = service._checksum(historical)
+
+    normalized = service._validate_transition_definition(actor, record)
+
+    assert normalized.routing == {
+        "strategy": {"order": ["primary", "secondary"]},
+    }
+    assert normalized.tool_overrides == {"search": {"enabled": True}}
+    row.routing["strategy"]["order"].append("late-row-mutation")
+    assert normalized.routing["strategy"]["order"] == ["primary", "secondary"]
+
+
+def test_mcp_definition_canonicalizes_slot_order_for_historical_checksum() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.ADMIN)
+    url = "https://historical.example.test/mcp"
+    service = service_module.McpService(
+        lambda: None,
+        endpoint_policy=_endpoint_policy(url),
+    )
+    slots = tuple(
+        service_module.McpCredentialSlot(
+            name,
+            f"{name} credential",
+            {"headers": (header,)},
+            required=name != "refresh",
+        )
+        for name, header in (
+            ("secondary", "X-Secondary"),
+            ("primary", "X-Primary"),
+            ("refresh", "X-Refresh"),
+        )
+    )
+    normalized = service._validate_definition(
+        actor,
+        service_module.McpDefinition(
+            transport="http",
+            url=url,
+            credential_slots=slots,
+        ),
+        endpoint_policy=service._endpoint_policy,
+    )
+    reordered = service._validate_definition(
+        actor,
+        dataclasses.replace(
+            normalized,
+            credential_slots=tuple(reversed(slots)),
+        ),
+        endpoint_policy=service._endpoint_policy,
+    )
+
+    assert [slot.name for slot in normalized.credential_slots] == [
+        "primary",
+        "refresh",
+        "secondary",
+    ]
+    assert service._checksum(normalized) == service._checksum(reordered)
+
+    row = SimpleNamespace(
+        description=normalized.description,
+        transport=normalized.transport,
+        command=normalized.command,
+        args=list(normalized.args),
+        url=normalized.url,
+        non_secret_env=dict(normalized.env),
+        non_secret_headers=dict(normalized.headers),
+        oauth_metadata=dict(normalized.oauth),
+        routing=dict(normalized.routing),
+        tool_overrides=dict(normalized.tool_overrides),
+        timeout_seconds=normalized.timeout_seconds,
+        payload_checksum=service._checksum(normalized),
+    )
+    record_slots = tuple(
+        SimpleNamespace(
+            name=slot.name,
+            purpose=slot.purpose,
+            payload_schema={key: list(values) for key, values in slot.payload_schema.items()},
+            required=slot.required,
+        )
+        for slot in sorted(slots, key=lambda slot: slot.name)
+    )
+
+    historical = service._validate_transition_definition(
+        actor,
+        SimpleNamespace(row=row, slots=record_slots),
+    )
+
+    assert service._checksum(historical) == row.payload_checksum
 
 
 @pytest.mark.asyncio

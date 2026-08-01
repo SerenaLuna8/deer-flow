@@ -42,7 +42,7 @@ class SubagentConfig:
 
 def _default_model_name(app_config: "AppConfig") -> str:
     if not app_config.models:
-        raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
+        raise ValueError("No chat models are available. A platform administrator must configure an active model in System Settings.")
     return app_config.models[0].name
 
 

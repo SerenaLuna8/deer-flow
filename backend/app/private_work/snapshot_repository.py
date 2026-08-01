@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -34,6 +35,16 @@ from app.shared_assets.skill_credential_closure import (
     SkillCredentialClosureInvalid,
     SkillCredentialClosureTarget,
     lock_skill_credential_closures,
+)
+from app.system_runtime_settings.models import LockedAgentRuntimePolicy
+from app.system_runtime_settings.repository import (
+    SystemRuntimePolicyRepositoryInvariant,
+)
+from app.system_settings.errors import (
+    SystemModelConflict,
+    SystemModelInvalid,
+    SystemModelNotFound,
+    SystemModelStorageUnavailable,
 )
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
@@ -98,6 +109,66 @@ class RunSnapshotAssetStale(Exception):
     """Internal stale marker remapped at the request-context boundary."""
 
 
+class AdmittedRunModelSnapshot(Protocol):
+    """Minimum secret-free result required by Run admission."""
+
+    logical_name: str
+
+
+class RunModelSnapshotAdmissionPort(Protocol):
+    """Persist one exact database-backed model closure in the caller transaction."""
+
+    async def admit_model_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        thread_id: str,
+        run_id: str,
+        purpose: str,
+        model_ref: str,
+    ) -> AdmittedRunModelSnapshot: ...
+
+
+class RunRuntimePolicyAdmissionPort(Protocol):
+    """Lock and persist the exact agent runtime policy in the caller transaction."""
+
+    async def lock_agent_runtime_for_admission(
+        self,
+        session: AsyncSession,
+    ) -> LockedAgentRuntimePolicy: ...
+
+    async def admit_run_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        thread_id: str,
+        run_id: str,
+        locked_policy: LockedAgentRuntimePolicy | None = None,
+    ) -> object: ...
+
+
+def _apply_runtime_recursion_limit(
+    request: PrivateRunCreate,
+    policy: LockedAgentRuntimePolicy,
+) -> PrivateRunCreate:
+    kwargs = dict(request.kwargs)
+    raw_config = kwargs.get("config")
+    config = dict(raw_config) if isinstance(raw_config, Mapping) else {}
+    requested = config.get("recursion_limit", 100)
+    if type(requested) is not int or requested <= 0:
+        requested = 100
+    config["recursion_limit"] = min(
+        requested,
+        policy.value.max_recursion_limit,
+    )
+    kwargs["config"] = config
+    return replace(request, kwargs=kwargs)
+
+
 def _reject_secret_bearing_keys(value: object, request_id: str) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
@@ -118,10 +189,14 @@ class RunSnapshotRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         model_ref_resolver: ModelRefResolver | None = None,
+        model_catalog: RunModelSnapshotAdmissionPort | None = None,
+        runtime_policy: RunRuntimePolicyAdmissionPort | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._model_ref_resolver = model_ref_resolver or ExactModelRefResolver()
+        self._model_catalog = model_catalog
+        self._runtime_policy = runtime_policy
         self._endpoint_policy = endpoint_policy
 
     @staticmethod
@@ -391,10 +466,14 @@ class RunSnapshotRepository:
             raise PrivateWorkConflict(context.request_id)
         _reject_secret_bearing_keys(request.metadata, context.request_id)
         _reject_secret_bearing_keys(request.kwargs, context.request_id)
-        exact_model_name = self._model_ref_resolver.resolve(
-            resolved_agent.payload.model_ref,
+        exact_model_name = (
+            self._model_ref_resolver.resolve(
+                resolved_agent.payload.model_ref,
+            )
+            if self._model_catalog is None
+            else None
         )
-        if exact_model_name is None:
+        if self._model_catalog is None and exact_model_name is None:
             raise RunSnapshotAssetStale
         safe_request = replace(
             request,
@@ -413,11 +492,102 @@ class RunSnapshotRepository:
             context,
             resolved_agent,
         )
+        locked_runtime_policy: LockedAgentRuntimePolicy | None = None
+        if self._runtime_policy is not None:
+            try:
+                locked_runtime_policy = await self._runtime_policy.lock_agent_runtime_for_admission(
+                    session,
+                )
+                safe_request = _apply_runtime_recursion_limit(
+                    safe_request,
+                    locked_runtime_policy,
+                )
+            except SystemRuntimePolicyRepositoryInvariant:
+                raise RunSnapshotAssetStale from None
         run = await PrivateRunRepository(session).create(
             scope=context.resource_scope,
             thread_id=thread_id,
             request=safe_request,
         )
+        if self._runtime_policy is not None:
+            try:
+                await self._runtime_policy.admit_run_snapshot(
+                    session,
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    run_id=run.run_id,
+                    locked_policy=locked_runtime_policy,
+                )
+            except SystemRuntimePolicyRepositoryInvariant:
+                raise RunSnapshotAssetStale from None
+        if self._model_catalog is not None:
+            try:
+                model_snapshot = await self._model_catalog.admit_model_snapshot(
+                    session,
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    run_id=run.run_id,
+                    purpose="lead",
+                    model_ref=resolved_agent.payload.model_ref,
+                )
+            except (
+                SystemModelConflict,
+                SystemModelInvalid,
+                SystemModelNotFound,
+            ):
+                raise RunSnapshotAssetStale from None
+            except SystemModelStorageUnavailable:
+                raise PrivateWorkUnavailable(context.request_id) from None
+            exact_model_name = model_snapshot.logical_name
+            if locked_runtime_policy is not None:
+                auxiliary_model_refs = (
+                    ("title", locked_runtime_policy.value.title.model_name),
+                    (
+                        "summarization",
+                        locked_runtime_policy.value.summarization.model_name,
+                    ),
+                    ("memory", locked_runtime_policy.value.memory.model_name),
+                )
+                try:
+                    for purpose, model_ref in auxiliary_model_refs:
+                        if model_ref is not None:
+                            await self._model_catalog.admit_model_snapshot(
+                                session,
+                                project_id=context.project_id,
+                                owner_user_id=str(context.user_id),
+                                thread_id=thread_id,
+                                run_id=run.run_id,
+                                purpose=purpose,
+                                model_ref=model_ref,
+                            )
+                except (
+                    SystemModelConflict,
+                    SystemModelInvalid,
+                    SystemModelNotFound,
+                ):
+                    raise RunSnapshotAssetStale from None
+                except SystemModelStorageUnavailable:
+                    raise PrivateWorkUnavailable(context.request_id) from None
+            if (
+                not isinstance(exact_model_name, str)
+                or not exact_model_name
+                or not await PrivateRunRepository(session).update_model_name(
+                    scope=context.resource_scope,
+                    run_id=run.run_id,
+                    model_name=exact_model_name,
+                )
+            ):
+                raise RunSnapshotAssetStale
+            refreshed = await PrivateRunRepository(session).get(
+                scope=context.resource_scope,
+                run_id=run.run_id,
+                lock=True,
+            )
+            if refreshed is None:
+                raise RunSnapshotAssetStale
+            run = refreshed
         asset_rows = [
             RunAssetVersionRow(
                 project_id=context.project_id,

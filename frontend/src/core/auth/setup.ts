@@ -1,8 +1,16 @@
+import { z } from "zod";
+
+import { AUTH_PROBE_TIMEOUT_MS, fetchAuth } from "./request";
 import { parseAuthError } from "./types";
 
-export type SetupStatusResponse = {
-  needs_setup?: boolean;
-};
+export const setupStatusSchema = z
+  .object({
+    needs_setup: z.boolean(),
+    registration_enabled: z.boolean(),
+  })
+  .strict();
+
+export type SetupStatusResponse = z.infer<typeof setupStatusSchema>;
 
 export type SetupStatusCheck = {
   checked: boolean;
@@ -14,15 +22,21 @@ export const setupStatusFetchInit = {
   credentials: "include",
 } satisfies RequestInit;
 
-export async function fetchSetupStatus(): Promise<SetupStatusResponse> {
-  const response = await fetch(
+export async function fetchSetupStatus(
+  signal?: AbortSignal,
+): Promise<SetupStatusResponse> {
+  const response = await fetchAuth(
     "/api/v1/auth/setup-status",
-    setupStatusFetchInit,
+    {
+      ...setupStatusFetchInit,
+      signal,
+    },
+    AUTH_PROBE_TIMEOUT_MS,
   );
   if (!response.ok) {
     throw new Error(`setup-status failed: ${response.status}`);
   }
-  return (await response.json()) as SetupStatusResponse;
+  return setupStatusSchema.parse(await response.json());
 }
 
 export function isSystemAlreadyInitializedError(data: unknown): boolean {
@@ -30,5 +44,9 @@ export function isSystemAlreadyInitializedError(data: unknown): boolean {
 }
 
 export function canCreateRegularAccount(check: SetupStatusCheck): boolean {
-  return check.checked && check.status?.needs_setup !== true;
+  return (
+    check.checked &&
+    check.status?.needs_setup === false &&
+    check.status.registration_enabled
+  );
 }

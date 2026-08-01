@@ -75,6 +75,7 @@ def _raw_tool_call(call_id: str, name: str = "task") -> dict:
 
 class TestClampSubagentLimit:
     def test_below_min_clamped_to_min(self):
+        assert MIN_SUBAGENT_LIMIT == 1
         assert _clamp_subagent_limit(0) == MIN_SUBAGENT_LIMIT
         assert _clamp_subagent_limit(1) == MIN_SUBAGENT_LIMIT
 
@@ -83,6 +84,7 @@ class TestClampSubagentLimit:
         assert _clamp_subagent_limit(100) == MAX_SUBAGENT_LIMIT
 
     def test_within_range_unchanged(self):
+        assert _clamp_subagent_limit(1) == 1
         assert _clamp_subagent_limit(2) == 2
         assert _clamp_subagent_limit(3) == 3
         assert _clamp_subagent_limit(4) == 4

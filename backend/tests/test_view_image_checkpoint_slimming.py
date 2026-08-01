@@ -624,3 +624,21 @@ def test_malformed_image_references_are_not_checkpoint_safe() -> None:
     }
 
     assert normalize_viewed_images(malformed) == {}
+
+
+def test_gif_reference_is_checkpoint_safe_without_image_bytes() -> None:
+    image_path = "/mnt/user-data/uploads/proof.gif"
+    image = {
+        image_path: {
+            "mime_type": "image/gif",
+            "size": 43,
+            "sha256": "a" * 64,
+            "file_ref": {
+                "path": image_path,
+                "sandbox_id": "sandbox-gif",
+                "run_id": "run-gif",
+            },
+        }
+    }
+
+    assert normalize_viewed_images(image) == image

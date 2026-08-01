@@ -8,10 +8,12 @@ import {
   GraduationCapIcon,
   LightbulbIcon,
   Loader2Icon,
+  MicIcon,
   PaperclipIcon,
   PlusIcon,
   RocketIcon,
   SparklesIcon,
+  SquareIcon,
   TargetIcon,
   Undo2Icon,
   XIcon,
@@ -80,6 +82,7 @@ import {
 } from "@/core/sidecar";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
+import { resolveAgentMode, type AgentMode } from "@/core/threads/agent-mode";
 import { compactThreadContext } from "@/core/threads/api";
 import {
   buildComposerDraftKey,
@@ -100,6 +103,20 @@ import {
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import {
+  getVoiceInputButtonState,
+  getVoiceInputToggleAction,
+} from "@/core/voice-input/interaction";
+import {
+  appendSpeechTranscript,
+  getSpeechRecognitionConstructor,
+  getSpeechRecognitionLanguage,
+  mapSpeechRecognitionError,
+  readSpeechRecognitionTranscript,
+  shouldRestartSpeechRecognition,
+  type BrowserSpeechRecognition,
+  type SpeechRecognitionErrorKind,
+} from "@/core/voice-input/speech-recognition";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -141,8 +158,6 @@ import {
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
-
-type InputMode = "flash" | "thinking" | "pro" | "ultra";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
 
@@ -186,19 +201,6 @@ function insertPlainTextAtSelection(container: HTMLElement, text: string) {
   return true;
 }
 
-function getResolvedMode(
-  mode: InputMode | undefined,
-  supportsThinking: boolean,
-): InputMode {
-  if (!supportsThinking && mode !== "flash") {
-    return "flash";
-  }
-  if (mode) {
-    return mode;
-  }
-  return supportsThinking ? "pro" : "flash";
-}
-
 function escapeXmlAttribute(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -211,6 +213,10 @@ export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   onSent?: () => void;
+};
+
+type VoiceRecognitionStartOptions = {
+  focusAfterStart?: boolean;
 };
 
 function buildHiddenConversationQuoteMessage({
@@ -288,10 +294,13 @@ export function InputBox({
   disabled?: boolean;
   context: Omit<
     AgentThreadContext,
-    "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+    | "thread_id"
+    | "is_plan_mode"
+    | "thinking_enabled"
+    | "subagent_enabled"
+    | "reasoning_effort"
   > & {
-    mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-    reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    mode: AgentMode | undefined;
   };
   extraHeader?: React.ReactNode;
   /**
@@ -306,10 +315,13 @@ export function InputBox({
   onContextChange?: (
     context: Omit<
       AgentThreadContext,
-      "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
+      | "thread_id"
+      | "is_plan_mode"
+      | "thinking_enabled"
+      | "subagent_enabled"
+      | "reasoning_effort"
     > & {
-      mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-      reasoning_effort?: "minimal" | "low" | "medium" | "high";
+      mode: AgentMode | undefined;
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
@@ -351,6 +363,17 @@ export function InputBox({
     controller: null,
     sequence: 0,
   });
+  const voiceRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const voiceBaseTextRef = useRef("");
+  const voiceLatestTextRef = useRef("");
+  const voiceLastErrorKindRef = useRef<SpeechRecognitionErrorKind | null>(null);
+  const voiceStopRequestedRef = useRef(false);
+  const voiceRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const startVoiceRecognitionRef = useRef<
+    ((options?: VoiceRecognitionStartOptions) => boolean) | null
+  >(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
   const latestDraftRef = useRef<{
@@ -366,6 +389,7 @@ export function InputBox({
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [polishingInput, setPolishingInput] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
   const [inputPolishUndo, setInputPolishUndo] = useState<{
     originalText: string;
     rewrittenText: string;
@@ -377,9 +401,72 @@ export function InputBox({
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
+  const latestAiId = useMemo(() => {
+    const id = [...thread.messages]
+      .reverse()
+      .find((message) => message.type === "ai")?.id;
+    return typeof id === "string" && id ? id : null;
+  }, [thread.messages]);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  const pendingFollowupRunRef = useRef<{ baseAiId: string | null } | null>(
+    null,
+  );
+  const followupScopeKey = `${privateWork.scope.accountId}:${privateWork.scope.projectId}:${threadId}`;
+  const followupScopeKeyRef = useRef(followupScopeKey);
   const messagesRef = useRef(thread.messages);
+
+  const clearVoiceRestartTimer = useCallback(() => {
+    if (voiceRestartTimerRef.current === null) {
+      return;
+    }
+    clearTimeout(voiceRestartTimerRef.current);
+    voiceRestartTimerRef.current = null;
+  }, []);
+
+  const cleanupVoiceRecognition = useCallback(
+    (
+      recognition: BrowserSpeechRecognition | null,
+      options: { keepListening?: boolean } = {},
+    ) => {
+      clearVoiceRestartTimer();
+      if (!recognition) {
+        if (!options.keepListening) {
+          voiceLastErrorKindRef.current = null;
+          voiceStopRequestedRef.current = false;
+          setVoiceListening(false);
+        }
+        return;
+      }
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      if (voiceRecognitionRef.current === recognition) {
+        voiceRecognitionRef.current = null;
+      }
+      if (!options.keepListening) {
+        voiceLastErrorKindRef.current = null;
+        voiceStopRequestedRef.current = false;
+        setVoiceListening(false);
+      }
+    },
+    [clearVoiceRestartTimer],
+  );
+
+  const abortVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    voiceStopRequestedRef.current = true;
+    if (!recognition) {
+      cleanupVoiceRecognition(null);
+      return;
+    }
+    cleanupVoiceRecognition(recognition);
+    try {
+      recognition.abort();
+    } catch {
+      // Browser implementations can throw when the recognizer already ended.
+    }
+  }, [cleanupVoiceRecognition]);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
@@ -489,7 +576,7 @@ export function InputBox({
     const fallbackModel = currentModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(context.mode, supportsThinking);
+    const nextMode = resolveAgentMode(context.mode, supportsThinking);
 
     if (context.model_name === nextModelName && context.mode === nextMode) {
       return;
@@ -513,11 +600,6 @@ export function InputBox({
 
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
-    [selectedModel],
-  );
-
-  const supportReasoningEffort = useMemo(
-    () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
   );
 
@@ -585,6 +667,7 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
+    abortVoiceInput();
     flushLatestDraft();
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
@@ -593,14 +676,11 @@ export function InputBox({
     setInputPolishUndo(null);
     setHydratedDraftKey(null);
     latestDraftRef.current = null;
-  }, [draftKey, flushLatestDraft, setTextInput]);
+  }, [abortVoiceInput, draftKey, flushLatestDraft, setTextInput]);
 
   useEffect(() => {
     if (skillsLoading || hydratedDraftKey === draftKey) return;
-    const saved = readComposerDraft(
-      getSessionComposerDraftStorage(),
-      draftKey,
-    );
+    const saved = readComposerDraft(getSessionComposerDraftStorage(), draftKey);
     if (!saved) {
       if (!textInput.value && initialValue) {
         setTextInput(initialValue);
@@ -684,6 +764,10 @@ export function InputBox({
   }, [abortInputPolishRequest, threadId]);
 
   useEffect(() => {
+    return () => abortVoiceInput();
+  }, [abortVoiceInput, draftKey, threadId]);
+
+  useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
     if (currentIndex !== null && currentIndex >= promptHistory.length) {
       promptHistoryIndexRef.current = null;
@@ -703,8 +787,7 @@ export function InputBox({
       onContextChange?.({
         ...context,
         model_name,
-        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
-        reasoning_effort: context.reasoning_effort,
+        mode: resolveAgentMode(context.mode, model.supports_thinking ?? false),
       });
       setModelDialogOpen(false);
     },
@@ -712,37 +795,16 @@ export function InputBox({
   );
 
   const handleModeSelect = useCallback(
-    (mode: InputMode) => {
+    (mode: AgentMode) => {
       if (disabled || polishingInput) {
         return;
       }
       onContextChange?.({
         ...context,
-        mode: getResolvedMode(mode, supportThinking),
-        reasoning_effort:
-          mode === "ultra"
-            ? "high"
-            : mode === "pro"
-              ? "medium"
-              : mode === "thinking"
-                ? "low"
-                : "minimal",
+        mode: resolveAgentMode(mode, supportThinking),
       });
     },
     [disabled, onContextChange, context, polishingInput, supportThinking],
-  );
-
-  const handleReasoningEffortSelect = useCallback(
-    (effort: "minimal" | "low" | "medium" | "high") => {
-      if (disabled || polishingInput) {
-        return;
-      }
-      onContextChange?.({
-        ...context,
-        reasoning_effort: effort,
-      });
-    },
-    [disabled, onContextChange, context, polishingInput],
   );
 
   const handleGoalCommand = useCallback(
@@ -960,13 +1022,13 @@ export function InputBox({
       const submitOptions: InputBoxSubmitOptions = {
         ...(quotes.length
           ? {
-            additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
-            additionalInputMessages: [
-              buildHiddenConversationQuoteMessage({
-                contexts: quoteContexts,
-              }),
-            ],
-          }
+              additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
+              additionalInputMessages: [
+                buildHiddenConversationQuoteMessage({
+                  contexts: quoteContexts,
+                }),
+              ],
+            }
           : {}),
         // Clear one-time state only after the stream accepts the send.
         onSent: () => {
@@ -987,7 +1049,7 @@ export function InputBox({
         onContextChange?.({
           ...context,
           model_name: resolvedModelName,
-          mode: getResolvedMode(
+          mode: resolveAgentMode(
             context.mode,
             selectedModel?.supports_thinking ?? false,
           ),
@@ -1015,8 +1077,25 @@ export function InputBox({
     ],
   );
 
+  const submitThreadMessageWithFollowup = useCallback(
+    async (message: PromptInputMessage) => {
+      const pendingRun = { baseAiId: latestAiId };
+      pendingFollowupRunRef.current = pendingRun;
+      try {
+        await submitThreadMessage(message);
+      } catch (error) {
+        if (pendingFollowupRunRef.current === pendingRun) {
+          pendingFollowupRunRef.current = null;
+        }
+        throw error;
+      }
+    },
+    [latestAiId, submitThreadMessage],
+  );
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      abortVoiceInput();
       if (status === "streaming") {
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
@@ -1041,7 +1120,7 @@ export function InputBox({
         const saved = await handleGoalCommand(submitAction.command);
         // Only start a run when a goal was actually saved; status/clear never run.
         if (saved && submitAction.command.kind === "set") {
-          return submitThreadMessage({
+          return submitThreadMessageWithFollowup({
             ...message,
             text: submitAction.command.objective,
             files: [],
@@ -1059,12 +1138,13 @@ export function InputBox({
       if (submitAction.kind === "empty") {
         return;
       }
-      await submitThreadMessage(messageWithSlashSkill);
+      await submitThreadMessageWithFollowup(messageWithSlashSkill);
       if (selectedSlashSkill) {
         setSelectedSlashSkill(null);
       }
     },
     [
+      abortVoiceInput,
       handleCompactCommand,
       handleGoalCommand,
       compactCommandEnabled,
@@ -1072,7 +1152,7 @@ export function InputBox({
       onStop,
       selectedSlashSkill,
       status,
-      submitThreadMessage,
+      submitThreadMessageWithFollowup,
       t.inputBox.pleaseWaitStreaming,
     ],
   );
@@ -1174,6 +1254,194 @@ export function InputBox({
       (status === "streaming" ||
         slashSkillQuery !== null ||
         !canPolishInput(textInput.value ?? "")));
+  const speechRecognitionConstructor = useMemo(
+    () =>
+      typeof window === "undefined"
+        ? null
+        : getSpeechRecognitionConstructor(window),
+    [],
+  );
+  const voiceInputSupported = speechRecognitionConstructor !== null;
+
+  const getVoiceInputErrorMessage = useCallback(
+    (kind: SpeechRecognitionErrorKind) => {
+      switch (kind) {
+        case "permission_denied":
+          return t.inputBox.voiceInputPermissionDenied;
+        case "microphone_unavailable":
+          return t.inputBox.voiceInputMicrophoneUnavailable;
+        case "unsupported_language":
+          return t.inputBox.voiceInputUnsupportedLanguage;
+        case "network":
+          return t.inputBox.voiceInputNetworkError;
+        case "no_speech":
+          return t.inputBox.voiceInputNoSpeech;
+        case "cancelled":
+          return null;
+        default:
+          return t.inputBox.voiceInputFailed;
+      }
+    },
+    [t],
+  );
+
+  const startVoiceRecognition = useCallback(
+    (options: VoiceRecognitionStartOptions = {}) => {
+      if (composerLocked || !speechRecognitionConstructor) {
+        return false;
+      }
+
+      const recognition = new speechRecognitionConstructor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = getSpeechRecognitionLanguage(locale);
+      recognition.maxAlternatives = 1;
+      voiceLastErrorKindRef.current = null;
+      voiceLatestTextRef.current = voiceBaseTextRef.current;
+      voiceRecognitionRef.current = recognition;
+
+      recognition.onresult = (event) => {
+        if (voiceRecognitionRef.current !== recognition) {
+          return;
+        }
+        const transcript = readSpeechRecognitionTranscript(event.results).text;
+        const nextValue = appendSpeechTranscript(
+          voiceBaseTextRef.current,
+          transcript,
+        );
+        voiceLatestTextRef.current = nextValue;
+        textInput.setInput(nextValue);
+      };
+      recognition.onerror = (event) => {
+        const errorKind = mapSpeechRecognitionError(event.error);
+        voiceLastErrorKindRef.current = errorKind;
+        if (
+          !voiceStopRequestedRef.current &&
+          shouldRestartSpeechRecognition(errorKind)
+        ) {
+          return;
+        }
+
+        const message = getVoiceInputErrorMessage(errorKind);
+        if (message) {
+          toast.error(message);
+        }
+      };
+      recognition.onend = () => {
+        const shouldRestart =
+          voiceRecognitionRef.current === recognition &&
+          !voiceStopRequestedRef.current &&
+          shouldRestartSpeechRecognition(voiceLastErrorKindRef.current);
+        if (shouldRestart) {
+          voiceBaseTextRef.current = voiceLatestTextRef.current;
+          cleanupVoiceRecognition(recognition, { keepListening: true });
+          voiceRestartTimerRef.current = setTimeout(() => {
+            voiceRestartTimerRef.current = null;
+            if (voiceStopRequestedRef.current) {
+              cleanupVoiceRecognition(null);
+              return;
+            }
+            const restarted = startVoiceRecognitionRef.current?.() ?? false;
+            if (!restarted) {
+              cleanupVoiceRecognition(null);
+            }
+          }, 150);
+          return;
+        }
+        cleanupVoiceRecognition(recognition);
+      };
+
+      setVoiceListening(true);
+      try {
+        recognition.start();
+        if (options.focusAfterStart) {
+          requestAnimationFrame(() => {
+            if (selectedSlashSkill) {
+              focusContentEditableEnd(inlineSkillTextRef.current);
+            } else {
+              textareaRef.current?.focus();
+            }
+          });
+        }
+        return true;
+      } catch {
+        cleanupVoiceRecognition(recognition);
+        toast.error(t.inputBox.voiceInputFailed);
+        return false;
+      }
+    },
+    [
+      cleanupVoiceRecognition,
+      composerLocked,
+      getVoiceInputErrorMessage,
+      locale,
+      selectedSlashSkill,
+      speechRecognitionConstructor,
+      t.inputBox.voiceInputFailed,
+      textInput,
+    ],
+  );
+
+  useEffect(() => {
+    startVoiceRecognitionRef.current = startVoiceRecognition;
+  }, [startVoiceRecognition]);
+
+  const stopVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    voiceStopRequestedRef.current = true;
+    if (!recognition) {
+      cleanupVoiceRecognition(null);
+      return;
+    }
+    try {
+      recognition.stop();
+    } catch {
+      cleanupVoiceRecognition(recognition);
+    }
+  }, [cleanupVoiceRecognition]);
+
+  const toggleVoiceInput = useCallback(() => {
+    const action = getVoiceInputToggleAction({
+      composerDisabled: composerLocked,
+      listening: voiceListening,
+      supported: speechRecognitionConstructor !== null,
+    });
+    if (action === "stop") {
+      stopVoiceInput();
+      return;
+    }
+    if (action === "ignore") {
+      return;
+    }
+    if (action === "report_unsupported") {
+      toast.error(t.inputBox.voiceInputUnsupported);
+      return;
+    }
+
+    abortInputPolishRequest();
+    setInputPolishUndo(null);
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    voiceStopRequestedRef.current = false;
+    voiceBaseTextRef.current = textInput.value ?? "";
+    voiceLatestTextRef.current = voiceBaseTextRef.current;
+    startVoiceRecognition({ focusAfterStart: true });
+  }, [
+    abortInputPolishRequest,
+    composerLocked,
+    speechRecognitionConstructor,
+    startVoiceRecognition,
+    stopVoiceInput,
+    t.inputBox.voiceInputUnsupported,
+    textInput.value,
+    voiceListening,
+  ]);
+
+  useEffect(() => {
+    if (composerLocked && voiceListening) {
+      abortVoiceInput();
+    }
+  }, [abortVoiceInput, composerLocked, voiceListening]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -1181,6 +1449,7 @@ export function InputBox({
 
   const applySkillSuggestion = useCallback(
     (suggestion: SlashSuggestion) => {
+      abortVoiceInput();
       if (suggestion.kind === "skill") {
         setSelectedSlashSkill(suggestion);
         textInput.setInput("");
@@ -1203,7 +1472,7 @@ export function InputBox({
         textarea.setSelectionRange(nextValue.length, nextValue.length);
       });
     },
-    [textInput],
+    [abortVoiceInput, textInput],
   );
 
   const handleSkillSuggestionKeyDown = useCallback(
@@ -1455,19 +1724,25 @@ export function InputBox({
   );
 
   const handlePromptTextareaChange = useCallback(() => {
+    if (voiceListening) {
+      abortVoiceInput();
+    }
     abortInputPolishRequest();
     setInputPolishUndo(null);
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
-  }, [abortInputPolishRequest]);
+  }, [abortInputPolishRequest, abortVoiceInput, voiceListening]);
 
   const updateInlineSkillTextInput = useCallback(
     (element: HTMLElement) => {
+      if (voiceListening) {
+        abortVoiceInput();
+      }
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
       textInput.setInput(element.textContent ?? "");
     },
-    [textInput],
+    [abortVoiceInput, textInput, voiceListening],
   );
 
   useEffect(() => {
@@ -1579,14 +1854,41 @@ export function InputBox({
   }, [thread.messages]);
 
   useEffect(() => {
+    if (followupScopeKeyRef.current === followupScopeKey) {
+      return;
+    }
+    followupScopeKeyRef.current = followupScopeKey;
+    lastGeneratedForAiIdRef.current = null;
+    wasStreamingRef.current = false;
+    pendingFollowupRunRef.current = null;
+    setFollowups([]);
+    setFollowupsHidden(false);
+    setFollowupsLoading(false);
+  }, [followupScopeKey]);
+
+  useEffect(() => {
     const streaming = status === "streaming";
     const wasStreaming = wasStreamingRef.current;
-    wasStreamingRef.current = streaming;
-    if (!wasStreaming || streaming) {
+    if (status === "error") {
+      wasStreamingRef.current = false;
+      pendingFollowupRunRef.current = null;
+      return;
+    }
+    if (streaming) {
+      wasStreamingRef.current = true;
+      return;
+    }
+    const pendingRun = pendingFollowupRunRef.current;
+    if (!wasStreaming && pendingRun === null) {
+      return;
+    }
+    if (!suggestionsConfigLoaded) {
       return;
     }
 
     if (!followupSuggestionsEnabled) {
+      wasStreamingRef.current = false;
+      pendingFollowupRunRef.current = null;
       setFollowups([]);
       setFollowupsLoading(false);
       return;
@@ -1596,17 +1898,18 @@ export function InputBox({
       return;
     }
 
-    const lastAi = [...messagesRef.current]
-      .reverse()
-      .find((m) => m.type === "ai");
-    const lastAiId = lastAi?.id ?? null;
-    if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
+    if (
+      !latestAiId ||
+      (pendingRun !== null && latestAiId === pendingRun.baseAiId)
+    ) {
       return;
     }
-    if (!suggestionsConfigLoaded) {
+    wasStreamingRef.current = false;
+    pendingFollowupRunRef.current = null;
+    if (latestAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
-    lastGeneratedForAiIdRef.current = lastAiId;
+    lastGeneratedForAiIdRef.current = latestAiId;
 
     if (!suggestionsEnabled) {
       setFollowups([]);
@@ -1654,6 +1957,7 @@ export function InputBox({
     disabled,
     followupSuggestionsEnabled,
     isMock,
+    latestAiId,
     privateWork.apiBaseURL,
     status,
     suggestionsConfigLoaded,
@@ -1674,10 +1978,7 @@ export function InputBox({
   }, []);
 
   return (
-    <div
-      ref={promptRootRef}
-      className="relative flex min-w-0 flex-col gap-2"
-    >
+    <div ref={promptRootRef} className="relative flex min-w-0 flex-col gap-2">
       {showFollowups && (
         <div className="flex items-center justify-center pb-1">
           <div className="flex items-center gap-2">
@@ -1896,6 +2197,12 @@ export function InputBox({
                 uploadLimits={uploadLimits}
               />
             )}
+            <VoiceInputButton
+              disabled={composerLocked}
+              listening={voiceListening}
+              supported={voiceInputSupported}
+              onToggle={toggleVoiceInput}
+            />
             <Tooltip
               content={
                 polishingInput
@@ -2006,222 +2313,105 @@ export function InputBox({
                       )}
                     </PromptInputActionMenuItem>
                     {supportThinking && (
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.mode === "thinking"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleModeSelect("thinking")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            <LightbulbIcon
-                              className={cn(
-                                "mr-2 size-4",
-                                context.mode === "thinking" &&
-                                  "text-accent-foreground",
-                              )}
-                            />
-                            {t.inputBox.reasoningMode}
+                      <>
+                        <PromptInputActionMenuItem
+                          className={cn(
+                            context.mode === "thinking"
+                              ? "text-accent-foreground"
+                              : "text-muted-foreground/65",
+                          )}
+                          onSelect={() => handleModeSelect("thinking")}
+                        >
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-1 font-bold">
+                              <LightbulbIcon
+                                className={cn(
+                                  "mr-2 size-4",
+                                  context.mode === "thinking" &&
+                                    "text-accent-foreground",
+                                )}
+                              />
+                              {t.inputBox.reasoningMode}
+                            </div>
+                            <div className="pl-7 text-xs">
+                              {t.inputBox.reasoningModeDescription}
+                            </div>
                           </div>
-                          <div className="pl-7 text-xs">
-                            {t.inputBox.reasoningModeDescription}
+                          {context.mode === "thinking" ? (
+                            <CheckIcon className="ml-auto size-4" />
+                          ) : (
+                            <div className="ml-auto size-4" />
+                          )}
+                        </PromptInputActionMenuItem>
+                        <PromptInputActionMenuItem
+                          className={cn(
+                            context.mode === "pro"
+                              ? "text-accent-foreground"
+                              : "text-muted-foreground/65",
+                          )}
+                          onSelect={() => handleModeSelect("pro")}
+                        >
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-1 font-bold">
+                              <GraduationCapIcon
+                                className={cn(
+                                  "mr-2 size-4",
+                                  context.mode === "pro" &&
+                                    "text-accent-foreground",
+                                )}
+                              />
+                              {t.inputBox.proMode}
+                            </div>
+                            <div className="pl-7 text-xs">
+                              {t.inputBox.proModeDescription}
+                            </div>
                           </div>
-                        </div>
-                        {context.mode === "thinking" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
+                          {context.mode === "pro" ? (
+                            <CheckIcon className="ml-auto size-4" />
+                          ) : (
+                            <div className="ml-auto size-4" />
+                          )}
+                        </PromptInputActionMenuItem>
+                        <PromptInputActionMenuItem
+                          className={cn(
+                            context.mode === "ultra"
+                              ? "text-accent-foreground"
+                              : "text-muted-foreground/65",
+                          )}
+                          onSelect={() => handleModeSelect("ultra")}
+                        >
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center gap-1 font-bold">
+                              <RocketIcon
+                                className={cn(
+                                  "mr-2 size-4",
+                                  context.mode === "ultra" && "text-[#dabb5e]",
+                                )}
+                              />
+                              <div
+                                className={cn(
+                                  context.mode === "ultra" && "golden-text",
+                                )}
+                              >
+                                {t.inputBox.ultraMode}
+                              </div>
+                            </div>
+                            <div className="pl-7 text-xs">
+                              {t.inputBox.ultraModeDescription}
+                            </div>
+                          </div>
+                          {context.mode === "ultra" ? (
+                            <CheckIcon className="ml-auto size-4" />
+                          ) : (
+                            <div className="ml-auto size-4" />
+                          )}
+                        </PromptInputActionMenuItem>
+                      </>
                     )}
-                    <PromptInputActionMenuItem
-                      className={cn(
-                        context.mode === "pro"
-                          ? "text-accent-foreground"
-                          : "text-muted-foreground/65",
-                      )}
-                      onSelect={() => handleModeSelect("pro")}
-                    >
-                      <div className="flex flex-col gap-2">
-                        <div className="flex items-center gap-1 font-bold">
-                          <GraduationCapIcon
-                            className={cn(
-                              "mr-2 size-4",
-                              context.mode === "pro" &&
-                                "text-accent-foreground",
-                            )}
-                          />
-                          {t.inputBox.proMode}
-                        </div>
-                        <div className="pl-7 text-xs">
-                          {t.inputBox.proModeDescription}
-                        </div>
-                      </div>
-                      {context.mode === "pro" ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </PromptInputActionMenuItem>
-                    <PromptInputActionMenuItem
-                      className={cn(
-                        context.mode === "ultra"
-                          ? "text-accent-foreground"
-                          : "text-muted-foreground/65",
-                      )}
-                      onSelect={() => handleModeSelect("ultra")}
-                    >
-                      <div className="flex flex-col gap-2">
-                        <div className="flex items-center gap-1 font-bold">
-                          <RocketIcon
-                            className={cn(
-                              "mr-2 size-4",
-                              context.mode === "ultra" && "text-[#dabb5e]",
-                            )}
-                          />
-                          <div
-                            className={cn(
-                              context.mode === "ultra" && "golden-text",
-                            )}
-                          >
-                            {t.inputBox.ultraMode}
-                          </div>
-                        </div>
-                        <div className="pl-7 text-xs">
-                          {t.inputBox.ultraModeDescription}
-                        </div>
-                      </div>
-                      {context.mode === "ultra" ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </PromptInputActionMenuItem>
                   </PromptInputActionMenu>
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
-            {supportReasoningEffort && context.mode !== "flash" && (
-              <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger
-                  className="hidden gap-1! px-2! sm:inline-flex"
-                  disabled={composerLocked}
-                >
-                  <div className="text-xs font-normal">
-                    {t.inputBox.reasoningEffort}:
-                    {context.reasoning_effort === "minimal" &&
-                      " " + t.inputBox.reasoningEffortMinimal}
-                    {context.reasoning_effort === "low" &&
-                      " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
-                      " " + t.inputBox.reasoningEffortMedium}
-                    {context.reasoning_effort === "high" &&
-                      " " + t.inputBox.reasoningEffortHigh}
-                  </div>
-                </PromptInputActionMenuTrigger>
-                <PromptInputActionMenuContent className="w-70">
-                  <DropdownMenuGroup>
-                    <DropdownMenuLabel className="text-muted-foreground text-xs">
-                      {t.inputBox.reasoningEffort}
-                    </DropdownMenuLabel>
-                    <PromptInputActionMenu>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "minimal"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("minimal")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortMinimal}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortMinimalDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "minimal" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "low"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("low")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortLow}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortLowDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "low" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "medium" ||
-                            !context.reasoning_effort
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("medium")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortMedium}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortMediumDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "medium" ||
-                        !context.reasoning_effort ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                      <PromptInputActionMenuItem
-                        className={cn(
-                          context.reasoning_effort === "high"
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        onSelect={() => handleReasoningEffortSelect("high")}
-                      >
-                        <div className="flex flex-col gap-2">
-                          <div className="flex items-center gap-1 font-bold">
-                            {t.inputBox.reasoningEffortHigh}
-                          </div>
-                          <div className="pl-2 text-xs">
-                            {t.inputBox.reasoningEffortHighDescription}
-                          </div>
-                        </div>
-                        {context.reasoning_effort === "high" ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </PromptInputActionMenuItem>
-                    </PromptInputActionMenu>
-                  </DropdownMenuGroup>
-                </PromptInputActionMenuContent>
-              </PromptInputActionMenu>
-            )}
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
             <ModelSelector
@@ -2415,6 +2605,57 @@ function AddAttachmentsButton({
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />
+      </PromptInputButton>
+    </Tooltip>
+  );
+}
+
+function VoiceInputButton({
+  disabled,
+  listening,
+  supported,
+  onToggle,
+}: {
+  disabled?: boolean;
+  listening: boolean;
+  supported: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  const tooltipContent = !supported
+    ? t.inputBox.voiceInputUnsupported
+    : listening
+      ? t.inputBox.voiceInputListening
+      : t.inputBox.voiceInputStart;
+  const label = listening
+    ? t.inputBox.voiceInputStopLabel
+    : t.inputBox.voiceInputStartLabel;
+  const buttonState = getVoiceInputButtonState({
+    composerDisabled: disabled ?? false,
+    supported,
+  });
+
+  return (
+    <Tooltip content={<span className="block max-w-72">{tooltipContent}</span>}>
+      <PromptInputButton
+        aria-label={label}
+        aria-disabled={buttonState.ariaDisabled}
+        aria-pressed={listening}
+        className={cn(
+          "px-2!",
+          listening && "text-primary bg-primary/10 hover:bg-primary/15",
+          buttonState.visuallyDisabled &&
+            "cursor-not-allowed opacity-50 hover:bg-transparent dark:hover:bg-transparent",
+        )}
+        data-testid="voice-input-button"
+        disabled={buttonState.nativeDisabled}
+        onClick={onToggle}
+      >
+        {listening ? (
+          <SquareIcon className="size-3 fill-current" />
+        ) : (
+          <MicIcon className="size-3" />
+        )}
       </PromptInputButton>
     </Tooltip>
   );

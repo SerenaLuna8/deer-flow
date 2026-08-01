@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from app.audit.models import (
+    AUDIT_METADATA_MODELS,
     AuditAction,
     AuditActor,
     AuditAuthorityRejected,
@@ -17,10 +20,13 @@ from app.audit.models import (
 )
 from app.audit.service import (
     AuditService,
+    _bind_gateway_audit_process,
     _bind_scheduler_audit_process,
     _bind_worker_audit_process,
 )
+from app.audit.sinks import OperationalAuditSink
 from app.reliability.owner_refs import AuditHmacKeyring
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 
 def _keyring(active: str = "audit-v2") -> AuditHmacKeyring:
@@ -99,6 +105,131 @@ async def test_action_requires_enum_and_action_specific_metadata() -> None:
             target,
             AuditOutcome.SUCCESS,
             {"job_type": "retention_purge", "non_interactive": False},
+        )
+
+
+@pytest.mark.anyio
+async def test_run_files_finalized_metadata_is_aggregate_only_and_worker_bound() -> None:
+    service = AuditService(None, _keyring())
+    project_id = uuid.uuid4()
+    target = AuditTarget(
+        kind=AuditTargetKind.RUN,
+        authority_id=uuid.uuid4(),
+        project_id=project_id,
+    )
+    metadata = {
+        "created_count": 2,
+        "modified_count": 1,
+        "deleted_count": 3,
+        "artifact_count": 1,
+        "committed_bytes": 4096,
+    }
+    worker = AuditActor.trusted_process(_bind_worker_audit_process(service))
+
+    validated = AUDIT_METADATA_MODELS[AuditAction.RUN_FILES_FINALIZED].model_validate(metadata)
+    assert validated.model_dump() == metadata
+    assert AuditService._action_authorized(
+        worker,
+        AuditAction.RUN_FILES_FINALIZED,
+        target,
+        metadata,
+    )
+    assert not AuditService._action_authorized(
+        AuditActor.user(uuid.uuid4()),
+        AuditAction.RUN_FILES_FINALIZED,
+        target,
+        metadata,
+    )
+
+    for forbidden in (
+        "path",
+        "name",
+        "file_id",
+        "body",
+        "locator",
+        "sha256",
+    ):
+        with pytest.raises(AuditMetadataRejected):
+            await service.append(
+                object(),
+                worker,
+                AuditAction.RUN_FILES_FINALIZED,
+                target,
+                AuditOutcome.SUCCESS,
+                {**metadata, forbidden: "private"},
+            )
+    with pytest.raises(ValidationError):
+        AUDIT_METADATA_MODELS[AuditAction.RUN_FILES_FINALIZED].model_validate({**metadata, "created_count": True})
+
+
+@pytest.mark.anyio
+async def test_operational_sink_builds_run_files_finalized_event(
+    monkeypatch,
+) -> None:
+    service = AuditService(None, _keyring())
+    process_context = _bind_worker_audit_process(service)
+    append = AsyncMock()
+    monkeypatch.setattr(service, "append", append)
+    sink = OperationalAuditSink(
+        service,
+        process_context=process_context,
+    )
+    project_id = uuid.uuid4()
+    owner_user_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    metadata = {
+        "created_count": 2,
+        "modified_count": 1,
+        "deleted_count": 3,
+        "artifact_count": 1,
+        "committed_bytes": 4096,
+    }
+
+    await sink.run_files_finalized(
+        object(),
+        PrivateResourceScope(
+            project_id=str(project_id),
+            owner_user_id=str(owner_user_id),
+            membership_version=1,
+        ),
+        run_id=str(run_id),
+        job_id=job_id,
+        request_id="trace-run-files-finalized",
+        **metadata,
+    )
+
+    args = append.await_args.args
+    assert args[2] is AuditAction.RUN_FILES_FINALIZED
+    assert args[3] == AuditTarget(
+        AuditTargetKind.RUN,
+        run_id,
+        project_id,
+    )
+    assert args[4] is AuditOutcome.SUCCESS
+    assert args[5] == metadata
+    assert append.await_args.kwargs == {
+        "request_id": "trace-run-files-finalized",
+        "job_id": job_id,
+    }
+
+    gateway_service = AuditService(None, _keyring())
+    gateway = OperationalAuditSink(
+        gateway_service,
+        process_context=_bind_gateway_audit_process(gateway_service),
+    )
+    with pytest.raises(AuditAuthorityRejected):
+        await gateway.run_files_finalized(
+            object(),
+            PrivateResourceScope(
+                project_id=str(project_id),
+                owner_user_id=str(owner_user_id),
+                membership_version=1,
+            ),
+            run_id=str(run_id),
+            job_id=job_id,
+            request_id="trace-run-files-finalized",
+            **metadata,
         )
 
 

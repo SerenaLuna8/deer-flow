@@ -9,7 +9,7 @@ class AllowlistProvider:
     name = "allowlist"
 
     def __init__(self, *, allowed_tools: list[str] | None = None, denied_tools: list[str] | None = None):
-        self._allowed = set(allowed_tools) if allowed_tools else None
+        self._allowed = set(allowed_tools) if allowed_tools is not None else None
         self._denied = set(denied_tools) if denied_tools else set()
 
     def evaluate(self, request: GuardrailRequest) -> GuardrailDecision:

@@ -2,7 +2,10 @@ import type { Thread, ThreadState } from "@langchain/langgraph-sdk";
 import type { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 import { z } from "zod";
 
-import { createCompatibleClient } from "@/core/api/api-client";
+import {
+  clearReconnectRun,
+  createCompatibleClient,
+} from "@/core/api/api-client";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
@@ -12,13 +15,28 @@ import {
   type RunMetadataStorage,
 } from "./types";
 
-const projectClients = new Map<string, LangGraphClient>();
+type ProjectClientLifecycle = {
+  active: boolean;
+  controller: AbortController;
+};
+
+type ProjectClientEntry = ProjectClientLifecycle & {
+  client: LangGraphClient;
+  reconnectStorage: RunMetadataStorage;
+};
+
+const projectClients = new Map<string, ProjectClientEntry>();
 const projectThreadVersions = new Map<string, Map<string, number>>();
 const projectStreamCursorStates = new Map<string, ProjectStreamCursorState>();
 const CANONICAL_POSITIVE_EVENT_ID = /^[1-9][0-9]*$/;
+const CANONICAL_NONNEGATIVE_EVENT_ID = /^(?:0|[1-9][0-9]*)$/;
+const POSTGRES_SIGNED_BIGINT_MAX = "9223372036854775807";
 
 export type ProjectStreamCursorState = {
-  lastEventId: number;
+  // Keep the PostgreSQL BIGINT cursor as a canonical decimal string. JavaScript
+  // numbers lose precision above 2^53 - 1 and could otherwise skip or replay
+  // durable frames when a long-lived run_events sequence crosses that bound.
+  lastEventId: string;
   terminalRunId: string | null;
 };
 
@@ -34,6 +52,7 @@ export type ProjectStreamFrameDecision = {
 };
 
 export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
+export const PROJECT_STREAM_INCOMPLETE = "PROJECT_STREAM_INCOMPLETE";
 
 const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
   "error",
@@ -72,8 +91,72 @@ export function isProjectRunTerminalFailure(error: unknown): boolean {
   return error instanceof Error && error.name === PROJECT_RUN_TERMINAL_FAILURE;
 }
 
+function assertDurableProjectStreamCompleted({
+  started,
+  terminal,
+  signal,
+  entry,
+}: {
+  started: boolean;
+  terminal: boolean;
+  signal: AbortSignal;
+  entry: ProjectClientEntry;
+}): void {
+  if (
+    !started ||
+    terminal ||
+    signal.aborted ||
+    !isProjectClientEntryActive(entry)
+  ) {
+    return;
+  }
+  const error = new Error(
+    "Project stream ended before its durable terminal frame.",
+  );
+  error.name = PROJECT_STREAM_INCOMPLETE;
+  throw error;
+}
+
 export function emptyProjectStreamCursorState(): ProjectStreamCursorState {
-  return { lastEventId: 0, terminalRunId: null };
+  return { lastEventId: "0", terminalRunId: null };
+}
+
+function compareCanonicalDecimal(left: string, right: string): number {
+  if (left.length !== right.length) {
+    return left.length < right.length ? -1 : 1;
+  }
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+export function advanceProjectStreamCursorState(
+  current: ProjectStreamCursorState,
+  incoming: ProjectStreamCursorState,
+): ProjectStreamCursorState {
+  const order = compareCanonicalDecimal(
+    incoming.lastEventId,
+    current.lastEventId,
+  );
+  if (order < 0) return current;
+  if (order > 0) return incoming;
+  if (current.terminalRunId !== null || incoming.terminalRunId === null) {
+    return current;
+  }
+  return incoming;
+}
+
+function isPostgresBigintEventId(
+  value: unknown,
+  allowZero: boolean,
+): value is string {
+  if (typeof value !== "string") return false;
+  const pattern = allowZero
+    ? CANONICAL_NONNEGATIVE_EVENT_ID
+    : CANONICAL_POSITIVE_EVENT_ID;
+  return (
+    pattern.test(value) &&
+    compareCanonicalDecimal(value, POSTGRES_SIGNED_BIGINT_MAX) <= 0
+  );
 }
 
 export function acceptProjectStreamFrame(
@@ -83,18 +166,17 @@ export function acceptProjectStreamFrame(
 ): ProjectStreamFrameDecision {
   if (
     typeof frame.id !== "string" ||
-    !CANONICAL_POSITIVE_EVENT_ID.test(frame.id)
+    !isPostgresBigintEventId(frame.id, false)
   ) {
     return { accepted: false, state };
   }
-  const eventId = Number(frame.id);
-  if (!Number.isSafeInteger(eventId) || eventId <= state.lastEventId) {
+  if (compareCanonicalDecimal(frame.id, state.lastEventId) <= 0) {
     return { accepted: false, state };
   }
   return {
     accepted: true,
     state: {
-      lastEventId: eventId,
+      lastEventId: frame.id,
       terminalRunId:
         frame.event === "end" && runId.length > 0 ? runId : state.terminalRunId,
     },
@@ -141,25 +223,55 @@ const privateThreadStateSchema = z
 
 type PrivateThread = z.infer<typeof privateThreadSchema>;
 
+export const PROJECT_RESPONSE_ERROR_CODES = [
+  "DEFAULT_AGENT_UNAVAILABLE",
+] as const;
+export type ProjectResponseErrorCode =
+  (typeof PROJECT_RESPONSE_ERROR_CODES)[number];
+const projectResponseErrorBodySchema = z.object({
+  detail: z.object({ code: z.enum(PROJECT_RESPONSE_ERROR_CODES) }),
+});
+
 class ProjectResponseError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly response: Response,
+    readonly code: ProjectResponseErrorCode | null,
   ) {
     super(message);
     this.name = "ProjectResponseError";
   }
 }
 
-export type CreateProjectThreadInput = {
+export function isProjectResponseErrorCode<
+  Code extends ProjectResponseErrorCode,
+>(
+  error: unknown,
+  code: Code,
+): error is Error & { readonly code: Code; readonly status: number } {
+  return error instanceof ProjectResponseError && error.code === code;
+}
+
+type CreateProjectThreadBaseInput = {
   threadId: string;
-  agentAssetId: string;
-  agentScope?: "project" | "system";
   displayName?: string | null;
   metadata?: Record<string, unknown>;
   signal?: AbortSignal;
 };
+
+type ExplicitProjectThreadAgentInput = {
+  agentAssetId: string;
+  agentScope?: "project" | "system";
+};
+
+type DefaultProjectThreadAgentInput = {
+  agentAssetId?: never;
+  agentScope?: never;
+};
+
+export type CreateProjectThreadInput = CreateProjectThreadBaseInput &
+  (ExplicitProjectThreadAgentInput | DefaultProjectThreadAgentInput);
 
 function scopeKey(scope: ProjectClientScope): string {
   const parsed = projectClientScopeSchema.parse(scope);
@@ -240,11 +352,19 @@ async function readProjectResponse<T>(
   fallback: string,
 ): Promise<T> {
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: fallback }));
+    const error: unknown = await response
+      .json()
+      .catch(() => ({ detail: fallback }));
+    const stableError = projectResponseErrorBodySchema.safeParse(error);
+    const detail =
+      typeof error === "object" && error !== null
+        ? Reflect.get(error, "detail")
+        : null;
     throw new ProjectResponseError(
-      typeof error.detail === "string" ? error.detail : fallback,
+      typeof detail === "string" ? detail : fallback,
       response.status,
       response,
+      stableError.success ? stableError.data.detail.code : null,
     );
   }
   return schema.parse(await response.json());
@@ -464,13 +584,24 @@ function readProjectStreamCursorState(
         if (typeof value === "object" && value !== null) {
           const lastEventId = Reflect.get(value, "lastEventId");
           const terminalRunId = Reflect.get(value, "terminalRunId");
+          const normalizedLastEventId = isPostgresBigintEventId(
+            lastEventId,
+            true,
+          )
+            ? lastEventId
+            : typeof lastEventId === "number" &&
+                Number.isSafeInteger(lastEventId) &&
+                lastEventId >= 0
+              ? String(lastEventId)
+              : null;
           if (
-            Number.isSafeInteger(lastEventId) &&
-            typeof lastEventId === "number" &&
-            lastEventId >= 0 &&
+            normalizedLastEventId !== null &&
             (terminalRunId === null || typeof terminalRunId === "string")
           ) {
-            const state = { lastEventId, terminalRunId };
+            const state: ProjectStreamCursorState = {
+              lastEventId: normalizedLastEventId,
+              terminalRunId,
+            };
             projectStreamCursorStates.set(key, state);
             return state;
           }
@@ -489,14 +620,47 @@ function writeProjectStreamCursorState(
   scope: ProjectClientScope,
   threadId: string,
   state: ProjectStreamCursorState,
+  lifecycle?: ProjectClientLifecycle,
 ): void {
+  if (lifecycle && !lifecycle.active) return;
   const key = projectStreamCursorStorageKey(scope, threadId);
-  projectStreamCursorStates.set(key, state);
+  const current = readProjectStreamCursorState(scope, threadId);
+  const next = advanceProjectStreamCursorState(current, state);
+  if (next === current) return;
+  projectStreamCursorStates.set(key, next);
   try {
-    browserSessionStorage()?.setItem(key, JSON.stringify(state));
+    browserSessionStorage()?.setItem(key, JSON.stringify(next));
   } catch {
     // The in-memory cursor still protects this mounted client from duplicates.
   }
+}
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return typeof AbortSignal !== "undefined" && value instanceof AbortSignal;
+}
+
+function mergeProjectStreamSignals(
+  callerSignal: AbortSignal | undefined,
+  scopeSignal: AbortSignal,
+): AbortSignal {
+  if (!callerSignal || callerSignal === scopeSignal) return scopeSignal;
+  if (callerSignal.aborted) return callerSignal;
+  if (scopeSignal.aborted) return scopeSignal;
+
+  const anySignal = Reflect.get(AbortSignal, "any");
+  if (typeof anySignal === "function") {
+    return Reflect.apply(anySignal, AbortSignal, [[callerSignal, scopeSignal]]);
+  }
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  callerSignal.addEventListener("abort", abort, { once: true });
+  scopeSignal.addEventListener("abort", abort, { once: true });
+  return controller.signal;
+}
+
+function isProjectClientEntryActive(entry: ProjectClientEntry): boolean {
+  return entry.active && !entry.controller.signal.aborted;
 }
 
 function streamFrameRunId(frame: ProjectStreamFrame): string | null {
@@ -509,93 +673,178 @@ function streamFrameRunId(frame: ProjectStreamFrame): string | null {
 function installProjectStreamAdapter(
   client: LangGraphClient,
   scope: ProjectClientScope,
+  entry: ProjectClientEntry,
 ): void {
-  const reconnectStorage = projectReconnectStorage(scope);
+  const reconnectStorage = entry.reconnectStorage;
+  const originalGetRun = client.runs.get.bind(client.runs);
+  client.runs.get = ((threadId, runId, options) =>
+    originalGetRun(threadId, runId, {
+      ...options,
+      signal: mergeProjectStreamSignals(
+        options?.signal,
+        entry.controller.signal,
+      ),
+    })) as typeof client.runs.get;
+
   const originalRunStream = client.runs.stream.bind(client.runs);
   client.runs.stream = async function* (threadId, assistantId, payload) {
+    if (!isProjectClientEntryActive(entry)) return;
+    let runId = "";
+    const payloadSignal =
+      payload && typeof payload === "object"
+        ? Reflect.get(payload, "signal")
+        : undefined;
+    const callerOnRunCreated = payload?.onRunCreated;
+    const selectedPayload = {
+      ...(payload ?? {}),
+      signal: mergeProjectStreamSignals(
+        isAbortSignal(payloadSignal) ? payloadSignal : undefined,
+        entry.controller.signal,
+      ),
+      onRunCreated(params: { run_id: string; thread_id?: string }) {
+        runId = params.run_id;
+        callerOnRunCreated?.(params);
+      },
+    };
     if (threadId == null) {
-      yield* originalRunStream(threadId, assistantId, payload);
+      for await (const frame of originalRunStream(
+        threadId,
+        assistantId,
+        selectedPayload,
+      )) {
+        if (!isProjectClientEntryActive(entry)) return;
+        yield frame;
+      }
       return;
     }
 
-    let state = readProjectStreamCursorState(scope, threadId);
-    if (state.terminalRunId !== null) {
-      state = { ...state, terminalRunId: null };
-      writeProjectStreamCursorState(scope, threadId, state);
-    }
-    let runId = "";
+    let state = emptyProjectStreamCursorState();
+    let started = false;
+    let terminal = false;
     for await (const frame of originalRunStream(
       threadId,
       assistantId,
-      payload,
+      selectedPayload,
     )) {
-      runId = streamFrameRunId(frame) ?? runId;
-      const decision = acceptProjectStreamFrame(state, frame, runId);
+      if (!isProjectClientEntryActive(entry)) return;
+      const projectFrame: ProjectStreamFrame = frame;
+      runId = streamFrameRunId(projectFrame) ?? runId;
+      const decision = acceptProjectStreamFrame(state, projectFrame, runId);
       if (!decision.accepted) continue;
       state = decision.state;
-      writeProjectStreamCursorState(scope, threadId, state);
+      started = true;
+      terminal ||= projectFrame.event === "end";
+      writeProjectStreamCursorState(scope, threadId, state, entry);
       if (state.terminalRunId !== null) {
-        reconnectStorage.removeItem(`lg:stream:${threadId}`);
+        clearReconnectRun(threadId, state.terminalRunId, reconnectStorage);
+      }
+      if (projectFrame.event === "error") {
+        // Worker failures are persisted as a diagnostic error frame followed
+        // by the authoritative durable end frame. Exposing the first frame to
+        // LangGraph's StreamManager would stop consumption before that end.
+        continue;
       }
       yield projectStreamFrameForUI(frame);
     }
+    assertDurableProjectStreamCompleted({
+      started,
+      terminal,
+      signal: selectedPayload.signal,
+      entry,
+    });
   } as typeof client.runs.stream;
 
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   client.runs.joinStream = async function* (threadId, runId, options) {
+    if (!isProjectClientEntryActive(entry)) return;
+    const callerSignal = isAbortSignal(options) ? options : options?.signal;
+    const selectedOptions = {
+      ...(isAbortSignal(options) ? {} : options),
+      signal: mergeProjectStreamSignals(callerSignal, entry.controller.signal),
+      // A newly mounted UI projection must rebuild the complete current Run.
+      // Shared cursors are diagnostic only: an old invisible consumer may have
+      // advanced one beyond frames the new UI has actually rendered.
+      lastEventId: "0",
+    };
     if (threadId == null) {
-      yield* originalJoinStream(threadId, runId, options);
+      for await (const frame of originalJoinStream(
+        threadId,
+        runId,
+        selectedOptions,
+      )) {
+        if (!isProjectClientEntryActive(entry)) return;
+        yield frame;
+      }
       return;
     }
 
-    let state = readProjectStreamCursorState(scope, threadId);
-    if (!shouldReconnectProjectStream(state, runId)) {
-      reconnectStorage.removeItem(`lg:stream:${threadId}`);
-      return;
-    }
-    // The durable cursor intentionally resumes after frames the browser has
-    // already consumed. A route change clears the SDK's in-memory projection,
-    // though, so replaying only the tail would omit the current Human message
-    // and Lead Agent task call. Hydrate the latest checkpoint first, without an
-    // event id (and therefore without advancing or rewinding the durable
-    // cursor), then continue with the exact persisted Last-Event-ID.
-    if (
-      reconnectStorage.getItem(`lg:stream:${threadId}`) === runId
-    ) {
-      try {
-        const latestState = (
-          await client.threads.getHistory(threadId, { limit: 1 })
-        )[0];
-        if (latestState?.values) {
-          yield {
-            event: "values",
-            data: latestState.values,
-          };
-        }
-      } catch {
-        // Snapshot hydration is best effort. The durable tail remains the
-        // authoritative reconnect path and must still be attempted.
-      }
-    }
-    const selectedOptions =
-      typeof AbortSignal !== "undefined" && options instanceof AbortSignal
-        ? { signal: options, lastEventId: String(state.lastEventId) }
-        : { ...options, lastEventId: String(state.lastEventId) };
+    let state = emptyProjectStreamCursorState();
+    let started = false;
+    let terminal = false;
     for await (const frame of originalJoinStream(
       threadId,
       runId,
       selectedOptions,
     )) {
-      const decision = acceptProjectStreamFrame(state, frame, runId);
+      if (!isProjectClientEntryActive(entry)) return;
+      const projectFrame: ProjectStreamFrame = frame;
+      const decision = acceptProjectStreamFrame(state, projectFrame, runId);
       if (!decision.accepted) continue;
       state = decision.state;
-      writeProjectStreamCursorState(scope, threadId, state);
+      started = true;
+      terminal ||= projectFrame.event === "end";
+      writeProjectStreamCursorState(scope, threadId, state, entry);
       if (state.terminalRunId === runId) {
-        reconnectStorage.removeItem(`lg:stream:${threadId}`);
+        clearReconnectRun(threadId, runId, reconnectStorage);
+      }
+      if (projectFrame.event === "error") {
+        continue;
       }
       yield projectStreamFrameForUI(frame);
     }
+    assertDurableProjectStreamCompleted({
+      started,
+      terminal,
+      signal: selectedOptions.signal,
+      entry,
+    });
   } as typeof client.runs.joinStream;
+}
+
+function createProjectReconnectStorage(
+  scope: ProjectClientScope,
+  storageOverride?: Pick<Storage, "getItem" | "setItem" | "removeItem">,
+  lifecycle?: ProjectClientLifecycle,
+): RunMetadataStorage {
+  const parsed = projectClientScopeSchema.parse(scope);
+  const storage = () => storageOverride ?? browserSessionStorage();
+  const ownedRunIds = new Map<`lg:stream:${string}`, string>();
+  const isActive = () => !lifecycle || lifecycle.active;
+  return {
+    getItem(key) {
+      if (!isActive()) return null;
+      const value =
+        storage()?.getItem(projectReconnectKey(parsed, key)) ?? null;
+      if (value !== null) ownedRunIds.set(key, value);
+      return value;
+    },
+    setItem(key, value) {
+      if (!isActive()) return;
+      storage()?.setItem(projectReconnectKey(parsed, key), value);
+      ownedRunIds.set(key, value);
+    },
+    removeItem(key) {
+      if (!isActive()) return;
+      const ownedRunId = ownedRunIds.get(key);
+      if (ownedRunId === undefined) return;
+      const selectedStorage = storage();
+      const scopedKey = projectReconnectKey(parsed, key);
+      if (selectedStorage?.getItem(scopedKey) === ownedRunId) {
+        selectedStorage.removeItem(scopedKey);
+      }
+      ownedRunIds.delete(key);
+    },
+  };
 }
 
 export function projectReconnectStorage(
@@ -603,18 +852,8 @@ export function projectReconnectStorage(
   storageOverride?: Pick<Storage, "getItem" | "setItem" | "removeItem">,
 ): RunMetadataStorage {
   const parsed = projectClientScopeSchema.parse(scope);
-  const storage = () => storageOverride ?? browserSessionStorage();
-  return {
-    getItem(key) {
-      return storage()?.getItem(projectReconnectKey(parsed, key)) ?? null;
-    },
-    setItem(key, value) {
-      storage()?.setItem(projectReconnectKey(parsed, key), value);
-    },
-    removeItem(key) {
-      storage()?.removeItem(projectReconnectKey(parsed, key));
-    },
-  };
+  const entry = projectClients.get(scopeKey(parsed));
+  return createProjectReconnectStorage(parsed, storageOverride, entry);
 }
 
 export function clearProjectReconnectStorage(scope: ProjectClientScope): void {
@@ -653,17 +892,31 @@ export function getProjectAPIClient(
 ): LangGraphClient {
   const parsed = projectClientScopeSchema.parse(scope);
   const key = scopeKey(parsed);
-  let client = projectClients.get(key);
-  if (!client) {
-    client = createCompatibleClient({
+  let entry = projectClients.get(key);
+  if (!entry) {
+    const lifecycle: ProjectClientLifecycle = {
+      active: true,
+      controller: new AbortController(),
+    };
+    const reconnectStorage = createProjectReconnectStorage(
+      parsed,
+      undefined,
+      lifecycle,
+    );
+    const client = createCompatibleClient({
       apiUrl: projectPrivateWorkBaseURL(parsed.projectId),
-      runMetadataStorage: projectReconnectStorage(parsed),
+      runMetadataStorage: reconnectStorage,
+      durableRunStreams: true,
+    });
+    entry = Object.assign(lifecycle, {
+      client,
+      reconnectStorage,
     });
     installProjectThreadAdapter(client, parsed);
-    installProjectStreamAdapter(client, parsed);
-    projectClients.set(key, client);
+    installProjectStreamAdapter(client, parsed, entry);
+    projectClients.set(key, entry);
   }
-  return client;
+  return entry.client;
 }
 
 export async function createProjectThread(
@@ -672,7 +925,16 @@ export async function createProjectThread(
 ): Promise<Thread> {
   const parsedScope = projectClientScopeSchema.parse(scope);
   const threadId = z.string().uuid().parse(input.threadId);
-  const agentAssetId = z.string().uuid().parse(input.agentAssetId);
+  if (input.agentAssetId === undefined && input.agentScope !== undefined) {
+    throw new TypeError("Agent scope requires an Agent asset ID");
+  }
+  const agentSelection =
+    input.agentAssetId === undefined
+      ? {}
+      : {
+          agent_asset_id: z.string().uuid().parse(input.agentAssetId),
+          agent_scope: input.agentScope ?? "project",
+        };
   const response = await fetchWithAuth(
     `${projectPrivateWorkBaseURL(parsedScope.projectId)}/threads`,
     {
@@ -680,8 +942,7 @@ export async function createProjectThread(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         thread_id: threadId,
-        agent_asset_id: agentAssetId,
-        agent_scope: input.agentScope ?? "project",
+        ...agentSelection,
         display_name: input.displayName ?? null,
         metadata: input.metadata ?? {},
       }),
@@ -698,6 +959,11 @@ export async function createProjectThread(
 
 export function disposeProjectAPIClient(scope: ProjectClientScope): void {
   const key = scopeKey(scope);
+  const entry = projectClients.get(key);
+  if (entry) {
+    entry.active = false;
+    entry.controller.abort();
+  }
   projectClients.delete(key);
   projectThreadVersions.delete(key);
 }

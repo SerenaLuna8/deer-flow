@@ -230,6 +230,75 @@ describe("M6 project governance", () => {
         },
       ],
     });
+    expect(
+      auditPageSchema.parse({
+        items: [
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            occurred_at: "2026-07-30T10:00:00Z",
+            actor: "worker",
+            action: "run.files_finalized",
+            target_kind: "run",
+            outcome: "success",
+            public_error_code: null,
+            metadata: {
+              created_count: 2,
+              modified_count: 1,
+              deleted_count: 3,
+              artifact_count: 1,
+              committed_bytes: 4096,
+            },
+          },
+        ],
+        next_cursor: null,
+      }),
+    ).toMatchObject({
+      items: [
+        {
+          action: "run.files_finalized",
+          metadata: {
+            created_count: 2,
+            modified_count: 1,
+            deleted_count: 3,
+            artifact_count: 1,
+            committed_bytes: 4096,
+          },
+        },
+      ],
+    });
+    for (const privateKey of [
+      "path",
+      "name",
+      "file_id",
+      "body",
+      "locator",
+      "sha256",
+    ]) {
+      expect(() =>
+        auditPageSchema.parse({
+          items: [
+            {
+              id: "55555555-5555-4555-8555-555555555555",
+              occurred_at: "2026-07-30T10:00:00Z",
+              actor: "worker",
+              action: "run.files_finalized",
+              target_kind: "run",
+              outcome: "success",
+              public_error_code: null,
+              metadata: {
+                created_count: 2,
+                modified_count: 1,
+                deleted_count: 3,
+                artifact_count: 1,
+                committed_bytes: 4096,
+                [privateKey]: "must-not-render",
+              },
+            },
+          ],
+          next_cursor: null,
+        }),
+      ).toThrow();
+    }
     expect(() =>
       usageResponseSchema.parse({ ...usage, owner_user_id: ACCOUNT_A }),
     ).toThrow();

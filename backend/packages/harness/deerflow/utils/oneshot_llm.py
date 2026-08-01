@@ -19,7 +19,7 @@ import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tracing import inject_langfuse_metadata
@@ -71,6 +71,7 @@ async def run_oneshot_llm(
             assistant_id=run_name,
             model_name=model_name,
             environment=_resolve_environment(),
+            include_deerflow_trace_id=is_trace_correlation_enabled(app_config),
         )
     response = await model.ainvoke(
         [

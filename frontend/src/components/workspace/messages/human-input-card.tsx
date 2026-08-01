@@ -2,6 +2,7 @@
 
 import {
   CheckCircle2Icon,
+  CheckIcon,
   CircleDotIcon,
   CircleIcon,
   ListIcon,
@@ -13,10 +14,24 @@ import { useId, useMemo, useState, type KeyboardEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildHumanInputFormSubmissionValue,
+  buildHumanInputFormSummary,
+  buildInitialHumanInputFormValues,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
+  readHumanInputFormValue,
+  type HumanInputField,
+  type HumanInputFormValue,
   type HumanInputOption,
   type HumanInputRequest,
   type HumanInputResponse,
@@ -39,6 +54,174 @@ export function shouldSubmitHumanInputTextOnKeyDown(
   );
 }
 
+function isEmptyFieldValue(value: HumanInputFormValue | undefined) {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value === "string") {
+    return value.trim().length === 0;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  return value === false;
+}
+
+export function findMissingRequiredFields(
+  fields: HumanInputField[],
+  values: Record<string, HumanInputFormValue>,
+) {
+  return fields.filter(
+    (field) =>
+      field.required &&
+      isEmptyFieldValue(readHumanInputFormValue(values, field.name)),
+  );
+}
+
+function FormFieldInput({
+  field,
+  value,
+  disabled,
+  selectPlaceholder,
+  controlId,
+  labelId,
+  invalid,
+  errorId,
+  onChange,
+}: {
+  field: HumanInputField;
+  value: HumanInputFormValue | undefined;
+  disabled: boolean;
+  selectPlaceholder: string;
+  controlId: string;
+  labelId: string;
+  invalid: boolean;
+  errorId: string;
+  onChange: (value: HumanInputFormValue) => void;
+}) {
+  const stringValue = typeof value === "string" ? value : "";
+  const ariaProps = {
+    "aria-required": field.required || undefined,
+    "aria-invalid": invalid || undefined,
+    "aria-describedby": invalid ? errorId : undefined,
+  };
+  const groupErrorAriaProps = {
+    "aria-invalid": invalid || undefined,
+    "aria-describedby": invalid ? errorId : undefined,
+  };
+
+  if (field.type === "textarea") {
+    return (
+      <Textarea
+        id={controlId}
+        className="min-h-24 resize-y rounded-xl px-4 py-3 text-[15px] shadow-none"
+        disabled={disabled}
+        placeholder={field.placeholder}
+        value={stringValue}
+        onChange={(event) => onChange(event.target.value)}
+        {...ariaProps}
+      />
+    );
+  }
+
+  if (field.type === "select") {
+    return (
+      <Select
+        disabled={disabled}
+        value={stringValue}
+        onValueChange={(next) => onChange(next)}
+      >
+        <SelectTrigger
+          id={controlId}
+          className="h-12 w-full rounded-xl px-4 text-[15px] shadow-none"
+          aria-labelledby={labelId}
+          {...ariaProps}
+        >
+          <SelectValue placeholder={field.placeholder ?? selectPlaceholder} />
+        </SelectTrigger>
+        <SelectContent>
+          {(field.options ?? []).map((option) => (
+            <SelectItem key={option.id} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+
+  if (field.type === "multi_select") {
+    const selectedValues = Array.isArray(value) ? value : [];
+    return (
+      <div
+        id={controlId}
+        className="flex flex-wrap gap-2"
+        role="group"
+        aria-labelledby={labelId}
+        {...groupErrorAriaProps}
+      >
+        {(field.options ?? []).map((option) => {
+          const selected = selectedValues.includes(option.value);
+          return (
+            <Button
+              key={option.id}
+              aria-pressed={selected}
+              className={cn(
+                "h-9 w-fit rounded-lg px-3 text-left leading-5 whitespace-normal shadow-none",
+                selected &&
+                  "border-ring bg-selection-subtle hover:bg-selection-subtle",
+              )}
+              disabled={disabled}
+              type="button"
+              variant="outline"
+              onClick={() => {
+                onChange(
+                  selected
+                    ? selectedValues.filter((entry) => entry !== option.value)
+                    : [...selectedValues, option.value],
+                );
+              }}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "border-border flex size-4 shrink-0 items-center justify-center rounded border",
+                  selected &&
+                    "border-ring bg-selection text-selection-foreground",
+                )}
+              >
+                {selected ? <CheckIcon className="size-3" /> : null}
+              </span>
+              {option.label}
+            </Button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <Input
+      id={controlId}
+      className="h-12 rounded-xl px-4 text-[15px] shadow-none"
+      disabled={disabled}
+      placeholder={field.placeholder}
+      type={
+        field.type === "number"
+          ? "number"
+          : field.type === "date"
+            ? "date"
+            : "text"
+      }
+      value={stringValue}
+      onChange={(event) => onChange(event.target.value)}
+      {...ariaProps}
+    />
+  );
+}
+
+export { FormFieldInput as HumanInputFormFieldInput };
+
 export function HumanInputCard({
   request,
   disabled = false,
@@ -59,12 +242,22 @@ export function HumanInputCard({
   const [selectedOptionId, setSelectedOptionId] = useState("");
   const [error, setError] = useState("");
   const [isComposing, setIsComposing] = useState(false);
+  const [formValues, setFormValues] = useState<
+    Record<string, HumanInputFormValue>
+  >(() => buildInitialHumanInputFormValues(request.fields ?? []));
+  const [invalidFieldNames, setInvalidFieldNames] = useState<Set<string>>(
+    () => new Set(),
+  );
   const titleId = useId();
   const textInputId = useId();
+  const formFieldIdBase = useId();
+  const formErrorId = `${formFieldIdBase}-error`;
+  const isForm = request.input_mode === "form";
   const allowText =
     request.input_mode === "free_text" ||
     request.input_mode === "choice_with_other";
   const options = useMemo(() => request.options ?? [], [request.options]);
+  const fields = useMemo(() => request.fields ?? [], [request.fields]);
   const readOnly = !onSubmit;
   const isDisabled =
     disabled || pending || Boolean(answeredResponse) || readOnly;
@@ -100,8 +293,37 @@ export function HumanInputCard({
     setError("");
   };
 
+  const handleFormValueChange = (name: string, value: HumanInputFormValue) => {
+    const remaining = new Set(invalidFieldNames);
+    remaining.delete(name);
+    setInvalidFieldNames(remaining);
+    if (remaining.size === 0) {
+      setError("");
+    }
+    setFormValues((previous) => ({ ...previous, [name]: value }));
+  };
+
   const handleSubmit = (event: { preventDefault(): void }) => {
     event.preventDefault();
+    if (isForm) {
+      const missing = findMissingRequiredFields(fields, formValues);
+      if (missing.length > 0) {
+        setInvalidFieldNames(new Set(missing.map((field) => field.name)));
+        setError(t.humanInput.requiredError);
+        return;
+      }
+      if (!buildHumanInputFormSummary(request, formValues).trim()) {
+        setError(t.humanInput.emptyError);
+        return;
+      }
+      void submitResponse(
+        createHumanInputTextResponse(
+          request,
+          buildHumanInputFormSubmissionValue(request, formValues),
+        ),
+      );
+      return;
+    }
     if (selectedOption) {
       void submitResponse(
         createHumanInputOptionResponse(request, selectedOption),
@@ -126,6 +348,7 @@ export function HumanInputCard({
     return (
       <section
         aria-label={t.humanInput.answered}
+        aria-live="polite"
         className="border-border/80 bg-muted/35 flex items-center gap-3 rounded-xl border px-4 py-3"
         data-human-input-state="answered"
         data-testid="human-input-card"
@@ -197,7 +420,95 @@ export function HumanInputCard({
           </div>
 
           <form className="space-y-4" onSubmit={handleSubmit}>
-            {options.length > 0 ? (
+            {isForm
+              ? fields.map((field, index) => {
+                  const controlId = `${formFieldIdBase}-${index}`;
+                  const labelId = `${controlId}-label`;
+                  const fieldValue = readHumanInputFormValue(
+                    formValues,
+                    field.name,
+                  );
+                  const invalid = invalidFieldNames.has(field.name);
+
+                  if (field.type === "checkbox") {
+                    return (
+                      <label
+                        key={field.name}
+                        className="flex w-fit cursor-pointer items-center gap-2 text-[15px] leading-6"
+                        htmlFor={controlId}
+                      >
+                        <input
+                          id={controlId}
+                          checked={fieldValue === true}
+                          className="accent-selection size-4"
+                          disabled={isDisabled}
+                          type="checkbox"
+                          aria-required={field.required || undefined}
+                          aria-invalid={invalid || undefined}
+                          aria-describedby={invalid ? formErrorId : undefined}
+                          onChange={(event) =>
+                            handleFormValueChange(
+                              field.name,
+                              event.target.checked,
+                            )
+                          }
+                        />
+                        {field.label}
+                        {field.required ? (
+                          <>
+                            <span className="text-destructive" aria-hidden>
+                              *
+                            </span>
+                            <span className="sr-only">
+                              {t.humanInput.requiredA11yLabel}
+                            </span>
+                          </>
+                        ) : null}
+                      </label>
+                    );
+                  }
+
+                  return (
+                    <div key={field.name} className="space-y-2">
+                      <label
+                        className="text-[15px] leading-6 font-medium"
+                        htmlFor={controlId}
+                        id={labelId}
+                      >
+                        {field.label}
+                        {field.required ? (
+                          <>
+                            <span
+                              className="text-destructive ml-0.5"
+                              aria-hidden
+                            >
+                              *
+                            </span>
+                            <span className="sr-only">
+                              {t.humanInput.requiredA11yLabel}
+                            </span>
+                          </>
+                        ) : null}
+                      </label>
+                      <FormFieldInput
+                        controlId={controlId}
+                        disabled={isDisabled}
+                        errorId={formErrorId}
+                        field={field}
+                        invalid={invalid}
+                        labelId={labelId}
+                        selectPlaceholder={t.humanInput.selectPlaceholder}
+                        value={fieldValue}
+                        onChange={(value) =>
+                          handleFormValueChange(field.name, value)
+                        }
+                      />
+                    </div>
+                  );
+                })
+              : null}
+
+            {!isForm && options.length > 0 ? (
               <div
                 aria-label={request.question}
                 className="grid gap-3"
@@ -269,11 +580,12 @@ export function HumanInputCard({
             ) : null}
 
             <div className="flex min-h-10 flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0">
+              <div className="min-w-0" aria-live="polite">
                 {error ? (
                   <p
                     className="text-destructive text-sm"
-                    id={`${textInputId}-error`}
+                    id={isForm ? formErrorId : `${textInputId}-error`}
+                    role={isForm ? "alert" : undefined}
                   >
                     {error}
                   </p>

@@ -15,6 +15,7 @@ from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 
 logger = logging.getLogger(__name__)
@@ -182,9 +183,15 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             if existing is not None and existing != private_sandbox_id:
                 raise RuntimeError("Private file authority is unavailable")
             return None
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                logger.info(
+                    "Not releasing fork-restored sandbox %s",
+                    sandbox_id,
+                )
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             get_sandbox_provider().release(sandbox_id)
             return None
@@ -206,9 +213,15 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             if existing is not None and existing != private_sandbox_id:
                 raise RuntimeError("Private file authority is unavailable")
             return None
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                logger.info(
+                    "Not releasing fork-restored sandbox %s",
+                    sandbox_id,
+                )
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             await self._release_sandbox_async(sandbox_id)
             return None

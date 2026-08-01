@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import deerflow.utils.llm_text as llm_text
 from app.gateway.deps import (
-    get_config,
+    get_current_agent_runtime_config,
     project_input_polish_context,
     require_project_private_open,
 )
@@ -41,6 +41,10 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.system_settings import (
+    SystemModelMaterializationUnavailable,
+    SystemModelMaterializer,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.mcp_definition_policy import (
     ExactMcpEndpointPolicy,
@@ -105,6 +109,7 @@ class ProjectInputPolishService:
         *,
         resolver: ProjectAssetResolver | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
+        model_materializer: SystemModelMaterializer | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._resolver = resolver or ProjectAssetResolver(session_factory)
@@ -113,6 +118,7 @@ class ProjectInputPolishService:
             endpoint_policy=endpoint_policy,
         )
         self._revalidator = PrivateWorkRevalidator()
+        self._model_materializer = model_materializer
 
     async def validate_authority(
         self,
@@ -172,17 +178,30 @@ class ProjectInputPolishService:
         if not config.input_polish.enabled:
             raise PrivateWorkNotFound(context.request_id)
 
-        await self.validate_authority(context, str(body.thread_id))
+        resolved = await self.validate_authority(
+            context,
+            str(body.thread_id),
+        )
         try:
+            runtime_config = config
+            model_name = config.input_polish.model_name
+            if self._model_materializer is not None:
+                runtime_model = await self._model_materializer.materialize_active(
+                    model_name or resolved.payload.model_ref,
+                )
+                runtime_config = config.with_runtime_models((runtime_model,))
+                model_name = runtime_model.name
             raw = await run_oneshot_llm(
                 system_instruction=_build_system_instruction(),
                 user_content=_build_user_content(text, body.locale),
                 run_name="project_input_polish",
-                app_config=config,
-                model_name=config.input_polish.model_name,
+                app_config=runtime_config,
+                model_name=model_name,
                 thread_id=str(body.thread_id),
             )
             rewritten = _clean_rewritten_text(raw)
+        except SystemModelMaterializationUnavailable as exc:
+            raise PrivateWorkUnavailable(context.request_id) from exc
         except Exception as exc:
             logger.exception(
                 "Project input polish model call failed: request_id=%s",
@@ -207,6 +226,11 @@ def project_input_polish_service(request: Request) -> ProjectInputPolishService:
     service = ProjectInputPolishService(
         get_session_factory(),
         endpoint_policy=endpoint_policy,
+        model_materializer=getattr(
+            request.app.state,
+            "system_model_materializer",
+            None,
+        ),
     )
     request.app.state.project_input_polish_service = service
     return service
@@ -218,7 +242,7 @@ async def polish_project_input(
     body: ProjectInputPolishRequest,
     context: PrivateWorkContext = Depends(project_input_polish_context),
     service: ProjectInputPolishService = Depends(project_input_polish_service),
-    config: AppConfig = Depends(get_config),
+    config: AppConfig = Depends(get_current_agent_runtime_config),
 ) -> ProjectInputPolishResponse:
     del project_id
     try:

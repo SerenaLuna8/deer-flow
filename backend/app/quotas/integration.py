@@ -18,6 +18,7 @@ from app.projects.errors import ProjectMemberQuotaExceeded, ProjectQuotaStateCon
 from app.quotas.models import (
     QuotaError,
     QuotaExceeded,
+    QuotaUnavailable,
     _issue_project_storage_quota_authority,
     _issue_quota_compensation_authority,
     _issue_quota_reconciliation_authority,
@@ -74,6 +75,8 @@ class ProjectQuotaEnforcer:
             )
         except QuotaExceeded:
             raise ProjectMemberQuotaExceeded() from None
+        except QuotaUnavailable:
+            raise
         except QuotaError:
             raise ProjectQuotaStateConflict() from None
 
@@ -96,6 +99,8 @@ class ProjectQuotaEnforcer:
                 1,
                 self._member_key(membership_id, activation_generation),
             )
+        except QuotaUnavailable:
+            raise
         except QuotaError:
             raise ProjectQuotaStateConflict() from None
 

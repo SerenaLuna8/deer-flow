@@ -36,6 +36,10 @@ class _NoopQuota:
 class _NoopQuotaService:
     config = QuotaConfig()
 
+    async def current_config(self, session):
+        del session
+        return self.config
+
 
 @asynccontextmanager
 async def _noop_lifespan(_app):
@@ -73,6 +77,11 @@ def client(_setup_auth):
     app.state.project_quota_enforcer = _NoopQuota()
     app.state.project_quota_service = _NoopQuotaService()
     app.state.operational_audit_sink = AsyncMock()
+    from app.system_runtime_settings import AuthPolicyValue
+
+    app.state.system_runtime_policy_materializer = MagicMock(
+        materialize_current=AsyncMock(return_value=AuthPolicyValue()),
+    )
 
     from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, init_engine
@@ -417,6 +426,26 @@ def test_initialize_creates_admin_and_sets_cookie(client):
     assert data["email"] == "admin@example.com"
     assert data["system_role"] == "system_admin"
     assert "access_token" in resp.cookies
+
+
+def test_initialize_is_not_blocked_by_closed_registration(
+    client,
+    monkeypatch,
+):
+    from app.gateway.routers import auth as auth_router
+
+    monkeypatch.setattr(
+        auth_router,
+        "_local_registration_enabled",
+        lambda: False,
+    )
+
+    response = client.post(
+        "/api/v1/auth/initialize",
+        json=_init_payload(remember_me=False),
+    )
+
+    assert response.status_code == 201
 
 
 def test_initialize_needs_setup_false(client):
@@ -771,6 +800,12 @@ async def test_setup_status_single_flight_per_ip(monkeypatch):
     monkeypatch.setattr("app.gateway.routers.auth.get_local_provider", lambda: provider)
     _SETUP_STATUS_CACHE.clear()
     _SETUP_STATUS_INFLIGHT.clear()
+    from app.system_runtime_settings import AuthPolicyValue
+
+    app = MagicMock()
+    app.state.system_runtime_policy_materializer.materialize_current = AsyncMock(
+        return_value=AuthPolicyValue(),
+    )
 
     def _request() -> Request:
         return Request(
@@ -780,6 +815,7 @@ async def test_setup_status_single_flight_per_ip(monkeypatch):
                 "path": "/api/v1/auth/setup-status",
                 "headers": [],
                 "client": ("127.0.0.1", 12345),
+                "app": app,
             }
         )
 

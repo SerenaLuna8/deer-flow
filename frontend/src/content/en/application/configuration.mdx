@@ -5,7 +5,12 @@ description: Configure the final project-scoped DeerFlow application.
 
 # Configuration
 
-Runtime configuration lives in the repository-root `config.yaml` plus environment variables. Copy `config.example.yaml`, then configure models, PostgreSQL, sandbox, authentication, Worker and optional Scheduler settings.
+Infrastructure configuration lives in the repository-root `config.yaml` plus
+process/tool environment variables. Copy `config.example.yaml`, then configure
+PostgreSQL, sandbox, authentication, Worker and optional Scheduler settings.
+Model definitions are not accepted from YAML: after startup, a system
+administrator configures their versioned provider settings and encrypted
+Credentials at `/admin/settings/models`.
 
 ```bash
 make config
@@ -13,7 +18,11 @@ make doctor
 make check-db
 ```
 
-Agent, Skill, MCP and Credential definitions are versioned database assets. System admins publish system assets; project members manage project assets and bindings in authenticated settings. Secrets use encrypted Credential envelopes and are never stored in browser query caches.
+Agent, Skill, MCP, Credential and model definitions are versioned database
+assets. System admins manage the model catalog and system assets; project
+members manage project assets and bindings in authenticated settings. Secrets
+use encrypted Credential envelopes and are never stored in browser query
+caches.
 
 Gateway, Worker and Scheduler validate the configured database and schema at startup. Use the explicit database setup/migration commands before starting application processes.
 

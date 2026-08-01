@@ -53,6 +53,7 @@ from app.shared_assets import (
     McpCredentialSlot,
     McpDefinition,
     McpService,
+    ProjectDefaultAgentService,
     SharedAssetError,
     SkillArchiveFile,
     SkillCredentialBindingInput,
@@ -191,6 +192,12 @@ class CredentialMutationResponse(_StrictModel):
     request_id: str
 
 
+class ProjectDefaultAgentResponse(_StrictModel):
+    agent_asset_id: uuid.UUID | None
+    revision: int = Field(ge=0, le=9_223_372_036_854_775_807)
+    request_id: str
+
+
 class CreateAssetRequest(_StrictModel):
     slug: str
     display_name: str
@@ -198,6 +205,14 @@ class CreateAssetRequest(_StrictModel):
 
 class ExpectedAssetVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
+
+
+class ProjectDefaultAgentRequest(_StrictModel):
+    agent_asset_id: uuid.UUID | None
+    expected_revision: int = Field(
+        ge=0,
+        le=9_223_372_036_854_775_807,
+    )
 
 
 class SystemBindingRequest(_StrictModel):
@@ -707,6 +722,15 @@ def get_credential_service(request: Request) -> CredentialService:
 
 def get_binding_service(request: Request) -> BindingService:
     return BindingService(_factory(), governance_sink=_governance_sink(request))
+
+
+def get_project_default_agent_service(
+    request: Request,
+) -> ProjectDefaultAgentService:
+    return ProjectDefaultAgentService(
+        _factory(),
+        governance_sink=_governance_sink(request),
+    )
 
 
 def get_skill_credential_binding_service(
@@ -1413,6 +1437,55 @@ async def list_project_agents(
     binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
     return await _list_assets(context, AssetKind.AGENT, service, binding_service)
+
+
+@project_router.get(
+    "/default-agent",
+    response_model=ProjectDefaultAgentResponse,
+)
+async def get_project_default_agent(
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[
+        ProjectDefaultAgentService,
+        Depends(get_project_default_agent_service),
+    ],
+):
+    try:
+        selection = await service.get(context)
+        return ProjectDefaultAgentResponse(
+            agent_asset_id=selection.agent_asset_id,
+            revision=selection.revision,
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.put(
+    "/default-agent",
+    response_model=ProjectDefaultAgentResponse,
+)
+async def replace_project_default_agent(
+    body: ProjectDefaultAgentRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[
+        ProjectDefaultAgentService,
+        Depends(get_project_default_agent_service),
+    ],
+):
+    try:
+        selection = await service.replace(
+            context,
+            body.agent_asset_id,
+            expected_revision=body.expected_revision,
+        )
+        return ProjectDefaultAgentResponse(
+            agent_asset_id=selection.agent_asset_id,
+            revision=selection.revision,
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
 
 
 @project_router.get("/skills", response_model=ScopedSkillAssetListResponse)

@@ -44,6 +44,7 @@ def test_is_startup_only_field_recognises_registered_fields():
         assert is_startup_only_field(field_path)
     assert not is_startup_only_field("memory")  # hot-reloadable
     assert not is_startup_only_field("models")
+    assert not is_startup_only_field("quotas")  # DB policy: next authoritative check
     assert not is_startup_only_field("nonexistent_field")
 
 
@@ -90,12 +91,19 @@ def test_appconfig_descriptions_retain_original_field_documentation():
         "sandbox": "Sandbox provider",
         "channel_connections": "IM channel connection",
         "worker": "independent Worker",
-        "quotas": "project quota",
     }
     for field_name, expected_substring in descriptions.items():
         description = AppConfig.model_fields[field_name].description or ""
         assert description.startswith(STARTUP_ONLY_PREFIX), f"AppConfig.{field_name} missing startup-only marker"
         assert expected_substring in description, f"AppConfig.{field_name} description lost original field doc; got {description!r}"
+
+
+def test_quota_description_documents_database_live_boundary():
+    description = AppConfig.model_fields["quotas"].description or ""
+    assert not description.startswith(STARTUP_ONLY_PREFIX)
+    assert "database-backed" in description
+    assert "latest committed" in description
+    assert "inside their transaction" in description
 
 
 def test_appconfig_schema_marks_registered_fields_with_prefix():

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
-import { renderToStaticMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
+import { renderToStaticMarkup as renderReactToStaticMarkup } from "react-dom/server";
 
 import {
   AGENT_INSTRUCTION_FILES,
@@ -13,10 +14,18 @@ import {
   ProjectAgentCardGridView,
   projectAgentCanActivate,
   projectAgentChatAvailability,
+  projectAgentDefaultAvailability,
 } from "@/components/projects/assets/project-agents-page";
 import { effectiveAssetVersion } from "@/components/projects/assets/project-asset-detail-sheet";
+import { I18nProvider } from "@/core/i18n/context";
 import type { Capability } from "@/core/projects/types";
 import type { AssetVersion, ProjectAssetItem } from "@/core/shared-assets";
+
+function renderToStaticMarkup(children: ReactNode): string {
+  return renderReactToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">{children}</I18nProvider>,
+  );
+}
 
 const version: Extract<AssetVersion, { agent_id: string }> = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -148,6 +157,71 @@ describe("Agent asset detail", () => {
     expect(html).toContain("与 Research Agent 对话，请先完成 Agent 配置并发布");
     expect(html).toContain('title="请先完成 Agent 配置并发布"');
     expect(html).toContain('disabled=""');
+  });
+
+  test("shows the current default and lets an Admin set or restore it", () => {
+    const adminCapabilities: Capability[] = [
+      ...chatCapabilities,
+      "shared_assets.manage_bindings",
+    ];
+    const manageableAgent = {
+      ...agentItem,
+      capabilities: [
+        ...agentItem.capabilities,
+        "shared_assets.manage_bindings" as const,
+      ],
+    };
+    const otherAgent = {
+      ...manageableAgent,
+      id: "55555555-5555-4555-8555-555555555555",
+      display_name: "Coding Agent",
+    };
+    const html = renderToStaticMarkup(
+      <ProjectAgentCardGridView
+        items={[manageableAgent, otherAgent]}
+        projectCapabilities={adminCapabilities}
+        selectedAssetId={null}
+        creatingChatForAgentId={null}
+        defaultAgentId={manageableAgent.id}
+        onSelect={() => undefined}
+        onStartChat={() => undefined}
+        onSetDefault={() => undefined}
+        onRestoreMain={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("默认");
+    expect(html).toContain("恢复 Main");
+    expect(html).toContain("设为默认");
+    expect(
+      projectAgentDefaultAvailability(manageableAgent, adminCapabilities),
+    ).toEqual({ enabled: true, reason: null });
+  });
+
+  test("keeps the default badge read-only for Editor and Runner roles", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAgentCardGridView
+        items={[agentItem]}
+        projectCapabilities={chatCapabilities}
+        selectedAssetId={null}
+        creatingChatForAgentId={null}
+        defaultAgentId={agentItem.id}
+        onSelect={() => undefined}
+        onStartChat={() => undefined}
+        onSetDefault={() => undefined}
+        onRestoreMain={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("默认");
+    expect(html).not.toContain("恢复 Main");
+    expect(html).not.toContain("设为默认");
+    expect(
+      projectAgentDefaultAvailability(agentItem, chatCapabilities),
+    ).toEqual({
+      enabled: false,
+      reason: "仅项目管理员可以修改默认 Agent",
+    });
   });
 
   test("blocks card chat when fail-closed MCP dependency validation fails", () => {

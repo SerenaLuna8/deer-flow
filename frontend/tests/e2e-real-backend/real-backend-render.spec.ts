@@ -4,6 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
 
+import {
+  createReplayThread,
+  registerReplayProject,
+  type ReplayProjectScope,
+} from "./project-fixture";
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -64,19 +70,15 @@ const EXPECTED_SUGGESTION = ((): string => {
 const EXPECTED_TITLE = fallbackTitle(PROMPT);
 
 test.describe("real backend render (replay, no API key)", () => {
+  let project: ReplayProjectScope;
+
   test.beforeEach(async ({ context }) => {
-    // Throwaway test account: register sets access_token + csrf_token cookies in
-    // the browser context (host-scoped to localhost, shared across ports), so
-    // the frontend's SDK (credentials:include + X-CSRF-Token) authenticates.
-    const email = `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
-    const resp = await context.request.post(`${APP}/api/v1/auth/register`, {
-      data: { email, password: "very-strong-password-123" },
-    });
-    expect(resp.status(), await resp.text()).toBe(201);
+    project = await registerReplayProject(context, APP);
   });
 
   test("renders the local auto-title + replayed suggestions from a real backend", async ({
     page,
+    context,
   }) => {
     // ultra mode so the context the frontend sends (is_plan_mode + subagent_enabled)
     // matches the recorded fixture; otherwise the replay input hash would miss.
@@ -87,17 +89,19 @@ test.describe("real backend render (replay, no API key)", () => {
       );
     });
 
-    await page.goto("/workspace/chats/new");
+    const threadId = await createReplayThread(context, APP, project);
+    await page.goto(
+      `/projects/${encodeURIComponent(project.slug)}/chats/${threadId}`,
+    );
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 30_000 });
     await textarea.fill(PROMPT);
     await textarea.press("Enter");
 
-    // The title is the default local fallback, while the suggestion is a
-    // replayed model output absent from the prompt. Together they prove the
-    // backend state update and the replayed post-answer model call both render
-    // through the real frontend.
+    // The title is project-thread metadata rendered in the conversation list,
+    // not chat transcript content. The answer and generated file belong to the
+    // chat/artifact surfaces; the suggestion is a Gateway auxiliary model call.
     expect(
       EXPECTED_TITLE,
       "default local fallback title should be derived from the prompt",
@@ -107,12 +111,17 @@ test.describe("real backend render (replay, no API key)", () => {
       "fixture should contain a suggestions turn (re-record; the record spec waits for /suggestions)",
     ).not.toBe("");
     const chat = page.locator("#chat");
-    await expect(chat.getByText(EXPECTED_TITLE)).toBeVisible({
+    await expect(chat.getByText("hi from replay.", { exact: true })).toBeVisible({
       timeout: 60_000,
     });
+    await expect(
+      page.getByRole("link", { name: new RegExp(EXPECTED_TITLE, "i") }),
+    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("combobox").filter({ hasText: "note.txt" })).toBeVisible();
     await expect(chat.getByText(EXPECTED_SUGGESTION)).toBeVisible({
       timeout: 30_000,
     });
+    await expect(page.getByTestId("run-failure-alert")).toHaveCount(0);
 
     // Visual regression is OS-sensitive (a macOS baseline won't match CI's
     // Linux render), so it's a local dev gate only; in CI we capture the render

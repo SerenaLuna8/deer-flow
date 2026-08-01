@@ -21,6 +21,10 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.config.app_config import AppConfig
+from deerflow.error_codes import (
+    llm_error_code_for_reason,
+    normalize_llm_error_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -240,22 +244,22 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self,
         content: str,
         *,
-        error_type: str,
         reason: str,
-        detail: str,
     ) -> AIMessage:
+        safe_reason = normalize_llm_error_reason(reason)
+        error_code = llm_error_code_for_reason(safe_reason)
         return AIMessage(
             content=content,
             additional_kwargs={
                 "deerflow_error_fallback": True,
-                "error_type": error_type,
-                "error_reason": reason,
-                "error_detail": detail,
+                "error_code": error_code,
+                "error_type": error_code,
+                "error_reason": safe_reason,
+                "error_detail": error_code,
             },
         )
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
-        detail = _extract_error_detail(exc)
         if reason == "quota":
             return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
@@ -276,14 +280,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     "smaller steps, or shorten the requested output, and try again."
                 )
             return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
-        return f"LLM request failed: {detail}"
+        return "The configured LLM provider could not complete the request. Please retry, or contact an administrator if the problem continues."
 
     def _build_user_fallback_message(self, exc: BaseException, reason: str) -> AIMessage:
         return self._build_error_fallback_message(
             self._build_user_message(exc, reason),
-            error_type=type(exc).__name__,
             reason=reason,
-            detail=_extract_error_detail(exc),
         )
 
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
@@ -302,7 +304,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 }
             )
         except Exception:
-            logger.debug("Failed to emit llm_retry event", exc_info=True)
+            logger.debug("Failed to emit llm_retry event")
 
     @override
     def wrap_model_call(
@@ -313,9 +315,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return self._build_error_fallback_message(
                 self._build_circuit_breaker_message(),
-                error_type="CircuitBreakerOpen",
                 reason="circuit_open",
-                detail="LLM circuit breaker is open",
             )
 
         attempt = 1
@@ -335,22 +335,22 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 max_attempts = self._max_attempts_for(exc)
                 if retriable and attempt < max_attempts:
                     wait_ms = self._build_retry_delay_ms(attempt, exc)
+                    error_code = llm_error_code_for_reason(reason)
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
+                        "Transient LLM error on attempt %d/%d; retrying in %dms: error_code=%s",
                         attempt,
                         self.retry_max_attempts,
                         wait_ms,
-                        _extract_error_detail(exc),
+                        error_code,
                     )
                     self._emit_retry_event(attempt, wait_ms, reason)
                     time.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
                 logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
+                    "LLM call failed after %d attempt(s): error_code=%s",
                     attempt,
-                    _extract_error_detail(exc),
-                    exc_info=exc,
+                    llm_error_code_for_reason(reason),
                 )
                 if retriable:
                     self._record_failure()
@@ -365,9 +365,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if self._check_circuit():
             return self._build_error_fallback_message(
                 self._build_circuit_breaker_message(),
-                error_type="CircuitBreakerOpen",
                 reason="circuit_open",
-                detail="LLM circuit breaker is open",
             )
 
         attempt = 1
@@ -387,22 +385,22 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 max_attempts = self._max_attempts_for(exc)
                 if retriable and attempt < max_attempts:
                     wait_ms = self._build_retry_delay_ms(attempt, exc)
+                    error_code = llm_error_code_for_reason(reason)
                     logger.warning(
-                        "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
+                        "Transient LLM error on attempt %d/%d; retrying in %dms: error_code=%s",
                         attempt,
                         self.retry_max_attempts,
                         wait_ms,
-                        _extract_error_detail(exc),
+                        error_code,
                     )
                     self._emit_retry_event(attempt, wait_ms, reason)
                     await asyncio.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
                 logger.warning(
-                    "LLM call failed after %d attempt(s): %s",
+                    "LLM call failed after %d attempt(s): error_code=%s",
                     attempt,
-                    _extract_error_detail(exc),
-                    exc_info=exc,
+                    llm_error_code_for_reason(reason),
                 )
                 if retriable:
                     self._record_failure()

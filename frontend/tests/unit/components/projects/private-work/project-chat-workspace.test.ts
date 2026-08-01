@@ -284,8 +284,7 @@ describe("project chat workspace", () => {
     });
     const elements = descendants(indicator);
     const root = elements.find(
-      (element) =>
-        element.props["data-testid"] === "thread-agent-indicator",
+      (element) => element.props["data-testid"] === "thread-agent-indicator",
     );
 
     expect(root?.props["aria-label"]).toBe("当前 Agent：不可用");
@@ -349,6 +348,43 @@ describe("project chat workspace", () => {
     expect(mainMessageList).toBeDefined();
     expect(mainMessageList).toContain("key={threadId}");
     expect(mainMessageList).toContain('initialScroll="instant"');
+  });
+
+  test("wires scoped edit replay while keeping the composer available for clarification replies", () => {
+    const scopedChat = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/workspace/chats/scoped-chat-page.tsx",
+      ),
+      "utf8",
+    );
+    const mainMessageList =
+      /<MessageList[\s\S]*?testId="main-message-list"[\s\S]*?\/>/u.exec(
+        scopedChat,
+      )?.[0];
+    const inputBox = /<InputBox[\s\S]*?\/>/u.exec(scopedChat)?.[0];
+
+    expect(scopedChat).toContain("editAndRegenerateMessage");
+    expect(mainMessageList).toContain("canEdit=");
+    expect(mainMessageList).toContain("onEditAndRegenerateMessage=");
+    expect(mainMessageList).toContain("!hasOpenHumanInputCard");
+    expect(inputBox).toBeDefined();
+    expect(inputBox).not.toContain("hasOpenHumanInputCard");
+  });
+
+  test("keeps the conversation title out of the top toolbar", () => {
+    const scopedChat = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/workspace/chats/scoped-chat-page.tsx",
+      ),
+      "utf8",
+    );
+    const toolbar = /<header[\s\S]*?<\/header>/u.exec(scopedChat)?.[0];
+
+    expect(toolbar).toBeDefined();
+    expect(toolbar).not.toContain("<ThreadTitle");
+    expect(scopedChat).toContain("<ThreadDocumentTitle thread={thread} />");
   });
 
   test("uses the appearance width for the empty conversation composer", () => {

@@ -11,15 +11,20 @@ import type { ProjectClientScope } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
 import {
   invalidateProjectAssetQueries,
+  useProjectDefaultAgent,
+  type ProjectDefaultAgent,
   type ProjectAssetList,
 } from "@/core/shared-assets";
 
+import { useAgentMcpDependencyRuntime } from "../assets/use-mcp-dependency-runtime";
+
 import {
-  createProjectChatForAgent,
-  mainProjectAgent,
+  createProjectChatWithDefaultAgent,
+  resolveProjectDefaultAgent,
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
 import { prepareMainProjectChatRuntime } from "./main-project-chat-runtime";
+import { projectNewChatErrorMessage } from "./project-new-chat-error";
 
 type StartChatCandidateState = {
   requested: boolean;
@@ -31,6 +36,7 @@ const projectStartChatIntentRuns = new Map<string, Promise<string>>();
 
 export function projectStartChatCandidate(
   catalog: ProjectAssetList | undefined,
+  defaultAgent: ProjectDefaultAgent | undefined,
   state: StartChatCandidateState,
 ): ExecutableProjectAgent | null {
   if (
@@ -40,7 +46,8 @@ export function projectStartChatCandidate(
   ) {
     return null;
   }
-  return mainProjectAgent(catalog);
+  const resolution = resolveProjectDefaultAgent(catalog, defaultAgent);
+  return resolution.status === "ready" ? resolution.agent : null;
 }
 
 export async function consumeProjectStartChatIntent({
@@ -50,7 +57,7 @@ export async function consumeProjectStartChatIntent({
   agent,
   replace,
   prepareAgent,
-  createChat = createProjectChatForAgent,
+  createChat = createProjectChatWithDefaultAgent,
 }: {
   scope: ProjectClientScope;
   projectSlug: string;
@@ -58,7 +65,7 @@ export async function consumeProjectStartChatIntent({
   agent: ExecutableProjectAgent;
   replace: (path: string) => void;
   prepareAgent: (agent: ExecutableProjectAgent) => Promise<void>;
-  createChat?: typeof createProjectChatForAgent;
+  createChat?: typeof createProjectChatWithDefaultAgent;
 }): Promise<string> {
   const intentKey = `${scope.accountId}:${scope.projectId}:${intentId}`;
   let run = projectStartChatIntentRuns.get(intentKey);
@@ -68,7 +75,6 @@ export async function consumeProjectStartChatIntent({
       return createChat({
         scope,
         projectSlug,
-        agent,
         navigate: () => undefined,
       });
     });
@@ -169,24 +175,50 @@ export function ProjectAgentStartContinuation({
     project.capabilities.includes("private_work.create") &&
     project.capabilities.includes("shared_assets.execute");
   const readiness = useProjectPrivateWorkReadiness(requested && canCreate);
+  const defaultAgent = useProjectDefaultAgent(
+    privateWork.scope.accountId,
+    project.id,
+    requested && canCreate,
+  );
+  const refetchDefaultAgent = defaultAgent.refetch;
+  const defaultResolution = useMemo(
+    () => resolveProjectDefaultAgent(catalog, defaultAgent.data),
+    [catalog, defaultAgent.data],
+  );
   const candidate = useMemo(
     () =>
-      projectStartChatCandidate(catalog, {
+      projectStartChatCandidate(catalog, defaultAgent.data, {
         requested,
         canCreate,
         readinessStatus: readiness.data?.status,
       }),
-    [canCreate, catalog, readiness.data?.status, requested],
+    [canCreate, catalog, defaultAgent.data, readiness.data?.status, requested],
   );
+  const customAgent =
+    defaultResolution.status === "ready" &&
+    defaultResolution.source === "project"
+      ? defaultResolution.agent
+      : null;
+  const customAgentDependencies = useAgentMcpDependencyRuntime({
+    accountId: privateWork.scope.accountId,
+    projectId: project.id,
+    agents: customAgent ? [customAgent] : [],
+    enabled: Boolean(candidate && customAgent),
+  });
+  const customAgentAssessment = customAgentDependencies.assessments[0];
+  const candidateReady =
+    Boolean(candidate) &&
+    (!customAgent || customAgentAssessment?.status === "ready");
   const [retry, setRetry] = useState(0);
   const [failure, setFailure] = useState<string | null>(null);
   const startedKeyRef = useRef<string | null>(null);
   const fallbackIntentIdRef = useRef<string | null>(null);
   fallbackIntentIdRef.current ??= `${privateWork.scope.accountId}:${privateWork.scope.projectId}:legacy`;
   const stableIntentId = intentId ?? fallbackIntentIdRef.current;
-  const candidateKey = candidate
-    ? `${stableIntentId}:${candidate.scope}:${candidate.id}:${retry}`
-    : null;
+  const candidateKey =
+    candidate && candidateReady
+      ? `${stableIntentId}:${candidate.scope}:${candidate.id}:${retry}`
+      : null;
 
   useEffect(() => {
     if (!candidate || !candidateKey || startedKeyRef.current === candidateKey) {
@@ -200,6 +232,10 @@ export function ProjectAgentStartContinuation({
       intentId: stableIntentId,
       agent: candidate,
       prepareAgent: async (agent) => {
+        if (defaultResolution.status !== "ready") {
+          throw new Error("项目默认 Agent 当前不可用，请联系项目管理员。");
+        }
+        if (defaultResolution.source === "project") return;
         const prepared = await prepareMainProjectChatRuntime({
           projectId: project.id,
           agent,
@@ -217,20 +253,24 @@ export function ProjectAgentStartContinuation({
         );
       },
       replace: (path) => router.replace(path),
-    }).catch((error) =>
+    }).catch(async (error) =>
       setFailure(
-        error instanceof Error
-          ? error.message
-          : "Agent 已完成配置，请重试进入对话。",
+        await projectNewChatErrorMessage(
+          error,
+          () => refetchDefaultAgent(),
+          "Agent 已完成配置，请重试进入对话。",
+        ),
       ),
     );
   }, [
     candidate,
     candidateKey,
+    defaultResolution,
     privateWork.scope,
     project.id,
     project.slug,
     queryClient,
+    refetchDefaultAgent,
     router,
     stableIntentId,
   ]);
@@ -241,6 +281,45 @@ export function ProjectAgentStartContinuation({
   }
   if (readiness.isLoading || readiness.data?.status !== "ready") {
     return <ProjectAgentStartContinuationView status="waiting-for-service" />;
+  }
+  if (defaultAgent.error) {
+    return (
+      <ProjectAgentStartContinuationView
+        status="error"
+        errorMessage="无法加载项目默认 Agent，请稍后重试。"
+        onRetry={() => void defaultAgent.refetch()}
+      />
+    );
+  }
+  if (defaultAgent.isLoading) {
+    return <ProjectAgentStartContinuationView status="waiting-for-agent" />;
+  }
+  if (defaultResolution.status === "unavailable") {
+    return (
+      <ProjectAgentStartContinuationView
+        status="error"
+        errorMessage={defaultResolution.reason}
+        onRetry={() => void defaultAgent.refetch()}
+      />
+    );
+  }
+  if (
+    customAgentDependencies.error ||
+    customAgentAssessment?.status === "blocked"
+  ) {
+    return (
+      <ProjectAgentStartContinuationView
+        status="error"
+        errorMessage={
+          customAgentAssessment?.reason ??
+          "无法验证项目默认 Agent 的运行依赖，请稍后重试。"
+        }
+        onRetry={() => setRetry((value) => value + 1)}
+      />
+    );
+  }
+  if (customAgentDependencies.isLoading) {
+    return <ProjectAgentStartContinuationView status="waiting-for-agent" />;
   }
   if (!candidate) {
     return <ProjectAgentStartContinuationView status="waiting-for-agent" />;

@@ -6,6 +6,8 @@ import {
   Loader2Icon,
   MessageSquareIcon,
   PowerIcon,
+  RotateCcwIcon,
+  StarIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -19,6 +21,7 @@ import {
   type ExecutableProjectAgent,
 } from "@/components/projects/private-work/agent-selector-dialog";
 import { ProjectAgentStartContinuation } from "@/components/projects/private-work/project-agent-start-continuation";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -35,6 +38,8 @@ import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Capability, Project } from "@/core/projects/types";
 import {
   useChangeProjectAssetStatus,
+  useProjectDefaultAgent,
+  useSetProjectDefaultAgent,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
@@ -86,28 +91,66 @@ export function projectAgentCanActivate(
   );
 }
 
+export function projectAgentDefaultAvailability(
+  item: ProjectAssetItem,
+  projectCapabilities: readonly Capability[],
+  mcpDependencyReason: string | null = null,
+): ProjectAgentChatAvailability {
+  if (
+    !projectCapabilities.includes("shared_assets.manage_bindings") ||
+    !item.capabilities.includes("shared_assets.manage_bindings")
+  ) {
+    return { enabled: false, reason: "仅项目管理员可以修改默认 Agent" };
+  }
+  if (item.scope !== "project" || item.status !== "active") {
+    return { enabled: false, reason: "该 Agent 当前不可设为默认" };
+  }
+  if (!item.capabilities.includes("shared_assets.execute")) {
+    return { enabled: false, reason: "当前账号没有执行该 Agent 的权限" };
+  }
+  if (!item.current_published_version_id) {
+    return { enabled: false, reason: "请先完成 Agent 配置并发布" };
+  }
+  if (mcpDependencyReason) {
+    return { enabled: false, reason: mcpDependencyReason };
+  }
+  return { enabled: true, reason: null };
+}
+
 export function ProjectAgentCardGridView({
   items,
   projectCapabilities,
   selectedAssetId,
   creatingChatForAgentId,
   activatingAgentId = null,
+  defaultAgentId = null,
+  settingDefaultAgentTarget = null,
+  defaultAgentLoading = false,
+  defaultAgentError = false,
   mcpDependencyReasons = new Map(),
   mcpDependencyError = false,
   onSelect,
   onStartChat,
   onActivate,
+  onSetDefault,
+  onRestoreMain,
 }: {
   items: ProjectAssetItem[];
   projectCapabilities: readonly Capability[];
   selectedAssetId: string | null;
   creatingChatForAgentId: string | null;
   activatingAgentId?: string | null;
+  defaultAgentId?: string | null;
+  settingDefaultAgentTarget?: string | "main" | null;
+  defaultAgentLoading?: boolean;
+  defaultAgentError?: boolean;
   mcpDependencyReasons?: ReadonlyMap<string, string>;
   mcpDependencyError?: boolean;
   onSelect: (item: ProjectAssetItem) => void;
   onStartChat: (item: ExecutableProjectAgent) => void;
   onActivate?: (item: ProjectAssetItem) => void;
+  onSetDefault?: (item: ProjectAssetItem) => void;
+  onRestoreMain?: () => void;
 }) {
   if (items.length === 0) {
     return (
@@ -124,6 +167,11 @@ export function ProjectAgentCardGridView({
           无法验证 Agent 的 MCP 依赖，请稍后重试。
         </p>
       ) : null}
+      {defaultAgentError ? (
+        <p role="alert" className="text-destructive text-sm">
+          无法加载项目默认 Agent，请稍后重试。
+        </p>
+      ) : null}
       <div role="list" className="grid gap-4 sm:grid-cols-2 lg:gap-5">
         {items.map((item) => {
           const availability = projectAgentChatAvailability(
@@ -136,6 +184,27 @@ export function ProjectAgentCardGridView({
           const canActivate =
             projectAgentCanActivate(item, projectCapabilities) &&
             Boolean(onActivate);
+          const isDefault = defaultAgentId === item.id;
+          const defaultAvailability = projectAgentDefaultAvailability(
+            item,
+            projectCapabilities,
+            mcpDependencyReasons.get(item.id) ?? null,
+          );
+          const canManageDefault =
+            projectCapabilities.includes("shared_assets.manage_bindings") &&
+            item.capabilities.includes("shared_assets.manage_bindings") &&
+            Boolean(onSetDefault && onRestoreMain);
+          const defaultPending = settingDefaultAgentTarget !== null;
+          const settingThisDefault = settingDefaultAgentTarget === item.id;
+          const restoringMain =
+            isDefault && settingDefaultAgentTarget === "main";
+          const defaultActionReason = defaultAgentError
+            ? "无法加载项目默认 Agent，请稍后重试"
+            : defaultAgentLoading
+              ? "正在加载项目默认 Agent"
+              : isDefault
+                ? null
+                : defaultAvailability.reason;
           const description = item.description?.trim();
           return (
             <Card
@@ -162,6 +231,11 @@ export function ProjectAgentCardGridView({
                     <span className="min-w-0 flex-1 truncate text-base font-semibold">
                       {item.display_name}
                     </span>
+                    {isDefault ? (
+                      <Badge variant="secondary">
+                        <StarIcon aria-hidden /> 默认
+                      </Badge>
+                    ) : null}
                     {item.status !== "active" ? (
                       <AssetStatusBadge
                         status={item.status}
@@ -180,7 +254,49 @@ export function ProjectAgentCardGridView({
                   </span>
                 </CardContent>
               </button>
-              <CardFooter className="gap-2 px-6 pb-6">
+              <CardFooter className="flex-wrap gap-2 px-6 pb-6">
+                {canManageDefault ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="min-h-10 w-full"
+                    disabled={
+                      defaultPending ||
+                      defaultAgentLoading ||
+                      defaultAgentError ||
+                      (!isDefault && !defaultAvailability.enabled)
+                    }
+                    aria-label={
+                      defaultActionReason
+                        ? `${isDefault ? "恢复 Main" : `将 ${item.display_name} 设为默认`}，${defaultActionReason}`
+                        : isDefault
+                          ? "恢复 Main"
+                          : `将 ${item.display_name} 设为默认`
+                    }
+                    title={defaultActionReason ?? undefined}
+                    onClick={() =>
+                      isDefault ? onRestoreMain?.() : onSetDefault?.(item)
+                    }
+                  >
+                    {settingThisDefault || restoringMain ? (
+                      <Loader2Icon
+                        aria-hidden
+                        className="size-4 animate-spin"
+                      />
+                    ) : isDefault ? (
+                      <RotateCcwIcon aria-hidden className="size-4" />
+                    ) : (
+                      <StarIcon aria-hidden className="size-4" />
+                    )}
+                    {restoringMain
+                      ? "恢复中…"
+                      : settingThisDefault
+                        ? "设置中…"
+                        : isDefault
+                          ? "恢复 Main"
+                          : "设为默认"}
+                  </Button>
+                ) : null}
                 {canActivate ? (
                   <Button
                     type="button"
@@ -247,13 +363,22 @@ function ProjectAgentCardGrid({
     project.id,
     "agents",
   );
+  const defaultAgent = useProjectDefaultAgent(
+    privateWork.scope.accountId,
+    project.id,
+  );
+  const setDefaultAgent = useSetProjectDefaultAgent(
+    privateWork.scope.accountId,
+    project.id,
+  );
   const mcpDependencyRuntime = useAgentMcpDependencyRuntime({
     accountId: privateWork.scope.accountId,
     projectId: project.id,
     agents: items,
     enabled:
-      project.capabilities.includes("private_work.create") &&
-      project.capabilities.includes("shared_assets.execute"),
+      (project.capabilities.includes("private_work.create") &&
+        project.capabilities.includes("shared_assets.execute")) ||
+      project.capabilities.includes("shared_assets.manage_bindings"),
   });
   const mcpDependencyReasons = new Map(
     mcpDependencyRuntime.assessments.flatMap((assessment, index) => {
@@ -314,6 +439,54 @@ function ProjectAgentCardGrid({
     );
   }
 
+  function updateDefaultAgent(agent: ProjectAssetItem) {
+    const availability = projectAgentDefaultAvailability(
+      agent,
+      project.capabilities,
+      mcpDependencyReasons.get(agent.id) ?? null,
+    );
+    if (
+      !availability.enabled ||
+      !defaultAgent.data ||
+      defaultAgent.error ||
+      setDefaultAgent.isPending
+    ) {
+      return;
+    }
+    setDefaultAgent.mutate(
+      {
+        agent_asset_id: agent.id,
+        expected_revision: defaultAgent.data.revision,
+      },
+      {
+        onSuccess: () =>
+          toast.success(`已将 ${agent.display_name} 设为项目默认 Agent`),
+        onError: (error) => toast.error(adminAssetErrorMessage(error)),
+      },
+    );
+  }
+
+  function restoreMainDefault() {
+    if (
+      !project.capabilities.includes("shared_assets.manage_bindings") ||
+      !defaultAgent.data ||
+      defaultAgent.error ||
+      setDefaultAgent.isPending
+    ) {
+      return;
+    }
+    setDefaultAgent.mutate(
+      {
+        agent_asset_id: null,
+        expected_revision: defaultAgent.data.revision,
+      },
+      {
+        onSuccess: () => toast.success("已恢复 Main 为项目默认 Agent"),
+        onError: (error) => toast.error(adminAssetErrorMessage(error)),
+      },
+    );
+  }
+
   return (
     <ProjectAgentCardGridView
       items={items}
@@ -325,11 +498,21 @@ function ProjectAgentCardGrid({
           ? (changeStatus.variables?.assetId ?? null)
           : null
       }
+      defaultAgentId={defaultAgent.data?.agent_asset_id ?? null}
+      settingDefaultAgentTarget={
+        setDefaultAgent.isPending
+          ? (setDefaultAgent.variables?.agent_asset_id ?? "main")
+          : null
+      }
+      defaultAgentLoading={defaultAgent.isLoading}
+      defaultAgentError={Boolean(defaultAgent.error)}
       mcpDependencyReasons={mcpDependencyReasons}
       mcpDependencyError={Boolean(mcpDependencyRuntime.error)}
       onSelect={onSelect}
       onStartChat={(agent) => void startChat(agent)}
       onActivate={activate}
+      onSetDefault={updateDefaultAgent}
+      onRestoreMain={restoreMainDefault}
     />
   );
 }

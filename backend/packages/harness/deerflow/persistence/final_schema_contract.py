@@ -53,6 +53,7 @@ LANGGRAPH_ROOT_OBJECTS = frozenset(
 REQUIRED_FUNCTIONS = frozenset(
     {
         "bump_asset_catalog_generation",
+        "enforce_run_model_snapshot_credential_closure",
         "enforce_scheduled_task_agent_project",
         "enforce_shared_asset_version_state_transition",
         "enforce_stream_terminal_invariant",
@@ -61,6 +62,8 @@ REQUIRED_FUNCTIONS = frozenset(
         "prevent_published_version_child_mutation",
         "prevent_shared_asset_version_payload_update",
         "reject_m7_append_only_mutation",
+        "reject_direct_run_model_snapshot_mutation",
+        "reject_direct_run_runtime_policy_snapshot_mutation",
         "set_m7_updated_at",
     }
 )
@@ -76,28 +79,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=59,
-        digest="8b968a3ae832a579d934127bd739e2a0e0f11d34d41d924a9c72f2508f587d12",
+        count=69,
+        digest="b0ddb59adbf8e6c635c854635bf688507adcaadc690f8f9496dbc665e9ce1db4",
     ),
     "columns": CatalogInvariant(
-        count=720,
-        digest="74053d51ba42cc904f02cdead986158f70adc7f73bd41cc143d4ad67d72102af",
+        count=817,
+        digest="06b489cc195562dd8db89c652d50e8d1c82171786d88eea1f64df849dd065b0f",
+    ),
+    "sequences": CatalogInvariant(
+        count=1,
+        digest="94e9734ed0d3e15fc64fcf15a8ed1181999429aec5e9ddb535513ac42145acde",
     ),
     "constraints": CatalogInvariant(
-        count=479,
-        digest="4a0f4b7cf5ab110b9ea223411dd2dcf29e72e4189f7593ef5f197dc97f7e7b16",
+        count=562,
+        digest="8893d7a0f6ed7accf7c7719891906b03fe7524440c4eab3335968fb4e73156f2",
     ),
     "indexes": CatalogInvariant(
-        count=196,
-        digest="f74b3de228f86604f99a931dd53feceb64ae3f51516d51963d9f5a7db3a1ecbf",
+        count=227,
+        digest="cf3f7af25676078d4adccc16edd90254f847bc89b46e10c8121fc128a7e06e60",
     ),
     "functions": CatalogInvariant(
-        count=10,
-        digest="0fbb322b08fe552383069830ffbf733692eb6a76a71f1340cbbb43ad2328d8d7",
+        count=13,
+        digest="1a36ac2eb114d801c83fedbe12142d3b5b67060122a3c1f0555ff880e1f09712",
     ),
     "triggers": CatalogInvariant(
-        count=70,
-        digest="86217c5113c7098cfd47ff9bf7424ef62fd9761ee79fad94bbb9f264ff1a149e",
+        count=80,
+        digest="372d425df2ea8a3407fe2bb986d03c974f4ea31b2c27617813e55a23e84c2565",
     ),
 }
 
@@ -145,6 +152,17 @@ _CATALOG_QUERIES = {
           AND c.relname = ANY(CAST(:app_tables AS text[]))
           AND a.attnum > 0 AND NOT a.attisdropped
         ORDER BY c.relname, a.attnum
+    """,
+    "sequences": """
+        SELECT c.relname, pg_catalog.format_type(s.seqtypid, NULL),
+               s.seqstart, s.seqincrement, s.seqmax, s.seqmin,
+               s.seqcache, s.seqcycle
+        FROM pg_sequence s
+        JOIN pg_class c ON c.oid=s.seqrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=current_schema()
+          AND c.relname = ANY(CAST(:app_sequences AS text[]))
+        ORDER BY c.relname
     """,
     "constraints": """
         SELECT c.relname, con.conname, con.contype::text,
@@ -228,6 +246,7 @@ async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, Ca
 
     parameters = {
         "app_tables": sorted(FINAL_APP_TABLES),
+        "app_sequences": sorted(name for name, _owner in FINAL_APP_SEQUENCES),
         "required_functions": sorted(REQUIRED_FUNCTIONS),
     }
     signature: dict[str, CatalogInvariant] = {}

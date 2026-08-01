@@ -23,6 +23,7 @@ from app.private_work.run_repository import PrivateRunCreate, PrivateRunReposito
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.private_work.thread_service import PrivateThreadService
+from app.quotas.system_policy import SystemQuotaPolicyReader
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
@@ -80,6 +81,10 @@ async def test_gateway_platform_runtime_installs_project_private_work_services_f
             assert isinstance(app.state.private_thread_service, PrivateThreadService)
             assert app.state.private_thread_service._session_factory is session_factory
             assert app.state.private_thread_service._project_scoped_checkpointer is app.state.project_scoped_checkpointer
+            assert isinstance(
+                app.state.project_quota_service._current_policy_reader,
+                SystemQuotaPolicyReader,
+            )
 
             assert isinstance(app.state.private_run_service, PrivateRunService)
             assert app.state.private_run_service._session_factory is session_factory

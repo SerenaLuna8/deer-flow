@@ -124,13 +124,6 @@ def test_app_config_reload_without_acp_agents_clears_previous_state(tmp_path, mo
 
     config_with_acp = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-        "models": [
-            {
-                "name": "test-model",
-                "use": "langchain_openai:ChatOpenAI",
-                "model": "gpt-test",
-            }
-        ],
         "acp_agents": {
             "codex": {
                 "command": "codex-acp",
@@ -141,13 +134,6 @@ def test_app_config_reload_without_acp_agents_clears_previous_state(tmp_path, mo
     }
     config_without_acp = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-        "models": [
-            {
-                "name": "test-model",
-                "use": "langchain_openai:ChatOpenAI",
-                "model": "gpt-test",
-            }
-        ],
     }
 
     config_path.write_text(yaml.safe_dump(config_with_acp), encoding="utf-8")

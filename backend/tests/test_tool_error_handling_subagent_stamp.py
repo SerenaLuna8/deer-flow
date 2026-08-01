@@ -10,6 +10,7 @@ from langgraph.types import Command
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
 )
+from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
     SUBAGENT_STATUS_KEY,
@@ -34,7 +35,8 @@ def test_task_tool_exception_returns_failed_metadata():
 
     assert isinstance(result, ToolMessage)
     assert result.additional_kwargs.get(SUBAGENT_STATUS_KEY) == "failed"
-    assert "RuntimeError" in result.additional_kwargs.get(SUBAGENT_ERROR_KEY, "")
+    assert result.additional_kwargs.get(SUBAGENT_ERROR_KEY) == TOOL_EXECUTION_FAILED_ERROR_CODE
+    assert "blew up during execution" not in repr(result)
 
 
 def test_async_task_tool_exception_returns_failed_metadata():
@@ -48,7 +50,8 @@ def test_async_task_tool_exception_returns_failed_metadata():
 
     assert isinstance(result, ToolMessage)
     assert result.additional_kwargs.get(SUBAGENT_STATUS_KEY) == "failed"
-    assert "RuntimeError" in result.additional_kwargs.get(SUBAGENT_ERROR_KEY, "")
+    assert result.additional_kwargs.get(SUBAGENT_ERROR_KEY) == TOOL_EXECUTION_FAILED_ERROR_CODE
+    assert "async boom" not in repr(result)
 
 
 def test_successful_plain_task_tool_message_is_not_stamped_from_content():

@@ -13,7 +13,11 @@ from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
 from deerflow.persistence.private_work.model import RunAssetVersionRow
-from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.projects.model import (
+    ProjectDefaultAgentRow,
+    ProjectMembershipRow,
+    ProjectRow,
+)
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.shared_assets import (
     AgentDesignSessionRow,
@@ -217,6 +221,34 @@ class AgentRepository:
         if row is None:
             raise AssetNotFound(context.request_id)
         return row
+
+    async def ensure_not_current_project_default(
+        self,
+        context: ProjectContext | SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+    ) -> None:
+        """Lock the pointer before the Agent and reject destructive changes."""
+
+        if isinstance(context, ProjectContext):
+            await self._lock_project_context(context)
+            project_id = context.project_id
+        elif isinstance(context, SystemAssetGovernanceContext) and context.project_id is not None:
+            await self._lock_override_project(context)
+            project_id = context.project_id
+        elif isinstance(context, SystemAssetGovernanceContext):
+            return
+        else:
+            raise AssetForbidden(_request_id(context))
+        statement = (
+            select(ProjectDefaultAgentRow.project_id)
+            .where(
+                ProjectDefaultAgentRow.project_id == project_id,
+                ProjectDefaultAgentRow.agent_asset_id == asset_id,
+            )
+            .with_for_update(of=ProjectDefaultAgentRow)
+        )
+        if (await self.session.execute(statement)).scalar_one_or_none() is not None:
+            raise AssetConflict(context.request_id)
 
     async def plan_project_asset_deletion(
         self,

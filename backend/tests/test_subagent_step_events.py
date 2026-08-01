@@ -243,6 +243,40 @@ def test_capture_new_step_messages_is_noop_on_values_reyield():
     assert len(captured) == 1
 
 
+def test_capture_new_step_messages_handles_history_contraction():
+    """Post-compaction growth is captured from the reset cursor without repeats."""
+    captured: list[dict] = []
+    seen: set[str] = set()
+
+    ai1 = AIMessage(content="searching", id="ai-1")
+    tool1 = ToolMessage(content="r1", tool_call_id="c1", name="web_search", id="tool-1")
+    ai2 = AIMessage(content="done turn", id="ai-2")
+    before = [HumanMessage(content="do research", id="h-1"), ai1, tool1, ai2]
+    processed = capture_new_step_messages(before, captured, seen, 0)
+    assert processed == 4
+    assert [item["id"] for item in captured] == ["ai-1", "tool-1", "ai-2"]
+
+    # Summarization keeps only an already-seen tail message; its summary lives
+    # in the separate summary_text state key and is not a synthetic AIMessage.
+    compacted = [ai2]
+    processed = capture_new_step_messages(compacted, captured, seen, processed)
+    assert processed == 1
+    assert [item["id"] for item in captured] == ["ai-1", "tool-1", "ai-2"]
+
+    tool2 = ToolMessage(content="r2", tool_call_id="c2", name="read_file", id="tool-2")
+    ai3 = AIMessage(content="final answer", id="ai-3")
+    processed = capture_new_step_messages([ai2, tool2, ai3], captured, seen, processed)
+
+    assert processed == 3
+    assert [item["id"] for item in captured] == [
+        "ai-1",
+        "tool-1",
+        "ai-2",
+        "tool-2",
+        "ai-3",
+    ]
+
+
 def test_run_event_for_task_started():
     record = subagent_run_event({"type": "task_started", "task_id": "call_1", "description": "research X"})
 
@@ -269,11 +303,29 @@ def test_run_event_for_task_running_carries_step_payload():
 
 
 def test_run_event_for_terminal_status():
-    record = subagent_run_event({"type": "task_completed", "task_id": "call_1", "result": "done"})
+    record = subagent_run_event(
+        {
+            "type": "task_completed",
+            "task_id": "call_1",
+            "result": "done",
+            "model_name": "  claude-3-7-sonnet  ",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+        }
+    )
 
     assert record["event_type"] == "subagent.end"
     assert record["content"]["status"] == "completed"
     assert record["content"]["result"] == "done"
+    assert record["content"]["model_name"] == "claude-3-7-sonnet"
+    assert record["content"]["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
 
     failed = subagent_run_event({"type": "task_failed", "task_id": "call_1", "error": "boom"})
     assert failed["content"]["status"] == "failed"
@@ -292,3 +344,31 @@ def test_run_event_ignores_non_task_chunks():
     assert subagent_run_event({"type": "something_else"}) is None
     assert subagent_run_event({"no_type": True}) is None
     assert subagent_run_event("not-a-dict") is None
+
+
+def test_run_event_rejects_malformed_task_contract_fields():
+    assert subagent_run_event({"type": "task_started", "description": "missing id"}) is None
+    assert subagent_run_event({"type": "task_started", "task_id": "", "description": "blank id"}) is None
+    assert subagent_run_event({"type": "task_started", "task_id": "call_1", "description": 42}) is None
+    assert (
+        subagent_run_event(
+            {
+                "type": "task_running",
+                "task_id": "call_1",
+                "message": {"type": "ai", "content": "work"},
+                "message_index": True,
+            }
+        )
+        is None
+    )
+    assert (
+        subagent_run_event(
+            {
+                "type": "task_running",
+                "task_id": "call_1",
+                "message": "not-a-message",
+                "message_index": 1,
+            }
+        )
+        is None
+    )

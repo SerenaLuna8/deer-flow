@@ -20,7 +20,9 @@ describe("admin return path", () => {
       ),
     );
 
-    expect(config).toEqual({ matcher: "/admin/:path*" });
+    expect(config).toEqual({
+      matcher: ["/workspace/:path*", "/projects/:path*", "/admin/:path*"],
+    });
     expect(
       response.headers.get(`x-middleware-request-${ADMIN_RETURN_PATH_HEADER}`),
     ).toBe("/admin/assets/agents?scope=system");

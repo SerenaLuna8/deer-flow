@@ -12,10 +12,14 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from app.audit.service import AuditService
 from app.projects.context import ProjectContext, resolve_project_context
+from app.reliability.owner_refs import AuditHmacKeyring
+from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
 from app.shared_assets.models import AgentModelSettings, AgentPayload, WorkflowStatus
+from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionMcpRefRow, AgentVersionRow, AgentVersionSkillRefRow
 
 
@@ -84,6 +88,52 @@ async def _seed_system_admin(engine: AsyncEngine) -> SystemAssetGovernanceContex
             },
         )
     return SystemAssetGovernanceContext(user_id=user_id, request_id="req-system")
+
+
+async def _seed_project_member(
+    engine: AsyncEngine,
+    factory: async_sessionmaker,
+    *,
+    project_id: uuid.UUID,
+    label: str,
+    role: str,
+) -> ProjectContext:
+    user_id = uuid.uuid4()
+    membership_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """INSERT INTO users
+                (id,email,system_role,created_at,needs_setup,token_version)
+                VALUES (:id,:email,'user',:now,false,0)"""
+            ),
+            {
+                "id": str(user_id),
+                "email": f"{label}-{user_id}@example.com",
+                "now": now,
+            },
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO project_memberships
+                (id,project_id,user_id,role,status,version)
+                VALUES (:id,:project,:user,:role,'active',1)"""
+            ),
+            {
+                "id": membership_id,
+                "project": project_id,
+                "user": str(user_id),
+                "role": role,
+            },
+        )
+    async with factory() as session:
+        return await resolve_project_context(
+            session,
+            user_id,
+            project_id,
+            f"req-{label}",
+        )
 
 
 async def _seed_dependency(
@@ -212,6 +262,262 @@ def _payload(
 
 
 @pytest.mark.asyncio
+async def test_project_default_agent_cas_clear_and_lifecycle_protection(
+    migrated_postgres_database_url: str,
+) -> None:
+    agent_module = importlib.import_module("app.shared_assets.agent_service")
+    default_module = importlib.import_module("app.shared_assets.default_agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="default-agent-cas",
+        role="admin",
+    )
+    editor = await _seed_project_member(
+        engine,
+        factory,
+        project_id=admin.project_id,
+        label="default-agent-editor",
+        role="editor",
+    )
+    runner = await _seed_project_member(
+        engine,
+        factory,
+        project_id=admin.project_id,
+        label="default-agent-runner",
+        role="runner",
+    )
+    agent_service = agent_module.AgentService(factory)
+    default_service = default_module.ProjectDefaultAgentService(
+        factory,
+        governance_sink=DurableSharedAssetGovernanceEventSink(
+            AuditService(
+                factory,
+                AuditHmacKeyring(
+                    active_key_id="default-agent-test-v1",
+                    _keys={"default-agent-test-v1": b"d" * 32},
+                ),
+            )
+        ),
+    )
+    try:
+        asset = await agent_service.create_asset(
+            admin,
+            agent_module.CreateAgent("project-default", "Project Default"),
+        )
+        draft = await agent_service.create_version(
+            admin,
+            asset.id,
+            _payload(),
+            expected_asset_version=1,
+        )
+        await agent_service.publish(
+            admin,
+            asset.id,
+            draft.id,
+            expected_asset_version=2,
+        )
+
+        assert (await default_service.get(admin)).revision == 0
+        selected = await default_service.replace(
+            admin,
+            asset.id,
+            expected_revision=0,
+        )
+        assert selected.agent_asset_id == asset.id
+        assert selected.revision == 1
+        assert await default_service.get(admin) == selected
+
+        for member in (editor, runner):
+            with pytest.raises(AssetForbidden):
+                await default_service.replace(
+                    member,
+                    None,
+                    expected_revision=1,
+                )
+
+        with pytest.raises(AssetConflict):
+            await default_service.replace(
+                admin,
+                None,
+                expected_revision=0,
+            )
+        with pytest.raises(AssetConflict):
+            await agent_service.suspend(
+                admin,
+                asset.id,
+                expected_asset_version=3,
+            )
+        with pytest.raises(AssetConflict):
+            await agent_service.delete(
+                admin,
+                asset.id,
+                expected_asset_version=3,
+            )
+
+        cleared = await default_service.replace(
+            admin,
+            None,
+            expected_revision=1,
+        )
+        assert cleared.agent_asset_id is None
+        assert cleared.revision == 2
+        async with factory() as session:
+            audit_rows = tuple(
+                (
+                    await session.execute(
+                        select(AuditLogRow).where(
+                            AuditLogRow.project_id == admin.project_id,
+                            AuditLogRow.action.in_(("asset.bound", "asset.unbound")),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert {row.action for row in audit_rows} == {
+            "asset.bound",
+            "asset.unbound",
+        }
+        assert all(row.metadata_json == {"asset_kind": "agent"} for row in audit_rows)
+        assert all(str(asset.id) not in repr(row.__dict__) for row in audit_rows)
+        suspended = await agent_service.suspend(
+            admin,
+            asset.id,
+            expected_asset_version=3,
+        )
+        assert suspended.status == "suspended"
+        with pytest.raises(AssetConflict):
+            await default_service.replace(
+                admin,
+                asset.id,
+                expected_revision=2,
+            )
+        assert (await default_service.get(admin)).revision == 2
+        assert (await default_service.get(admin)).agent_asset_id is None
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """UPDATE project_default_agents
+                    SET revision=9223372036854775807
+                    WHERE project_id=:project"""
+                ),
+                {"project": admin.project_id},
+            )
+        with pytest.raises(AssetConflict):
+            await default_service.replace(
+                admin,
+                None,
+                expected_revision=9_223_372_036_854_775_807,
+            )
+        assert (await default_service.get(admin)).revision == 9_223_372_036_854_775_807
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_default_agent_rejects_cross_project_and_broken_closure(
+    migrated_postgres_database_url: str,
+) -> None:
+    agent_module = importlib.import_module("app.shared_assets.agent_service")
+    default_module = importlib.import_module("app.shared_assets.default_agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="default-agent-project",
+        role="admin",
+    )
+    outsider = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="default-agent-outsider",
+        role="admin",
+    )
+    agent_service = agent_module.AgentService(factory)
+    default_service = default_module.ProjectDefaultAgentService(factory)
+    try:
+        outsider_asset = await agent_service.create_asset(
+            outsider,
+            agent_module.CreateAgent("outsider-default", "Outsider Default"),
+        )
+        outsider_draft = await agent_service.create_version(
+            outsider,
+            outsider_asset.id,
+            _payload(),
+            expected_asset_version=1,
+        )
+        await agent_service.publish(
+            outsider,
+            outsider_asset.id,
+            outsider_draft.id,
+            expected_asset_version=2,
+        )
+        with pytest.raises(AssetNotFound):
+            await default_service.replace(
+                admin,
+                outsider_asset.id,
+                expected_revision=0,
+            )
+        with pytest.raises(DBAPIError):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """INSERT INTO project_default_agents
+                        (project_id,agent_asset_id,revision,
+                         created_by_user_id,updated_by_user_id)
+                        VALUES (:project,:agent,1,:user,:user)"""
+                    ),
+                    {
+                        "project": admin.project_id,
+                        "agent": outsider_asset.id,
+                        "user": str(admin.user_id),
+                    },
+                )
+
+        skill_id, skill_version_id = await _seed_dependency(
+            engine,
+            kind="skill",
+            scope="project",
+            project_id=admin.project_id,
+            user_id=admin.user_id,
+        )
+        target = await agent_service.create_asset(
+            admin,
+            agent_module.CreateAgent("broken-default", "Broken Default"),
+        )
+        target_draft = await agent_service.create_version(
+            admin,
+            target.id,
+            _payload(skill_version_ids=(skill_version_id,)),
+            expected_asset_version=1,
+        )
+        await agent_service.publish(
+            admin,
+            target.id,
+            target_draft.id,
+            expected_asset_version=2,
+        )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE skills SET status='suspended' WHERE id=:skill"),
+                {"skill": skill_id},
+            )
+        with pytest.raises(AssetConflict):
+            await default_service.replace(
+                admin,
+                target.id,
+                expected_revision=0,
+            )
+        assert (await default_service.get(admin)).revision == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_project_agent_publish_pins_dependencies_and_hides_other_project(
     migrated_postgres_database_url: str,
 ) -> None:
@@ -332,6 +638,50 @@ async def test_project_agent_publish_pins_dependencies_and_hides_other_project(
                 )
         with pytest.raises(dataclasses.FrozenInstanceError):
             published.soul = "mutated"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_builder_atomic_create_inserts_mcp_refs_before_publishing_v1(
+    migrated_postgres_database_url: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.agent_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    editor = await _seed_actor_and_project(
+        engine,
+        factory,
+        label="builder-mcp-publish-order",
+    )
+    _, mcp_version_id = await _seed_dependency(
+        engine,
+        kind="mcp",
+        scope="project",
+        project_id=editor.project_id,
+        user_id=editor.user_id,
+    )
+    service = service_module.AgentService(factory)
+    try:
+        async with factory() as session, session.begin():
+            created = await service.create_project_from_design_in_session(
+                session,
+                editor,
+                service_module.CreateAgent(
+                    "builder-mcp-agent",
+                    "Builder MCP Agent",
+                ),
+                _payload(mcp_version_ids=(mcp_version_id,)),
+            )
+
+        assert created.asset.status == "suspended"
+        assert created.version.workflow_status is WorkflowStatus.PUBLISHED
+        assert created.version.mcp_version_ids == (mcp_version_id,)
+        async with factory() as session:
+            persisted_status = await session.scalar(select(AgentVersionRow.workflow_status).where(AgentVersionRow.id == created.version.id))
+            persisted_refs = (await session.execute(select(AgentVersionMcpRefRow.mcp_server_version_id).where(AgentVersionMcpRefRow.agent_version_id == created.version.id))).scalars().all()
+        assert persisted_status == WorkflowStatus.PUBLISHED.value
+        assert persisted_refs == [mcp_version_id]
     finally:
         await engine.dispose()
 
@@ -1347,14 +1697,15 @@ async def test_project_agent_hard_delete_rejects_an_exact_terminal_run_snapshot(
             await connection.execute(
                 text(
                     """INSERT INTO runs
-                    (run_id,thread_id,project_id,owner_user_id,status,
+                    (run_id,thread_id,project_id,owner_user_id,origin_trace_id,status,
                      multitask_strategy,metadata_json,kwargs_json,
                      finalization_status,message_count,total_input_tokens,
                      total_output_tokens,total_tokens,llm_call_count,
                      lead_agent_tokens,subagent_tokens,middleware_tokens,
                      token_usage_by_model,created_at,updated_at)
                     VALUES
-                    (:run,:thread,:project,:owner,'success','reject',
+                    (:run,:thread,:project,:owner,'test-m3-agent-assets-trace',
+                     'success','reject',
                      '{}'::json,'{}'::json,'complete',0,0,0,0,0,0,0,0,
                      '{}'::json,:now,:now)"""
                 ),

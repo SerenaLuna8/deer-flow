@@ -22,6 +22,7 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 if TYPE_CHECKING:
     from app.private_work.context import PrivateWorkContext
+    from app.quotas.service import QuotaConfigProvider
 
 
 class ProjectCreateQuotaPort(Protocol):
@@ -110,10 +111,17 @@ class ProjectRepository:
         *,
         quota: ProjectCreateQuotaPort | None = None,
         quota_config: QuotaConfig | None = None,
+        quota_policy: QuotaConfigProvider | None = None,
     ):
         self.session = session
         self._quota = quota or _NoopProjectCreateQuota()
         self._quota_config = quota_config or QuotaConfig()
+        self._quota_policy = quota_policy
+
+    async def _current_quota_config(self) -> QuotaConfig:
+        if self._quota_policy is None:
+            return self._quota_config
+        return await self._quota_policy.current_config(self.session)
 
     async def create_with_admin(
         self,
@@ -189,7 +197,10 @@ class ProjectRepository:
     async def _get_in_transaction(self, context: ProjectContext) -> ProjectView:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
         asset_counts = project_asset_summary_columns(ProjectRow.id)
-        quota_summary = project_quota_summary_columns(ProjectRow.id, self._quota_config)
+        quota_summary = project_quota_summary_columns(
+            ProjectRow.id,
+            await self._current_quota_config(),
+        )
         statement = select(ProjectRow, ProjectMembershipRow, member_count.label("member_count"), *asset_counts, *quota_summary).join(ProjectMembershipRow, ProjectMembershipRow.project_id == ProjectRow.id).where(self._scope(context))
         rows = (await self.session.execute(statement)).all()
         if len(rows) != 1:
@@ -336,7 +347,10 @@ class ProjectRepository:
     ) -> ProjectPage:
         member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
         asset_counts = project_asset_summary_columns(ProjectRow.id)
-        quota_summary = project_quota_summary_columns(ProjectRow.id, self._quota_config)
+        quota_summary = project_quota_summary_columns(
+            ProjectRow.id,
+            await self._current_quota_config(),
+        )
         project_visibility = ProjectRow.status == "active"
         if include_recoverable:
             project_visibility = or_(

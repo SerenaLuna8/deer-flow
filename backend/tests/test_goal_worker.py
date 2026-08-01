@@ -48,6 +48,47 @@ class _ClearBeforeSecondGoalReadCheckpointer:
         return await self.inner.aput(*args, **kwargs)
 
 
+class _RaceAfterFirstContinuationCommitCheckpointer:
+    """Inject a user turn immediately after the continuation count is committed."""
+
+    def __init__(self, inner: InMemorySaver, thread_id: str) -> None:
+        self.inner = inner
+        self.thread_id = thread_id
+        self.put_count = 0
+
+    def get_next_version(self, current, channel):
+        return self.inner.get_next_version(current, channel)
+
+    async def aget_tuple(self, config):
+        return await self.inner.aget_tuple(config)
+
+    async def aput(self, *args, **kwargs):
+        result = await self.inner.aput(*args, **kwargs)
+        self.put_count += 1
+        if self.put_count == 1:
+            checkpoint_tuple = await self.inner.aget_tuple(
+                {
+                    "configurable": {
+                        "thread_id": self.thread_id,
+                        "checkpoint_ns": "",
+                    }
+                }
+            )
+            assert checkpoint_tuple is not None
+            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+            channel_values = checkpoint.get("channel_values", {}) or {}
+            current_messages = channel_values.get("messages", []) or []
+            await _write_messages(
+                self.inner,
+                thread_id=self.thread_id,
+                messages=[
+                    *current_messages,
+                    HumanMessage(content="Actually, stop and wait."),
+                ],
+            )
+        return result
+
+
 async def _seed_goal_thread(
     checkpointer: InMemorySaver,
     *,
@@ -311,6 +352,52 @@ async def test_goal_worker_does_not_resurrect_goal_cleared_during_persist():
 
 
 @pytest.mark.asyncio
+async def test_persist_goal_evaluation_advances_from_fresh_count_on_race():
+    """A stale continuation writer must not overwrite a higher committed count."""
+    checkpointer = InMemorySaver()
+    thread_id = "race-count-thread"
+    await _seed_goal_thread(
+        checkpointer,
+        thread_id=thread_id,
+        goal_text="Race test",
+    )
+    stale_goal = await read_thread_goal(checkpointer, thread_id)
+    assert stale_goal is not None
+
+    racing_goal = attach_goal_evaluation(
+        stale_goal,
+        GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="A competing continuation committed first.",
+            evidence_summary="Competing continuation.",
+        ),
+        run_id="racing-run",
+        continuation_count=2,
+    )
+    await write_thread_goal(checkpointer, thread_id, racing_goal)
+
+    result = await worker._persist_goal_evaluation(
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="stale-run",
+        goal=stale_goal,
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        ),
+        no_progress_count=1,
+        continuation_count=1,
+    )
+
+    assert result is not None
+    assert result["continuation_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_stops_when_abort_is_requested_during_evaluation(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "abort-during-eval-thread"
@@ -382,6 +469,52 @@ async def test_goal_worker_stands_down_when_thread_changes_after_evaluation(monk
     assert latest_goal is not None
     assert latest_goal["continuation_count"] == 0
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "thread_changed_after_evaluation"
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_does_not_double_count_when_thread_changes_before_continuation(
+    monkeypatch,
+):
+    inner = InMemorySaver()
+    thread_id = "race-before-continuation-thread"
+    await _seed_goal_thread(
+        inner,
+        thread_id=thread_id,
+        goal_text="Finish all tests",
+    )
+    checkpointer = _RaceAfterFirstContinuationCommitCheckpointer(
+        inner,
+        thread_id,
+    )
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "evaluate_goal_completion",
+        fake_evaluate_goal_completion,
+    )
+
+    continuation = await worker._prepare_goal_continuation_input(
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-race-before-continuation",
+        model_name="test-model",
+        app_config=None,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(inner, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "thread_changed_before_continuation"
 
 
 @pytest.mark.asyncio

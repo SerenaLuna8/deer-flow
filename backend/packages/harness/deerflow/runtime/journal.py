@@ -5,7 +5,8 @@ RunEventStore. It standardizes callback data into RunEvent records and
 handles token usage accumulation.
 
 Key design decisions:
-- on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
+- on_llm_new_token observes lead-Agent reasoning/output boundaries; complete
+  messages are still persisted only via on_llm_end
 - on_chat_model_start captures structured prompts as llm_request (OpenAI format) and
   extracts the first human message for run.input, because it is more reliable than
   on_chain_start (fires on every node) — messages here are fully structured.
@@ -21,6 +22,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
@@ -41,6 +43,18 @@ logger = logging.getLogger(__name__)
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
+_REASONING_DURATION_KEY = "reasoning_duration_ms"
+_MAX_REASONING_DURATION_MS = 24 * 60 * 60 * 1000
+
+
+@dataclass
+class _ReasoningWindow:
+    """Server-observed reasoning interval for one LangChain model call."""
+
+    started_at: float | None = None
+    ended_at: float | None = None
+    inline_buffer: str = ""
+    inline_think_open: bool = False
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -115,6 +129,8 @@ class RunJournal(BaseCallbackHandler):
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
+        self._reasoning_windows: dict[str, _ReasoningWindow] = {}
+        self._finalized_reasoning_durations: dict[str, int] = {}
 
         # LLM request/response tracking
         self._llm_call_index = 0
@@ -245,6 +261,55 @@ class RunJournal(BaseCallbackHandler):
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
         self._llm_start_times[str(run_id)] = time.monotonic()
 
+    def on_llm_new_token(
+        self,
+        token: str | list[str | dict[str, Any]],
+        *,
+        chunk: Any = None,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Observe the lead Agent's reasoning boundary without persisting deltas.
+
+        The duration begins with the first non-empty reasoning delta and ends
+        when the first visible answer delta arrives. A reasoning-only tool-call
+        step is closed in ``on_llm_end``. Subagent and middleware calls are
+        deliberately excluded.
+        """
+
+        del token, parent_run_id, kwargs
+        rid = str(run_id)
+        if self._identify_caller(tags) != "lead_agent":
+            self._reasoning_windows.pop(rid, None)
+            return
+        if rid in self._finalized_reasoning_durations:
+            return
+
+        message = getattr(chunk, "message", None)
+        if message is None:
+            return
+        window = self._reasoning_windows.setdefault(rid, _ReasoningWindow())
+        has_reasoning = self._message_has_structured_reasoning(message)
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and not has_reasoning:
+            (
+                has_inline_reasoning,
+                has_visible_content,
+            ) = self._classify_inline_reasoning_delta(window, content)
+            has_reasoning = has_inline_reasoning
+        else:
+            has_visible_content = self._message_has_visible_content(message)
+        if not has_reasoning and not has_visible_content:
+            return
+
+        observed_at = time.monotonic()
+        if has_reasoning and window.started_at is None:
+            window.started_at = observed_at
+        if has_visible_content and window.started_at is not None and window.ended_at is None:
+            window.ended_at = observed_at
+
     def on_llm_end(
         self,
         response: Any,
@@ -256,21 +321,45 @@ class RunJournal(BaseCallbackHandler):
     ) -> None:
         messages: list[AnyMessage] = []
         logger.debug("on_llm_end %s: tags=%s", run_id, tags)
-        for generation in response.generations:
-            for gen in generation:
-                if hasattr(gen, "message"):
-                    messages.append(gen.message)
-                else:
-                    logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
+        # LangChain groups candidate generations per model input. The graph
+        # consumes the first candidate from each group; alternatives must not
+        # enter DeerFlow's authoritative conversation history.
+        for candidates in response.generations:
+            if not candidates:
+                continue
+            selected = candidates[0]
+            if hasattr(selected, "message"):
+                messages.append(selected.message)
+            else:
+                logger.warning(
+                    "on_llm_end %s: selected generation has no message attribute: %s",
+                    run_id,
+                    selected,
+                )
 
-        for message in messages:
-            caller = self._identify_caller(tags)
+        caller = self._identify_caller(tags)
+        rid = str(run_id)
+        start = self._llm_start_times.pop(rid, None)
+        observed_at = time.monotonic()
+        latency_ms = int((observed_at - start) * 1000) if start else None
+        selected_reasoning_duration_ms = self._complete_reasoning_window(
+            rid=rid,
+            caller=caller,
+            observed_at=observed_at,
+        )
+
+        for message_index, message in enumerate(messages):
             self._remember_current_run_tool_calls(message, caller=caller)
 
-            # Latency
-            rid = str(run_id)
-            start = self._llm_start_times.pop(rid, None)
-            latency_ms = int((time.monotonic() - start) * 1000) if start else None
+            # A batched callback can contain more than one selected message,
+            # but the single observed stream window belongs only to its first
+            # message. Reusing it across the remaining batch would fabricate a
+            # duration for content that was not observed on that stream.
+            reasoning_duration_ms = selected_reasoning_duration_ms if message_index == 0 else None
+            self._replace_reasoning_duration(
+                message,
+                reasoning_duration_ms,
+            )
 
             # Token usage from message
             usage = getattr(message, "usage_metadata", None)
@@ -300,7 +389,10 @@ class RunJournal(BaseCallbackHandler):
             self._put(
                 event_type="llm.ai.response",
                 category="message" if caller == "lead_agent" else "trace",
-                content=message.model_dump(),
+                content=self._message_payload(
+                    message,
+                    reasoning_duration_ms=reasoning_duration_ms,
+                ),
                 metadata={
                     "caller": caller,
                     "usage": usage_dict,
@@ -346,7 +438,10 @@ class RunJournal(BaseCallbackHandler):
             self._counted_message_llm_run_ids.add(str(run_id))
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._llm_start_times.pop(str(run_id), None)
+        rid = str(run_id)
+        self._llm_start_times.pop(rid, None)
+        self._reasoning_windows.pop(rid, None)
+        self._finalized_reasoning_durations.pop(rid, None)
         self._put(event_type="llm.error", category="trace", content=str(error))
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
@@ -376,6 +471,167 @@ class RunJournal(BaseCallbackHandler):
             logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --
+
+    @staticmethod
+    def _non_empty_text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    @classmethod
+    def _message_has_structured_reasoning(cls, message: Any) -> bool:
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and cls._non_empty_text(additional_kwargs.get("reasoning_content")):
+            return True
+
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("type") not in {"thinking", "reasoning"}:
+                continue
+            if any(cls._non_empty_text(block.get(key)) for key in ("thinking", "reasoning", "text", "content")):
+                return True
+        return False
+
+    @staticmethod
+    def _partial_tag_suffix(value: str, marker: str) -> str:
+        lowered = value.lower()
+        max_length = min(len(lowered), len(marker) - 1)
+        for length in range(max_length, 0, -1):
+            if lowered.endswith(marker[:length]):
+                return value[-length:]
+        return ""
+
+    @classmethod
+    def _classify_inline_reasoning_delta(
+        cls,
+        window: _ReasoningWindow,
+        content: str,
+    ) -> tuple[bool, bool]:
+        """Classify incremental ``<think>`` text, including split tags."""
+
+        data = f"{window.inline_buffer}{content}"
+        window.inline_buffer = ""
+        has_reasoning = False
+        has_visible_content = False
+
+        while data:
+            lowered = data.lower()
+            if window.inline_think_open:
+                has_reasoning = True
+                close_index = lowered.find("</think")
+                if close_index < 0:
+                    window.inline_buffer = cls._partial_tag_suffix(
+                        data,
+                        "</think",
+                    )
+                    return has_reasoning, has_visible_content
+                close_end = lowered.find(">", close_index + len("</think"))
+                if close_end < 0:
+                    window.inline_buffer = data[close_index:]
+                    return has_reasoning, has_visible_content
+                window.inline_think_open = False
+                data = data[close_end + 1 :]
+                continue
+
+            open_index = lowered.find("<think")
+            if open_index < 0:
+                partial = cls._partial_tag_suffix(data, "<think")
+                visible = data[: len(data) - len(partial)] if partial else data
+                has_visible_content = has_visible_content or bool(visible.strip())
+                window.inline_buffer = partial
+                return has_reasoning, has_visible_content
+
+            has_visible_content = has_visible_content or bool(data[:open_index].strip())
+            open_end = lowered.find(">", open_index + len("<think"))
+            if open_end < 0:
+                window.inline_buffer = data[open_index:]
+                return has_reasoning, has_visible_content
+            window.inline_think_open = True
+            has_reasoning = True
+            data = data[open_end + 1 :]
+
+        return has_reasoning, has_visible_content
+
+    @classmethod
+    def _message_has_visible_content(cls, message: Any) -> bool:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            stripped = content.strip()
+            return bool(stripped) and "<think" not in stripped.lower()
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if isinstance(block, str) and block.strip():
+                return True
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("type") in {"thinking", "reasoning"}:
+                continue
+            if any(cls._non_empty_text(block.get(key)) for key in ("text", "content", "output_text")):
+                return True
+        return False
+
+    def _complete_reasoning_window(
+        self,
+        *,
+        rid: str,
+        caller: str,
+        observed_at: float,
+    ) -> int | None:
+        finalized = self._finalized_reasoning_durations.get(rid)
+        if finalized is not None:
+            return finalized
+        window = self._reasoning_windows.pop(rid, None)
+        if caller != "lead_agent" or window is None:
+            return None
+
+        started_at = window.started_at
+        if started_at is None:
+            return None
+
+        ended_at = window.ended_at if window.ended_at is not None else observed_at
+        elapsed_ms = int(round(max(0.0, ended_at - started_at) * 1000))
+        duration_ms = min(elapsed_ms, _MAX_REASONING_DURATION_MS)
+        self._finalized_reasoning_durations[rid] = duration_ms
+        return duration_ms
+
+    @staticmethod
+    def _replace_reasoning_duration(
+        message: Any,
+        duration_ms: int | None,
+    ) -> None:
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        projected_kwargs = dict(additional_kwargs) if isinstance(additional_kwargs, Mapping) else {}
+        projected_kwargs.pop(_REASONING_DURATION_KEY, None)
+        if duration_ms is not None:
+            projected_kwargs[_REASONING_DURATION_KEY] = duration_ms
+        try:
+            message.additional_kwargs = projected_kwargs
+        except (AttributeError, TypeError, ValueError):
+            logger.debug(
+                "Could not attach observed reasoning duration to model message",
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _message_payload(
+        message: Any,
+        *,
+        reasoning_duration_ms: int | None,
+    ) -> dict[str, Any]:
+        payload = message.model_dump()
+        if not isinstance(payload, Mapping):
+            return {}
+        projected = dict(payload)
+        additional_kwargs = projected.get("additional_kwargs")
+        projected_kwargs = dict(additional_kwargs) if isinstance(additional_kwargs, Mapping) else {}
+        projected_kwargs.pop(_REASONING_DURATION_KEY, None)
+        if reasoning_duration_ms is not None:
+            projected_kwargs[_REASONING_DURATION_KEY] = reasoning_duration_ms
+        projected["additional_kwargs"] = projected_kwargs
+        return projected
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:

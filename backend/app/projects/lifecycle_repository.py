@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
@@ -23,11 +24,26 @@ from app.projects.quota_summary import load_project_quota_summary
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
+if TYPE_CHECKING:
+    from app.quotas.service import QuotaConfigProvider
+
 
 class ProjectLifecycleRepository:
-    def __init__(self, session: AsyncSession, *, quota_config: QuotaConfig | None = None):
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        quota_config: QuotaConfig | None = None,
+        quota_policy: QuotaConfigProvider | None = None,
+    ):
         self.session = session
         self._quota_config = quota_config or QuotaConfig()
+        self._quota_policy = quota_policy
+
+    async def _current_quota_config(self) -> QuotaConfig:
+        if self._quota_policy is None:
+            return self._quota_config
+        return await self._quota_policy.current_config(self.session)
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
@@ -275,7 +291,11 @@ class ProjectLifecycleRepository:
             )
         ).scalar_one()
         asset_summary = await load_project_asset_summary(self.session, project.id)
-        quota_summary = await load_project_quota_summary(self.session, project.id, self._quota_config)
+        quota_summary = await load_project_quota_summary(
+            self.session,
+            project.id,
+            await self._current_quota_config(),
+        )
         try:
             role = ProjectRole(membership.role)
         except ValueError:

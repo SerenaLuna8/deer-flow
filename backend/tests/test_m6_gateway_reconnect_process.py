@@ -11,12 +11,14 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from support.project_agent_factory import create_project_agent_from_design
 
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.shared_assets.models import AgentPayload
+from deerflow.config.app_config import AppConfig
 from deerflow.runtime.events.models import StreamFrame
 from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.runtime.private_scope import PrivateResourceScope
@@ -26,17 +28,12 @@ _PROCESS_TIMEOUT = 60.0
 
 def _config(database_url: str) -> str:
     return f"""\
+config_version: 34
 log_level: warning
-models:
-  - name: release-model
-    use: langchain_openai.ChatOpenAI
-    model: release-model
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 database:
   url: {database_url}
-memory:
-  token_counting: char
 worker:
   enabled: true
   poll_interval_seconds: 0.1
@@ -46,6 +43,20 @@ worker:
 scheduler:
   enabled: false
 """
+
+
+def test_gateway_child_config_obeys_v34_yaml_authority_boundary() -> None:
+    raw = yaml.safe_load(_config("postgresql://localhost/deerflow_test_gateway_fixture"))
+
+    config = AppConfig.model_validate(
+        raw,
+        context={"config_source": "yaml"},
+    )
+
+    assert "models" not in raw
+    assert "memory" not in raw
+    assert raw["config_version"] == 34
+    assert config.worker.enabled is True
 
 
 def _reserve_port() -> tuple[socket.socket, int]:
@@ -300,12 +311,45 @@ async def test_last_event_id_replays_after_formal_gateway_process_replacement(
                 path,
                 headers={"Last-Event-ID": first_frame.id},
             )
+            exact_terminal = await owner.get(
+                path,
+                headers={"Last-Event-ID": terminal.id},
+            )
         assert replay.status_code == 200, replay.text
         assert f"id: {first_frame.id}\n" not in replay.text
         assert replay.text.count(f"id: {second_frame.id}\n") == 1
         assert replay.text.count(f"id: {terminal.id}\n") == 1
         replay_ids = [line.removeprefix("id: ") for line in replay.text.splitlines() if line.startswith("id: ")]
         assert replay_ids == [second_frame.id, terminal.id]
+        assert exact_terminal.status_code == 200, exact_terminal.text
+        assert exact_terminal.text == ""
+
+        later_run_id = str(uuid.uuid4())
+        async with factory() as session, session.begin():
+            await PrivateRunRepository(session).create(
+                scope=scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(run_id=later_run_id, status="running"),
+            )
+        later_frame = await bridge.publish_frame(
+            scope,
+            thread_id,
+            later_run_id,
+            StreamFrame(event="updates", data={"delta": "later-run"}),
+        )
+        async with httpx.AsyncClient(
+            base_url=second_url,
+            cookies=cookies,
+            timeout=10,
+            trust_env=False,
+        ) as owner:
+            past_old_terminal = await owner.get(
+                path,
+                headers={"Last-Event-ID": later_frame.id},
+            )
+        assert int(later_frame.id) > int(terminal.id)
+        assert past_old_terminal.status_code == 200, past_old_terminal.text
+        assert past_old_terminal.text == ""
 
         async with httpx.AsyncClient(
             base_url=second_url,

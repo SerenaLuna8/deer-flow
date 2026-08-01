@@ -34,13 +34,17 @@ export const enUS: Translations = {
     retry: "Retry",
     historyLoadFailed: "Conversation history could not be loaded safely.",
     download: "Download",
+    file: "file",
     thinking: "Thinking",
+    thinkingProcess: "Reasoning",
     thinkingInProgress: (seconds?: number) =>
       seconds === undefined ? "Thinking…" : `Thinking… (${seconds}s)`,
     thoughtFor: (seconds?: number) =>
       seconds === undefined
-        ? "Thought for a few seconds"
-        : `Thought for ${seconds} seconds`,
+        ? "Reasoning"
+        : seconds === 0
+          ? "Thought (under 1 second)"
+          : `Thought (${seconds} ${seconds === 1 ? "second" : "seconds"})`,
     artifacts: "Artifacts",
     public: "Public",
     custom: "Custom",
@@ -60,11 +64,27 @@ export const enUS: Translations = {
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
     regenerate: "Regenerate",
+    editAndRerun: "Edit and rerun",
+    updateAndRerun: "Update and rerun",
+    editRerunWarning:
+      "Rerunning restores conversation state only. Files, memory, and external actions are not undone.",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
     feedbackHelpful: "Helpful response",
     feedbackNotHelpful: "Not helpful response",
     feedbackSaveFailed: "Failed to save feedback",
+  },
+
+  runDuration: {
+    working: "Working…",
+    completedIn: (duration) => `Completed in ${duration}`,
+    description:
+      "Total task time, including model reasoning, tool calls, and waiting.",
+    lessThanSecond: "<1s",
+    hours: (value) => `${value}h`,
+    minutes: (value) => `${value}m`,
+    seconds: (value) => `${value}s`,
+    separator: " ",
   },
 
   // Home
@@ -134,30 +154,37 @@ export const enUS: Translations = {
     inputPolishFailed: "Failed to polish input.",
     inputPolishUndo: "Undo polish",
     inputPolishCancel: "Cancel polishing",
+    voiceInputStartLabel: "Dictate with voice",
+    voiceInputStopLabel: "Stop voice input",
+    voiceInputStart:
+      "Dictate with voice. DeerFlow receives only transcribed text; audio is handled by your browser or system speech service.",
+    voiceInputListening: "Listening... Click to stop voice input.",
+    voiceInputUnsupported:
+      "Voice input is not supported in this browser. Try Chrome or Edge.",
+    voiceInputPermissionDenied:
+      "Microphone access was denied. Allow microphone access and try again.",
+    voiceInputMicrophoneUnavailable:
+      "No microphone was detected. Check your device input and try again.",
+    voiceInputUnsupportedLanguage:
+      "Voice input does not support the current language in this browser.",
+    voiceInputNetworkError:
+      "Voice input could not reach the browser speech service.",
+    voiceInputNoSpeech: "No speech was detected. Please try again.",
+    voiceInputFailed: "Voice input failed. Please try again.",
     model: "Model",
     mode: "Mode",
     flashMode: "Flash",
-    flashModeDescription: "Fast and efficient, but may not be accurate",
+    flashModeDescription:
+      "Disable extended thinking and use minimal reasoning for simple tasks",
     reasoningMode: "Reasoning",
     reasoningModeDescription:
-      "Reasoning before action, balance between time and accuracy",
+      "Enable extended thinking with low reasoning effort",
     proMode: "Pro",
     proModeDescription:
-      "Reasoning, planning and executing, get more accurate results, may take more time",
+      "Enable extended thinking with medium reasoning effort to balance quality and speed",
     ultraMode: "Ultra",
     ultraModeDescription:
-      "Pro mode with subagents to divide work; best for complex multi-step tasks",
-    reasoningEffort: "Reasoning Effort",
-    reasoningEffortMinimal: "Minimal",
-    reasoningEffortMinimalDescription: "Retrieval + Direct Output",
-    reasoningEffortLow: "Low",
-    reasoningEffortLowDescription: "Simple Logic Check + Shallow Deduction",
-    reasoningEffortMedium: "Medium",
-    reasoningEffortMediumDescription:
-      "Multi-layer Logic Analysis + Basic Verification",
-    reasoningEffortHigh: "High",
-    reasoningEffortHighDescription:
-      "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
+      "Enable extended thinking with high reasoning effort for complex tasks",
     searchModels: "Search models...",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
@@ -309,17 +336,45 @@ export const enUS: Translations = {
   },
 
   adminOperations: {
-    shellTitle: "Platform operations",
-    shellDescription: "System reliability and governance",
+    shellTitle: "Platform administration",
+    shellDescription: "Operations, assets, and settings",
     signOut: "Sign out",
     retry: "Retry",
+    gatewayUnavailable: {
+      title: "Platform administration is unavailable",
+      description:
+        "The Gateway could not be reached, so your administrator session could not be verified. No administration data was loaded.",
+      reload: "Reload page",
+    },
+    ui: {
+      navigationGroups: {
+        operations: "Operations and governance",
+        governance: "Platform configuration",
+      },
+      skipToContent: "Skip to main content",
+      close: "Close",
+      backToWorkspace: "Back to project workspace",
+      expandNavigation: "Expand navigation",
+      collapseNavigation: "Collapse navigation",
+      previousPage: "Newer",
+      page: (page) => `Page ${page}`,
+      copy: "Copy",
+      copied: "Copied",
+      platformHealthy: "Systems operational",
+      publicErrorCode: "Public error code",
+      eventId: "Event ID",
+      jobId: "Job ID",
+      clearFilters: "Clear filters",
+    },
     navigation: {
-      label: "Platform operations navigation",
+      label: "Platform administration navigation",
       overview: "Overview",
       projects: "Projects",
       jobs: "Jobs",
       audit: "Audit",
       assets: "Assets",
+      systemSettings: "System settings",
+      settings: "Model settings",
     },
     overview: {
       title: "Operations overview",
@@ -342,6 +397,9 @@ export const enUS: Translations = {
           unavailable: "Unavailable",
           disabled: "Disabled",
           polling: "Polling",
+          owned: "Owned",
+          unowned: "Unowned",
+          ownership_lost: "Ownership lost",
           unknown: "Unknown",
         },
         components: {
@@ -356,6 +414,7 @@ export const enUS: Translations = {
       },
       channels: {
         title: "Channel providers",
+        emptyTitle: "No provider health reports",
         empty: "No channel providers are configured or reporting health.",
         checkedAt: "Checked {time}",
       },
@@ -367,6 +426,7 @@ export const enUS: Translations = {
         deadJobs: "Dead jobs",
       },
       usage: {
+        title: "Aggregate usage",
         members: "Members",
         storage_bytes: "Storage bytes",
         concurrent_runs: "Concurrent runs",
@@ -400,12 +460,14 @@ export const enUS: Translations = {
         queryPlaceholder: "Search by project name or slug",
         status: "Lifecycle status",
         suspension: "Platform suspension",
+        notSuspended: "Not suspended",
         all: "All",
         apply: "Apply filters",
         clear: "Clear",
         invalid: "Search text must contain 1 to 120 characters.",
       },
       actions: {
+        governAssets: "Govern shared assets",
         suspend: "Platform suspend",
         resume: "Resume",
         pending: "Updating…",
@@ -433,6 +495,26 @@ export const enUS: Translations = {
       requeue: "Requeue safe job",
       requeueing: "Requeueing",
       requeueError: "The safe requeue could not be completed.",
+      statuses: {
+        queued: "Queued",
+        leased: "Leased",
+        running: "Running",
+        retry_wait: "Waiting to retry",
+        succeeded: "Succeeded",
+        failed: "Failed",
+        cancelled: "Cancelled",
+        dead: "Dead",
+      },
+      types: {
+        private_run: "Project chat run",
+        automation_run: "Automation run",
+        retention_purge: "Retention purge",
+      },
+      retrySafety: {
+        safe: "Safe to retry",
+        unsafe: "Unsafe to retry",
+        unknown: "Unknown",
+      },
       filters: {
         project: "Project ID",
         status: "Status",
@@ -453,6 +535,668 @@ export const enUS: Translations = {
       emptyTitle: "No audit events found",
       emptyDescription: "No platform audit events are available.",
       older: "Older events",
+    },
+  },
+
+  adminModelSettings: {
+    header: {
+      eyebrow: "System settings",
+      title: "Model settings",
+      description:
+        "Manage available platform models, the default model, and system Credential references. Credential values are never read or displayed here.",
+      create: "Create model",
+    },
+    overview: {
+      label: "Model catalog overview",
+      configured: "Configured models",
+      configuredDetail: "Models in the platform catalog",
+      active: "Active models",
+      activeDetail: "Available for conversations",
+      defaultModel: "Default model",
+      defaultDetail: "System default for new conversations",
+      notSet: "Not set",
+      revision: "Catalog revision",
+      revisionDetail: "Used for concurrency checks",
+    },
+    states: {
+      loading: "Loading model catalog",
+      unavailableTitle: "Model settings are unavailable",
+      unavailableDescription:
+        "No unverified data is shown. Check Gateway and database health, then retry.",
+      retry: "Retry",
+      emptyTitle: "No models are available yet",
+      emptyDescription:
+        "Create your first model, enable it, and set it as the default.",
+      catalogLabel: "Model catalog",
+      catalogDescription:
+        "Each entry shows only non-sensitive configuration metadata and exact Credential references.",
+      modelCount: (count) => `${count} ${count === 1 ? "model" : "models"}`,
+    },
+    card: {
+      defaultModel: "Default model",
+      active: "Enabled",
+      suspended: "Suspended",
+      updatedAt: (formattedDate) => `Updated ${formattedDate}`,
+      providerModel: "Provider model",
+      credential: "Credential",
+      environmentKey: "Environment variable",
+      version: "Version",
+      versionMeta: (versionNumber, revision, sortOrder) =>
+        `Config v${versionNumber} · revision ${revision} · order ${sortOrder}`,
+      capabilities: "Model capabilities",
+      thinking: "Thinking",
+      reasoningEffort: "Reasoning effort",
+      vision: "Vision input",
+      edit: "Edit",
+      pause: "Suspend",
+      enable: "Enable",
+      currentDefault: "Current default",
+      setDefault: "Set as default",
+      actions: "Actions",
+      actionFor: (action, name) => `${action}: ${name}`,
+      defaultCannotPause: "The default model cannot be suspended",
+      credentialUnbound: "No Credential bound",
+      credentialUnavailable: "Credential bound (currently unavailable)",
+      credentialHistorical: "Historical version",
+    },
+    adapters: {
+      patchedOpenAI: "OpenAI enhanced compatibility",
+      patchedDeepSeek: "DeepSeek enhanced compatibility",
+      patchedMiMo: "MiMo enhanced compatibility",
+      patchedMiniMax: "MiniMax enhanced compatibility",
+      patchedStepFun: "StepFun enhanced compatibility",
+    },
+    editor: {
+      editTitle: "Edit model",
+      createTitle: "Create model",
+      description:
+        "Provider parameters are saved as model configuration. Credential references point to existing versions; secret values are never entered here.",
+      basicInformation: "Basic information",
+      basicDescription:
+        "Define the stable logical name, Provider mapping, and catalog details.",
+      logicalName: "Logical name",
+      displayName: "Display name",
+      displayNamePlaceholder: "Analysis Pro",
+      providerAdapter: "Provider Adapter",
+      providerModel: "Provider model",
+      status: "Status",
+      active: "Enable",
+      suspended: "Suspend",
+      modelDescription: "Description",
+      modelDescriptionPlaceholder: "Recommended use cases",
+      sortOrder: "Sort order",
+      sortOrderHint: "Lower values appear first. New models use 0 by default.",
+      capabilities: "Model capabilities",
+      capabilitiesDescription:
+        "These capabilities determine which input and reasoning controls are available in conversations.",
+      supportsThinking: "Supports thinking",
+      supportsReasoningEffort: "Supports reasoning effort",
+      supportsVision: "Supports vision input",
+      commonProviderSettings: "Common Provider settings",
+      commonProviderSettingsDescription:
+        "Only allowlisted request parameters are saved. Secret values are never stored here.",
+      baseUrl: "Base URL",
+      temperature: "Temperature",
+      maxTokens: "Maximum Tokens",
+      requestTimeout: "Request timeout (seconds)",
+      maxRetries: "Maximum retries",
+      credentialBinding: "Credential binding",
+      credentialBindingDescription:
+        "Bind an exact system Credential version. Secret values never enter the page cache.",
+      systemCredential: "System Credential",
+      credentialsUnavailableHint:
+        "Credential metadata is unavailable, so the binding cannot be changed.",
+      credentialSelectionHint:
+        "Saving binds the selected Credential's current version without reading its value.",
+      selectCredential: "Select a Credential",
+      providerDoesNotUseCredential: "This Provider does not use a Credential",
+      environmentKey: "Injected environment variable",
+      environmentKeyHint:
+        "Only the variable name is saved, for example OPENAI_API_KEY.",
+      advancedJson: "Advanced JSON",
+      advancedJsonHint:
+        "Only allowlisted parameters and fixed structures are supported, such as reasoning_effort, extra_body.reasoning.effort, and the thinking toggle. Unknown fields and arbitrary strings are rejected.",
+      cancel: "Cancel",
+      saving: "Saving…",
+      saveChanges: "Save changes",
+      createModel: "Create model",
+    },
+    validation: {
+      invalidNumber: (label) => `${label} has an invalid format`,
+      temperature: "Temperature",
+      maxTokens: "Maximum Tokens",
+      requestTimeout: "Request timeout",
+      maxRetries: "Retry count",
+      sortOrder: "Sort order",
+      advancedJsonInvalid: "Advanced JSON is invalid",
+      advancedJsonObject: "Advanced JSON must be an object",
+      advancedJsonUnsafe:
+        "Advanced JSON may contain only supported safe fields with exact value types",
+      invalidForm:
+        "Check the required fields, model names, and Credential binding",
+      invalidConfiguration: "The model configuration is invalid",
+    },
+    actionErrors: {
+      authRequired: "Your session has expired. Sign in again.",
+      conflict:
+        "Another administrator changed this model. Refresh and try again.",
+      invalid: "The model configuration failed server validation.",
+      generic: "The action was not completed. Refresh and try again.",
+    },
+    success: {
+      updated: (name) => `Updated model “${name}”.`,
+      created: (name) => `Created model “${name}”.`,
+      enabled: (name) => `Enabled model “${name}”.`,
+      suspended: (name) => `Suspended model “${name}”.`,
+      defaultSet: (name) => `Set “${name}” as the default model.`,
+    },
+  },
+
+  adminSystemSettings: {
+    header: {
+      eyebrow: "Platform configuration",
+      title: "System settings",
+      description:
+        "Set the platform's default behavior. Choose one area and save its changes independently.",
+      refresh: "Refresh",
+      refreshing: "Refreshing",
+    },
+    states: {
+      loading: "Loading system settings",
+      unavailableTitle: "System settings are unavailable",
+      unavailableDescription:
+        "The current system settings could not be read safely.",
+      retry: "Retry",
+    },
+    sections: {
+      auth: {
+        title: "Accounts and access",
+        description:
+          "Control new local-account registration requests without changing administrator setup or OIDC.",
+      },
+      quotas: {
+        title: "Default quotas",
+        description:
+          "Set project quota defaults and the shared warning threshold.",
+      },
+      agentRuntime: {
+        title: "Agent runtime policy",
+        description:
+          "Control budgets, context, Memory, tool results, and safeguards for new Runs. Active Runs are not changed.",
+      },
+    },
+    groups: {
+      runLimits: "Run budgets and limits",
+      assistantExperience: "Assistant experience",
+      summarization: "Context summarization",
+      memory: "Project Memory",
+      tools: "Tool discovery and output",
+      safeguards: "Loop and file safety",
+    },
+    fields: {
+      allowRegistration: "Allow visitors to register local accounts",
+      defaultMemberLimit: "Default member limit",
+      defaultStorageLimit: "Default storage byte limit",
+      defaultConcurrentRuns: "Default concurrent Run limit",
+      defaultDailyMcpCalls: "Default daily MCP call limit",
+      quotaWarningThreshold: "Quota warning threshold",
+      defaultModel: "Use the system default model",
+      unavailableModel: "The referenced model is no longer available",
+      addRow: "Add item",
+      removeRow: "Remove",
+      listHint:
+        "Separate values with commas. Empty and duplicate values are removed before save.",
+    },
+    common: {
+      save: "Save changes",
+      saving: "Saving",
+      reset: "Discard changes",
+      revision: (revision) => `Stored revision r${revision}`,
+      effectiveRevision: (revision) => `Effective revision r${revision}`,
+      updatedAt: (value) => `Updated ${value}`,
+      storedRevision: (revision) => `Stored as r${revision}`,
+      pendingRoles: (roles) => `Waiting for: ${roles}`,
+      noPendingRoles: "No process refresh is pending",
+    },
+    effects: {
+      newRequests: "Effective for later requests",
+      newRuns: "Applies to new Runs",
+      newRequestsAndRuns: "Applies to new requests and Runs",
+      nextAuthoritativeCheck: "Applies at the next quota check",
+      restartRequired: "Applies after services restart",
+    },
+    feedback: {
+      saved:
+        "Settings were saved. The activation state below is server-confirmed.",
+      registrationConfirmation:
+        "This changes the visitor registration entry point. Save the accounts and access settings?",
+      conflict:
+        "The server revision changed. Your local edits are preserved; refresh, compare, and retry.",
+      invalid: "A value is outside the safe range. Review this group.",
+      inactiveModel:
+        "Every model field must use a current active model or the system default.",
+      authRequired: "Your administrator session expired. Sign in again.",
+      generic: "Save failed. Your local changes are still preserved.",
+    },
+  },
+
+  adminAssets: {
+    navigation: {
+      platformLabel: "Platform asset navigation",
+      projectLabel: "Project asset governance navigation",
+      agent: "Agent",
+      skill: "Skill",
+      mcp: "MCP",
+      credential: "Credential",
+    },
+    shell: {
+      platformAria: "Platform asset management",
+      systemCatalog: "System asset catalog",
+      systemCatalogDescription:
+        "System definitions are runtime read-only; Credential writes are controlled",
+      adminScope: "Platform administrator scope",
+      projectAria: "Project shared-asset governance",
+      backToProjects: "Back to projects",
+      projectGovernance: "Project shared-asset governance",
+      projectBoundary:
+        "Governs shared Agents, Skills, MCP, Credentials, and system bindings only. It never reads members, chats, runs, Memory, files, or other private user content.",
+      projectId: "Project UUID",
+    },
+    common: {
+      assetVersion: "Asset revision",
+      versionId: "Version UUID",
+      currentPublishedVersion: "Current published version",
+      updatedAt: "Updated",
+      versionHistory: "Version history",
+      versionCount: (count) =>
+        `${count} ${count === 1 ? "version" : "versions"}`,
+      credentialMetadata: "Credential metadata",
+      details: "Details",
+      dangerZone: "Danger zone",
+      type: "Type",
+      credentialTypes: {
+        modelApiKey: "Model API key",
+        apiKey: "API key",
+        token: "Access token",
+        oauth: "OAuth authorization",
+        database: "Database Credential",
+      },
+      transportTypes: {
+        stdio: "Standard input/output (stdio)",
+        sse: "Server-sent events (SSE)",
+        http: "HTTP",
+      },
+      credentialPayloadGroups: {
+        env: "Environment variables (env)",
+        headers: "Request headers (headers)",
+        oauth: "OAuth (oauth)",
+      },
+      metadataVersion: "Metadata revision",
+      replaceCredential: "Replace Credential",
+      migrateReferences: "Migrate compatible references",
+      revokeCredential: "Revoke Credential",
+      delete: "Delete",
+      createCredential: "Create Credential",
+      createProjectCredential: "Create project Credential",
+      createProjectAsset: "Create project asset",
+      retry: "Retry",
+      retrying: "Retrying…",
+      create: "Create",
+      creating: "Creating…",
+      createVersion: "Create version",
+      creatingVersion: "Creating…",
+      reload: "Reload",
+      systemProvided: "System provided",
+      projectOwned: "Project owned",
+      active: "Active",
+      revoked: "Revoked",
+      loading: "Loading",
+      migrationSuccess:
+        "Compatible reference migration completed. No authorization changes were made when no eligible MCP Grant or Skill environment binding required migration.",
+      credentialRotationNote:
+        "Replacement creates a new version only. Existing MCP Grants and Skill environment bindings remain pinned until they are migrated explicitly.",
+      historySchemaUnavailable:
+        "The current Credential field schema could not be verified. Reload and try again.",
+    },
+    status: {
+      active: "Active",
+      archived: "Archived",
+      suspended: "Suspended",
+      draft: "Draft",
+      pending_approval: "Pending approval",
+      published: "Published",
+      rejected: "Rejected",
+      retired: "Replaced",
+      revoked: "Revoked",
+    },
+    pages: {
+      systemEyebrow: "Platform shared assets",
+      databaseCatalog: "PostgreSQL catalog",
+      runtimeReadOnly: "Runtime read-only",
+      controlledWrite: "Controlled secure writes",
+      loading: "Loading assets",
+      loadFailed: "Assets could not be loaded",
+      systemCount: (count) => `${count} ${count === 1 ? "asset" : "assets"}`,
+      credentialCount: (count) =>
+        `${count} system ${count === 1 ? "Credential" : "Credentials"}`,
+      systemNote: (kind) =>
+        `System ${kind} entries are written during database initialization from the versioned, digest-verified packaged catalog and remain runtime read-only. Update the repository catalog and run the explicit database initialization flow to publish system asset changes.`,
+      emptySystem: (kind) =>
+        `The packaged catalog contains no system ${kind} entries.`,
+      emptyCreate: "Use the create action above to add the first entry.",
+      system: {
+        agentsTitle: "System Agents",
+        agentsDescription:
+          "Governance metadata for system Agents initialized from the packaged catalog.",
+        skillsTitle: "System Skills",
+        skillsDescription:
+          "System Skill and version metadata initialized from the packaged catalog.",
+        mcpTitle: "System MCP",
+        mcpDescription:
+          "Governance metadata for system MCP initialized from the packaged catalog.",
+        credentialsTitle: "System Credentials",
+        credentialsDescription:
+          "Only Credential metadata is displayed. Secret values are never returned after writing.",
+      },
+      projectEyebrow: "Project governance catalog",
+      projectDatabaseCatalog: "PostgreSQL asset catalog",
+      sharedOnly: "Shared assets only",
+      projectLoadFailed: "Project assets could not be loaded",
+      sourceCounts: (systemCount, projectCount) =>
+        `System provided ${systemCount} · Project owned ${projectCount}`,
+      project: {
+        agentsTitle: "Project Agent governance",
+        agentsDescription:
+          "Review Agents in the selected project. System Agents can only be bound.",
+        skillsTitle: "Project Skill governance",
+        skillsDescription:
+          "Manage complete project Skill versions. System Skills can only be bound.",
+        mcpTitle: "Project MCP governance",
+        mcpDescription:
+          "Manage project MCP definitions, approvals, and Credential Grants. System MCP definitions remain read-only.",
+        credentialsTitle: "Project Credential governance",
+        credentialsDescription:
+          "Govern only Credential security metadata for the selected project. Secret values are never returned after writing.",
+      },
+    },
+    catalog: {
+      systemAssets: "System assets",
+      systemAssetsDescription:
+        "System assets are shared read-only. Project bindings pin an explicit version and never upgrade automatically.",
+      searchPlaceholder: "Search by name or identifier",
+      filterAll: "All statuses",
+      catalogReady: "Catalog loaded",
+      catalogReadyDetail: "PostgreSQL available",
+      totalAssets: "Total assets",
+      activeAssets: "Active assets",
+      unpublishedAssets: "Unpublished assets",
+      latestUpdate: "Latest update",
+      noUpdate: "No update yet",
+      publicationFilter: "Publication status",
+      publicationAll: "All publication states",
+      publishedOnly: "Published only",
+      unpublishedOnly: "Unpublished only",
+      updatedSort: "Updated-time sort",
+      newestFirst: "Recently updated first",
+      oldestFirst: "Oldest updated first",
+      identifier: "Identifier",
+      source: "Source",
+      systemCatalogSource: "System catalog",
+      lifecycleStatus: "Status",
+      publicationStatus: "Publication",
+      published: "Published",
+      assetRevision: "Asset revision",
+      actions: "Actions",
+      viewDetails: "View details",
+      refresh: "Refresh catalog",
+      refreshing: "Refreshing",
+      resultRange: (from, to, total) =>
+        `${from}–${to} of ${total} ${total === 1 ? "item" : "items"}`,
+      page: (page, totalPages) => `Page ${page} of ${totalPages}`,
+      previousPage: "Previous page",
+      nextPage: "Next page",
+      noResults: "No assets match the current filters.",
+      noSystemAssets: "No visible system assets.",
+      system: "System",
+      systemPublishStatus: "System publication",
+      pinnedVersion: "Pinned version",
+      bindingStatus: "Binding status",
+      bindingRevision: "Binding revision",
+      publishedAvailable: "Published version available",
+      unpublished: "Not published",
+      enabledAndPinned: "Enabled and pinned",
+      closed: "Disabled",
+      notBound: "Not bound",
+      enabled: "Enabled",
+      none: "None",
+      manageBinding: "Manage binding",
+      projectAssets: "Project assets",
+      projectAgentDescription:
+        "Owned by this project. Agent settings are maintained on the project Agent page and take effect after saving.",
+      projectVersionedDescription:
+        "Owned by this project. Content changes create immutable new versions.",
+      noProjectAssets: "This project has no assets of this type.",
+      project: "Project",
+      publishStatus: "Publication",
+      createNewVersion: "Create new version",
+      credentialSource: "Credential source",
+      systemCredentials: "System Credentials",
+      projectCredentials: "Project Credentials",
+      emptyCredentials: (title) => `No ${title}.`,
+      waitingForAdmin: "Waiting for administrator approval",
+      archive: "Archive",
+      activate: "Enable",
+      disable: "Disable",
+      suspend: "Suspend",
+    },
+    version: {
+      none: "No versions have been created.",
+      selectHint: "Select a version on the left to inspect its details.",
+      number: (number) => `Version ${number}`,
+      publish: "Publish version",
+      submit: "Submit for approval",
+      approve: "Approve and publish",
+      configureGrants: "Configure Credential grants",
+    },
+    diff: {
+      payloadChecksum: "Payload checksum",
+      description: "Description",
+      model: "Model",
+      toolGroups: "Tool groups",
+      skillVersions: "Skill versions",
+      mcpVersions: "MCP versions",
+      compatibility: "Compatibility",
+      scanDecision: "Scan decision",
+      scanAllow: "Allowed",
+      scanWarn: "Warning",
+      scanBlock: "Blocked",
+      scanRules: "Scan rules",
+      files: "Files",
+      credentialRequirements: "Credential requirements",
+      transport: "Transport",
+      command: "Command",
+      url: "URL",
+      arguments: "Arguments",
+      timeout: "Timeout",
+      credentialSlots: "Credential slots",
+      status: "Status",
+      payloadSchemaVersion: "Payload schema version",
+      payloadFields: "Payload fields",
+      optional: "optional",
+      required: "required",
+      noDescription: "No description",
+      seconds: (seconds) => `${seconds}s`,
+      noChanges: "No structured changes.",
+      field: "Field",
+      previous: "Previous version",
+      current: "Current version",
+    },
+    runtime: {
+      unsupportedProjectTransport:
+        "Only SSE and HTTP are supported. This historical version can be viewed but cannot be published, bound, or used by an Agent.",
+      unsupportedSystemTransport:
+        "The Private runtime supports only stdio, SSE, and HTTP. This historical system version can be viewed but cannot be bound or used by an Agent.",
+      missingProjectUrl:
+        "This transport has no URL. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+      invalidProjectUrl:
+        "Project MCP requires an absolute HTTPS URL without credentials or query parameters. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+      projectOAuth:
+        "Project MCP does not support version-level OAuth configuration. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+      projectHeadersOnly:
+        "Project MCP Credential slots support headers only. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+      missingSystemCommand:
+        "This stdio system MCP has no command and cannot be bound or used by an Agent.",
+      missingSystemUrl:
+        "This remote system MCP has no URL and cannot be bound or used by an Agent.",
+      systemEnvOnly:
+        "Stdio system MCP Credential slots support env only and cannot otherwise be bound or used by an Agent.",
+      systemRemoteCredentialsOnly:
+        "Remote system MCP Credential slots support headers or oauth only and cannot otherwise be bound or used by an Agent.",
+    },
+    dialogs: {
+      createAssetTitle: (kind) => `Create ${kind}`,
+      skillCreationDescription:
+        "Creates a draft SKILL.md from the starter template. The Skill starts disabled.",
+      assetCreationDescription: (scope) =>
+        `Create the ${scope === "system" ? "system" : "project"} asset first, then create and publish a version.`,
+      name: "Name",
+      assetSlug: "Asset slug",
+      slugTitle:
+        "Use 3–63 lowercase letters, digits, and single hyphen separators",
+      slugHelp:
+        "Use 3–63 lowercase letters, digits, or hyphens. The slug becomes the stable identifier.",
+      filePath: "File path",
+      mediaType: "Media type",
+      fileContent: "File content",
+      skillTemplateDescription: "Describe when and how to use this skill.",
+      skillTemplateInstructions: "Add instructions for this skill here.",
+      description: "Description",
+      transport: "Transport",
+      sseTransport: "Server-sent events (SSE)",
+      workerUrlHelp:
+        "The Worker connects to this exact platform-approved HTTPS endpoint.",
+      timeoutHelp:
+        "The platform controls the effective timeout. The compatibility value cannot be changed here.",
+      credentialSlotOptional: "Credential slot (optional)",
+      slotPublicationHelp:
+        "A version with a Credential slot must use the submit and approval workflow.",
+      slotName: "Slot name",
+      slotNameTitle:
+        "Start with a lowercase letter and use only lowercase letters, digits, dots, underscores, or hyphens",
+      slotNameHelp:
+        "Start with a lowercase letter. Use at most 63 letters, digits, dots, underscores, or hyphens.",
+      purpose: "Purpose",
+      credentialHeaderGroup: "Credential field group: headers",
+      requiredFields: "Required fields (comma or newline separated)",
+      requiredFieldsHelp:
+        "Enter the field names required in the selected Credential group. Separate multiple fields with commas or new lines.",
+      unsupportedMcpTransport: "New MCP versions support SSE or HTTP only",
+      missingMcpUrl: "SSE and HTTP transports require a URL",
+      createVersionTitle: (kind) => `Create ${kind} version`,
+      secretCreateTitle: "Create Credential",
+      secretReplaceTitle: "Replace Credential",
+      secretDescription:
+        "Secret values are used only for this encrypted write and are never returned after submission.",
+      credentialSlug: "Credential slug",
+      credentialFields: "Credential fields",
+      credentialFieldsHelp:
+        "Add environment, header, or OAuth fields. Each secret value is written once.",
+      addField: "Add field",
+      group: "Group",
+      envGroup: "Environment (env)",
+      headersGroup: "Headers",
+      fieldName: "Field name",
+      credentialValue: "Secret value",
+      removeField: (index) => `Remove field ${index}`,
+      remove: "Remove",
+      writing: "Writing…",
+      encryptWrite: "Encrypt and save",
+      validation: {
+        emptyFields: "Add at least one Credential field.",
+        unsupportedGroup: "Select a supported Credential field group.",
+        emptyField: "Enter a field name.",
+        fieldTooLong: "Field names cannot exceed 255 characters.",
+        duplicateField: "Fields cannot be duplicated within one group.",
+        emptyValue: "Enter a secret value.",
+      },
+      revokeTitle: "Revoke Credential?",
+      revokeDescription: (name) =>
+        `This cannot be undone. Revoking “${name}” invalidates all Credential versions and related active Grants in one transaction. MCP details will no longer report them as authorized.`,
+      cancel: "Cancel",
+      revoking: "Revoking…",
+      confirmRevoke: "Permanently revoke",
+      migrateTitle: "Migrate compatible Credential references",
+      migrateDescription: (name) =>
+        `Replacing a Credential creates a new version without rotating existing MCP Grants or Skill environment bindings. References to an older “${name}” version migrate atomically only when every field schema is compatible. Any incompatible reference rejects the entire operation.`,
+      migrating: "Migrating…",
+      confirmMigrate: "Migrate references",
+      deleteTitle: "Delete Credential?",
+      deleteDescription: (name) =>
+        `Deleting “${name}” removes all versions from ordinary lists and runtime queries. Related MCP Grants and Skill environment bindings become invalid. Only audit records remain. This cannot be undone.`,
+      deleting: "Deleting…",
+      confirmDeleteCountdown: (seconds) => `Confirm delete (${seconds}s)`,
+      confirmDelete: "Confirm delete",
+      binding: {
+        switchTitle: "Switch project binding version",
+        enableTitle: "Enable system asset",
+        description: (name) =>
+          `${name}. This changes only the current project binding. It never modifies the packaged system definition or version.`,
+        selectPublished: "Select a published version",
+        selectPublishedAria: "Select a published version",
+        selectPlaceholder: "Select a version",
+        unavailableSuffix: " (unavailable)",
+        noBindableVersions: "No published versions can be bound.",
+        currentProject: (version) => `Current project: ${version}`,
+        notEnabled: "Not enabled",
+        disable: "Disable for this project",
+        enable: "Enable for this project",
+        rollback: "Roll back to this version",
+        switchVersion: "Switch to new version",
+      },
+      approval: {
+        configureTitle: "Configure MCP Credential grants",
+        configureDescription:
+          "Select current system Credential versions for a published packaged system MCP. This configures slot grants only; it never modifies or republishes the MCP definition.",
+        saveGrants: "Save grants",
+        configureEmptyOptional:
+          "No Credentials are eligible. Optional slots may remain empty to clear existing grants.",
+        clearOptionalGrant: "No Credential",
+        publishTitle: "Approve MCP version",
+        publishDescription:
+          "Select an enabled, currently visible Credential version for each slot. The MCP version is published only after approval succeeds.",
+        approve: "Approve and publish",
+        publishEmptyOptional:
+          "No Credentials are eligible. Optional slots may remain empty for approval.",
+        selectCredential: "Select a Credential",
+        currentVersion: "Current version",
+        loadingCredentials: "Loading Credentials…",
+        credentialsFailed: "Credentials could not be loaded. Retry.",
+        requiredUnavailable:
+          "No eligible Credential is available for a required slot.",
+      },
+    },
+    rotation: {
+      title: "Credential envelope rotation",
+      summary: (current, total) =>
+        `${current} of ${total} active versions current`,
+      current: "Rotation current",
+      pending: (count) => `${count} pending`,
+    },
+    errors: {
+      notFound: "The asset does not exist or is no longer visible.",
+      forbidden: "This account cannot perform that action.",
+      conflict: "The asset changed. Refresh and try again.",
+      validationFailed:
+        "The submitted content does not meet asset requirements.",
+      storageQuota:
+        "The project Skill storage quota is exhausted. Remove unused Skills and try again.",
+      storageUnavailable:
+        "Asset storage is temporarily unavailable. Try again.",
+      authRequired: "The session has expired. Sign in again.",
+      network: "The asset service is temporarily unreachable. Try again.",
+      invalidResponse: "The asset service returned invalid data.",
+      invalidErrorResponse: "The operation failed. Try again.",
+      fallback: "The operation failed. Try again.",
     },
   },
 
@@ -786,6 +1530,8 @@ export const enUS: Translations = {
   toolCalls: {
     moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
     lessSteps: "Less steps",
+    executionDetails: "Execution details",
+    stepCount: (count: number) => `${count} ${count === 1 ? "step" : "steps"}`,
     executeCommand: "Execute command",
     presentFiles: "Present files",
     needYourHelp: "Need your help",
@@ -816,6 +1562,9 @@ export const enUS: Translations = {
     otherPlaceholder: "Type another answer...",
     submit: "Submit answer",
     emptyError: "Enter an answer before submitting.",
+    requiredError: "Fill in all required fields before submitting.",
+    requiredA11yLabel: "required",
+    selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
   },
 
@@ -1109,6 +1858,13 @@ export const enUS: Translations = {
     emailPlaceholder: "you@example.com",
     password: "Password",
     passwordPlaceholder: "•••••••",
+    rememberMe: "Remember this session and email",
+    checkingRegistration: "Checking account registration status…",
+    registrationUnavailable:
+      "Account registration status is temporarily unavailable.",
+    registrationDisabled:
+      "Regular account registration is disabled by an administrator.",
+    retry: "Retry",
     pleaseWait: "Please wait...",
     signIn: "Sign In",
     createAccount: "Create Account",

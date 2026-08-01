@@ -20,6 +20,7 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 
 PRIVATE_FILE_CHUNK_SIZE = 1024 * 1024
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+_POSTGRES_BIGINT_MAX = (1 << 63) - 1
 
 
 class PrivateFileConflict(Exception):
@@ -264,10 +265,11 @@ class PrivateFileRepository:
         thread_id: str,
         after: tuple[str, int, uuid.UUID] | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> tuple[PrivateFileRecord, ...]:
         """List every ready file kind in stable logical-path/version/id order."""
 
-        if not 1 <= limit <= 100:
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= _POSTGRES_BIGINT_MAX or (after is not None and offset != 0):
             raise PrivateFileConflict
         statement = (
             select(PrivateFileRow)
@@ -305,7 +307,9 @@ class PrivateFileRepository:
                     PrivateFileRow.logical_path,
                     PrivateFileRow.version,
                     PrivateFileRow.id,
-                ).limit(limit)
+                )
+                .offset(offset)
+                .limit(limit)
             )
         ).scalars()
         return tuple(self._file_record(row) for row in rows)

@@ -3,7 +3,19 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint, Uuid, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -85,4 +97,71 @@ class ProjectMembershipRow(Base):
         ),
         UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
         Index("ix_project_memberships_user_id", "user_id"),
+    )
+
+
+class ProjectDefaultAgentRow(Base):
+    """One optimistic default project Agent selection per project."""
+
+    __tablename__ = "project_default_agents"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "projects.id",
+            name="fk_project_default_agents_project",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+    agent_asset_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revision: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+    created_by_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            "users.id",
+            name="fk_project_default_agents_creator",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    updated_by_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            "users.id",
+            name="fk_project_default_agents_updater",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        onupdate=_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "agent_asset_id"],
+            ["agents.project_id", "agents.id"],
+            name="fk_project_default_agents_project_agent",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_project_default_agents_revision",
+        ),
     )

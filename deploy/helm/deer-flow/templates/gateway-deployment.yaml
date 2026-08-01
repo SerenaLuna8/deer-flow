@@ -23,6 +23,7 @@ spec:
         checksum/config: {{ include "deer-flow.configChecksum" . }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      automountServiceAccountToken: false
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
@@ -92,36 +93,14 @@ spec:
               value: 0.0.0.0
             - name: GATEWAY_PORT
               value: "8001"
-            - name: DEER_FLOW_INTERNAL_AUTH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "deer-flow.appSecret" . }}
-                  key: DEER_FLOW_INTERNAL_AUTH_TOKEN
-            - name: DEER_FLOW_PROXY_AUTH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "deer-flow.appSecret" . }}
-                  key: DEER_FLOW_PROXY_AUTH_TOKEN
-            {{- /* PostgreSQL DSN from the bundled StatefulSet, an external
-                  databaseUrl, or an existing Secret. Public application
-                  configuration requires DATABASE_URL via database.url. */ -}}
-            {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
-            {{- if $pgConfigured }}
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "deer-flow.databaseUrlSecret" . }}
-                  key: database-url
-            {{- end }}
+            # Includes DEER_FLOW_PROXY_AUTH_TOKEN plus the independent JWT,
+            # audit, credential, internal-auth and Provisioner trust domains.
+            {{- include "deer-flow.backendSecretEnv" . | nindent 12 }}
+            {{- include "deer-flow.backendDatabaseEnv" . | nindent 12 }}
             - name: NO_PROXY
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
             - name: no_proxy
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
-          {{- if or .Values.secrets .Values.existingSecret }}
-          envFrom:
-            - secretRef:
-                name: {{ include "deer-flow.providerSecret" . }}
-          {{- end }}
           ports:
             - containerPort: 8001
               name: http

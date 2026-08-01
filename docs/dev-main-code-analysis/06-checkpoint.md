@@ -7,6 +7,10 @@
 - main 演进区间：`3be3969f..e317f7b8`
 - 范围：checkpoint channel 表示、materialization、兼容门、state mutation、第三方补丁，以及 dev 的 project-scoped saver 授权包装。
 
+> 实施状态（2026-07-30）：06 Checkpoint 已按下述落点完成移植，并在本地 `delta /
+> snapshot_frequency=10` 下通过真实 PostgreSQL、独立 Worker、真实浏览器和 DeepSeek 多轮调用验证。
+> 07 Streaming 尚未开始。
+
 本篇必须先固定两个正交概念：
 
 ```text
@@ -23,11 +27,11 @@ checkpoint 体积。它通过 process-frozen mode/cadence、metadata marker、ma
 和 fail-closed compatibility gate，支持 **full -> delta** 单向演进；delta thread 被 full process
 打开时必须拒绝。
 
-dev 当前没有 delta 表示，但已经有更重要的 SaaS 安全边界：
-`ProjectScopedCheckpointer` 将 raw LangGraph saver 包在
+移植前 dev 没有 delta 表示，但已经有更重要的 SaaS 安全边界。本轮没有替换这条边界，而是在其内完成
+delta 移植：`ProjectScopedCheckpointer` 继续将 raw LangGraph saver 包在
 `PrivateResourceScope(project_id, owner_user_id)`、membership revalidation、Thread row lock 和
-checkpoint metadata marker 内。任何 main delta 能力只能装在该 wrapper 之下，并同时覆盖 Gateway
-chat-control 与独立 Worker；绝不能用 main 的 raw accessor 替换 scoped saver。
+checkpoint metadata marker 内；mode-matched materialized accessor 再绑定这个 scoped saver，并同时覆盖
+Gateway chat-control、独立 Worker 和嵌入式 client。main 的 raw accessor 没有取代 scoped saver。
 
 ## 3. main 源码地图
 
@@ -387,7 +391,7 @@ commit
 | marker 目的 | 防错误模式物化 | 防 raw checkpoint 误绑定到错误 scope |
 | 读写入口 | compiled graph accessor | scoped BaseCheckpointSaver wrapper |
 | 恢复 | seed + delta writes | membership/lease revalidation + retry/delete status |
-| 当前 dev 状态 | 尚未采用 | 已是生产安全边界 |
+| 当前 dev 状态 | 已采用；本地实测 `delta / N=10` | 保留且扩展为 materialized accessor 的唯一业务入口 |
 
 两类 marker 可以同时存在于 metadata，字段和验证顺序不冲突。
 
@@ -407,25 +411,31 @@ commit
    context、Thread lock 和 thread ID 约束，source-absence test 必须持续守住 raw saver import。
 2.删除的业务 tombstone 与 raw saver delete 分两阶段；`retry_required` backlog 需要可观测和重试 worker。
 3.同步 saver 从 owner loop 调用会失败；新代码不能在 async Worker 内误用 sync surface。
-4.当前 full 表示在超长会话下写放大明显，但不能以性能理由绕过 scoped wrapper。
+4. delta 读取会重放 seed 后的增量；cadence 过大可能提高物化成本，但不能以性能理由绕过 scoped
+   wrapper 或退回 raw `channel_values`。
 
-## 14. delta 移植到 dev 的精确落点
+## 14. delta 移植到 dev 的已完成落点
 
-建议分层实现：
+本轮按以下顺序完成：
 
-1. 在 harness 保留 main 的
+1. 在 harness 落地 main 的
    `checkpoint_mode.py`、`checkpoint_state.py`、`thread_state.py` reducer 与受 guard 的 patch。
-2. raw PostgreSQL saver 继续只由基础设施装配；先包
+2. raw PostgreSQL saver 继续只由基础设施装配；业务路径先包
    `ProjectScopedCheckpointer.for_context()`，再绑定 mode-matched compiled graph。
 3. Worker 的
-   `backend/app/reliability/execution.py::RunAgentPrivateExecutor.execute()` 必须注入同一
-   mode/cadence 和 scoped saver。
-4. Gateway 的 branch/edit/regenerate/context-compaction/state/history 必须全部用
-   `CheckpointStateAccessor` + scoped saver，不得 raw read。
-5. `aput_writes()` 的 pending-write-before-checkpoint 测试必须在 delta 下重跑，确认 marker与 delta
-   metadata 都不被 client filter/serializer 丢失。
-6. retry takeover 要用 materialized latest state 和 exact private Run snapshot，不能只复制 raw blobs。
-7. 所有 Gateway/Worker 实例一次性切到 delta；配置校验应在启动 readiness 中暴露 mode/cadence。
+   `backend/app/reliability/execution.py::RunAgentPrivateExecutor.execute()` 注入相同 mode/cadence、
+   scoped saver、materialized rollback point 和 linear resume。
+4. Gateway 的 branch/edit/regenerate/context-compaction/state/history 全部改用
+   `CheckpointStateAccessor` + scoped saver；chat controls、Thread service、connection inbound 和
+   state router 不再消费 raw `channel_values`。
+5. caller-held transaction saver 增加 `alist` 与 `aput_writes` 的 async facade；delta pending-write
+   仍在相同 membership/capability/Thread lock 下写入，并在已有 tuple 时验证 private marker。
+6. retry takeover 使用 materialized latest state；progress cursor 同时哈希 checkpoint ID 和
+   pending writes，后续尝试始终与最早尝试 baseline 比较。
+7. Gateway 与 Worker 启动时都 freeze mode/cadence。任一进程内出现重配置立即失败；本地
+   `config.yaml` 以 `delta / 10` 冷启动整套服务验证。
+8. 前端 Run 目录按 Gateway `limit<=1000` 契约取完所有分页，并保持 newest-first；消息正文仍按
+   “加载更多”逐 Run 读取，修复 SDK 默认 `limit=10` 导致的长历史截断。
 
 ## 15. 禁止直接合并
 
@@ -440,7 +450,7 @@ commit
 - 禁止因首次 pending write 尚无 marker而取消 membership/Thread lock。
 - 禁止在 project 模块直接 import/raw instantiate checkpointer。
 
-## 16. 建议测试矩阵
+## 16. 测试矩阵
 
 | 轴 | 场景 |
 | --- | --- |
@@ -458,3 +468,208 @@ commit
 | 多进程配置 | Gateway/Worker mode/cadence 一致；任一不一致 readiness 失败 |
 | upstream patch | 当前 LangGraph、升级版本、bug present/absent probe |
 | source absence | project runtime 不得直接 import 或持有 raw saver |
+
+## 17. 本轮实际代码变更
+
+### 17.1 配置与进程冻结
+
+| 文件 | 实际变化 |
+| --- | --- |
+| `backend/packages/harness/deerflow/config/database_config.py` | 增加 `full/delta`、nested cadence、范围校验与旧 flat key 迁移 |
+| `config.example.yaml` | 解释默认 `full`、`delta` 的作用和统一重启约束；示例 cadence 为 10 |
+| `backend/app/gateway/app.py` | Gateway lifespan 冷启动时 freeze mode/cadence |
+| `backend/app/worker/app.py` | Worker 启动时 freeze 同一 mode/cadence |
+| `backend/app/private_work/checkpoint_state.py` | 集中解析并冻结运行时配置，构造 request-local scoped accessor |
+| `backend/packages/harness/deerflow/client.py` | 嵌入式 client 也 freeze，并使用 mode-matched graph/accessor |
+
+仓库示例仍默认 `full`，避免现有部署在未统一重启 Gateway/Worker 时被静默切换。本地被忽略的
+`config.yaml` 明确改成 `delta / 10`，随后执行完整 `make stop` → `make dev`，不是靠热加载切换。
+
+### 17.2 harness 表示层
+
+| 文件 | 实际变化 |
+| --- | --- |
+| `runtime/checkpoint_mode.py` | mode/cadence freeze、config marker 注入、snapshot/tuple compatibility gate |
+| `runtime/checkpoint_state.py` | graph-backed materialized accessor、mutation graph、reducer/writable channel introspection |
+| `checkpoint_patches.py` | InMemory delta ancestor walk 与 first-write `Overwrite` 的受版本/行为保护补丁 |
+| `agents/thread_state.py` | `DeltaThreadState`、message write reducer、schema adaptation |
+| `agents/factory.py` | 通用 factory 在持久化 delta 装配不完整时 fail closed |
+| `agents/lead_agent/agent.py` | lead graph 使用精确 mode/cadence schema，装配 marker 与 compatibility gate |
+
+这里的核心约束是“先通过 graph 物化，再读状态”。raw saver 只保存 lineage、blob 和 writes；
+`CheckpointStateAccessor` 才返回业务可用的完整 `messages`、`todos`、`artifacts` 等 channel。
+
+### 17.3 project-scoped saver 与事务
+
+`backend/app/private_work/checkpointer.py` 保留原有 project/owner/thread 授权包装，并增加：
+
+- `already_authorized(session)`：只允许 caller 已持有 transaction/Thread lock 时使用；
+- `alist_already_authorized()`：在同一 transaction 内列出并验证每个 private marker；
+- `aput_writes_already_authorized()`：在同一 transaction 内重新验证 capability、membership 与
+  Thread row，再写 pending channel values；
+- sync surface 在 owner async loop 上继续 fail closed，避免死锁和越权旁路。
+
+`backend/app/private_work/checkpoint_state.py` 提供两种绑定：
+
+```python
+bind_scoped_checkpoint_state(...)
+bind_transaction_checkpoint_state(...)
+```
+
+前者用于普通 Gateway 请求，后者用于已经拿到 exact Thread lock 的 chat-control/rollback 路径。
+两者顺序都是：
+
+```text
+server-issued context
+  -> project-scoped saver
+  -> mode-matched graph
+  -> CheckpointStateAccessor
+  -> materialized state
+```
+
+### 17.4 Gateway 状态消费者
+
+以下消费者已从 raw tuple/channel value 迁到 materialized accessor：
+
+- `private_work/chat_controls.py`：edit、regenerate、branch、rollback/state replace；
+- `private_work/thread_service.py`：Thread state 与 branch source state；
+- `gateway/routers/private_work.py`：state/wait/恢复后的 API 响应；
+- `private_work/connection_inbound.py`：外部连接进入 Thread 前的完整状态读取；
+- `private_work/context.py` 与 `runtime_context.py`：向运行时传递同一模式所需的受控上下文；
+- `deerflow/client.py`：history、state mutation 与 rollback。
+
+整状态替换由 `replacement_values()` 校验 writable channel；reducer/DeltaChannel 使用
+`Overwrite(value)`。若 source/current state 含 graph schema 不认识的 channel，直接失败，避免静默
+丢字段。
+
+### 17.5 Worker rollback、resume 与 takeover
+
+Worker 侧完成的关键行为：
+
+1. 所有 graph 调用强制使用持久化 Thread ID 和 root checkpoint namespace；
+2. rollback point 保存 materialized state，而不是复制 raw delta blob；
+3. 从旧 checkpoint 恢复时把选中状态写成新的 linear head，不继承 abandoned sibling writes；
+4. private rollback 没有 rollback point 时不调用业务删除；
+5. state replacement 遇到未知 channel fail closed；
+6. `CheckpointModeMismatchError` 映射为永久
+   `CHECKPOINT_MODE_MISMATCH`，第一次失败即进入 dead，不做无意义重试；
+7. progress cursor 采用 domain-separated SHA-256，输入包含 checkpoint ID，以及每条 pending write
+   的 task/channel/serde type/bytes；数据库只保存摘要；
+8. 第 2、3…次 takeover 都与最早 attempt 的 baseline 比较。只要曾经出现新 durable progress，
+   后续 attempt 仍保持 resume，不会因相邻两次 cursor 相等而错误重放 input。
+
+### 17.6 前端长历史消费者
+
+真实浏览器测试发现 `useThreadRuns()` 未传 options，LangGraph SDK 因而固定只返回 10 条 Run。后端
+实际上允许 `limit=1..1000` 和 `offset>=0`，且按
+`created_at DESC, run_id DESC` 稳定排序。
+
+新增 `fetchAllThreadRuns()` 后：
+
+- 每页明确传 `limit/offset`；
+- offset 按原始行数推进；
+- 保持后端 newest-first，不 reverse、不重排；
+- 按 `run_id` 去除并发插入造成的页边界重复；
+- 每一页都转发 TanStack `AbortSignal`；
+- 短页结束；精确满页会继续请求空尾页；
+- 重复满页没有新增 ID 时抛 `non-advancing`，防止服务端忽略 offset 导致死循环；
+- page size 非整数、`<1` 或 `>1000` 时拒绝。
+
+Run 元数据会取全，但每个 Run 的消息正文仍由“加载更多”按需请求，并没有一次把所有正文装入页面。
+
+## 18. 自动化测试结果
+
+### 18.1 后端无数据库测试
+
+覆盖 mode/state/schema/context/client/view-image/Worker rollback/goal/Worker
+app/service/auth/subgraph/subagent 的组合：
+
+```text
+294 passed, 5 skipped
+```
+
+5 个 skip 都是明确要求真实 PostgreSQL 的用例，已由下一组 0-skip 门禁覆盖。
+
+### 18.2 真实 PostgreSQL
+
+组合运行 private-work router、route dependency、connection inbound、app wiring、project-scoped
+saver、chat controls、Thread service、Checkpoint PostgreSQL migration 和 M6 private Worker：
+
+```text
+103 passed, 0 skipped, 64.50s
+```
+
+其中另行聚焦验证：
+
+- 三次 attempt：第 3 次仍相对最早 baseline 进入 resume；
+- mode mismatch：只执行 1 次，Run/Job 进入永久 dead；
+- project-scoped delta rollback：恢复精确 materialized state，未混入 sibling writes。
+
+### 18.3 前端
+
+新增分页测试先观察到预期失败，再实现修复。最终结果：
+
+```text
+focused Run pagination: 6 passed
+pnpm check: passed
+full Rstest: 176 files, 1,246 passed, 0 skipped
+```
+
+分页测试覆盖跨页顺序、AbortSignal、短尾页、精确满页后的空页、并发页边界去重、重复满页
+fail-fast，以及 Gateway page-size 边界。
+
+## 19. 真实浏览器与模型验证
+
+### 19.1 线程
+
+| 角色 | Thread ID |
+| --- | --- |
+| Source | `96d942fc-d0ff-420e-8657-1707a75324fa` |
+| Branch | `684d0680-315e-48a4-9b06-613f7ed2cdeb` |
+
+浏览器使用 `http://localhost:2026` 的本地完整栈，模型为 UI 中选定的 DeepSeek V4 Pro；不是 mock、
+不是直接写数据库伪造回复。
+
+### 19.2 顺序场景
+
+1. Source 第 1 轮写入 A=`CP-A-20260730-7F3C`，模型回复 `ACK-1`。
+2. 第 2 轮写入 B=`CP-B-20260730-91D2`，模型精确回复 A/B。
+3. 刷新页面，第 3 轮仍精确恢复 A/B。
+4. regenerate 最新轮，刷新后只有一个有效 head。
+5. 从当前 turn 创建 Branch；Branch 恢复 A/B 并新增
+   C=`CP-C-BRANCH-4E71`。
+6. 返回 Source，模型精确回复 `SOURCE-C:ABSENT` 并恢复 A/B，证明分支隔离。
+7. Source 增加 D=`CP-D-COMPACT-88B0`，继续真实调用多轮，再执行 `/compact`；刷新后恢复 A/B/D。
+8. 只出现一次的 E=`CP-E-EARLY-6A2F` 后再进行 6 轮 filler 和第二次 `/compact`。模型摘要遗漏 E，
+   但仍恢复 A/B/D；PostgreSQL 证明 E 仍存在于 4 条 writes 和 2 个 blobs。
+9. 累计超过 20 个 Run 后，真实浏览器暴露 SDK 默认 10 条 Run 的截断问题；修复后连续加载 12 次，
+   最早的 `ACK-1`、第 2 轮 A/B、刷新后的第 3 轮 A/B 全部出现，且按钮最终消失。
+10. 修复后再调用模型两轮，中间刷新页面。两轮均准确恢复 A/B/D，第二轮还确认上一轮
+    `FINAL06-1` 存在。
+
+最终数据库聚合为 Source 23 个 Run（22 success、1 次测试编排显式 cancel 造成的 interrupted）和 Branch
+1 个 success；真实模型合计 24 次 LLM call。完整只读聚合见
+[database-evidence.md](evidence/06-checkpoint/database-evidence.md)。
+
+### 19.3 截图
+
+- [Branch 恢复 A/B 并新增 C](evidence/06-checkpoint/06-branch-recalls-a-b-and-adds-c.jpg)
+- [Source 不可见 Branch 的 C](evidence/06-checkpoint/07-source-isolated-from-branch-c.jpg)
+- [第二次压缩：E 未进入摘要，A/B/D 仍保留](evidence/06-checkpoint/11-second-compact-final-state.jpg)
+- [超过 10 个 Run 后恢复最早 ACK-1 与第二轮 A/B](evidence/06-checkpoint/12-long-history-over-10-runs-restored.jpg)
+- [页面刷新后的第三轮 A/B 历史恢复](evidence/06-checkpoint/13-refresh-history-restored.jpg)
+- [分页修复后真实模型第 1 轮](evidence/06-checkpoint/14-post-fix-real-model-round-1.jpg)
+- [刷新后真实模型第 2 轮](evidence/06-checkpoint/15-post-refresh-real-model-round-2.jpg)
+
+## 20. 仍然存在的明确边界
+
+1. mode/cadence 的 freeze 是进程内保护。不同宿主机若配置不一致，仍需部署编排与 readiness 保证；
+   Checkpoint metadata 不能自证 cadence。
+2. 只支持 full → delta。已经写入 delta 的 Thread 不能靠把配置切回 full 回滚。
+3. `/compact` 是模型生成的有损摘要。Checkpoint 原始历史仍在，不代表每个低显著性事实都会进入后续
+   活跃模型上下文；E 用例已经真实证明这一点。
+4. offset 分页无法提供跨多个 HTTP 请求的事务快照。并发新增可能让本次短暂视图缺少刚插入的头部
+   Run；终态 cache invalidation 会重新查询。极大历史若出现明显元数据开销，再演进为
+   `useInfiniteQuery`，本轮不扩大改动。
+5. Checkpoint lease revalidation 与最终 raw saver 写之间仍依赖现有锁/lease 边界。未来若引入跨存储
+   写入，应单独设计不可分割 fence，不能把本次 delta 表示移植误当成分布式事务。

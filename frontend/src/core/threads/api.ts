@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import {
+  eventSequenceSchema,
+  type EventSequence,
+} from "@/core/private-work/event-sequence";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 
 import type { RunMessage, ThreadTokenUsageResponse } from "./types";
@@ -22,7 +26,7 @@ const persistedMessageSchema = z
 const runMessageSchema = z
   .object({
     run_id: z.string().min(1),
-    seq: z.number().int().nonnegative(),
+    seq: eventSequenceSchema,
     content: persistedMessageSchema,
     metadata: z.record(z.unknown()),
     created_at: z.string().min(1),
@@ -62,12 +66,12 @@ export function buildRunMessagesUrl(
   apiBaseURL: string,
   threadId: string,
   runId: string,
-  beforeSeq?: number,
+  beforeSeq?: EventSequence,
 ) {
   const baseURL = requireProjectPrivateWorkURL(apiBaseURL);
   const path = `${baseURL}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/messages`;
   if (beforeSeq === undefined) return path;
-  const parsedBeforeSeq = z.number().int().nonnegative().parse(beforeSeq);
+  const parsedBeforeSeq = eventSequenceSchema.parse(beforeSeq);
   return `${path}?before_seq=${parsedBeforeSeq}`;
 }
 
@@ -75,7 +79,7 @@ export async function fetchRunMessagesPage(
   apiBaseURL: string,
   threadId: string,
   runId: string,
-  beforeSeq?: number,
+  beforeSeq?: EventSequence,
   signal?: AbortSignal,
 ): Promise<RunMessagesPageResponse> {
   const response = await fetchWithAuth(

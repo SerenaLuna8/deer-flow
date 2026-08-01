@@ -59,7 +59,11 @@ class ThreadEventSequenceRow(Base):
 class RunEventRow(Base):
     __tablename__ = "run_events"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
@@ -69,7 +73,7 @@ class RunEventRow(Base):
     # Includes message/trace/lifecycle plus M6's durable "stream" category.
     content: Mapped[str] = mapped_column(Text, default="")
     event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
-    seq: Mapped[int] = mapped_column(nullable=False)
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
 

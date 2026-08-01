@@ -4,6 +4,7 @@ import { isStaticWebsiteOnly } from "../static-mode";
 
 import { AUTH_DISABLED_USER, isAuthDisabledMode } from "./auth-disabled-user";
 import { getGatewayConfig } from "./gateway-config";
+import { setupStatusSchema } from "./setup";
 import { STATIC_WEBSITE_USER } from "./static-user";
 import { type AuthResult, userSchema } from "./types";
 
@@ -55,8 +56,15 @@ export async function getServerSideUser(): Promise<AuthResult> {
       );
       clearTimeout(setupTimeout);
       if (setupRes.ok) {
-        const setupData = (await setupRes.json()) as { needs_setup?: boolean };
-        if (setupData.needs_setup) {
+        const setupData = setupStatusSchema.safeParse(await setupRes.json());
+        if (!setupData.success) {
+          console.error(
+            "[SSR auth] Malformed /auth/setup-status response:",
+            setupData.error,
+          );
+          return { tag: "gateway_unavailable" };
+        }
+        if (setupData.data.needs_setup) {
           return { tag: "system_setup_required" };
         }
       }
@@ -89,7 +97,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
       }
       return { tag: "authenticated", user: parsed.data };
     }
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       return { tag: "unauthenticated" };
     }
     console.error(`[SSR auth] /api/v1/auth/me responded ${res.status}`);

@@ -40,11 +40,22 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import (
+    get_thread_state_schema,
+    normalize_middleware_state_schemas,
+)
 from deerflow.assets.catalog import trusted_asset_context
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.memory_config import MemoryConfig, should_use_project_memory_search
 from deerflow.models import create_chat_model
+from deerflow.runtime.checkpoint_mode import (
+    INTERNAL_CHECKPOINT_MODE_KEY,
+    freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
+    frozen_checkpoint_channel_mode,
+    inject_checkpoint_mode,
+)
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -90,7 +101,7 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     app_config = app_config or get_app_config()
     default_model_name = app_config.models[0].name if app_config.models else None
     if default_model_name is None:
-        raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
+        raise ValueError("No chat models are available. A platform administrator must configure an active model in System Settings.")
 
     if requested_model_name and app_config.get_model_config(requested_model_name):
         return requested_model_name
@@ -241,6 +252,20 @@ Being proactive with task management demonstrates thoroughness and ensures all r
     return TodoMiddleware(system_prompt=system_prompt, tool_description=tool_description)
 
 
+def _project_memory_tools(
+    *,
+    private_runtime: object | None,
+    memory_config: MemoryConfig,
+) -> list:
+    """Expose search only when a Worker materialized a private Agent runtime."""
+
+    if private_runtime is None or not should_use_project_memory_search(memory_config):
+        return []
+    from deerflow.agents.memory.tools import get_project_memory_tools
+
+    return get_project_memory_tools()
+
+
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
@@ -375,7 +400,13 @@ def build_middlewares(
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+    middlewares.append(
+        MemoryMiddleware(
+            agent_name=agent_name,
+            memory_config=resolved_app_config.memory,
+            app_config=resolved_app_config,
+        )
+    )
 
     # Always install checkpoint cleanup. Text-only models disable ephemeral
     # image injection but still purge legacy base64 channels/messages.
@@ -507,8 +538,19 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 
-    cfg = _get_runtime_config(config)
     resolved_app_config = app_config
+    frozen_mode = frozen_checkpoint_channel_mode()
+    if frozen_mode is None:
+        requested_mode = resolved_app_config.database.checkpoint_channel_mode
+    else:
+        requested_mode = (config.get("configurable", {}) or {}).get(
+            INTERNAL_CHECKPOINT_MODE_KEY,
+            resolved_app_config.database.checkpoint_channel_mode,
+        )
+    mode = freeze_checkpoint_channel_mode(requested_mode)
+    snapshot_frequency = freeze_checkpoint_snapshot_frequency(resolved_app_config.database.checkpoint_delta.snapshot_frequency)
+    inject_checkpoint_mode(config, mode)
+    cfg = _get_runtime_config(config)
 
     # Extract user_id for user-scoped skill loading.
     # LangGraph gateway injects user_id into config["configurable"];
@@ -580,7 +622,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     model_config = resolved_app_config.get_model_config(model_name)
 
     if model_config is None:
-        raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+        raise ValueError("No chat model could be resolved. A platform administrator must configure an active model in System Settings, and the request must reference its logical name.")
     exact_agent_thinking = getattr(agent_version_model_settings, "thinking_enabled", None) if agent_version_model_settings is not None else None
     exact_agent_reasoning = getattr(agent_version_model_settings, "reasoning_effort", None) if agent_version_model_settings is not None else None
     if "thinking_enabled" not in cfg and exact_agent_thinking is True and not model_config.supports_thinking:
@@ -683,16 +725,20 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
-            middleware=build_middlewares(
-                config,
-                model_name=model_name,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_setup=setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=resolved_user_id,
-                resolved_subagent_enabled=subagent_enabled,
-                resolved_max_concurrent_subagents=max_concurrent_subagents,
+            middleware=normalize_middleware_state_schemas(
+                build_middlewares(
+                    config,
+                    model_name=model_name,
+                    available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+                    app_config=resolved_app_config,
+                    deferred_setup=setup,
+                    mcp_routing_middleware=mcp_routing_middleware,
+                    user_id=resolved_user_id,
+                    resolved_subagent_enabled=subagent_enabled,
+                    resolved_max_concurrent_subagents=max_concurrent_subagents,
+                ),
+                mode,
+                snapshot_frequency,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -703,7 +749,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
                 user_id=resolved_user_id,
                 skill_names=skill_setup.skill_names or None,
             ),
-            state_schema=ThreadState,
+            state_schema=get_thread_state_schema(
+                mode,
+                snapshot_frequency,
+            ),
         )
 
     # Build discovery from the Agent-available Skill catalog. Availability is
@@ -713,8 +762,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         enabled=skill_search_enabled,
         container_base_path=container_base_path,
     )
-    # File-backed Agent self-mutation is no longer a runtime tool.
-    extra_tools = []
+    # File-backed Agent self-mutation is no longer a runtime tool. Project
+    # Memory contributes only a Worker-authorized read tool.
+    extra_tools = _project_memory_tools(
+        private_runtime=private_runtime,
+        memory_config=resolved_app_config.memory,
+    )
     # Default lead agent (unchanged behavior)
     tool_kwargs = {
         "model_name": model_name,
@@ -775,21 +828,25 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     return create_agent(
         model=create_chat_model(**create_model_kwargs),
         tools=final_tools,
-        middleware=build_middlewares(
-            config,
-            model_name=model_name,
-            agent_name=agent_name,
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            deferred_setup=setup,
-            mcp_routing_middleware=mcp_routing_middleware,
-            user_id=resolved_user_id,
-            runtime_skills=runtime_skills,
-            runtime_skill_version_ids=runtime_skill_version_ids,
-            runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
-            runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
-            resolved_subagent_enabled=subagent_enabled,
-            resolved_max_concurrent_subagents=max_concurrent_subagents,
+        middleware=normalize_middleware_state_schemas(
+            build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=agent_name,
+                available_skills=available_skills,
+                app_config=resolved_app_config,
+                deferred_setup=setup,
+                mcp_routing_middleware=mcp_routing_middleware,
+                user_id=resolved_user_id,
+                runtime_skills=runtime_skills,
+                runtime_skill_version_ids=runtime_skill_version_ids,
+                runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
+                runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
+                resolved_subagent_enabled=subagent_enabled,
+                resolved_max_concurrent_subagents=max_concurrent_subagents,
+            ),
+            mode,
+            snapshot_frequency,
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -806,7 +863,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             exact_skills=runtime_skills,
             exact_skills_container_path=container_base_path if runtime_skills is not None else None,
         ),
-        state_schema=ThreadState,
+        state_schema=get_thread_state_schema(
+            mode,
+            snapshot_frequency,
+        ),
     )
 
 

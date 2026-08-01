@@ -354,6 +354,26 @@ async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_pat
     assert to_thread_calls == [(provider._reuse_in_process_sandbox, ("thread-cached-async",))]
 
 
+def test_sandbox_config_declares_provisioner_api_key() -> None:
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    assert "provisioner_api_key" in SandboxConfig.model_fields
+
+
+def test_remote_backend_factory_forwards_provisioner_api_key() -> None:
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {
+        "provisioner_url": "http://provisioner:8002",
+        "provisioner_api_key": "test-secret",
+    }
+
+    backend = provider._create_backend()
+
+    assert isinstance(backend, aio_mod.RemoteSandboxBackend)
+    assert backend._auth_headers() == {"X-API-Key": "test-secret"}
+
+
 def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
     """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
@@ -368,7 +388,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 
@@ -401,7 +421,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,6 +14,7 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.error_codes import llm_error_code_for_reason
 
 
 def _make_app_config() -> AppConfig:
@@ -96,7 +98,33 @@ def test_async_model_call_returns_user_message_for_quota_errors() -> None:
     assert "out of quota" in str(result.content)
     assert result.additional_kwargs["deerflow_error_fallback"] is True
     assert result.additional_kwargs["error_reason"] == "quota"
-    assert result.additional_kwargs["error_type"] == "FakeError"
+    quota_code = llm_error_code_for_reason("quota")
+    assert result.additional_kwargs["error_type"] == quota_code
+    assert result.additional_kwargs["error_detail"] == quota_code
+    assert result.additional_kwargs["error_code"] == quota_code
+    assert "FakeError" not in repr(result)
+
+
+def test_model_exception_secret_is_absent_from_logs_and_fallback(
+    caplog,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=1)
+    sentinel = "LLM-EXCEPTION-SECRET-9XK2"
+
+    def handler(_request) -> AIMessage:
+        raise FakeError(
+            f"Authorization: Bearer {sentinel}",
+            status_code=401,
+        )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="deerflow.agents.middlewares.llm_error_handling_middleware",
+    ):
+        result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    exposed = f"{result!r}\n{caplog.text}"
+    assert sentinel not in exposed
 
 
 def test_async_model_call_marks_transient_retry_exhaustion_as_error_fallback(
@@ -118,7 +146,11 @@ def test_async_model_call_marks_transient_retry_exhaustion_as_error_fallback(
     assert "temporarily unavailable" in str(result.content)
     assert result.additional_kwargs["deerflow_error_fallback"] is True
     assert result.additional_kwargs["error_reason"] == "transient"
-    assert result.additional_kwargs["error_detail"] == "Connection error."
+    transient_code = llm_error_code_for_reason("transient")
+    assert result.additional_kwargs["error_detail"] == transient_code
+    assert result.additional_kwargs["error_type"] == transient_code
+    assert result.additional_kwargs["error_code"] == transient_code
+    assert "Connection error." not in repr(result)
 
 
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -750,5 +782,6 @@ def test_async_index_error_exhausted_returns_user_fallback(
     assert isinstance(result, AIMessage)
     assert result.additional_kwargs["deerflow_error_fallback"] is True
     assert result.additional_kwargs["error_reason"] == "transient"
-    assert result.additional_kwargs["error_type"] == "IndexError"
+    assert result.additional_kwargs["error_type"] == llm_error_code_for_reason("transient")
+    assert "IndexError" not in repr(result)
     assert "temporarily unavailable" in str(result.content)

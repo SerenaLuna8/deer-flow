@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from starlette.datastructures import Headers, MutableHeaders
+from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from deerflow.config.app_config import is_trace_correlation_enabled
@@ -37,10 +37,10 @@ class TraceMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = Headers(scope=scope)
-        incoming_trace_id = headers.get(TRACE_ID_HEADER)
-
-        with request_trace_context(incoming_trace_id) as trace_id:
+        # This public Gateway issues the durable request origin. A caller-owned
+        # header is correlation input, not authority, and must never become the
+        # Run/Job/audit/Langfuse identity or be echoed into logs.
+        with request_trace_context() as trace_id:
 
             async def send_with_trace(message: Message) -> None:
                 if message["type"] == "http.response.start":

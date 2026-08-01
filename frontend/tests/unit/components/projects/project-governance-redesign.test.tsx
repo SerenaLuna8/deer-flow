@@ -227,6 +227,40 @@ describe("project governance redesign", () => {
         metadata: [{ label: "资产类型", value: "MCP" }],
       }),
     );
+
+    const finalized = describeAuditItem(
+      {
+        id: "77777777-7777-4777-8777-777777777777",
+        occurred_at: "2026-07-30T10:00:00Z",
+        actor: "worker",
+        action: "run.files_finalized",
+        target_kind: "run",
+        outcome: "success",
+        public_error_code: null,
+        metadata: {
+          created_count: 2,
+          modified_count: 1,
+          deleted_count: 3,
+          artifact_count: 1,
+          committed_bytes: 4096,
+        },
+      },
+      "zh-CN",
+    );
+    expect(finalized).toEqual(
+      expect.objectContaining({
+        action: "已完成运行文件入库",
+        actor: "执行服务",
+        target: "运行",
+        metadata: [
+          { label: "新增文件数", value: "2" },
+          { label: "修改文件数", value: "1" },
+          { label: "删除文件数", value: "3" },
+          { label: "产物数", value: "1" },
+          { label: "提交字节数", value: "4,096" },
+        ],
+      }),
+    );
   });
 
   test("renders localized audit events without inventing actor or target names", () => {

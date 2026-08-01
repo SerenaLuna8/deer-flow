@@ -95,6 +95,7 @@ async function mockProjectPrivateData(page: Page) {
       email: "runner@example.test",
       system_role: "user",
       needs_setup: false,
+      oauth_provider: null,
     }),
   );
   await page.route(/\/api\/projects(?:\?.*)?$/, (route) =>
@@ -142,6 +143,35 @@ async function mockProjectPrivateData(page: Page) {
       ],
       request_id: "req-agents",
     }),
+  );
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/agents/${AGENT_ID}/versions`,
+    (route) =>
+      json(route, {
+        data: [
+          {
+            id: AGENT_VERSION_ID,
+            agent_id: AGENT_ID,
+            version_number: 1,
+            workflow_status: "published",
+            description: "Project connection agent",
+            agents_instructions: "",
+            soul: "",
+            identity: "",
+            user_context: "",
+            payload_schema_version: 1,
+            model_ref: "mock-model",
+            tool_groups: [],
+            skill_version_ids: [],
+            mcp_version_ids: [],
+            supersedes_version_id: null,
+            payload_checksum: "project-analyst-v1",
+            created_by_user_id: ACCOUNT_ID,
+            created_at: "2026-07-15T00:00:00Z",
+          },
+        ],
+        request_id: "req-agent-versions",
+      }),
   );
   await page.route(
     `**/api/projects/${PROJECT_ID}/connections**`,

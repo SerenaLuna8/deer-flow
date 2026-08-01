@@ -5,7 +5,10 @@ description: 配置最终项目作用域的 DeerFlow 应用。
 
 # 配置
 
-运行时配置位于仓库根目录 `config.yaml` 和环境变量。先复制 `config.example.yaml`，再配置模型、PostgreSQL、sandbox、认证、Worker 和可选 Scheduler。
+基础设施配置位于仓库根目录 `config.yaml` 和进程/工具环境变量。先复制
+`config.example.yaml`，再配置 PostgreSQL、sandbox、认证、Worker 和可选
+Scheduler。YAML 不再接受模型定义；服务启动后，由 system admin 在
+`/admin/settings/models` 配置版本化 provider 设置和加密 Credential。
 
 ```bash
 make config
@@ -13,7 +16,9 @@ make doctor
 make check-db
 ```
 
-Agent、Skill、MCP 和 Credential 定义是数据库中的版本化资产。system admin 发布系统资产，项目成员在认证后的项目设置中管理项目资产和 binding。secret 使用加密 Credential envelope，绝不进入浏览器 query cache。
+Agent、Skill、MCP、Credential 和模型定义都是数据库中的版本化资产。system
+admin 管理模型目录和系统资产，项目成员在认证后的项目设置中管理项目资产和
+binding。secret 使用加密 Credential envelope，绝不进入浏览器 query cache。
 
 Gateway、Worker 和 Scheduler 启动时只验证目标数据库和 schema。启动应用进程前，请先运行显式数据库 setup/migration 命令。
 

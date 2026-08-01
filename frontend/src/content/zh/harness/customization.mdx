@@ -104,18 +104,13 @@ Memory 是项目私有的 PostgreSQL 资源。扩展其外围产品行为时，�
 
 ## 自定义模型
 
-任何与 LangChain 兼容的聊天模型都可以通过在 `use:` 字段中指定来使用：
+应用不会从 `config.yaml` 导入任意模型类路径。新增 adapter 是代码级扩展：实现
+LangChain `BaseChatModel` 接口，经过审查后把固定类路径加入服务端 provider-adapter
+allowlist，并部署代码。
 
-```yaml
-models:
-  - name: my-custom-model
-    use: mypackage.models:MyCustomChatModel
-    # 任何额外字段都作为 kwargs 传递给构造函数
-    base_url: http://my-model-server:8080
-    api_key: $MY_MODEL_API_KEY
-```
-
-模型类必须实现 LangChain 的 `BaseChatModel` 接口。
+部署完成后，由 system admin 在 `/admin/settings/models` 创建版本，只保存有界且不含
+secret 的 provider 设置，并绑定精确的加密 System Credential 版本。浏览器不会接受
+Python 类路径或明文 provider key。
 
 ## 自定义检查点
 

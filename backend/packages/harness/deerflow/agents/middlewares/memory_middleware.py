@@ -10,7 +10,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
 from deerflow.agents.memory.queue import get_project_memory_queue
-from deerflow.config.memory_config import get_memory_config
+from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
@@ -38,7 +39,13 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None, *, memory_config: "MemoryConfig | None" = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        memory_config: "MemoryConfig | None" = None,
+        app_config: AppConfig | None = None,
+    ):
         """Initialize the MemoryMiddleware.
 
         Args:
@@ -48,6 +55,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         super().__init__()
         self._agent_name = agent_name
         self._memory_config = memory_config
+        self._app_config = app_config
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
@@ -77,8 +85,13 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if not isinstance(private_scope, PrivateResourceScope):
             return None
 
-        config = self._memory_config or get_memory_config()
+        config = self._memory_config
+        if type(config) is not MemoryConfig:
+            return None
         if not config.enabled:
+            return None
+        app_config = runtime_context.get("app_config") or self._app_config
+        if type(app_config) is not AppConfig:
             return None
         thread_id = runtime_context.get("thread_id")
         run_id = runtime_context.get("run_id")
@@ -113,8 +126,13 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             run_id=run_id,
             namespace=namespace,
             messages=filtered_messages,
+            memory_config=config,
+            app_config=app_config,
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             deerflow_trace_id=deerflow_trace_id,
+            langfuse_trace_correlation_enabled=is_trace_correlation_enabled(
+                runtime_context.get("app_config"),
+            ),
         )
         return None

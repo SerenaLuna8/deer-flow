@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.gateway.auth.email import normalize_email
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import UserRow
@@ -66,8 +67,12 @@ class SQLUserRepository(UserRepository):
 
     async def create_user(self, user: User) -> User:
         """Insert a new user. Raises ``ValueError`` on duplicate email."""
+        user.email = normalize_email(user.email)
         row = self._user_to_row(user)
         async with self._sf() as session:
+            existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
+            if await session.scalar(existing) is not None:
+                raise ValueError(f"Email already registered: {user.email}")
             session.add(row)
             try:
                 await session.commit()
@@ -82,10 +87,10 @@ class SQLUserRepository(UserRepository):
             return self._row_to_user(row) if row is not None else None
 
     async def get_user_by_email(self, email: str) -> User | None:
-        stmt = select(UserRow).where(UserRow.email == email)
+        stmt = select(UserRow).where(func.lower(UserRow.email) == normalize_email(email)).order_by(UserRow.created_at, UserRow.id).limit(1)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
+            row = result.scalars().first()
             return self._row_to_user(row) if row is not None else None
 
     async def update_user(self, user: User) -> User:
@@ -99,14 +104,31 @@ class SQLUserRepository(UserRepository):
                 # success would let the caller log "password reset" for
                 # a row that no longer exists.
                 raise UserNotFoundError(f"User {user.id} no longer exists")
-            row.email = user.email
+            canonical_email = normalize_email(user.email)
+            if canonical_email != normalize_email(row.email):
+                existing = (
+                    select(UserRow.id)
+                    .where(
+                        func.lower(UserRow.email) == canonical_email,
+                        UserRow.id != str(user.id),
+                    )
+                    .limit(1)
+                )
+                if await session.scalar(existing) is not None:
+                    raise ValueError(f"Email already registered: {canonical_email}")
+                row.email = canonical_email
+            user.email = row.email
             row.password_hash = user.password_hash
             row.system_role = user.system_role
             row.oauth_provider = user.oauth_provider
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError(f"Email already registered: {canonical_email}") from exc
         return user
 
     async def count_users(self) -> int:

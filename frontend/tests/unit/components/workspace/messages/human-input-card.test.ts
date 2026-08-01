@@ -3,11 +3,14 @@ import { createElement, type KeyboardEvent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  findMissingRequiredFields,
   HumanInputCard,
+  HumanInputFormFieldInput,
   shouldSubmitHumanInputTextOnKeyDown,
 } from "@/components/workspace/messages/human-input-card";
 import { I18nContext } from "@/core/i18n/context";
 import type {
+  HumanInputField,
   HumanInputRequest,
   HumanInputResponse,
 } from "@/core/messages/human-input";
@@ -61,6 +64,7 @@ describe("HumanInputCard", () => {
     const html = renderCard({ answeredResponse: response });
 
     expect(html).toContain('data-human-input-state="answered"');
+    expect(html).toContain('aria-live="polite"');
     expect(html).toContain("Answered");
     expect(html).toContain("Answered: staging");
     expect(html).not.toContain("development");
@@ -90,6 +94,243 @@ describe("HumanInputCard", () => {
     expect(html).toContain("篇幅");
     expect(html).not.toContain("**题材/类型**");
     expect(html).not.toContain("**篇幅**");
+  });
+
+  it("renders all seven form controls with labels and accessible metadata", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-form",
+        question: "Please provide the expense details.",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          { name: "title", label: "Title", type: "text", required: true },
+          { name: "note", label: "Note", type: "textarea", required: false },
+          { name: "amount", label: "Amount", type: "number", required: true },
+          {
+            name: "category",
+            label: "Category",
+            type: "select",
+            required: true,
+            options: [
+              { id: "travel", label: "Travel", value: "travel" },
+              { id: "meals", label: "Meals", value: "meals" },
+            ],
+          },
+          {
+            name: "receipts",
+            label: "Receipts",
+            type: "multi_select",
+            required: false,
+            options: [
+              { id: "a-1", label: "A-1", value: "A-1" },
+              { id: "a-2", label: "A-2", value: "A-2" },
+            ],
+          },
+          {
+            name: "urgent",
+            label: "Urgent",
+            type: "checkbox",
+            required: false,
+          },
+          {
+            name: "spent_on",
+            label: "Spent on",
+            type: "date",
+            required: true,
+          },
+        ],
+      },
+    });
+
+    for (const text of [
+      "Title",
+      "Note",
+      "Amount",
+      "Category",
+      "Receipts",
+      "Urgent",
+      "Spent on",
+      "Select...",
+      "A-1",
+    ]) {
+      expect(html).toContain(text);
+    }
+    expect(html).toContain('type="text"');
+    expect(html).toContain("<textarea");
+    expect(html).toContain('type="number"');
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('role="group"');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('type="date"');
+    expect(html).toContain('aria-required="true"');
+    expect(html).toContain('aria-live="polite"');
+
+    const htmlForIds = [...html.matchAll(/<label[^>]*for="([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+    expect(htmlForIds.length).toBe(7);
+    for (const id of htmlForIds) {
+      expect(html).toContain(`id="${id}"`);
+    }
+  });
+
+  it("uses valid required and invalid semantics for the multi-select group", () => {
+    const requiredGroupHtml = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-required-group",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          {
+            name: "receipts",
+            label: "Receipts",
+            type: "multi_select",
+            required: true,
+            options: [
+              { id: "a-1", label: "A-1", value: "A-1" },
+              { id: "a-2", label: "A-2", value: "A-2" },
+            ],
+          },
+        ],
+      },
+    });
+    const requiredLabel =
+      /<label[^>]*id="([^"]+)"[^>]*>[\s\S]*?<\/label>/.exec(
+        requiredGroupHtml,
+      );
+    const requiredGroup =
+      /<div id="[^"]+"[^>]*role="group"[^>]*>/.exec(requiredGroupHtml)?.[0];
+
+    expect(requiredLabel).toBeDefined();
+    expect(requiredLabel?.[0]).toContain("Receipts");
+    expect(requiredLabel?.[0]).toMatch(/required/i);
+    expect(requiredGroup).toContain(
+      `aria-labelledby="${requiredLabel?.[1]}"`,
+    );
+    expect(requiredGroup).not.toContain("aria-required");
+
+    const invalidGroupHtml = renderToStaticMarkup(
+      createElement(HumanInputFormFieldInput, {
+        field: {
+          name: "receipts",
+          label: "Receipts",
+          type: "multi_select",
+          required: true,
+          options: [
+            { id: "a-1", label: "A-1", value: "A-1" },
+            { id: "a-2", label: "A-2", value: "A-2" },
+          ],
+        },
+        value: [],
+        disabled: false,
+        selectPlaceholder: "Select...",
+        controlId: "receipts-control",
+        labelId: "receipts-label",
+        invalid: true,
+        errorId: "receipts-error",
+        onChange: () => undefined,
+      }),
+    );
+    const invalidGroup =
+      /<div id="receipts-control"[^>]*role="group"[^>]*>/.exec(
+        invalidGroupHtml,
+      )?.[0];
+
+    expect(invalidGroup).toBeDefined();
+    expect(invalidGroup).toContain('aria-labelledby="receipts-label"');
+    expect(invalidGroup).not.toContain("aria-required");
+    expect(invalidGroup).toContain('aria-invalid="true"');
+    expect(invalidGroup).toContain('aria-describedby="receipts-error"');
+
+    const requiredControls: Array<[string, HumanInputField]> = [
+      [
+        "required-text",
+        {
+          name: "details",
+          label: "Details",
+          type: "text" as const,
+          required: true,
+        },
+      ],
+      [
+        "required-select",
+        {
+          name: "category",
+          label: "Category",
+          type: "select" as const,
+          required: true,
+          options: [{ id: "travel", label: "Travel", value: "travel" }],
+        },
+      ],
+    ];
+    for (const [controlId, field] of requiredControls) {
+      const controlHtml = renderToStaticMarkup(
+        createElement(HumanInputFormFieldInput, {
+          field,
+          value: "",
+          disabled: false,
+          selectPlaceholder: "Select...",
+          controlId,
+          labelId: `${controlId}-label`,
+          invalid: false,
+          errorId: `${controlId}-error`,
+          onChange: () => undefined,
+        }),
+      );
+      const control = new RegExp(
+        `<(?:input|button)[^>]*id="${controlId}"[^>]*>`,
+      ).exec(controlHtml)?.[0];
+
+      expect(control).toBeDefined();
+      expect(control).toContain('aria-required="true"');
+    }
+  });
+
+  it("findMissingRequiredFields uses own values and checkbox truth", () => {
+    const fields = [
+      {
+        name: "amount",
+        label: "Amount",
+        type: "number" as const,
+        required: true,
+      },
+      {
+        name: "receipts",
+        label: "Receipts",
+        type: "multi_select" as const,
+        required: true,
+        options: [{ id: "a-1", label: "A-1", value: "A-1" }],
+      },
+      {
+        name: "confirmed",
+        label: "Confirmed",
+        type: "checkbox" as const,
+        required: true,
+      },
+    ];
+
+    expect(
+      findMissingRequiredFields(fields, {}).map((field) => field.name),
+    ).toEqual(["amount", "receipts", "confirmed"]);
+    expect(
+      findMissingRequiredFields(fields, {
+        amount: "300",
+        receipts: ["A-1"],
+        confirmed: false,
+      }).map((field) => field.name),
+    ).toEqual(["confirmed"]);
+    expect(
+      findMissingRequiredFields(fields, {
+        amount: "300",
+        receipts: ["A-1"],
+        confirmed: true,
+      }),
+    ).toEqual([]);
   });
 
   it("does not submit text with Enter while IME composition is active", () => {

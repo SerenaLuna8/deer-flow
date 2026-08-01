@@ -13,8 +13,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.system_runtime_catalog import seed_process_runtime_catalog
 from test_m6_gateway_reconnect_process import (
     _create_project_thread,
     _start_gateway,
@@ -28,6 +30,7 @@ from test_m6_worker_crash_recovery_postgres import (
 )
 
 from app.automations.ownership import AUTOMATION_SCHEDULER_OWNERSHIP_LOCK_KEY
+from deerflow.config.app_config import AppConfig
 
 _PROCESS_TIMEOUT = 60.0
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +43,7 @@ _DYNAMIC_IMPORT_LITERAL_ALLOWLIST = frozenset(
         ("deerflow.agents", "__getattr__", "deerflow.agents.thread_state"),
         ("deerflow.runtime", "__getattr__", "deerflow.runtime.runs.worker"),
         ("deerflow.runtime.runs", "__getattr__", "deerflow.runtime.runs.worker"),
+        ("deerflow.subagents", "__getattr__", "deerflow.subagents.executor"),
     }
 )
 _DYNAMIC_IMPORT_VARIABLE_ALLOWLIST = frozenset(
@@ -355,14 +359,12 @@ def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
 
 def _scheduler_config(database_url: str) -> str:
     return f"""\
+config_version: 34
 log_level: warning
-models: []
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 database:
   url: {database_url}
-memory:
-  token_counting: char
 worker:
   enabled: true
   poll_interval_seconds: 0.05
@@ -374,6 +376,20 @@ scheduler:
   poll_interval_seconds: 1
   max_concurrent_runs: 1
 """
+
+
+def test_scheduler_child_config_obeys_v34_yaml_authority_boundary() -> None:
+    raw = yaml.safe_load(_scheduler_config("postgresql://localhost/deerflow_test_scheduler_fixture"))
+
+    config = AppConfig.model_validate(
+        raw,
+        context={"config_source": "yaml"},
+    )
+
+    assert "models" not in raw
+    assert "memory" not in raw
+    assert raw["config_version"] == 34
+    assert config.scheduler.enabled is True
 
 
 def _scheduler_environment(tmp_path: Path, database_url: str) -> dict[str, str]:
@@ -426,6 +442,10 @@ async def _wait_scheduler_owned(
                     text(
                         """SELECT pid FROM pg_locks
                         WHERE locktype='advisory' AND granted
+                          AND database=(
+                            SELECT oid FROM pg_database
+                            WHERE datname=current_database()
+                          )
                           AND classid=:classid AND objid=:objid AND objsubid=1"""
                     ),
                     {"classid": high, "objid": low},
@@ -500,10 +520,20 @@ async def test_real_process_roles_keep_graph_worker_only_and_reconnect_isolated(
 
     scheduler = gateway = replacement = worker = None
     scheduler_log = gateway_log = replacement_log = worker_log = None
+    setup_engine = create_async_engine(migrated_postgres_database_url)
+    setup_session_factory = async_sessionmaker(
+        setup_engine,
+        expire_on_commit=False,
+    )
     barrier = tmp_path / "m7-process-events.jsonl"
     release = tmp_path / "m7-process-release"
     roles: list[dict[str, object]] = []
     try:
+        runtime_catalog = await seed_process_runtime_catalog(
+            setup_session_factory,
+            logical_name="release-model",
+        )
+        assert runtime_catalog.model.logical_name == "release-model"
         scheduler, scheduler_log = _start_scheduler(
             tmp_path,
             migrated_postgres_database_url,
@@ -532,7 +562,10 @@ async def test_real_process_roles_keep_graph_worker_only_and_reconnect_isolated(
             timeout=15,
             trust_env=False,
         ) as owner:
-            owner_user_id, project_id, thread_id = await _create_project_thread(owner)
+            owner_user_id, project_id, thread_id = await _create_project_thread(
+                owner,
+                setup_session_factory,
+            )
             cookies = httpx.Cookies(owner.cookies)
             csrf = owner.cookies.get("csrf_token")
             assert csrf
@@ -546,6 +579,33 @@ async def test_real_process_roles_keep_graph_worker_only_and_reconnect_isolated(
             )
         assert admitted.status_code == 200, admitted.text
         run_id = admitted.json()["run_id"]
+        async with setup_session_factory() as session:
+            exact_closure = (
+                await session.execute(
+                    text(
+                        """SELECT r.model_name,s.logical_name,
+                        count(p.run_id) AS runtime_policy_count
+                        FROM runs r
+                        JOIN run_model_config_snapshots s
+                          ON s.project_id=r.project_id
+                         AND s.owner_user_id=r.owner_user_id
+                         AND s.run_id=r.run_id
+                         AND s.purpose='lead'
+                        JOIN run_runtime_policy_snapshots p
+                          ON p.project_id=r.project_id
+                         AND p.owner_user_id=r.owner_user_id
+                         AND p.run_id=r.run_id
+                        WHERE r.run_id=:run_id
+                        GROUP BY r.model_name,s.logical_name"""
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert tuple(exact_closure) == (
+            "release-model",
+            "release-model",
+            1,
+        )
         roles.append({"event": "admission", "role": "gateway", "pid": gateway.pid})
 
         worker, worker_log = _start_worker(
@@ -659,3 +719,4 @@ async def test_real_process_roles_keep_graph_worker_only_and_reconnect_isolated(
         ):
             if process is not None and log is not None:
                 _stop_process(process, log)
+        await setup_engine.dispose()

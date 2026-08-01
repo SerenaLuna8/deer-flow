@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +19,10 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.http_runtime import start_private_run
+from app.private_work.inbound_dedupe import (
+    DuplicateInboundDelivery,
+    PrivateRunInboundDelivery,
+)
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
     PrivateRunInboundAuthority,
@@ -57,9 +61,17 @@ class ResolvedInboundPrivateWork:
 
 
 ProjectInboundState = dict[str, Any] | list[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectInboundLaunchResult:
+    state: ProjectInboundState
+    disposition: Literal["admitted", "duplicate_delivery"] = "admitted"
+
+
 ProjectInboundRunLauncher = Callable[
     [PrivateWorkContext, str, InboundMessage, PrivateRunInboundAuthority],
-    Awaitable[ProjectInboundState],
+    Awaitable[ProjectInboundState | ProjectInboundLaunchResult],
 ]
 
 
@@ -67,6 +79,7 @@ ProjectInboundRunLauncher = Callable[
 class ProjectInboundDispatchResult:
     resolved: ResolvedInboundPrivateWork
     state: ProjectInboundState
+    disposition: Literal["admitted", "duplicate_delivery"] = "admitted"
 
 
 class ConnectionInboundRepository(Protocol):
@@ -139,13 +152,22 @@ class ProjectInboundDispatcher:
                 external_topic_id=message.topic_id,
             )
         )
-        state = await self._run_launcher(
+        launched = await self._run_launcher(
             resolved.context,
             resolved.thread_id,
             message,
             resolved.authority,
         )
-        return ProjectInboundDispatchResult(resolved=resolved, state=state)
+        if type(launched) is ProjectInboundLaunchResult:
+            return ProjectInboundDispatchResult(
+                resolved=resolved,
+                state=launched.state,
+                disposition=launched.disposition,
+            )
+        return ProjectInboundDispatchResult(
+            resolved=resolved,
+            state=launched,
+        )
 
 
 def build_gateway_project_run_launcher(
@@ -156,8 +178,14 @@ def build_gateway_project_run_launcher(
     """Build the in-process Gateway launcher used by project-bound IM text."""
 
     from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-    from app.gateway.deps import get_project_checkpointer
+    from app.gateway.deps import get_config
     from app.gateway.internal_auth import get_internal_user
+    from app.private_work.checkpoint_state import (
+        bind_scoped_checkpoint_state,
+        checkpoint_config,
+        snapshot_checkpoint_id,
+    )
+    from app.private_work.checkpointer import ProjectScopedCheckpointer
     from deerflow.runtime import serialize_channel_values_for_api
 
     private_start = start_private_run_fn or start_private_run
@@ -167,7 +195,7 @@ def build_gateway_project_run_launcher(
         thread_id: str,
         message: InboundMessage,
         authority: PrivateRunInboundAuthority,
-    ) -> ProjectInboundState:
+    ) -> ProjectInboundState | ProjectInboundLaunchResult:
         async def is_disconnected() -> bool:
             return False
 
@@ -200,15 +228,31 @@ def build_gateway_project_run_launcher(
             },
             multitask_strategy="reject",
         )
-        record = await private_start(
-            body,
-            thread_id,
-            request,
-            context,
-            server_context=PrivateRunAdmissionServerContext(
-                inbound_authority=authority,
-            ),
-        )
+        provider_delivery_id = message.provider_delivery_id
+        if not isinstance(provider_delivery_id, str) or not provider_delivery_id:
+            raise PrivateWorkInvalid(context.request_id)
+        try:
+            inbound_delivery = PrivateRunInboundDelivery(
+                provider_delivery_id,
+            )
+        except TypeError:
+            raise PrivateWorkInvalid(context.request_id) from None
+        try:
+            record = await private_start(
+                body,
+                thread_id,
+                request,
+                context,
+                server_context=PrivateRunAdmissionServerContext(
+                    inbound_authority=authority,
+                    inbound_delivery=inbound_delivery,
+                ),
+            )
+        except DuplicateInboundDelivery:
+            return ProjectInboundLaunchResult(
+                state={},
+                disposition="duplicate_delivery",
+            )
         service = getattr(app.state, "private_run_service", None)
         if not isinstance(service, PrivateRunService):
             raise PrivateWorkUnavailable(context.request_id)
@@ -222,24 +266,26 @@ def build_gateway_project_run_launcher(
                 break
             await asyncio.sleep(0.1)
 
-        checkpointer = get_project_checkpointer(request, context)
-        checkpoint_tuple = await checkpointer.aget_tuple(
-            {
-                "configurable": {
-                    "thread_id": thread_id,
-                    "checkpoint_ns": "",
-                }
-            }
+        project_checkpointer = getattr(
+            app.state,
+            "project_scoped_checkpointer",
+            None,
         )
-        if checkpoint_tuple is None:
-            return {}
-        checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-        if not isinstance(checkpoint, Mapping):
-            return {}
-        channel_values = checkpoint.get("channel_values", {}) or {}
-        if not isinstance(channel_values, Mapping):
-            return {}
-        return serialize_channel_values_for_api(channel_values)
+        if not isinstance(project_checkpointer, ProjectScopedCheckpointer):
+            raise PrivateWorkUnavailable(context.request_id)
+        snapshot = await bind_scoped_checkpoint_state(
+            project_checkpointer,
+            context,
+            get_config(),
+            as_node="inbound_response",
+        ).aget(checkpoint_config(thread_id))
+        if snapshot_checkpoint_id(snapshot) is None:
+            return ProjectInboundLaunchResult(state={})
+        return ProjectInboundLaunchResult(
+            state=serialize_channel_values_for_api(
+                dict(snapshot.values or {}),
+            ),
+        )
 
     return launch
 

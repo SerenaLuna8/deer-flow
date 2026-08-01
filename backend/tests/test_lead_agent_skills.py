@@ -232,6 +232,7 @@ def test_make_lead_agent_uses_only_exact_private_runtime_contract(
     assert [tool.name for tool in create_kwargs["tools"]] == [
         "exact_builtin",
         "exact_mcp",
+        "memory_search",
     ]
     assert create_kwargs["system_prompt"] == "exact-system-prompt"
     assert captured["middlewares"]["runtime_skills"] == (skill,)

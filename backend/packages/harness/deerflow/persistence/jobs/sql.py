@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.trace_context import normalize_trace_id
 
 JobType = Literal["private_run", "automation_run", "retention_purge"]
 RetrySafety = Literal["safe", "unknown", "unsafe"]
@@ -49,6 +50,7 @@ class EnqueueJob:
     run_id: str | None
     occurrence_id: str | None
     max_attempts: int
+    origin_trace_id: str | None = None
     retry_safety: RetrySafety = "safe"
     priority: int = 0
     available_at: datetime | None = None
@@ -79,6 +81,13 @@ class EnqueueJob:
             raise ValueError(
                 "retention_purge requires project or exact former-owner authority",
             )
+        normalized_trace_id = normalize_trace_id(self.origin_trace_id)
+        if self.job_type in {"private_run", "automation_run"}:
+            if normalized_trace_id is None:
+                raise ValueError("Run jobs require a valid origin trace")
+            object.__setattr__(self, "origin_trace_id", normalized_trace_id)
+        elif self.origin_trace_id is not None:
+            raise ValueError("retention_purge does not accept an origin trace")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +101,7 @@ class JobClaim:
     occurrence_id: str | None
     retry_safety: RetrySafety
     cancel_requested: bool
+    origin_trace_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +201,7 @@ class JobTerminalEvent:
     cancel_reason: str | None
     occurred_at: datetime
     attempt_count: int = 0
+    origin_trace_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +299,7 @@ class JobRepository:
             and row.run_id == request.run_id
             and row.automation_occurrence_id == request.occurrence_id
             and row.predecessor_dead_job_id == request.predecessor_dead_job_id
+            and row.origin_trace_id == request.origin_trace_id
             and row.max_attempts == request.max_attempts
             and row.retry_safety == request.retry_safety
             and row.priority == request.priority
@@ -308,6 +320,7 @@ class JobRepository:
                 run_id=request.run_id,
                 automation_occurrence_id=request.occurrence_id,
                 predecessor_dead_job_id=request.predecessor_dead_job_id,
+                origin_trace_id=request.origin_trace_id,
                 idempotency_key=request.idempotency_key,
                 status="queued",
                 priority=request.priority,
@@ -439,6 +452,7 @@ class JobRepository:
                 cancel_reason=row.cancel_reason,
                 occurred_at=now,
                 attempt_count=row.attempt_count,
+                origin_trace_id=row.origin_trace_id,
             ),
         )
         if type(result) is not JobTerminalResult:
@@ -582,6 +596,9 @@ class JobRepository:
                 await self.session.flush()
                 return None
 
+            if row.job_type in {"private_run", "automation_run"} and normalize_trace_id(row.origin_trace_id) is None:
+                raise RuntimeError("Run job trace authority is invalid")
+
             if row.status in {"leased", "running"}:
                 if row.retry_safety != "safe":
                     public_error_code = "SIDE_EFFECT_STATE_UNKNOWN"
@@ -661,6 +678,7 @@ class JobRepository:
                 occurrence_id=row.automation_occurrence_id,
                 retry_safety=row.retry_safety,
                 cancel_requested=False,
+                origin_trace_id=row.origin_trace_id,
             )
         return None
 
@@ -1102,6 +1120,7 @@ class JobRepository:
                 and existing_successor.job_type == predecessor.job_type
                 and existing_successor.run_id == predecessor.run_id
                 and existing_successor.automation_occurrence_id == predecessor.automation_occurrence_id
+                and existing_successor.origin_trace_id == predecessor.origin_trace_id
                 and existing_successor.status == "queued"
                 and existing_successor.attempt_count == 0
                 and existing_successor.retry_safety == "safe"
@@ -1119,6 +1138,7 @@ class JobRepository:
             retry_safety="safe",
             priority=predecessor.priority,
             predecessor_dead_job_id=predecessor.id,
+            origin_trace_id=predecessor.origin_trace_id,
         )
         successor_id, created = await self._enqueue(request)
         if created:

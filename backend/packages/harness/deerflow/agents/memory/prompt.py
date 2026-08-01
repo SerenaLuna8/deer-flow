@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import math
 import re
@@ -363,9 +364,18 @@ def _format_fact_line(fact: dict[str, Any]) -> str | None:
     category = str(fact.get("category", "context")).strip() or "context"
     confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
     source_error = fact.get("sourceError")
+    content = html.escape(content, quote=False)
+    category = html.escape(category, quote=False)
     if category == "correction" and isinstance(source_error, str) and source_error.strip():
-        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+        source_error = html.escape(source_error.strip(), quote=False)
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error})"
     return f"- [{category} | {confidence:.2f}] {content}"
+
+
+def _escape_summary(value: Any) -> str:
+    """Escape a user-editable summary rendered inside the memory block."""
+
+    return html.escape(str(value), quote=False)
 
 
 def _select_fact_lines(
@@ -502,15 +512,15 @@ def format_memory_for_injection(
 
         work_ctx = user_data.get("workContext", {})
         if work_ctx.get("summary"):
-            user_sections.append(f"Work: {work_ctx['summary']}")
+            user_sections.append(f"Work: {_escape_summary(work_ctx['summary'])}")
 
         personal_ctx = user_data.get("personalContext", {})
         if personal_ctx.get("summary"):
-            user_sections.append(f"Personal: {personal_ctx['summary']}")
+            user_sections.append(f"Personal: {_escape_summary(personal_ctx['summary'])}")
 
         top_of_mind = user_data.get("topOfMind", {})
         if top_of_mind.get("summary"):
-            user_sections.append(f"Current Focus: {top_of_mind['summary']}")
+            user_sections.append(f"Current Focus: {_escape_summary(top_of_mind['summary'])}")
 
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
@@ -522,15 +532,15 @@ def format_memory_for_injection(
 
         recent = history_data.get("recentMonths", {})
         if recent.get("summary"):
-            history_sections.append(f"Recent: {recent['summary']}")
+            history_sections.append(f"Recent: {_escape_summary(recent['summary'])}")
 
         earlier = history_data.get("earlierContext", {})
         if earlier.get("summary"):
-            history_sections.append(f"Earlier: {earlier['summary']}")
+            history_sections.append(f"Earlier: {_escape_summary(earlier['summary'])}")
 
         background = history_data.get("longTermBackground", {})
         if background.get("summary"):
-            history_sections.append(f"Background: {background['summary']}")
+            history_sections.append(f"Background: {_escape_summary(background['summary'])}")
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
@@ -554,6 +564,8 @@ def format_memory_for_injection(
     #   performs a single-pass confidence-only ranking.
     facts_data = memory_data.get("facts", [])
     guaranteed_line_tokens = 0  # used later for the effective truncation limit
+    facts_header = "Facts:\n"
+    all_fact_lines: list[str] = []
     if isinstance(facts_data, list) and facts_data:
         # Token cost of sections built above (user context, history).
         base_text = "\n\n".join(sections)
@@ -568,9 +580,6 @@ def format_memory_for_injection(
         # structure-aware truncation at the bottom of the function can
         # reason about them regardless of whether the primary path or
         # the except/fallback path produced the final Facts section.
-        facts_header = "Facts:\n"
-        all_fact_lines: list[str] = []
-
         try:
             # Partition valid facts into guaranteed vs regular groups.
             # Use the *raw* category field (no ``or "context"`` default) so
@@ -740,17 +749,24 @@ def format_conversation_for_update(messages: list[Any]) -> str:
                         text_parts.append(text_val)
             content = " ".join(text_parts) if text_parts else str(content)
 
-        # Strip uploaded_files tags from human messages to avoid persisting
+        # Strip upload tags from human messages to avoid persisting
         # ephemeral file path info into long-term memory.  Skip the turn entirely
         # when nothing remains after stripping (upload-only message).
         if role == "human":
-            content = re.sub(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", "", str(content)).strip()
+            content = re.sub(
+                r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*?</(?P=tag)>\n*",
+                "",
+                str(content),
+            ).strip()
             if not content:
                 continue
 
-        # Truncate very long messages
+        # Preserve both the opening context and the tail's user directives.
         if len(str(content)) > 1000:
-            content = str(content)[:1000] + "..."
+            raw_content = str(content)
+            content = raw_content[:500] + "\n...[truncated]...\n" + raw_content[-500:]
+
+        content = html.escape(str(content), quote=False)
 
         if role == "human":
             lines.append(f"User: {content}")

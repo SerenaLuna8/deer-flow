@@ -21,6 +21,7 @@ from app.private_work.thread_repository import PrivateThreadRepository, ThreadAg
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from deerflow.persistence.private_work.model import PrivateFileRow
 
 
 def test_private_work_router_exposes_project_file_route_matrix() -> None:
@@ -290,6 +291,81 @@ async def test_project_files_happy_path_scope_and_stable_errors(
     )
     assert hidden_deleted.status_code == 404
     assert hidden_deleted.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_ready_file_list_pages_past_one_hundred_without_omission(
+    harness: _Harness,
+) -> None:
+    thread_id = uuid.uuid4()
+    async with harness.seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=harness.seed.owner_a.resource_scope,
+            thread_id=str(thread_id),
+            agent=ThreadAgentRef(harness.seed.project_agent_id, "project"),
+        )
+        session.add_all(
+            [
+                PrivateFileRow(
+                    id=uuid.uuid5(uuid.NAMESPACE_URL, f"m09-upload-page-{index}"),
+                    project_id=harness.seed.owner_a.project_id,
+                    owner_user_id=str(harness.seed.owner_a.user_id),
+                    thread_id=str(thread_id),
+                    kind="upload",
+                    logical_path=f"uploads/page-{index:03d}.txt",
+                    media_type="text/plain",
+                    size=0,
+                    sha256=hashlib.sha256(b"").hexdigest(),
+                    status="ready",
+                    version=1,
+                )
+                for index in range(101)
+            ]
+        )
+
+    first = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/uploads?limit=40&offset=0",
+    )
+    second = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/uploads?limit=40&offset=40",
+    )
+    third = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/uploads?limit=40&offset=80",
+    )
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert first.headers["x-next-offset"] == "40"
+    assert second.headers["x-next-offset"] == "80"
+    assert "x-next-offset" not in third.headers
+    combined = [*first.json(), *second.json(), *third.json()]
+    assert len(combined) == 101
+    assert len({item["id"] for item in combined}) == 101
+    assert [item["logical_path"] for item in combined] == [f"uploads/page-{index:03d}.txt" for index in range(101)]
+
+    default_page = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/uploads",
+    )
+    assert default_page.status_code == 200
+    assert len(default_page.json()) == 100
+    assert default_page.headers["x-next-offset"] == "100"
+
+    for query in (
+        "limit=0",
+        "limit=101",
+        "offset=-1",
+        "offset=9223372036854775808",
+    ):
+        invalid = await harness.request(
+            "GET",
+            f"/threads/{thread_id}/uploads?{query}",
+        )
+        assert invalid.status_code == 422
+        assert invalid.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
 
 
 @pytest.mark.postgres

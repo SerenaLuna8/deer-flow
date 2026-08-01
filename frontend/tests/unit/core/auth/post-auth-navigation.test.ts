@@ -16,8 +16,15 @@ const invitedUser: User = {
 
 describe("post-auth navigation", () => {
   test("waits for the current user before returning to the invitation", async () => {
-    let release!: (user: User | null) => void;
-    const restored = new Promise<User | null>((resolve) => {
+    let release!: (
+      result:
+        | { type: "authenticated"; user: User }
+        | { type: "unavailable" },
+    ) => void;
+    const restored = new Promise<
+      | { type: "authenticated"; user: User }
+      | { type: "unavailable" }
+    >((resolve) => {
       release = resolve;
     });
     const navigate = rs.fn();
@@ -29,7 +36,7 @@ describe("post-auth navigation", () => {
     await Promise.resolve();
     expect(navigate).not.toHaveBeenCalled();
 
-    release(invitedUser);
+    release({ type: "authenticated", user: invitedUser });
     await expect(completion).resolves.toBe(true);
     expect(navigate).toHaveBeenCalledExactlyOnceWith("/invite");
 
@@ -53,5 +60,39 @@ describe("post-auth navigation", () => {
       ),
     ).resolves.toBe(false);
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  test("does not navigate when session restoration is temporarily unavailable", async () => {
+    const navigate = rs.fn();
+
+    await expect(
+      restoreSessionThenNavigate(
+        async () => ({ type: "unavailable" }),
+        () => navigate("/invite"),
+      ),
+    ).resolves.toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  test("does not re-probe or invite password resubmission after a successful change", () => {
+    const setupSource = readFileSync(
+      resolve(process.cwd(), "src/app/(auth)/setup/page.tsx"),
+      "utf8",
+    );
+    const settingsSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/workspace/settings/account-settings-page.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(setupSource).toContain('window.location.replace("/workspace")');
+    expect(setupSource).not.toContain(
+      "const refreshed = await refreshUser(controller.signal)",
+    );
+    expect(settingsSource).not.toContain(
+      "await refreshUser(controller.signal)",
+    );
   });
 });

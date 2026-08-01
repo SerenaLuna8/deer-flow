@@ -4,6 +4,7 @@ import {
   ArrowLeftIcon,
   BotIcon,
   BrainCircuitIcon,
+  CableIcon,
   CalendarClockIcon,
   FolderKanbanIcon,
   KeyRoundIcon,
@@ -96,14 +97,14 @@ export function projectNavigationItems(
       section: null,
     },
   ];
-  if (
+  const privateWorkEnabled =
     !staticWebsiteOnly &&
     projectPrivateWorkEntryEnabled(
       privateWorkFeatureEnabled,
       project.capabilities.includes("private_work.read_own"),
       privateWorkReady ? "ready" : undefined,
-    )
-  ) {
+    );
+  if (privateWorkEnabled) {
     items.push(
       {
         href: `${base}/chats`,
@@ -112,10 +113,10 @@ export function projectNavigationItems(
         section: "work",
       },
       {
-        href: `${base}/memory`,
-        icon: BrainCircuitIcon,
-        label: "Memory",
-        section: "capabilities",
+        href: `${base}/connections`,
+        icon: CableIcon,
+        label: "Connections",
+        section: "work",
       },
     );
   }
@@ -156,6 +157,14 @@ export function projectNavigationItems(
         section: "capabilities",
       },
     );
+  }
+  if (privateWorkEnabled) {
+    items.push({
+      href: `${base}/memory`,
+      icon: BrainCircuitIcon,
+      label: "Memory",
+      section: "capabilities",
+    });
   }
   if (project.capabilities.includes("mcp.credentials.approve")) {
     items.push({

@@ -20,6 +20,19 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.projects.errors import ProjectBootstrapFailed
+from app.system_runtime_settings.bootstrap import (
+    SystemRuntimePolicyBootstrapConflict,
+    SystemRuntimePolicyBootstrapStorageUnavailable,
+    bootstrap_system_runtime_policies,
+)
+from app.system_settings.bootstrap import (
+    DefaultSystemModelBootstrapConfigurationInvalid,
+    DefaultSystemModelBootstrapConflict,
+    DefaultSystemModelBootstrapMaterial,
+    DefaultSystemModelBootstrapStorageUnavailable,
+    bootstrap_default_system_model,
+    prepare_default_system_model_bootstrap,
+)
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
@@ -215,6 +228,8 @@ async def _complete_bootstrap_lock(database_url: str):
 
 async def _bootstrap_existing(
     database_url: str,
+    *,
+    default_model_bootstrap: (DefaultSystemModelBootstrapMaterial | None) = None,
 ) -> str:
     engine = _create_setup_engine(DatabaseConfig(url=database_url))
     primary_error: BaseException | None = None
@@ -224,12 +239,26 @@ async def _bootstrap_existing(
                 await connection.execute(text("SELECT 1"))
             await bootstrap_schema(engine)
             await _bootstrap_builtin_catalog(engine)
+            if default_model_bootstrap is not None:
+                await _bootstrap_default_model_schema(
+                    engine,
+                    default_model_bootstrap,
+                )
+                await _bootstrap_runtime_policy_schema(engine)
             await _bootstrap_langgraph_schemas(database_url)
             await _bootstrap_default_project_schema(engine)
         return CURRENT_SCHEMA_REVISION
     except ProjectBootstrapFailed as exc:
         primary_error = exc
         raise PostgresSetupError(exc.code) from None
+    except (
+        DefaultSystemModelBootstrapConflict,
+        DefaultSystemModelBootstrapStorageUnavailable,
+        SystemRuntimePolicyBootstrapConflict,
+        SystemRuntimePolicyBootstrapStorageUnavailable,
+    ) as exc:
+        primary_error = exc
+        raise PostgresSetupError(str(exc)) from None
     except M7RecreateRequired as exc:
         primary_error = exc
         raise PostgresSetupError("M7_RECREATE_REQUIRED: 非空目标库不是完整的 full_schema_v1；请显式重建目标数据库") from None
@@ -267,6 +296,26 @@ async def _bootstrap_default_project_schema(engine: AsyncEngine) -> None:
         await bootstrap_default_project(session)
 
 
+async def _bootstrap_default_model_schema(
+    engine: AsyncEngine,
+    material: DefaultSystemModelBootstrapMaterial,
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    await bootstrap_default_system_model(
+        async_sessionmaker(engine, expire_on_commit=False),
+        material,
+    )
+
+
+async def _bootstrap_runtime_policy_schema(engine: AsyncEngine) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    await bootstrap_system_runtime_policies(
+        async_sessionmaker(engine, expire_on_commit=False),
+    )
+
+
 async def setup_postgres(
     admin_url: str,
     database_url: str,
@@ -274,6 +323,10 @@ async def setup_postgres(
     expected_database: str | None = None,
 ) -> SetupResult:
     """幂等创建目标数据库，并安装或验证完整 schema 快照。"""
+    try:
+        default_model_bootstrap = prepare_default_system_model_bootstrap()
+    except DefaultSystemModelBootstrapConfigurationInvalid as exc:
+        raise PostgresSetupError(str(exc)) from None
     parse_target(admin_url, maintenance=True)
     target = parse_target(database_url)
     if expected_database is not None:
@@ -285,7 +338,10 @@ async def setup_postgres(
         target.database,
         owner_name=target.username,
     )
-    revision = await _bootstrap_existing(database_url)
+    revision = await _bootstrap_existing(
+        database_url,
+        default_model_bootstrap=default_model_bootstrap,
+    )
     return SetupResult(
         host=target.host,
         port=target.port,

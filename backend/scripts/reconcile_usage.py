@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.quotas.models import _issue_quota_reconciliation_authority
 from app.quotas.reconciliation import QuotaReconciler
 from app.quotas.service import QuotaService
+from app.quotas.system_policy import SystemQuotaPolicyReader
 from app.reliability.owner_refs import AuditHmacKeyring, AuditHmacKeyringInvalid
 from deerflow.config.quota_config import QuotaConfig
 
@@ -47,7 +48,12 @@ async def reconcile_usage(
             keyring = AuditHmacKeyring.from_environment()
         except AuditHmacKeyringInvalid:
             raise UsageReconciliationError("audit HMAC keyring is unavailable") from None
-        service = QuotaService(factory, QuotaConfig(), source_ref_hasher=keyring)
+        service = QuotaService(
+            factory,
+            QuotaConfig(),
+            source_ref_hasher=keyring,
+            current_policy_reader=SystemQuotaPolicyReader(),
+        )
         reconciler = QuotaReconciler(factory, service)
         async with engine.connect() as connection:
             if project_id is None:

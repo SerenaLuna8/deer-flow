@@ -14,6 +14,8 @@ import {
   mcpVersionInputSchema,
   projectAssetListSchema,
   projectCredentialListSchema,
+  projectDefaultAgentInputSchema,
+  projectDefaultAgentSchema,
   skillFileForkInputSchema,
   skillVersionFileContentResponseSchema,
   skillVersionInputSchema,
@@ -28,6 +30,73 @@ const VERSION_ID = "22222222-2222-4222-8222-222222222222";
 const PROJECT_ID = "33333333-3333-4333-8333-333333333333";
 
 describe("shared asset contracts", () => {
+  test("strictly parses the project default Agent pointer and revision guard", () => {
+    expect(
+      projectDefaultAgentSchema.parse({
+        agent_asset_id: ASSET_ID,
+        revision: 2,
+        request_id: "req-default-agent",
+      }),
+    ).toEqual({
+      agent_asset_id: ASSET_ID,
+      revision: 2,
+      request_id: "req-default-agent",
+    });
+    expect(
+      projectDefaultAgentSchema.parse({
+        agent_asset_id: null,
+        revision: 0,
+        request_id: "req-main-fallback",
+      }).agent_asset_id,
+    ).toBeNull();
+    expect(
+      projectDefaultAgentSchema.safeParse({
+        agent_asset_id: ASSET_ID,
+        revision: 2,
+        request_id: "req-default-agent",
+        project_id: PROJECT_ID,
+      }).success,
+    ).toBe(false);
+    expect(
+      projectDefaultAgentInputSchema.parse({
+        agent_asset_id: null,
+        expected_revision: 0,
+      }),
+    ).toEqual({ agent_asset_id: null, expected_revision: 0 });
+    expect(
+      projectDefaultAgentInputSchema.safeParse({
+        agent_asset_id: "not-a-uuid",
+        expected_revision: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      projectDefaultAgentSchema.parse({
+        agent_asset_id: ASSET_ID,
+        revision: Number.MAX_SAFE_INTEGER,
+        request_id: "req-max-safe-revision",
+      }).revision,
+    ).toBe(Number.MAX_SAFE_INTEGER);
+    expect(
+      projectDefaultAgentInputSchema.parse({
+        agent_asset_id: ASSET_ID,
+        expected_revision: Number.MAX_SAFE_INTEGER,
+      }).expected_revision,
+    ).toBe(Number.MAX_SAFE_INTEGER);
+    expect(
+      projectDefaultAgentSchema.safeParse({
+        agent_asset_id: ASSET_ID,
+        revision: Number.MAX_SAFE_INTEGER + 1,
+        request_id: "req-unsafe-revision",
+      }).success,
+    ).toBe(false);
+    expect(
+      projectDefaultAgentInputSchema.safeParse({
+        agent_asset_id: ASSET_ID,
+        expected_revision: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+    ).toBe(false);
+  });
+
   test("strictly parses bounded skill file previews and immutable fork changes", () => {
     const preview = skillVersionFileContentResponseSchema.parse({
       data: {

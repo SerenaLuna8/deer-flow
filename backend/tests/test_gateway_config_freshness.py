@@ -15,13 +15,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway import deps as gateway_deps
-from app.gateway.deps import get_config
+from app.gateway.deps import get_config, get_current_agent_runtime_config
+from app.system_runtime_settings import AgentRuntimePolicyValue
+from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
 from deerflow.config.app_config import (
     AppConfig,
     pop_current_app_config,
@@ -58,6 +62,23 @@ def _build_app() -> FastAPI:
     @app.get("/probe")
     def probe(cfg: AppConfig = Depends(get_config)):
         return {"log_level": cfg.log_level}
+
+    return app
+
+
+def _build_runtime_policy_app(materializer: object) -> FastAPI:
+    app = FastAPI()
+    app.state.system_runtime_policy_materializer = materializer
+
+    @app.get("/runtime-probe")
+    async def runtime_probe(
+        cfg: AppConfig = Depends(get_current_agent_runtime_config),
+    ):
+        return {
+            "suggestions_enabled": cfg.suggestions.enabled,
+            "input_polish_enabled": cfg.input_polish.enabled,
+            "input_polish_max_chars": cfg.input_polish.max_chars,
+        }
 
     return app
 
@@ -163,3 +184,63 @@ def test_get_config_does_not_log_secret_bearing_validation_input(
     assert response.status_code == 503
     assert secret not in caplog.text
     assert "input_value" not in caplog.text
+
+
+def test_current_agent_runtime_config_overlays_latest_database_policy() -> None:
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "test"},
+                "suggestions": {"enabled": True},
+                "input_polish": {"enabled": True, "max_chars": 4_000},
+            }
+        )
+    )
+    policy = AgentRuntimePolicyValue.model_validate(
+        {
+            "suggestions": {"enabled": False},
+            "input_polish": {
+                "enabled": False,
+                "max_chars": 321,
+                "model_name": None,
+            },
+        }
+    )
+    materializer = SimpleNamespace(
+        materialize_current=AsyncMock(return_value=policy),
+    )
+
+    response = TestClient(_build_runtime_policy_app(materializer)).get("/runtime-probe")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "suggestions_enabled": False,
+        "input_polish_enabled": False,
+        "input_polish_max_chars": 321,
+    }
+    materializer.materialize_current.assert_awaited_once()
+
+
+def test_current_agent_runtime_config_fails_closed_without_yaml_fallback() -> None:
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "test"},
+                "suggestions": {"enabled": True},
+                "input_polish": {"enabled": True},
+            }
+        )
+    )
+    materializer = SimpleNamespace(
+        materialize_current=AsyncMock(
+            side_effect=SystemRuntimePolicyUnavailable,
+        ),
+    )
+
+    response = TestClient(
+        _build_runtime_policy_app(materializer),
+        raise_server_exceptions=False,
+    ).get("/runtime-probe")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "RUNTIME_POLICY_UNAVAILABLE"

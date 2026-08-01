@@ -1,5 +1,6 @@
 """SandboxAuditMiddleware - bash command security auditing."""
 
+import hashlib
 import json
 import logging
 import re
@@ -201,8 +202,9 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
     For every ``bash`` tool call:
     1. **Command classification**: regex + shlex analysis grades commands as
        high-risk (block), medium-risk (warn), or safe (pass).
-    2. **Audit log**: every bash call is recorded as a structured JSON entry
-       via the standard logger (visible in gateway.log).
+    2. **Audit log**: every bash call is recorded as bounded structured metadata
+       via the standard logger (visible in gateway.log). The raw command is
+       classified in memory but is never written to logs or result messages.
 
     High-risk commands (e.g. ``rm -rf /``, ``curl url | bash``) are blocked:
     the handler is not called and an error ``ToolMessage`` is returned so the
@@ -229,24 +231,37 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             thread_id = cfg.get("configurable", {}).get("thread_id")
         return thread_id
 
-    _AUDIT_COMMAND_LIMIT = 200
-
     def _write_audit(self, thread_id: str | None, command: str, verdict: str, *, truncate: bool = False) -> None:
-        audited_command = command
-        if truncate and len(command) > self._AUDIT_COMMAND_LIMIT:
-            audited_command = f"{command[: self._AUDIT_COMMAND_LIMIT]}... ({len(command)} chars)"
+        # ``truncate`` remains in the private call contract for compatibility
+        # with existing callers, but raw commands are no longer persisted at
+        # any length. A digest permits correlation without disclosing tokens,
+        # credentials, URLs, or user-authored shell payloads.
+        del truncate
+        command_sha256 = hashlib.sha256(command.encode("utf-8", errors="surrogatepass")).hexdigest()
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
-            "thread_id": thread_id or "unknown",
-            "command": audited_command,
-            "verdict": verdict,
+            "thread_id": (thread_id if isinstance(thread_id, str) and thread_id else "unknown"),
+            "command_length": len(command),
+            "command_sha256": command_sha256,
+            "verdict": (verdict if verdict in {"block", "warn", "pass"} else "unknown"),
         }
         logger.info("[SandboxAudit] %s", json.dumps(record, ensure_ascii=False))
 
     def _build_block_message(self, request: ToolCallRequest, reason: str) -> ToolMessage:
         tool_call_id = str(request.tool_call.get("id") or "missing_id")
+        safe_reason = (
+            reason
+            if reason
+            in {
+                "empty command",
+                "command too long",
+                "null byte detected",
+                "security violation detected",
+            }
+            else "security policy violation"
+        )
         return ToolMessage(
-            content=f"Command blocked: {reason}. Please use a safer alternative approach.",
+            content=(f"Command blocked: {safe_reason}. Please use a safer alternative approach."),
             tool_call_id=tool_call_id,
             name="bash",
             status="error",
@@ -254,9 +269,10 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
 
     def _append_warn_to_result(self, result: ToolMessage | Command, command: str) -> ToolMessage | Command:
         """Append a warning note to the tool result for medium-risk commands."""
+        del command
         if not isinstance(result, ToolMessage):
             return result
-        warning = f"\n\n⚠️ Warning: `{command}` is a medium-risk command that may modify the runtime environment."
+        warning = "\n\n⚠️ Warning: The executed command was classified as medium-risk and may modify the runtime environment."
         if isinstance(result.content, list):
             new_content = list(result.content) + [{"type": "text", "text": warning}]
         else:
@@ -307,7 +323,13 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         reject_reason = self._validate_input(command)
         if reject_reason:
             self._write_audit(thread_id, command, "block", truncate=True)
-            logger.warning("[SandboxAudit] INVALID INPUT thread=%s reason=%s", thread_id, reject_reason)
+            logger.warning(
+                "[SandboxAudit] INVALID INPUT thread=%s command_length=%d command_sha256=%s reason=%s",
+                thread_id if isinstance(thread_id, str) and thread_id else "unknown",
+                len(command),
+                hashlib.sha256(command.encode("utf-8", errors="surrogatepass")).hexdigest(),
+                reject_reason,
+            )
             return command, thread_id, "block", reject_reason
 
         # ② classify command
@@ -317,9 +339,19 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         self._write_audit(thread_id, command, verdict)
 
         if verdict == "block":
-            logger.warning("[SandboxAudit] BLOCKED thread=%s cmd=%r", thread_id, command)
+            logger.warning(
+                "[SandboxAudit] BLOCKED thread=%s command_length=%d command_sha256=%s",
+                thread_id if isinstance(thread_id, str) and thread_id else "unknown",
+                len(command),
+                hashlib.sha256(command.encode("utf-8", errors="surrogatepass")).hexdigest(),
+            )
         elif verdict == "warn":
-            logger.warning("[SandboxAudit] WARN (medium-risk) thread=%s cmd=%r", thread_id, command)
+            logger.warning(
+                "[SandboxAudit] WARN (medium-risk) thread=%s command_length=%d command_sha256=%s",
+                thread_id if isinstance(thread_id, str) and thread_id else "unknown",
+                len(command),
+                hashlib.sha256(command.encode("utf-8", errors="surrogatepass")).hexdigest(),
+            )
 
         return command, thread_id, verdict, None
 

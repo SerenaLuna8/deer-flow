@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import logging
 import re
 import uuid
@@ -23,7 +24,14 @@ from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkMcpQuotaExceeded
-from app.private_work.file_finalizer import PrivateFileFinalizer
+from app.private_work.file_finalizer import (
+    PrivateFileFinalizationAuditPort,
+    PrivateFileFinalizer,
+)
+from app.private_work.memory_authority import (
+    DEFAULT_PRIVATE_MEMORY_NAMESPACE,
+    PrivateRunMemoryAuthority,
+)
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
     PersistedRunSnapshot,
@@ -56,7 +64,12 @@ from app.worker.service import (
     JobSettlement,
     LeaseLost,
 )
+from deerflow.config.app_config import (
+    pop_current_app_config,
+    push_current_app_config,
+)
 from deerflow.config.mcp_security_config import McpSecurityConfig
+from deerflow.config.model_config import ModelConfig
 from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
 from deerflow.mcp_definition_policy import (
     ExactMcpEndpointPolicy,
@@ -81,6 +94,7 @@ from deerflow.runtime import (
     RunStatus,
     run_agent,
 )
+from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
 from deerflow.runtime.events.models import (
     StoredStreamFrame,
     StreamFrame,
@@ -99,9 +113,101 @@ from deerflow.runtime.user_context import (
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
+from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 _PUBLIC_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 logger = logging.getLogger(__name__)
+
+
+class SystemModelMaterializationPort(Protocol):
+    """Materialize the exact secret-bearing model frozen for one Run."""
+
+    async def materialize_snapshot(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_id: str,
+        purpose: str,
+    ) -> ModelConfig: ...
+
+
+class SystemRuntimePolicyMaterializationPort(Protocol):
+    """Materialize the exact global runtime policy frozen for one Run."""
+
+    async def materialize_run_snapshot(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        run_id: str,
+    ) -> object: ...
+
+
+def _private_guardrail_attribution(
+    context: PrivateWorkContext,
+    run: PrivateRunRecord,
+) -> dict[str, object]:
+    """Build the closed Guardrail identity from the locked private Run."""
+
+    if run.project_id != context.project_id or run.owner_user_id != str(context.user_id):
+        raise RuntimeError("Private Run attribution scope mismatch")
+    return {
+        "user_id": str(context.user_id),
+        "user_role": context.role.value,
+        "thread_id": run.thread_id,
+        "run_id": run.run_id,
+        "is_subagent": False,
+        "authz_attributes": {
+            "project_id": str(context.project_id),
+            "project_role": context.role.value,
+            "capabilities": tuple(sorted(capability.value for capability in context.capabilities)),
+        },
+    }
+
+
+def _checkpoint_progress_cursor(saver: Any, item: Any | None) -> str | None:
+    """Fingerprint the latest durable checkpoint plus its pending writes."""
+
+    if item is None:
+        return None
+    raw_configurable = item.config.get("configurable")
+    checkpoint_id = None
+    if isinstance(raw_configurable, Mapping):
+        raw_checkpoint_id = raw_configurable.get("checkpoint_id")
+        if isinstance(raw_checkpoint_id, str):
+            checkpoint_id = raw_checkpoint_id
+    pending_writes = getattr(item, "pending_writes", None)
+    if not pending_writes:
+        return checkpoint_id
+    if checkpoint_id is None:
+        raise RuntimeError("checkpoint pending writes require a checkpoint id")
+
+    digest = hashlib.sha256()
+
+    def update(part: bytes) -> None:
+        digest.update(len(part).to_bytes(8, "big"))
+        digest.update(part)
+
+    update(b"deerflow:checkpoint-progress:v1")
+    update(checkpoint_id.encode())
+    for pending_write in pending_writes:
+        if not isinstance(pending_write, (list, tuple)) or len(pending_write) != 3:
+            raise RuntimeError("checkpoint pending write is invalid")
+        task_id, channel, value = pending_write
+        if not isinstance(task_id, str) or not isinstance(channel, str):
+            raise RuntimeError("checkpoint pending write identity is invalid")
+        try:
+            value_type, value_bytes = saver.serde.dumps_typed(value)
+        except Exception:
+            raise RuntimeError("checkpoint pending write serialization failed") from None
+        if not isinstance(value_type, str) or not isinstance(value_bytes, bytes):
+            raise RuntimeError("checkpoint pending write serialization is invalid")
+        update(task_id.encode())
+        update(channel.encode())
+        update(value_type.encode())
+        update(value_bytes)
+    return f"pw:{digest.hexdigest()}"
 
 
 class TransientExecutionError(RuntimeError):
@@ -376,6 +482,9 @@ class PrivateRunJobTerminalPort:
             return JobTerminalResult(run_terminal_published=False)
         if event.owner_user_id is None or event.run_id is None:
             raise RuntimeError("private job terminal authority is incomplete")
+        origin_trace_id = normalize_trace_id(event.origin_trace_id)
+        if origin_trace_id is None:
+            raise RuntimeError("private job terminal trace authority is incomplete")
         project_exists = await session.scalar(sa.select(ProjectRow.id).where(ProjectRow.id == event.project_id).with_for_update(of=ProjectRow))
         membership_version = await session.scalar(
             sa.select(ProjectMembershipRow.version)
@@ -400,6 +509,7 @@ class PrivateRunJobTerminalPort:
                 RunRow.owner_user_id == event.owner_user_id,
                 RunRow.run_id == event.run_id,
                 RunRow.job_id == event.job_id,
+                RunRow.origin_trace_id == origin_trace_id,
                 RunRow.status.in_(("pending", "running")),
             )
             .values(
@@ -422,7 +532,7 @@ class PrivateRunJobTerminalPort:
                 session,
                 scope,
                 run_id=event.run_id,
-                request_id="worker-job-terminal",
+                request_id=origin_trace_id,
             )
             await self._audit.run_terminal(
                 session,
@@ -432,7 +542,7 @@ class PrivateRunJobTerminalPort:
                 job_type=event.job_type,
                 status=run_status,
                 public_error_code=event.public_error_code,
-                request_id="worker-job-terminal",
+                request_id=origin_trace_id,
             )
         run_terminal_published = terminalized.rowcount == 1
         if event.job_type == "automation_run":
@@ -596,6 +706,65 @@ class LeaseAuthorizedStreamBridge:
             await self._bridge.cleanup(run_id, delay=0)
 
 
+class LeaseAuthorizedRunEventStore:
+    """Bind Worker journal events to the same atomic Job lease as SSE writes."""
+
+    def __init__(
+        self,
+        store: Any,
+        boundary: PrivateRunExecutionBoundary,
+        *,
+        scope: PrivateResourceScope,
+    ) -> None:
+        self._store = store
+        self._boundary = boundary
+        self._scope = scope
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
+
+    async def put(self, **event: Any) -> dict:
+        event.pop("scope", None)
+        try:
+            return await self._store.put(
+                **event,
+                scope=self._scope,
+                lease=self._boundary.stream_lease_proof(),
+            )
+        except StreamWriteAuthorizationRevoked:
+            self._boundary.record_stream_authorization_revoked()
+            raise AuthorizationRevoked from None
+        except StreamWriteLeaseLost:
+            self._boundary.record_stream_lease_lost()
+            raise AuthorizationRevoked from None
+        except StreamWriteCancelled:
+            self._boundary.request_local_cancel()
+            raise AuthorizationRevoked from None
+
+    async def put_batch(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> list[dict]:
+        del scope
+        try:
+            return await self._store.put_batch(
+                events,
+                scope=self._scope,
+                lease=self._boundary.stream_lease_proof(),
+            )
+        except StreamWriteAuthorizationRevoked:
+            self._boundary.record_stream_authorization_revoked()
+            raise AuthorizationRevoked from None
+        except StreamWriteLeaseLost:
+            self._boundary.record_stream_lease_lost()
+            raise AuthorizationRevoked from None
+        except StreamWriteCancelled:
+            self._boundary.request_local_cancel()
+            raise AuthorizationRevoked from None
+
+
 class PrivateRunExecutionBoundary:
     """Combine member authorization with the current job/run lease proof."""
 
@@ -725,6 +894,9 @@ class PrivateRunExecutionBoundary:
             "before_tool_call",
             ambiguous_side_effect=True,
         )
+
+    async def before_read_only_tool_call(self) -> None:
+        await self._check("before_tool_call")
 
     async def before_mcp_call(self) -> None:
         # Discovery/materialization is read-only.  The exact remote dispatch
@@ -871,9 +1043,12 @@ class RunAgentPrivateExecutor:
         store: Any,
         event_store: Any,
         asset_runtime: PrivateAssetRuntime | None = None,
+        model_materializer: SystemModelMaterializationPort | None = None,
+        runtime_policy_materializer: SystemRuntimePolicyMaterializationPort | None = None,
         agent_factory: Any | None = None,
         runner=run_agent,
         quota: PrivateRunAgentQuotaPort | None = None,
+        audit: PrivateFileFinalizationAuditPort | None = None,
     ) -> None:
         self._factory = session_factory
         self._app_config = app_config
@@ -881,6 +1056,8 @@ class RunAgentPrivateExecutor:
         self._project_checkpointer = project_checkpointer
         self._store = store
         self._event_store = event_store
+        self._model_materializer = model_materializer
+        self._runtime_policy_materializer = runtime_policy_materializer
         if asset_runtime is None:
             raw_mcp_security = getattr(app_config, "mcp_security", None)
             if isinstance(raw_mcp_security, McpSecurityConfig):
@@ -911,6 +1088,7 @@ class RunAgentPrivateExecutor:
         self._agent_factory = agent_factory or self._default_agent_factory()
         self._runner = runner
         self._quota = quota or _NoopPrivateRunAgentQuota()
+        self._file_finalization_audit = audit
 
     @staticmethod
     def _default_agent_factory():
@@ -979,12 +1157,25 @@ class RunAgentPrivateExecutor:
                 run_id=execution.run.run_id,
                 idempotency_key=(automation_run_idempotency_key(claim.occurrence_id) if claim.job_type == "automation_run" and claim.occurrence_id is not None else private_run_idempotency_key(execution.run.run_id)),
                 status="running",
+                origin_trace_id=execution.run.origin_trace_id,
             ),
             snapshot=execution.snapshot,
             opaque_runtime_scope=execution.context.resource_scope,
         )
 
     async def execute(
+        self,
+        execution: PrivateRunExecution,
+        authority: JobLeaseAuthority,
+    ) -> AgentExecutionResult:
+        run_trace_id = normalize_trace_id(execution.run.origin_trace_id)
+        claim_trace_id = normalize_trace_id(authority.claim.origin_trace_id)
+        if run_trace_id is None or claim_trace_id is None or run_trace_id != claim_trace_id:
+            raise PermanentExecutionError("RUN_TRACE_MISMATCH")
+        with request_trace_context(run_trace_id):
+            return await self._execute_with_trace(execution, authority)
+
+    async def _execute_with_trace(
         self,
         execution: PrivateRunExecution,
         authority: JobLeaseAuthority,
@@ -999,24 +1190,103 @@ class RunAgentPrivateExecutor:
         admitted = self._admitted(execution, claim)
         private_runtime = None
         file_authority = None
+        memory_authority = None
         record: RunRecord | None = None
+        runtime_config_pushed = False
         try:
             exact_model_name = execution.run.model_name
-            if exact_model_name is None or self._app_config.get_model_config(exact_model_name) is None:
+            if exact_model_name is None:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
+            runtime_app_config = self._app_config
+            runtime_policy = None
+            if self._runtime_policy_materializer is not None:
+                try:
+                    runtime_policy = await self._runtime_policy_materializer.materialize_run_snapshot(
+                        project_id=execution.context.project_id,
+                        owner_user_id=str(execution.context.user_id),
+                        run_id=execution.run.run_id,
+                    )
+                    runtime_app_config = self._app_config.with_runtime_policy(
+                        runtime_policy,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raise PermanentExecutionError(
+                        "RUN_POLICY_STALE",
+                    ) from None
+            if self._model_materializer is not None:
+                try:
+                    lead_model = await self._model_materializer.materialize_snapshot(
+                        project_id=execution.context.project_id,
+                        owner_user_id=str(execution.context.user_id),
+                        run_id=execution.run.run_id,
+                        purpose="lead",
+                    )
+                    runtime_models: dict[str, ModelConfig] = {
+                        lead_model.name: lead_model,
+                    }
+                    if runtime_policy is not None:
+                        auxiliary_model_refs = (
+                            ("title", runtime_app_config.title.model_name),
+                            (
+                                "summarization",
+                                runtime_app_config.summarization.model_name,
+                            ),
+                            ("memory", runtime_app_config.memory.model_name),
+                        )
+                        for purpose, model_ref in auxiliary_model_refs:
+                            if model_ref is None:
+                                continue
+                            auxiliary_model = await self._model_materializer.materialize_snapshot(
+                                project_id=execution.context.project_id,
+                                owner_user_id=str(execution.context.user_id),
+                                run_id=execution.run.run_id,
+                                purpose=purpose,
+                            )
+                            if auxiliary_model.name != model_ref:
+                                raise PermanentExecutionError(
+                                    "RUN_ASSET_STALE",
+                                )
+                            existing = runtime_models.get(auxiliary_model.name)
+                            if existing is not None and existing != auxiliary_model:
+                                raise PermanentExecutionError(
+                                    "RUN_ASSET_STALE",
+                                )
+                            runtime_models[auxiliary_model.name] = auxiliary_model
+                except asyncio.CancelledError:
+                    raise
+                except PermanentExecutionError:
+                    raise
+                except Exception:
+                    raise PermanentExecutionError(
+                        "RUN_ASSET_STALE",
+                    ) from None
+                if lead_model.name != exact_model_name:
+                    raise PermanentExecutionError("RUN_ASSET_STALE")
+                runtime_app_config = runtime_app_config.with_runtime_models(
+                    tuple(runtime_models.values()),
+                )
+            elif runtime_app_config.get_model_config(exact_model_name) is None:
+                # Compatibility path for isolated unit tests. Production
+                # composition always injects the PostgreSQL materializer.
+                raise PermanentExecutionError("RUN_ASSET_STALE")
+
+            push_current_app_config(runtime_app_config)
+            runtime_config_pushed = True
             private_runtime = await self._asset_runtime.materialize(
                 execution.context,
                 admitted,
                 authorization_boundary=boundary,
             )
             resolved_runtime_model = resolve_model_ref(
-                self._app_config,
+                runtime_app_config,
                 private_runtime.model_ref,
             )
             if getattr(resolved_runtime_model, "name", None) != exact_model_name:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
 
-            skills_config = getattr(self._app_config, "skills", None)
+            skills_config = getattr(runtime_app_config, "skills", None)
             skill_container_path = getattr(
                 skills_config,
                 "container_path",
@@ -1042,8 +1312,19 @@ class RunAgentPrivateExecutor:
                     authorization_boundary=boundary,
                 ),
                 PrivateSandboxFileProjection(self._factory),
-                PrivateFileFinalizer(self._factory, quota=self._quota),
+                PrivateFileFinalizer(
+                    self._factory,
+                    quota=self._quota,
+                    audit=self._file_finalization_audit,
+                ),
                 mounts=mounts,
+            )
+            memory_authority = PrivateRunMemoryAuthority(
+                self._factory,
+                context=execution.context,
+                claim=claim,
+                thread_id=execution.run.thread_id,
+                namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
             )
             run_manager = RunManager()
             record = await run_manager.register_persisted(
@@ -1076,17 +1357,26 @@ class RunAgentPrivateExecutor:
             run_context = RunContext(
                 checkpointer=checkpointer,
                 store=self._store,
-                event_store=self._event_store,
+                event_store=LeaseAuthorizedRunEventStore(
+                    self._event_store,
+                    boundary,
+                    scope=execution.context.resource_scope,
+                ),
                 run_events_config=None,
                 thread_store=_PrivateRunThreadMetadataStore(
                     self._factory,
                     scope=execution.context.resource_scope,
                     boundary=boundary,
                 ),
-                app_config=self._app_config,
+                app_config=runtime_app_config,
                 private_scope=execution.context.resource_scope,
                 authorization_boundary=boundary,
                 file_authority=file_authority,
+                memory_authority=memory_authority,
+                guardrail_attribution=_private_guardrail_attribution(
+                    execution.context,
+                    execution.run,
+                ),
                 private_agent_runtime=private_runtime,
             )
             owner_token = set_current_user(
@@ -1146,12 +1436,20 @@ class RunAgentPrivateExecutor:
             )
         except asyncio.CancelledError:
             raise
+        except CheckpointModeMismatchError as error:
+            raise PermanentExecutionError(
+                "CHECKPOINT_MODE_MISMATCH",
+            ) from error
         except TransientExecutionError as error:
             if error.attempt_usage is None and record is not None and not boundary.lease_lost:
                 raise TransientExecutionError(
                     error.public_error_code,
                     attempt_usage=self._usage_snapshot(record),
                 ) from error
+            raise
+        except PermanentExecutionError:
+            # Deterministic admitted-snapshot drift must reach the Job handler
+            # unchanged so it settles the Run dead instead of scheduling retry.
             raise
         except AmbiguousExternalSideEffect:
             raise
@@ -1178,6 +1476,8 @@ class RunAgentPrivateExecutor:
                 attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
             ) from None
         finally:
+            if runtime_config_pushed:
+                pop_current_app_config()
             if private_runtime is not None:
                 try:
                     await private_runtime.aclose()
@@ -1270,7 +1570,8 @@ class PrivateRunJobHandler:
         AgentExecutionResult | None,
         PrivateResourceScope,
     ]:
-        if claim.job_type not in {"private_run", "automation_run"} or claim.run_id is None or claim.scope.owner_user_id is None or (claim.job_type == "automation_run" and claim.occurrence_id is None):
+        origin_trace_id = normalize_trace_id(claim.origin_trace_id)
+        if claim.job_type not in {"private_run", "automation_run"} or claim.run_id is None or claim.scope.owner_user_id is None or (claim.job_type == "automation_run" and claim.occurrence_id is None) or origin_trace_id is None:
             raise LeaseLost(claim.job_id)
         try:
             owner_user_id = uuid.UUID(claim.scope.owner_user_id)
@@ -1283,7 +1584,7 @@ class PrivateRunJobHandler:
                     session,
                     owner_user_id,
                     claim.scope.project_id,
-                    "worker-private-run",
+                    origin_trace_id,
                     lock=True,
                 )
                 project.require(Capability.PRIVATE_WORK_CREATE)
@@ -1294,6 +1595,7 @@ class PrivateRunJobHandler:
                     run_id=claim.run_id,
                     job_id=claim.job_id,
                     lease_token=claim.lease_token,
+                    origin_trace_id=origin_trace_id,
                 )
                 return None, True, None, claim_scope
             context = PrivateWorkContext.from_project(project)
@@ -1303,6 +1605,7 @@ class PrivateRunJobHandler:
                 run_id=claim.run_id,
                 job_id=claim.job_id,
                 lease_token=claim.lease_token,
+                origin_trace_id=origin_trace_id,
             )
             terminal = await self._events.get_stream_terminal(
                 session,
@@ -1349,20 +1652,14 @@ class PrivateRunJobHandler:
                     },
                     session=session,
                 )
-                latest_checkpoint_id = None
-                if item is not None:
-                    raw_configurable = item.config.get("configurable")
-                    if isinstance(raw_configurable, Mapping):
-                        raw_checkpoint_id = raw_configurable.get("checkpoint_id")
-                        if isinstance(raw_checkpoint_id, str):
-                            latest_checkpoint_id = raw_checkpoint_id
+                checkpoint_cursor = _checkpoint_progress_cursor(saver, item)
                 resume_from_checkpoint = await runs.prepare_checkpoint_takeover(
                     scope=context.resource_scope,
                     run_id=claim.run_id,
                     job_id=claim.job_id,
                     attempt_id=claim.attempt_id,
                     lease_token=claim.lease_token,
-                    latest_checkpoint_id=latest_checkpoint_id,
+                    latest_checkpoint_id=checkpoint_cursor,
                 )
 
         kwargs = state.run.kwargs
@@ -1436,8 +1733,11 @@ class PrivateRunJobHandler:
         durable_terminal: bool = False,
     ) -> JobSettlement:
         outcome = JobOutcome(result.status, result.public_error_code)
+        origin_trace_id = normalize_trace_id(claim.origin_trace_id)
+        if origin_trace_id is None:
+            raise LeaseLost(claim.job_id)
 
-        async def commit() -> None:
+        async def commit_with_trace() -> None:
             try:
                 settled_run = None
                 async with self._factory() as session, session.begin():
@@ -1469,7 +1769,7 @@ class PrivateRunJobHandler:
                             session,
                             locked_scope,
                             run_id=settled_run.run_id,
-                            request_id="worker-private-run",
+                            request_id=claim.origin_trace_id,
                         )
                         await self._audit.run_terminal(
                             session,
@@ -1479,7 +1779,7 @@ class PrivateRunJobHandler:
                             job_type=claim.job_type,
                             status=settled_run.status,
                             public_error_code=result.public_error_code,
-                            request_id="worker-private-run",
+                            request_id=claim.origin_trace_id,
                         )
                 if claim.job_type == "automation_run" and settled_run is not None:
                     from types import SimpleNamespace
@@ -1501,9 +1801,24 @@ class PrivateRunJobHandler:
             except PrivateRunExecutionLeaseLost:
                 raise LeaseLost(claim.job_id) from None
 
+        async def commit() -> None:
+            with request_trace_context(origin_trace_id):
+                await commit_with_trace()
+
         return JobSettlement(outcome, commit)
 
     async def __call__(
+        self,
+        claim: JobClaim,
+        authority: JobLeaseAuthority,
+    ) -> JobSettlement:
+        origin_trace_id = normalize_trace_id(claim.origin_trace_id)
+        if origin_trace_id is None:
+            raise LeaseLost(claim.job_id)
+        with request_trace_context(origin_trace_id):
+            return await self._handle_with_trace(claim, authority)
+
+    async def _handle_with_trace(
         self,
         claim: JobClaim,
         authority: JobLeaseAuthority,

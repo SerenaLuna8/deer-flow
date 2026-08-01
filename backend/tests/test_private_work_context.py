@@ -16,6 +16,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import app.private_work.context as private_work_context_module
 from app.private_work.context import PrivateWorkContext, strip_private_client_fields
 from app.private_work.errors import PrivateWorkForbidden, PrivateWorkNotFound
 from app.private_work.revalidation import PrivateWorkRevalidator
@@ -77,6 +78,17 @@ def test_private_work_context_can_only_derive_from_exact_project_context(project
     for source in (project_context.__dict__, forged, SimpleNamespace(**project_context.__dict__)):
         with pytest.raises(PrivateWorkNotFound):
             PrivateWorkContext.from_project(source)  # type: ignore[arg-type]
+
+
+def test_private_work_context_registry_lock_allows_weakref_callback_reentry() -> None:
+    lock = private_work_context_module._ISSUED_CONTEXTS_LOCK
+
+    assert lock.acquire(timeout=0.1)
+    try:
+        assert lock.acquire(timeout=0.1)
+        lock.release()
+    finally:
+        lock.release()
 
 
 @pytest.mark.parametrize(

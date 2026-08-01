@@ -1,7 +1,7 @@
 "use client";
 
 import { CollapsibleContent } from "@radix-ui/react-collapsible";
-import { ChevronDownIcon, LightbulbIcon } from "lucide-react";
+import { AtomIcon, ChevronRightIcon } from "lucide-react";
 import {
   useEffect,
   useRef,
@@ -25,6 +25,7 @@ export function ThinkingDisclosure({
   children,
   className,
   defaultOpen,
+  duration: observedDuration,
   isStreaming = false,
   ...props
 }: Omit<ReasoningProps, "defaultOpen" | "onOpenChange" | "open"> & {
@@ -53,18 +54,19 @@ export function ThinkingDisclosure({
 
   return (
     <Reasoning
-      className={cn(
-        "border-border/70 bg-background mb-4 overflow-hidden rounded-xl border",
-        className,
-      )}
+      className={cn("mb-3", className)}
       data-testid="thinking-disclosure"
       defaultOpen={false}
+      duration={observedDuration}
       isStreaming={isStreaming}
       onOpenChange={setIsOpen}
       open={isOpen}
       {...props}
     >
-      <ThinkingDisclosureTrigger hasContent={children != null} />
+      <ThinkingDisclosureTrigger
+        completedDuration={observedDuration}
+        hasContent={children != null}
+      />
       {children}
     </Reasoning>
   );
@@ -78,7 +80,7 @@ export function ThinkingDisclosureContent({
   return (
     <CollapsibleContent
       className={cn(
-        "border-border/60 bg-muted/25 text-foreground/75 border-t px-4 py-4 text-sm leading-6",
+        "border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 text-sm leading-6",
         "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-1 data-[state=open]:slide-in-from-top-1 data-[state=closed]:animate-out data-[state=open]:animate-in outline-none",
         className,
       )}
@@ -89,28 +91,34 @@ export function ThinkingDisclosureContent({
   );
 }
 
-function ThinkingDisclosureTrigger({ hasContent }: { hasContent: boolean }) {
-  const { duration, isOpen, isStreaming, startTime } = useReasoning();
+function ThinkingDisclosureTrigger({
+  completedDuration,
+  hasContent,
+}: {
+  completedDuration?: number;
+  hasContent: boolean;
+}) {
+  const { isOpen, isStreaming, startTime } = useReasoning();
 
   return (
     <ReasoningTrigger
       className={cn(
-        "text-foreground/75 hover:bg-muted/45 hover:text-foreground min-h-10 justify-start gap-2.5 px-4 py-2.5 font-medium",
+        "text-muted-foreground hover:text-foreground focus-visible:ring-ring/50 min-h-8 w-fit justify-start gap-2 px-0 py-1 font-normal hover:bg-transparent focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none",
         !hasContent && "cursor-default",
       )}
       hasContent={hasContent}
     >
-      <LightbulbIcon className="text-muted-foreground size-4 shrink-0" />
+      <AtomIcon className="size-3.5 shrink-0 text-[#3964fe]" />
       <ThinkingStatus
-        duration={duration}
+        duration={completedDuration}
         isStreaming={isStreaming}
         startTime={startTime}
       />
       {hasContent && (
-        <ChevronDownIcon
+        <ChevronRightIcon
           className={cn(
-            "text-muted-foreground ml-auto size-4 shrink-0 transition-transform duration-200",
-            isOpen && "rotate-180",
+            "text-muted-foreground size-3.5 shrink-0 transition-transform duration-200",
+            isOpen && "rotate-90",
           )}
         />
       )}

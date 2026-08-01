@@ -628,6 +628,7 @@ class WechatChannel(Channel):
             return
 
         thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+        provider_delivery_id = str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip()
 
         if context_token:
             self._context_tokens_by_chat[chat_id] = context_token
@@ -640,6 +641,7 @@ class WechatChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
             thread_ts=thread_ts,
+            provider_delivery_id=provider_delivery_id or None,
             files=files,
             metadata={
                 "context_token": context_token,

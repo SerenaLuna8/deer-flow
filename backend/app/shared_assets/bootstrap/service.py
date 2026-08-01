@@ -16,6 +16,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bootstrap_identities import (
+    BUILTIN_ASSET_EMAIL,
+    BUILTIN_ASSET_USER_ID,
+)
 from app.shared_assets.bootstrap.catalog import (
     BootstrapCatalog,
     BootstrapCatalogError,
@@ -54,8 +58,6 @@ from deerflow.persistence.shared_assets import (
 )
 from deerflow.persistence.user import UserRow
 
-BUILTIN_ASSET_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000007")
-BUILTIN_ASSET_EMAIL = "builtin-assets@deerflow.invalid"
 _ID_NAMESPACE = uuid.UUID("6f6622dd-a1f5-5799-a2f7-d9f793ea8d2e")
 
 

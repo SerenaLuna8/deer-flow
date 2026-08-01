@@ -656,6 +656,7 @@ async def test_dead_once_automation_job_terminalizes_occurrence_and_definition(
                     public_error_code="WORKER_ATTEMPTS_EXHAUSTED",
                     cancel_reason=None,
                     occurred_at=occurred_at,
+                    origin_trace_id=admitted.run.origin_trace_id,
                 ),
             )
 
@@ -793,6 +794,7 @@ async def test_automation_terminal_port_never_waits_on_locked_parent_definition(
                             public_error_code="WORKER_ATTEMPTS_EXHAUSTED",
                             cancel_reason=None,
                             occurred_at=occurred_at,
+                            origin_trace_id=admitted.run.origin_trace_id,
                         ),
                     )
 

@@ -17,6 +17,11 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from deerflow.config import get_app_config
+from deerflow.error_codes import SUBAGENT_EXECUTION_FAILED_ERROR_CODE
+from deerflow.guardrails.provider import (
+    GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
+    copy_guardrail_attribution,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -122,10 +127,11 @@ def _trusted_private_mcp_tools(
     raw_tools = parent_context.get("__runtime_mcp_tools")
     if not isinstance(raw_tools, tuple):
         return ()
+    from deerflow.tools.mcp_metadata import is_private_mcp_tool
+
     trusted: list[BaseTool] = []
     for candidate in raw_tools:
-        metadata = getattr(candidate, "metadata", None)
-        if not isinstance(candidate, BaseTool) or not isinstance(metadata, dict) or metadata.get("deerflow_private_mcp") is not True:
+        if not isinstance(candidate, BaseTool) or not is_private_mcp_tool(candidate):
             return ()
         trusted.append(candidate)
     return tuple(trusted)
@@ -271,9 +277,13 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, tas
     if cleanup_task.cancelled():
         return
 
-    exc = cleanup_task.exception()
-    if exc is not None:
-        logger.error(f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}")
+    if cleanup_task.exception() is not None:
+        logger.error(
+            "[trace=%s] Deferred cleanup failed for task %s: error_code=%s",
+            trace_id,
+            task_id,
+            SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+        )
 
 
 def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int) -> None:
@@ -343,7 +353,10 @@ def _report_subagent_usage(runtime: Any, result: Any) -> None:
         journal.record_external_llm_usage_records(records)
         result.usage_reported = True
     except Exception:
-        logger.warning("Failed to report subagent token usage", exc_info=True)
+        logger.warning(
+            "Failed to report subagent token usage: error_code=%s",
+            SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+        )
 
 
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
@@ -373,6 +386,8 @@ def _task_result_command(
     result: str | None = None,
     error: str | None = None,
     stop_reason: SubagentStopReasonValue | None = None,
+    model_name: str | None = None,
+    usage: dict[str, int] | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     return Command(
@@ -382,7 +397,14 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
-                    additional_kwargs=make_subagent_additional_kwargs(status, result=result, error=metadata_error, stop_reason=stop_reason),
+                    additional_kwargs=make_subagent_additional_kwargs(
+                        status,
+                        result=result,
+                        error=metadata_error,
+                        stop_reason=stop_reason,
+                        model_name=model_name,
+                        token_usage=usage,
+                    ),
                 )
             ]
         }
@@ -498,10 +520,18 @@ async def task_tool(
     # tool call delegated to a subagent (user_role=None).
     parent_context = runtime.context if runtime is not None else None
     parent_context = parent_context if isinstance(parent_context, dict) else {}
+    private_run = "private_scope" in parent_context
+    guardrail_attribution = copy_guardrail_attribution(parent_context.get(GUARDRAIL_ATTRIBUTION_CONTEXT_KEY)) if private_run else None
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
     run_id = parent_context.get("run_id")
+    if guardrail_attribution is not None:
+        user_id = guardrail_attribution.get("user_id")
+        user_role = guardrail_attribution.get("user_role")
+        oauth_provider = guardrail_attribution.get("oauth_provider")
+        oauth_id = guardrail_attribution.get("oauth_id")
+        run_id = guardrail_attribution.get("run_id")
     # IM-channel sender identity: group chats share one thread across senders,
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
@@ -531,7 +561,6 @@ async def task_tool(
         "groups": parent_tool_groups,
         "subagent_enabled": False,
     }
-    private_run = "private_scope" in parent_context
     if private_run:
         # Private Runs may use only the exact admitted proxies installed by the
         # Worker below. Never fall back to process-global MCP or ACP discovery.
@@ -578,6 +607,8 @@ async def task_tool(
         "channel_user_id": channel_user_id,
         "deerflow_trace_id": deerflow_trace_id,
     }
+    if guardrail_attribution is not None:
+        executor_kwargs["guardrail_attribution"] = guardrail_attribution
     # Preserve the server-issued private Run boundary across delegation.
     # Passing only sandbox/thread_data state is insufficient: the subagent's
     # own ThreadDataMiddleware and SandboxMiddleware need the opaque authority
@@ -639,7 +670,14 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer({"type": "task_started", "task_id": task_id, "description": description})
+    writer(
+        {
+            "type": "task_started",
+            "task_id": task_id,
+            "description": description,
+            "model_name": effective_model,
+        }
+    )
 
     try:
         while True:
@@ -647,19 +685,32 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+                writer(
+                    {
+                        "type": "task_failed",
+                        "task_id": task_id,
+                        "error": "Task disappeared from background tasks",
+                        "model_name": effective_model,
+                        "usage": None,
+                    }
+                )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
                     error=error,
+                    model_name=effective_model,
                 )
 
             # Log status changes for debugging
             if result.status != last_status:
                 logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
                 last_status = result.status
+
+            # Token records are cumulative. Reuse one snapshot for progress and
+            # terminal events so consumers replace rather than add totals.
+            usage = _summarize_usage(getattr(result, "token_usage_records", None))
 
             # Check for new AI messages and send task_running events
             ai_messages = result.ai_messages or []
@@ -675,17 +726,26 @@ async def task_tool(
                             "message": message,
                             "message_index": i + 1,  # 1-based index for display
                             "total_messages": current_message_count,
+                            "usage": usage,
+                            "model_name": effective_model,
                         }
                     )
                     logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
                 last_message_count = current_message_count
 
             # Check if task completed, failed, or timed out
-            usage = _summarize_usage(getattr(result, "token_usage_records", None))
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage})
+                writer(
+                    {
+                        "type": "task_completed",
+                        "task_id": task_id,
+                        "result": result.result,
+                        "usage": usage,
+                        "model_name": effective_model,
+                    }
+                )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
@@ -696,12 +756,22 @@ async def task_tool(
                     status="completed",
                     result=result.result,
                     stop_reason=result.stop_reason,
+                    model_name=effective_model,
+                    usage=usage,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage})
-                logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+                writer(
+                    {
+                        "type": "task_failed",
+                        "task_id": task_id,
+                        "error": result.error,
+                        "usage": usage,
+                        "model_name": effective_model,
+                    }
+                )
+                logger.error("[trace=%s] Task %s failed", trace_id, task_id)
                 cleanup_background_task(task_id)
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
@@ -711,28 +781,50 @@ async def task_tool(
                     status="failed",
                     error=result.error,
                     stop_reason=result.stop_reason,
+                    model_name=effective_model,
+                    usage=usage,
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error, "usage": usage})
-                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                writer(
+                    {
+                        "type": "task_cancelled",
+                        "task_id": task_id,
+                        "error": result.error,
+                        "usage": usage,
+                        "model_name": effective_model,
+                    }
+                )
+                logger.info("[trace=%s] Task %s cancelled", trace_id, task_id)
                 cleanup_background_task(task_id)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="cancelled",
                     error=result.error,
+                    model_name=effective_model,
+                    usage=usage,
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage})
-                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+                writer(
+                    {
+                        "type": "task_timed_out",
+                        "task_id": task_id,
+                        "error": result.error,
+                        "usage": usage,
+                        "model_name": effective_model,
+                    }
+                )
+                logger.warning("[trace=%s] Task %s timed out", trace_id, task_id)
                 cleanup_background_task(task_id)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="timed_out",
                     error=result.error,
+                    model_name=effective_model,
+                    usage=usage,
                 )
 
             # Still running, wait before next poll
@@ -748,7 +840,14 @@ async def task_tool(
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
-                writer({"type": "task_timed_out", "task_id": task_id, "usage": usage})
+                writer(
+                    {
+                        "type": "task_timed_out",
+                        "task_id": task_id,
+                        "usage": usage,
+                        "model_name": effective_model,
+                    }
+                )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.
@@ -759,6 +858,8 @@ async def task_tool(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",
                     error=message,
+                    model_name=effective_model,
+                    usage=usage,
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.

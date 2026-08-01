@@ -23,6 +23,7 @@ import {
   projectAssetVersionsKey,
   type EnableSystemBindingInput,
   type MoveSystemBindingInput,
+  type ProjectDefaultAgent,
   type ProjectAssetItem,
   type ProjectAssetList,
   type VersionHistoryResponse,
@@ -149,6 +150,48 @@ export function mainProjectAgent(
   );
 }
 
+export type ProjectDefaultAgentResolution =
+  | {
+      status: "ready";
+      source: "main" | "project";
+      agent: ExecutableProjectAgent;
+    }
+  | { status: "unavailable"; reason: string };
+
+export function resolveProjectDefaultAgent(
+  catalog: ProjectAssetList | undefined,
+  setting: ProjectDefaultAgent | undefined,
+): ProjectDefaultAgentResolution {
+  if (!catalog || !setting) {
+    return {
+      status: "unavailable",
+      reason: "无法确认项目默认 Agent，请稍后重试。",
+    };
+  }
+  if (setting.agent_asset_id === null) {
+    const agent = mainProjectAgent(catalog);
+    return agent
+      ? { status: "ready", source: "main", agent }
+      : {
+          status: "unavailable",
+          reason: "Main Agent 当前不可用，请联系项目管理员。",
+        };
+  }
+  const agent = catalog.project_items.find(
+    (item) =>
+      item.id === setting.agent_asset_id &&
+      item.status === "active" &&
+      item.current_published_version_id !== null &&
+      item.capabilities.includes("shared_assets.execute"),
+  );
+  return agent
+    ? { status: "ready", source: "project", agent }
+    : {
+        status: "unavailable",
+        reason: "项目默认 Agent 当前不可用，请联系项目管理员。",
+      };
+}
+
 type MainSystemBindingKind = "agent" | "skill" | "mcp";
 
 export type MainDependencyTarget = {
@@ -158,8 +201,15 @@ export type MainDependencyTarget = {
   boundVersionNumber: number | null;
 };
 
+export type MainAgentTarget = {
+  versionId: string;
+  versionNumber: number;
+  boundVersionNumber: number | null;
+};
+
 type EnsureMainSystemAgentBindingsDependencies = {
   agent: ProjectAssetItem;
+  agentTarget: MainAgentTarget;
   requiredSkillVersionIds: readonly string[];
   requiredMcpVersionIds: readonly string[];
   skillDependencies: readonly MainDependencyTarget[];
@@ -170,7 +220,7 @@ type EnsureMainSystemAgentBindingsDependencies = {
     input: EnableSystemBindingInput,
   ) => Promise<unknown>;
   moveBinding: (
-    kind: Exclude<MainSystemBindingKind, "agent">,
+    kind: MainSystemBindingKind,
     assetId: string,
     action: "upgrade" | "rollback",
     input: MoveSystemBindingInput,
@@ -230,6 +280,7 @@ async function ensureSystemDependencyBindings(
 
 export async function ensureMainSystemAgentBindings({
   agent,
+  agentTarget,
   requiredSkillVersionIds,
   requiredMcpVersionIds,
   skillDependencies,
@@ -241,7 +292,8 @@ export async function ensureMainSystemAgentBindings({
   if (
     agent.scope !== "system" ||
     agent.status !== "active" ||
-    agent.current_published_version_id === null
+    agent.current_published_version_id === null ||
+    agentTarget.versionId !== agent.current_published_version_id
   ) {
     throw new Error("Main 智能体尚未就绪");
   }
@@ -265,14 +317,32 @@ export async function ensureMainSystemAgentBindings({
     enableBinding,
     moveBinding,
   );
+  const agentBindingChanged =
+    agent.binding?.enabled !== true ||
+    agent.binding.version_id !== agentTarget.versionId;
   if (agent.binding?.enabled !== true) {
-    await enableBinding(
+    await enableBinding("agent", bindingInput(agent, agentTarget.versionId));
+  } else if (agent.binding.version_id !== agentTarget.versionId) {
+    if (
+      agentTarget.boundVersionNumber === null ||
+      agentTarget.boundVersionNumber === agentTarget.versionNumber
+    ) {
+      throw new Error("Main 智能体绑定版本无法确认");
+    }
+    await moveBinding(
       "agent",
-      bindingInput(agent, agent.current_published_version_id),
+      agent.id,
+      agentTarget.versionNumber > agentTarget.boundVersionNumber
+        ? "upgrade"
+        : "rollback",
+      {
+        version_id: agentTarget.versionId,
+        expected_binding_version: agent.binding.version,
+      },
     );
   }
   return (
-    agent.binding?.enabled !== true ||
+    agentBindingChanged ||
     [...skillDependencies, ...mcpDependencies].some(
       ({ item, versionId }) =>
         item.scope === "system" &&
@@ -289,10 +359,9 @@ export function projectThreadAgentSelection(agent: ExecutableProjectAgent) {
   } satisfies Pick<CreateProjectThreadInput, "agentAssetId" | "agentScope">;
 }
 
-type CreateProjectChatDependencies = {
+type CreateProjectChatBaseDependencies = {
   scope: ProjectClientScope;
   projectSlug: string;
-  agent: ExecutableProjectAgent;
   createThreadId?: () => string;
   createThread?: (
     scope: ProjectClientScope,
@@ -300,6 +369,10 @@ type CreateProjectChatDependencies = {
   ) => Promise<unknown>;
   invalidateThreadLists?: () => void;
   navigate: (path: string) => void;
+};
+
+type CreateProjectChatDependencies = CreateProjectChatBaseDependencies & {
+  agent: ExecutableProjectAgent;
 };
 
 export async function createProjectChatForAgent({
@@ -317,6 +390,23 @@ export async function createProjectChatForAgent({
     ...projectThreadAgentSelection(agent),
     displayName: "新对话",
   });
+  invalidateThreadLists?.();
+  navigate(
+    `/projects/${encodeURIComponent(projectSlug)}/chats/${encodeURIComponent(threadId)}`,
+  );
+  return threadId;
+}
+
+export async function createProjectChatWithDefaultAgent({
+  scope,
+  projectSlug,
+  createThreadId = uuid,
+  createThread = createProjectThread,
+  invalidateThreadLists,
+  navigate,
+}: CreateProjectChatBaseDependencies): Promise<string> {
+  const threadId = createThreadId();
+  await createThread(scope, { threadId, displayName: "新对话" });
   invalidateThreadLists?.();
   navigate(
     `/projects/${encodeURIComponent(projectSlug)}/chats/${encodeURIComponent(threadId)}`,

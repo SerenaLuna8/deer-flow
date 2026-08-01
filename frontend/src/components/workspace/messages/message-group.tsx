@@ -24,12 +24,14 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
+import { buildWriteFileArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { indexToolCallData } from "@/core/messages/tool-call-index";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractReasoningContentFromMessage,
+  getReasoningDurationSeconds,
   isClarificationOnlyProcessingGroup,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
@@ -51,14 +53,12 @@ export function MessageGroup({
   className,
   messages,
   isLoading = false,
-  turnStartTime,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
 }: {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
-  turnStartTime?: number | null;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
 }) {
@@ -248,8 +248,8 @@ export function MessageGroup({
     return (
       <ThinkingDisclosure
         className={className}
+        duration={lastReasoningStep.reasoningDurationSeconds}
         isStreaming={isLoading}
-        startTimeProp={turnStartTime}
       >
         <ThinkingDisclosureContent>
           <MarkdownContent
@@ -488,49 +488,42 @@ function ToolCall({
     ) : (
       fallback
     );
+  const writeFilePath =
+    (name === "write_file" || name === "str_replace") &&
+    typeof args.path === "string" &&
+    args.path
+      ? args.path
+      : undefined;
+  const writeFileArtifactUrl =
+    artifactsEnabled && writeFilePath
+      ? buildWriteFileArtifactURL({
+          filepath: writeFilePath,
+          messageId,
+          toolCallId: id,
+        })
+      : null;
+  const autoOpenArtifactUrl =
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
+      : null;
 
   useEffect(() => {
-    if (
-      !artifactsEnabled ||
-      (name !== "write_file" && name !== "str_replace") ||
-      !isLoading ||
-      !isLast ||
-      !autoOpen ||
-      !autoSelect ||
-      typeof args.path !== "string" ||
-      !args.path ||
-      result
-    ) {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
       return;
     }
 
-    const path = args.path;
     const timeout = window.setTimeout(() => {
-      const url = new URL(
-        `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-      ).toString();
-      if (selectedArtifact !== url) {
-        select(url, true);
-      }
+      select(autoOpenArtifactUrl, true);
       setOpen(true);
     }, 100);
 
     return () => window.clearTimeout(timeout);
-  }, [
-    args.path,
-    artifactsEnabled,
-    autoOpen,
-    autoSelect,
-    id,
-    isLast,
-    isLoading,
-    messageId,
-    name,
-    result,
-    select,
-    selectedArtifact,
-    setOpen,
-  ]);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
@@ -603,6 +596,14 @@ function ToolCall({
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
+    );
+  } else if (name === "present_files") {
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={t.toolCalls.presentFiles}
+        icon={FolderOpenIcon}
+      ></ChainOfThoughtStep>
     );
   } else if (name === "web_fetch") {
     const url = (args as { url: string })?.url;
@@ -679,29 +680,24 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
     return (
       <ChainOfThoughtStep
         key={id}
-        className={cn(artifactsEnabled && "cursor-pointer")}
+        className={cn(writeFileArtifactUrl && "cursor-pointer")}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={
-          artifactsEnabled
+          writeFileArtifactUrl
             ? () => {
-                select(
-                  new URL(
-                    `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-                  ).toString(),
-                );
+                select(writeFileArtifactUrl);
                 setOpen(true);
               }
             : undefined
         }
       >
-        {path && (
+        {writeFilePath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -772,6 +768,7 @@ interface GenericCoTStep<T extends string = string> {
 
 interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
   reasoning: string | null;
+  reasoningDurationSeconds?: number;
 }
 
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
@@ -794,6 +791,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "reasoning",
           reasoning,
+          reasoningDurationSeconds: getReasoningDurationSeconds(message),
         };
         steps.push(step);
       }

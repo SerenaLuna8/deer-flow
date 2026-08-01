@@ -405,11 +405,11 @@ class BoxliteBox(Sandbox):
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
-        # busybox+GNU-portable flags: -r recursive (also prints the filename),
-        # -n line numbers, -I skip binary, -E/-F regex vs fixed. --include and -m
-        # are omitted for busybox portability; glob-scoping and the result cap are
-        # applied in Python below.
-        flags = ["-r", "-n", "-I"]
+        # busybox+GNU-portable flags: -r recursive, -H always print the
+        # filename (including for a single-file root), -n line numbers, and -I
+        # skip binary. --include and -m are omitted for busybox portability;
+        # glob-scoping and the result cap are applied in Python below.
+        flags = ["-r", "-H", "-n", "-I"]
         if not case_sensitive:
             flags.append("-i")
         flags.append("-F" if literal else "-E")

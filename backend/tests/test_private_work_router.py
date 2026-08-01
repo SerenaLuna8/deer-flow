@@ -8,19 +8,30 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import ValidationError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.gateway.deps import private_work_context
-from app.gateway.routers.private_work import _thread_response, router
+from app.gateway.deps import get_config, private_work_context, project_session
+from app.gateway.routers.private_work import (
+    PrivateThreadCreateRequest,
+    _public_event,
+    _run_message_response,
+    _thread_response,
+    router,
+)
 from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
+from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import (
     PrivateThreadRecord,
     PrivateThreadRepository,
     ThreadAgentRef,
 )
 from app.private_work.thread_service import PrivateThreadService
+from deerflow.config.app_config import AppConfig
 
 
 @pytest_asyncio.fixture()
@@ -71,6 +82,7 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     app = FastAPI()
     app.include_router(router)
     app.state.private_thread_service = PrivateThreadService(seed.factory, scoped)
+    app.state.private_run_service = PrivateRunService(seed.factory)
     app.state.project_scoped_checkpointer = scoped
 
     async def context_override(project_id: uuid.UUID, request: Request):
@@ -86,7 +98,19 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
             return seed.viewer
         raise HTTPException(status_code=404)
 
+    async def session_override():
+        async with seed.factory() as session:
+            yield session
+
     app.dependency_overrides[private_work_context] = context_override
+    app.dependency_overrides[project_session] = session_override
+    app.dependency_overrides[get_config] = lambda: AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+        }
+    )
     return _Harness(seed=seed, app=app, raw=raw)
 
 
@@ -103,6 +127,41 @@ def _create_body(
         "display_name": display_name,
         "metadata": {"topic": "private"},
     }
+
+
+def test_thread_create_request_accepts_explicit_or_default_agent_selection() -> None:
+    thread_id = uuid.uuid4()
+    default_selection = PrivateThreadCreateRequest.model_validate({"thread_id": str(thread_id)})
+    assert default_selection.agent_asset_id is None
+    assert default_selection.agent_scope is None
+
+    agent_id = uuid.uuid4()
+    explicit_selection = PrivateThreadCreateRequest.model_validate(
+        {
+            "thread_id": str(thread_id),
+            "agent_asset_id": str(agent_id),
+            "agent_scope": "project",
+        }
+    )
+    assert explicit_selection.agent_asset_id == agent_id
+    assert explicit_selection.agent_scope == "project"
+
+
+@pytest.mark.parametrize(
+    "partial_selection",
+    [
+        {"agent_asset_id": str(uuid.uuid4())},
+        {"agent_scope": "project"},
+        {"agent_asset_id": None},
+        {"agent_scope": None},
+        {"agent_asset_id": None, "agent_scope": None},
+    ],
+)
+def test_thread_create_request_rejects_partial_agent_selection(
+    partial_selection: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        PrivateThreadCreateRequest.model_validate({"thread_id": str(uuid.uuid4()), **partial_selection})
 
 
 def test_thread_response_preserves_record_timestamps() -> None:
@@ -129,6 +188,23 @@ def test_thread_response_preserves_record_timestamps() -> None:
 
     assert response.model_dump()["created_at"] == created_at.isoformat()
     assert response.model_dump()["updated_at"] == updated_at.isoformat()
+
+
+def test_rest_event_sequences_are_canonical_decimal_strings() -> None:
+    sequence = 9_007_199_254_740_993
+    record = {
+        "thread_id": str(uuid.uuid4()),
+        "run_id": str(uuid.uuid4()),
+        "event_type": "llm.ai.response",
+        "category": "message",
+        "content": {"type": "ai", "content": "hello"},
+        "metadata": {},
+        "seq": sequence,
+        "created_at": "2026-07-30T00:00:00+00:00",
+    }
+
+    assert _public_event(record)["seq"] == "9007199254740993"
+    assert _run_message_response(record).model_dump()["seq"] == "9007199254740993"
 
 
 @pytest.mark.postgres
@@ -184,7 +260,13 @@ async def test_runner_thread_crud_search_and_state(harness: _Harness) -> None:
 
     state = await harness.request("GET", f"/threads/{thread_id}/state")
     assert state.status_code == 200
-    assert state.json()["values"] == {}
+    assert state.json()["values"] == {
+        "artifacts": [],
+        "delegations": [],
+        "messages": [],
+        "skill_context": [],
+        "viewed_images": {},
+    }
     assert "deerflow_private_scope" not in state.json()["metadata"]
 
     deleted = await harness.request(
@@ -194,6 +276,157 @@ async def test_runner_thread_crud_search_and_state(harness: _Harness) -> None:
     assert deleted.status_code == 200
     assert deleted.json() == {"success": True}
     assert (await harness.request("GET", f"/threads/{thread_id}")).status_code == 404
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_runner_implicit_thread_create_resolves_configured_project_default(
+    harness: _Harness,
+) -> None:
+    from deerflow.persistence.projects import ProjectDefaultAgentRow
+
+    async with harness.seed.factory() as session:
+        async with session.begin():
+            session.add(
+                ProjectDefaultAgentRow(
+                    project_id=harness.seed.owner_a.project_id,
+                    agent_asset_id=harness.seed.project_agent_id,
+                    revision=1,
+                    created_by_user_id=str(harness.seed.owner_a.user_id),
+                    updated_by_user_id=str(harness.seed.owner_a.user_id),
+                )
+            )
+
+    response = await harness.request(
+        "POST",
+        "/threads",
+        identity="owner-a",
+        json={"thread_id": str(uuid.uuid4()), "display_name": "Default Agent"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["agent_asset_id"] == str(harness.seed.project_agent_id)
+    assert response.json()["agent_scope"] == "project"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_runner_implicit_thread_create_falls_back_to_builtin_main(
+    harness: _Harness,
+) -> None:
+    response = await harness.request(
+        "POST",
+        "/threads",
+        identity="owner-a",
+        json={"thread_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["agent_asset_id"] == str(harness.seed.system_agent_id)
+    assert response.json()["agent_scope"] == "system"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_runner_implicit_thread_create_returns_stable_conflict_for_unavailable_default(
+    harness: _Harness,
+) -> None:
+    from deerflow.persistence.projects import ProjectDefaultAgentRow
+    from deerflow.persistence.shared_assets import AgentRow
+
+    async with harness.seed.factory() as session:
+        async with session.begin():
+            session.add(
+                ProjectDefaultAgentRow(
+                    project_id=harness.seed.owner_a.project_id,
+                    agent_asset_id=harness.seed.project_agent_id,
+                    revision=1,
+                    created_by_user_id=str(harness.seed.owner_a.user_id),
+                    updated_by_user_id=str(harness.seed.owner_a.user_id),
+                )
+            )
+            agent = await session.get(AgentRow, harness.seed.project_agent_id)
+            assert agent is not None
+            agent.status = "suspended"
+
+    response = await harness.request(
+        "POST",
+        "/threads",
+        identity="owner-a",
+        json={"thread_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "DEFAULT_AGENT_UNAVAILABLE",
+        "message": "The project default Agent is unavailable.",
+        "request_id": harness.seed.owner_a.request_id,
+    }
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_state_projects_duration_only_to_the_turn_final_ai(
+    harness: _Harness,
+) -> None:
+    thread_id = uuid.uuid4()
+    assert (
+        await harness.request(
+            "POST",
+            "/threads",
+            identity="owner-a",
+            json=_create_body(harness.seed, thread_id=thread_id),
+        )
+    ).status_code == 201
+    run_id = str(uuid.uuid4())
+    async with harness.seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=harness.seed.owner_a.resource_scope,
+            thread_id=str(thread_id),
+            request=PrivateRunCreate(run_id=run_id, status="success"),
+        )
+
+    saver = harness.app.state.project_scoped_checkpointer.for_context(harness.seed.owner_a)
+    root = await saver.aget_tuple(
+        {
+            "configurable": {
+                "thread_id": str(thread_id),
+                "checkpoint_ns": "",
+            }
+        }
+    )
+    assert root is not None
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {
+        "messages": [
+            HumanMessage(
+                id="human-duration",
+                content="question",
+                additional_kwargs={"run_id": run_id},
+            ),
+            AIMessage(id="ai-progress", content="progress"),
+            AIMessage(id="ai-final", content="final"),
+        ]
+    }
+    checkpoint["channel_versions"] = {"messages": checkpoint["id"]}
+    await saver.aput(
+        root.config,
+        checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        {"messages": checkpoint["id"]},
+    )
+
+    response = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/state",
+        identity="owner-a",
+    )
+
+    assert response.status_code == 200
+    messages = response.json()["values"]["messages"]
+    assert "turn_duration" not in messages[1].get("additional_kwargs", {})
+    duration = messages[2]["additional_kwargs"]["turn_duration"]
+    assert type(duration) is int and duration >= 0
 
 
 async def _seed_viewer_thread(harness: _Harness, thread_id: uuid.UUID) -> None:

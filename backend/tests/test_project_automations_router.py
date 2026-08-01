@@ -205,10 +205,12 @@ async def test_missing_automation_audit_composition_returns_stable_http_envelope
         )
 
     assert response.status_code == 503
+    server_request_id = response.headers["X-Trace-Id"]
+    assert server_request_id != request_id
     assert response.json()["detail"] == {
         "code": "AUTOMATION_UNAVAILABLE",
         "message": AutomationUnavailable.public_message,
-        "request_id": request_id,
+        "request_id": server_request_id,
     }
 
 
@@ -252,10 +254,12 @@ async def test_trigger_missing_audit_composition_fails_before_dispatch() -> None
         )
 
     assert response.status_code == 503
+    server_request_id = response.headers["X-Trace-Id"]
+    assert server_request_id != request_id
     assert response.json()["detail"] == {
         "code": "AUTOMATION_UNAVAILABLE",
         "message": AutomationUnavailable.public_message,
-        "request_id": request_id,
+        "request_id": server_request_id,
     }
     dispatcher.admit_manual.assert_not_awaited()
     occurrences.get.assert_not_awaited()

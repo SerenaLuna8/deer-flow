@@ -17,10 +17,24 @@ import { isStaticWebsiteOnly } from "../static-mode";
 
 import { transitionAccountQueries } from "./account-query-client";
 import {
+  classifyAuthMeResponse,
+  type AuthMeResult,
+} from "./auth-response";
+import {
   createAuthIdentityCoordinator,
   type AuthIdentityCoordinator,
 } from "./identity-coordinator";
-import { type User, buildLoginUrl, userSchema } from "./types";
+import {
+  currentBrowserReturnPath,
+  isPrivateRoutePath,
+} from "./private-return-path";
+import {
+  AUTH_PROBE_TIMEOUT_MS,
+  AUTH_SUBMIT_TIMEOUT_MS,
+  fetchAuth,
+  fetchWithAuthTimeout,
+} from "./request";
+import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
 export type { User };
@@ -33,7 +47,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   logout: () => Promise<void>;
-  refreshUser: () => Promise<User | null>;
+  refreshUser: (signal?: AbortSignal) => Promise<AuthMeResult | null>;
   applyUser: (user: User | null) => Promise<void>;
 }
 
@@ -57,7 +71,6 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [isLoading, setIsLoading] = useState(false);
   const queryClient = useQueryClient();
   const router = useRouter();
-  const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
   const identityCoordinatorRef = React.useRef<AuthIdentityCoordinator | null>(
     null,
@@ -78,9 +91,15 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     async (generation: number, next: User | null) => {
       const previousId = userRef.current?.id ?? null;
       const nextId = next?.id ?? null;
+      const previousSystemRole = userRef.current?.system_role ?? null;
+      const nextSystemRole = next?.system_role ?? null;
       return identityCoordinator.commitAtGeneration(
         generation,
-        () => transitionAccountQueries(queryClient, previousId, nextId),
+        () =>
+          transitionAccountQueries(queryClient, previousId, nextId, {
+            previousSystemRole,
+            nextSystemRole,
+          }),
         () => {
           userRef.current = next;
           setUser(next);
@@ -101,41 +120,81 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * Fetch current user from FastAPI
    * Used when initialUser might be stale (e.g., after tab was inactive)
    */
-  const refreshUser = useCallback(async () => {
-    if (staticMode) return null;
-
-    const attempt = identityCoordinator.startRefresh();
-    try {
-      const res = await fetch("/api/v1/auth/me", {
-        credentials: "include",
-        cache: "no-store",
-        signal: attempt.signal,
-      });
-      if (!identityCoordinator.isCurrent(attempt)) return null;
-
-      if (res.ok) {
-        const parsed = userSchema.safeParse(await res.json());
-        if (!identityCoordinator.isCurrent(attempt)) return null;
-        const nextUser = parsed.success ? parsed.data : null;
-        const applied = await applyAtGeneration(attempt.generation, nextUser);
-        return applied ? nextUser : null;
-      } else if (res.status === 401) {
-        const applied = await applyAtGeneration(attempt.generation, null);
-        // Redirect to login if on a protected route
-        if (applied && pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
-        }
+  const refreshUser = useCallback(
+    async (externalSignal?: AbortSignal) => {
+      if (staticMode) {
+        const currentUser = userRef.current;
+        return currentUser
+          ? ({ type: "authenticated", user: currentUser } as const)
+          : ({ type: "unauthenticated" } as const);
       }
-      return null;
-    } catch (err) {
-      if (!identityCoordinator.isCurrent(attempt)) return null;
-      const applied = await applyAtGeneration(attempt.generation, null);
-      if (applied) console.error("Failed to refresh user:", err);
-      return null;
-    } finally {
-      identityCoordinator.finishRefresh(attempt);
-    }
-  }, [staticMode, pathname, router, applyAtGeneration, identityCoordinator]);
+
+      const attempt = identityCoordinator.startRefresh();
+      const abortFromCaller = () =>
+        attempt.controller.abort(externalSignal?.reason);
+      if (externalSignal?.aborted) {
+        abortFromCaller();
+      } else {
+        externalSignal?.addEventListener("abort", abortFromCaller, {
+          once: true,
+        });
+      }
+      try {
+        const res = await fetchAuth(
+          "/api/v1/auth/me",
+          {
+            cache: "no-store",
+            signal: attempt.signal,
+          },
+          AUTH_PROBE_TIMEOUT_MS,
+        );
+        if (!identityCoordinator.isCurrent(attempt)) return null;
+
+        const result = await classifyAuthMeResponse(res);
+        if (!identityCoordinator.isCurrent(attempt)) return null;
+        if (result.type === "authenticated") {
+          const applied = await applyAtGeneration(
+            attempt.generation,
+            result.user,
+          );
+          return applied ? result : null;
+        }
+        if (result.type === "unauthenticated") {
+          const applied = await applyAtGeneration(attempt.generation, null);
+          if (
+            applied &&
+            typeof window !== "undefined" &&
+            isPrivateRoutePath(window.location.pathname)
+          ) {
+            router.push(
+              buildLoginUrl(currentBrowserReturnPath(window.location)),
+            );
+          }
+          return applied ? result : null;
+        }
+        console.warn(
+          "[auth] Retaining the current identity after an unavailable /auth/me response.",
+        );
+        return result;
+      } catch (err) {
+        if (
+          !identityCoordinator.isCurrent(attempt) ||
+          attempt.signal.aborted
+        ) {
+          return null;
+        }
+        console.warn(
+          "[auth] Retaining the current identity after /auth/me failed:",
+          err,
+        );
+        return { type: "unavailable" } as const;
+      } finally {
+        externalSignal?.removeEventListener("abort", abortFromCaller);
+        identityCoordinator.finishRefresh(attempt);
+      }
+    },
+    [staticMode, router, applyAtGeneration, identityCoordinator],
+  );
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -164,10 +223,15 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     let logoutFailed = false;
     try {
-      const res = await fetchWithAuth("/api/v1/auth/logout", {
-        method: "POST",
-        credentials: "include",
-      });
+      const res = await fetchWithAuthTimeout(
+        fetchWithAuth,
+        "/api/v1/auth/logout",
+        {
+          method: "POST",
+          credentials: "include",
+        },
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
       if (!res.ok) logoutFailed = true;
     } catch (err) {
       console.error("Logout request failed:", err);
@@ -251,7 +315,11 @@ export function useRequireAuth(): AuthContextType {
 
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
-      router.push(buildLoginUrl(pathname || "/workspace"));
+      const returnPath =
+        typeof window === "undefined"
+          ? pathname || "/workspace"
+          : currentBrowserReturnPath(window.location);
+      router.push(buildLoginUrl(returnPath));
     }
   }, [auth.isAuthenticated, auth.isLoading, router, pathname]);
 

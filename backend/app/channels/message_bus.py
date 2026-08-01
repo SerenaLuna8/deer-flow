@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
+_PROVIDER_DELIVERY_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,9 @@ class InboundMessage:
             lookup for routing display only. It is not private-work authority;
             the inbound resolver re-resolves project and owner from persistence.
         workspace_id: Optional external workspace/guild/team id.
+        provider_delivery_id: Provider-stable message/delivery identifier.
+            It is not project authority; project-scoped dedupe combines it
+            with the persisted connection and conversation coordinates.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -75,9 +79,38 @@ class InboundMessage:
     private_scope: PrivateResourceScope | None = None
     project_id: str | None = None
     workspace_id: str | None = None
+    provider_delivery_id: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+
+
+def extract_provider_delivery_id(message: InboundMessage) -> str | None:
+    """Return the provider's stable delivery/message identifier when present."""
+
+    if isinstance(message.provider_delivery_id, str):
+        explicit = message.provider_delivery_id.strip()
+        if explicit:
+            return explicit
+
+    metadata = message.metadata
+    candidates: list[Any] = [
+        *(metadata.get(key) for key in _PROVIDER_DELIVERY_METADATA_KEYS),
+    ]
+    raw_message = metadata.get("raw_message")
+    if isinstance(raw_message, dict):
+        candidates.extend(raw_message.get(key) for key in _PROVIDER_DELIVERY_METADATA_KEYS)
+    github = metadata.get("github")
+    if isinstance(github, dict):
+        candidates.append(github.get("delivery_id"))
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        normalized = str(candidate).strip()
+        if normalized:
+            return normalized
+    return None
 
 
 @dataclass

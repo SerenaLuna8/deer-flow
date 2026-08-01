@@ -13,7 +13,7 @@ from app.private_work.authorization import (
 )
 from app.private_work.retention import PrivateWorkRetentionService
 from app.private_work.retention_jobs import RetentionJobAdmission
-from app.projects.capabilities import Capability
+from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectMembershipVersionConflict, ProjectNotFound
 from app.projects.membership_models import MembershipView
@@ -123,14 +123,17 @@ class MembershipService:
             target_role = self._role(target.role)
             if target_role is ProjectRole.ADMIN and role is not ProjectRole.ADMIN:
                 await self.repository.require_another_active_admin(project.id, target.id)
+            lost_capabilities = capabilities_for(target_role) - capabilities_for(role)
+            revoked_at = self._clock() if lost_capabilities else None
             if target_role is not ProjectRole.VIEWER and role is ProjectRole.VIEWER:
-                revoked_at = self._clock()
+                assert revoked_at is not None
                 await self._retention.restrict_owner_to_viewer(
                     self.repository.session,
                     project_id=project.id,
                     owner_user_id=target.user_id,
                     now=revoked_at,
                 )
+            if revoked_at is not None:
                 await self._authorization.mark_revoked(
                     self.repository.session,
                     project_id=project.id,

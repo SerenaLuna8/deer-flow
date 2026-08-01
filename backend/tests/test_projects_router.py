@@ -28,6 +28,9 @@ class _NoopQuota:
 class _NoopQuotaService:
     config = QuotaConfig()
 
+    async def current_config(self, _session):
+        return self.config
+
 
 def _quota_summary() -> ProjectQuotaSummary:
     return ProjectQuotaSummary(
@@ -182,6 +185,41 @@ def test_project_create_quota_state_conflict_is_stable_409(monkeypatch) -> None:
     assert response.json()["detail"] == {
         "code": "PROJECT_QUOTA_STATE_CONFLICT",
         "message": "Project quota state conflict",
+    }
+
+
+@pytest.mark.asyncio
+async def test_project_context_service_uses_current_quota_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = object()
+    context = object()
+    quota_service = AsyncMock()
+    captured: dict[str, object] = {}
+
+    class Repository:
+        def __init__(self, passed_session, *, quota_policy, **_kwargs) -> None:
+            captured["session"] = passed_session
+            captured["quota_policy"] = quota_policy
+
+    monkeypatch.setattr(
+        projects,
+        "resolve_project_context",
+        AsyncMock(return_value=context),
+    )
+    monkeypatch.setattr(projects, "ProjectRepository", Repository)
+
+    resolved, _service = await projects._context_service(
+        uuid.uuid4(),
+        (uuid.uuid4(), "request-id"),
+        session,
+        quota_service,
+    )
+
+    assert resolved is context
+    assert captured == {
+        "session": session,
+        "quota_policy": quota_service,
     }
 
 

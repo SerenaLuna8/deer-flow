@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,6 +34,7 @@ from app.quotas.models import (
     QuotaPolicyInvalid,
     QuotaReconciliationAuthority,
     QuotaSourceRef,
+    QuotaUnavailable,
     QuotaUsageDimension,
     _is_issued_project_storage_quota_authority,
     _is_issued_quota_compensation_authority,
@@ -51,6 +53,24 @@ _SOURCE_DOMAIN = b"deerflow.m6.quota-source-ref.v1\x00"
 _PROJECT_STORAGE_OWNER_SUBJECT = "trusted:project_storage"
 
 
+class CurrentQuotaPolicyReader(Protocol):
+    """Read the current global quota policy in the caller-owned transaction."""
+
+    async def read_current_quotas(
+        self,
+        session: AsyncSession,
+    ) -> QuotaConfig: ...
+
+
+class QuotaConfigProvider(Protocol):
+    """Resolve effective quota defaults inside a caller-owned transaction."""
+
+    async def current_config(
+        self,
+        session: AsyncSession,
+    ) -> QuotaConfig: ...
+
+
 class QuotaService:
     def __init__(
         self,
@@ -58,18 +78,41 @@ class QuotaService:
         config: QuotaConfig,
         *,
         source_ref_hasher: QuotaSourceRefHasher,
+        current_policy_reader: CurrentQuotaPolicyReader | None = None,
     ) -> None:
         if type(config) is not QuotaConfig or not (callable(source_ref_hasher) or callable(getattr(source_ref_hasher, "quota_source_ref", None))):
             raise TypeError("quota service configuration is invalid")
         self._sessions = session_factory
         self._config = config
         self._source_ref_hasher = source_ref_hasher
+        self._current_policy_reader = current_policy_reader
 
     @property
     def config(self) -> QuotaConfig:
         """Return the validated platform defaults and warning policy."""
 
         return self._config
+
+    async def current_config(self, session: AsyncSession) -> QuotaConfig:
+        """Resolve one validated policy without leaving *session*.
+
+        The static value remains only as an isolated-test compatibility path.
+        Production composition always supplies ``current_policy_reader``.
+        """
+
+        if self._current_policy_reader is None:
+            return self._config
+        try:
+            config = await self._current_policy_reader.read_current_quotas(
+                session,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise QuotaUnavailable from None
+        if type(config) is not QuotaConfig:
+            raise QuotaUnavailable
+        return config
 
     @staticmethod
     def _dimension(value: str) -> QuotaDimension:
@@ -176,12 +219,16 @@ class QuotaService:
             return cls._now(now).date().isoformat()
         return "lifetime"
 
-    def _default_limit(self, dimension: QuotaDimension) -> int:
+    @staticmethod
+    def _default_limit(
+        dimension: QuotaDimension,
+        config: QuotaConfig,
+    ) -> int:
         return {
-            "members": self._config.default_member_limit,
-            "storage_bytes": self._config.default_storage_bytes_limit,
-            "concurrent_runs": self._config.default_concurrent_run_limit,
-            "mcp_calls_daily": self._config.default_mcp_calls_daily_limit,
+            "members": config.default_member_limit,
+            "storage_bytes": config.default_storage_bytes_limit,
+            "concurrent_runs": config.default_concurrent_run_limit,
+            "mcp_calls_daily": config.default_mcp_calls_daily_limit,
         }[dimension]
 
     @staticmethod
@@ -203,39 +250,50 @@ class QuotaService:
         session: AsyncSession,
         project_id: object,
         dimension: str,
+        *,
+        config: QuotaConfig | None = None,
     ) -> int:
         selected = self._dimension(dimension)
         policy = await QuotaRepository(session).policy(self._project_id(project_id))
-        default = self._default_limit(selected)
+        selected_config = config or await self.current_config(session)
+        default = self._default_limit(selected, selected_config)
         configured = self._configured_limit(policy, selected)
         return default if configured is None else min(default, configured)
 
-    def _effective_limits(self, configured: ProjectQuotaLimits) -> EffectiveQuotaLimits:
+    @staticmethod
+    def _effective_limits(
+        configured: ProjectQuotaLimits,
+        config: QuotaConfig,
+    ) -> EffectiveQuotaLimits:
         return EffectiveQuotaLimits(
             member_limit=min(
-                self._config.default_member_limit,
-                configured.member_limit if configured.member_limit is not None else self._config.default_member_limit,
+                config.default_member_limit,
+                configured.member_limit if configured.member_limit is not None else config.default_member_limit,
             ),
             storage_bytes_limit=min(
-                self._config.default_storage_bytes_limit,
-                configured.storage_bytes_limit if configured.storage_bytes_limit is not None else self._config.default_storage_bytes_limit,
+                config.default_storage_bytes_limit,
+                configured.storage_bytes_limit if configured.storage_bytes_limit is not None else config.default_storage_bytes_limit,
             ),
             concurrent_run_limit=min(
-                self._config.default_concurrent_run_limit,
-                configured.concurrent_run_limit if configured.concurrent_run_limit is not None else self._config.default_concurrent_run_limit,
+                config.default_concurrent_run_limit,
+                configured.concurrent_run_limit if configured.concurrent_run_limit is not None else config.default_concurrent_run_limit,
             ),
             mcp_calls_daily_limit=min(
-                self._config.default_mcp_calls_daily_limit,
-                configured.mcp_calls_daily_limit if configured.mcp_calls_daily_limit is not None else self._config.default_mcp_calls_daily_limit,
+                config.default_mcp_calls_daily_limit,
+                configured.mcp_calls_daily_limit if configured.mcp_calls_daily_limit is not None else config.default_mcp_calls_daily_limit,
             ),
         )
 
-    def _validate_limits(self, limits: ProjectQuotaLimits) -> None:
+    @staticmethod
+    def _validate_limits(
+        limits: ProjectQuotaLimits,
+        config: QuotaConfig,
+    ) -> None:
         values = (
-            (limits.member_limit, 1, self._config.default_member_limit),
-            (limits.storage_bytes_limit, 0, self._config.default_storage_bytes_limit),
-            (limits.concurrent_run_limit, 1, self._config.default_concurrent_run_limit),
-            (limits.mcp_calls_daily_limit, 0, self._config.default_mcp_calls_daily_limit),
+            (limits.member_limit, 1, config.default_member_limit),
+            (limits.storage_bytes_limit, 0, config.default_storage_bytes_limit),
+            (limits.concurrent_run_limit, 1, config.default_concurrent_run_limit),
+            (limits.mcp_calls_daily_limit, 0, config.default_mcp_calls_daily_limit),
         )
         if any(value is not None and (type(value) is not int or value < minimum or value > maximum) for value, minimum, maximum in values):
             raise QuotaPolicyInvalid("project quota must tighten the platform default")
@@ -279,6 +337,7 @@ class QuotaService:
     ) -> ProjectQuotaUsage:
         await self._require_usage_authority(session, context)
         selected_time = self._now(now)
+        config = await self.current_config(session)
         repository = QuotaRepository(session)
         row = await repository.policy(context.project_id)
         configured = ProjectQuotaLimits(
@@ -287,7 +346,7 @@ class QuotaService:
             concurrent_run_limit=row.concurrent_run_limit if row is not None else None,
             mcp_calls_daily_limit=row.mcp_calls_daily_limit if row is not None else None,
         )
-        effective = self._effective_limits(configured)
+        effective = self._effective_limits(configured, config)
         limits = {
             "members": effective.member_limit,
             "storage_bytes": effective.storage_bytes_limit,
@@ -311,7 +370,7 @@ class QuotaService:
                     warning_threshold_reached=self._threshold_reached(
                         usage=used + reserved,
                         limit=limit,
-                        threshold=self._config.warning_threshold,
+                        threshold=config.warning_threshold,
                     ),
                 )
             )
@@ -336,10 +395,11 @@ class QuotaService:
             raise QuotaForbidden("issued quota authority is required")
         if type(limits) is not ProjectQuotaLimits or type(expected_version) is not int or expected_version < 0:
             raise QuotaPolicyInvalid("project quota policy is invalid")
-        self._validate_limits(limits)
         _project, membership = await self._lock_active_authority(session, context)
         if membership.role != ProjectRole.ADMIN.value:
             raise QuotaForbidden("project Admin quota authority is required")
+        config = await self.current_config(session)
+        self._validate_limits(limits, config)
 
         row = await QuotaRepository(session).policy(context.project_id)
         if row is None:
@@ -360,7 +420,7 @@ class QuotaService:
         row.updated_at = changed_at
         await session.flush()
         repository = QuotaRepository(session)
-        effective = self._effective_limits(limits)
+        effective = self._effective_limits(limits, config)
         configured_limits = {
             "members": effective.member_limit,
             "storage_bytes": effective.storage_bytes_limit,
@@ -382,6 +442,7 @@ class QuotaService:
                 source_kind="policy_threshold",
                 source_key=f"policy:{row.version}",
                 occurred_at=changed_at,
+                config=config,
             )
         return ProjectQuotaPolicy(
             configured=limits,
@@ -480,6 +541,7 @@ class QuotaService:
         source_kind: str,
         source_key: str,
         occurred_at: datetime,
+        config: QuotaConfig,
     ) -> bool:
         selected = self._dimension(counter.dimension)
         repository = QuotaRepository(session)
@@ -487,7 +549,7 @@ class QuotaService:
         if not self._threshold_reached(
             usage=usage,
             limit=limit,
-            threshold=self._config.warning_threshold,
+            threshold=config.warning_threshold,
         ) or await repository.threshold_recorded(
             counter.project_id,
             selected,
@@ -564,11 +626,17 @@ class QuotaService:
             await self._lock_active_authority(session, authority)
             project_id = authority.project_id
             owner_user_id = str(authority.user_id)
+        config = await self.current_config(session)
         occurred_at = self._now(now)
         bucket = self.bucket_for(selected, now=occurred_at)
         repository = QuotaRepository(session)
         counter = await repository.lock_counter(project_id, selected, bucket)
-        limit = await self.effective_limit(session, project_id, selected)
+        limit = await self.effective_limit(
+            session,
+            project_id,
+            selected,
+            config=config,
+        )
         source_refs = self._source_refs(
             project_id=project_id,
             owner_user_id=owner_user_id,
@@ -649,7 +717,7 @@ class QuotaService:
             else:
                 counter.used += amount
         after = counter.used + counter.reserved
-        warning_at = math.ceil(limit * self._config.warning_threshold)
+        warning_at = math.ceil(limit * config.warning_threshold)
         threshold_crossed = operation != "release" and warning_at > 0 and before < warning_at <= after and not await repository.threshold_recorded(project_id, selected, bucket)
         await repository.append_ledger(
             project_id=project_id,
@@ -901,15 +969,17 @@ class QuotaService:
         delta = expected - current
         source_base = f"reconcile:{selected}:{counter.bucket}:{counter.version}:{current}:{expected}"
         repository = QuotaRepository(session)
+        config = await self.current_config(session)
         limit = await self.effective_limit(
             session,
             counter.project_id,
             selected,
+            config=config,
         )
         threshold_missing = self._threshold_reached(
             usage=expected,
             limit=limit,
-            threshold=self._config.warning_threshold,
+            threshold=config.warning_threshold,
         ) and not await repository.threshold_recorded(
             counter.project_id,
             selected,

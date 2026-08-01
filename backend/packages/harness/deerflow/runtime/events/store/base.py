@@ -12,6 +12,7 @@ Implementations:
 from __future__ import annotations
 
 import abc
+from collections.abc import Iterable, Mapping
 
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -116,6 +117,53 @@ class RunEventStore(abc.ABC):
     @abc.abstractmethod
     async def count_messages(self, thread_id: str, *, scope: PrivateResourceScope | None = None) -> int:
         """Count displayable messages (category=message) in a thread."""
+
+    async def get_last_visible_ai_seq_by_run(
+        self,
+        thread_id: str,
+        run_ids: Iterable[str],
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> dict[str, int]:
+        """Resolve each Run's last visible lead-AI sequence.
+
+        Stores may override this with a grouped query. The bounded fallback is
+        intentionally based on the public scoped message reader so non-SQL
+        implementations retain the same semantics.
+        """
+
+        result: dict[str, int] = {}
+        for run_id in {value for value in run_ids if isinstance(value, str) and value}:
+            before_seq: int | None = None
+            while True:
+                rows = await self.list_messages_by_run(
+                    thread_id,
+                    run_id,
+                    limit=200,
+                    before_seq=before_seq,
+                    scope=scope,
+                )
+                for row in reversed(rows):
+                    content = row.get("content")
+                    metadata = row.get("metadata")
+                    caller = metadata.get("caller") if isinstance(metadata, Mapping) else None
+                    additional_kwargs = content.get("additional_kwargs") if isinstance(content, Mapping) else None
+                    if (
+                        isinstance(content, Mapping)
+                        and content.get("type") in {"ai", "assistant"}
+                        and not (isinstance(caller, str) and caller.startswith(("middleware:", "subagent:")))
+                        and not (isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True)
+                        and type(row.get("seq")) is int
+                    ):
+                        result[run_id] = row["seq"]
+                        break
+                if run_id in result or len(rows) < 200:
+                    break
+                first_seq = rows[0].get("seq") if rows else None
+                if type(first_seq) is not int or first_seq <= 0:
+                    break
+                before_seq = first_seq
+        return result
 
     @abc.abstractmethod
     async def delete_by_thread(self, thread_id: str, *, scope: PrivateResourceScope | None = None) -> int:

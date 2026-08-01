@@ -7,6 +7,7 @@ import {
   createCredentialDeleteSnapshot,
 } from "@/components/projects/assets/credential-delete-dialog";
 import { Dialog } from "@/components/ui/dialog";
+import { I18nProvider } from "@/core/i18n/context";
 
 describe("Credential delete confirmation", () => {
   test("freezes identity and optimistic revision for the five-second delay", () => {
@@ -33,35 +34,39 @@ describe("Credential delete confirmation", () => {
 
   test("explains logical deletion and keeps the destructive action delayed", () => {
     const waiting = renderToStaticMarkup(
-      <Dialog open>
-        <CredentialDeleteConfirmation
-          credentialName="Project API"
-          remainingSeconds={5}
-          pending={false}
-          errorMessage={null}
-          onCancel={() => undefined}
-          onConfirm={() => undefined}
-        />
-      </Dialog>,
+      <I18nProvider initialLocale="zh-CN">
+        <Dialog open>
+          <CredentialDeleteConfirmation
+            credentialName="Project API"
+            remainingSeconds={5}
+            pending={false}
+            errorMessage={null}
+            onCancel={() => undefined}
+            onConfirm={() => undefined}
+          />
+        </Dialog>
+      </I18nProvider>,
     );
 
-    expect(waiting).toContain("删除 Credential");
+    expect(waiting).toContain("删除凭据");
     expect(waiting).toContain("普通列表与运行时");
     expect(waiting).toContain("仅审计记录保留");
     expect(waiting).toContain("确认删除（5 秒）");
     expect(waiting).toContain('disabled=""');
 
     const ready = renderToStaticMarkup(
-      <Dialog open>
-        <CredentialDeleteConfirmation
-          credentialName="Project API"
-          remainingSeconds={0}
-          pending={false}
-          errorMessage="Credential 状态已变化，请刷新后重试。"
-          onCancel={() => undefined}
-          onConfirm={() => undefined}
-        />
-      </Dialog>,
+      <I18nProvider initialLocale="zh-CN">
+        <Dialog open>
+          <CredentialDeleteConfirmation
+            credentialName="Project API"
+            remainingSeconds={0}
+            pending={false}
+            errorMessage="Credential 状态已变化，请刷新后重试。"
+            onCancel={() => undefined}
+            onConfirm={() => undefined}
+          />
+        </Dialog>
+      </I18nProvider>,
     );
     expect(ready).toContain(">确认删除<");
     expect(ready).toContain('role="alert"');

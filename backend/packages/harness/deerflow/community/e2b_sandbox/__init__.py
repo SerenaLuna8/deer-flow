@@ -18,7 +18,7 @@ Configuration example (``config.yaml``)::
           container_path: /path/in/sandbox
           read_only: false
       environment:                      # forwarded as e2b ``envs`` on create
-        OPENAI_API_KEY: $OPENAI_API_KEY
+        WORKLOAD_PROFILE: batch
 """
 
 from .e2b_sandbox import E2BSandbox

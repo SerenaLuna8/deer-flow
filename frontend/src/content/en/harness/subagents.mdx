@@ -89,9 +89,15 @@ Per-agent overrides take priority over the global `timeout_seconds` and `max_tur
 The `SubagentLimitMiddleware` controls how many subagents the Lead Agent can invoke in parallel in a single turn. This is controlled through the per-request configuration:
 
 - `subagent_enabled`: whether subagent delegation is active for this session
-- `max_concurrent_subagents`: maximum parallel task calls in one turn (default: 3)
+- `max_concurrent_subagents`: maximum parallel task calls in one turn (default: 3; enforced range: 1–4)
 
-If the agent tries to call more subagents than the limit allows, the middleware trims the excess calls.
+If the agent tries to call more subagents than the limit allows, the middleware trims the excess
+calls. Each Run also has an independent total delegation cap (default: 6; configurable range:
+1–50), preventing unbounded serial delegation across multiple turns.
+
+The subtask card shows the effective model used for the delegation. When global Token usage
+display is enabled, it also shows the latest cumulative Token total. Live events and restored
+structured task results use the same metadata fields.
 
 ## ACP agents (external agents)
 

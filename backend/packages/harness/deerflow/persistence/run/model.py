@@ -9,6 +9,7 @@ from sqlalchemy import CHAR, JSON, CheckConstraint, DateTime, ForeignKeyConstrai
 from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
+from deerflow.trace_context import generate_trace_id
 
 
 class RunRow(Base):
@@ -26,6 +27,11 @@ class RunRow(Base):
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    origin_trace_id: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        default=generate_trace_id,
+    )
     error: Mapped[str | None] = mapped_column(Text)
 
     # Convenience fields (for listing pages without querying RunEventStore)
@@ -65,6 +71,13 @@ class RunRow(Base):
         Index("ix_runs_thread_status", "thread_id", "status"),
         UniqueConstraint("project_id", "owner_user_id", "thread_id", "run_id", name="uq_runs_private_scope"),
         UniqueConstraint("project_id", "owner_user_id", "run_id", name="uq_runs_job_scope"),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "run_id",
+            "origin_trace_id",
+            name="uq_runs_job_trace_scope",
+        ),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_runs_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_runs_owner", ondelete="RESTRICT"),
         ForeignKeyConstraint(

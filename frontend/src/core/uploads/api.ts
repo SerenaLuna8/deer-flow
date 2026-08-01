@@ -63,18 +63,25 @@ export type UploadRequestOptions = Pick<
   "apiBaseURL" | "scope"
 >;
 
-type PrivateUploadedFile = {
-  id: string;
-  logical_path: string;
-  display_name: string;
-  kind: ProjectFileKind;
-  media_type: string;
-  size: number;
-  sha256: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-};
+const privateUploadedFileSchema = z
+  .object({
+    id: z.string().uuid(),
+    logical_path: z.string().min(1),
+    display_name: z.string(),
+    kind: z.enum(["upload", "workspace", "output"]),
+    media_type: z.string().min(1),
+    size: z.number().int().nonnegative(),
+    sha256: z.string(),
+    status: z.literal("ready"),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+type PrivateUploadedFile = z.infer<typeof privateUploadedFileSchema>;
+
+const UPLOAD_LIST_PAGE_SIZE = 100;
+const MAX_UPLOAD_LIST_PAGES = 10_000;
 
 function uploadAPIBaseURL(options: UploadRequestOptions): string {
   return options.apiBaseURL;
@@ -182,7 +189,7 @@ export async function uploadFiles(
     if (!response.ok) {
       throw await readUploadError(response, "Upload failed");
     }
-    const uploaded = (await response.json()) as PrivateUploadedFile;
+    const uploaded = privateUploadedFileSchema.parse(await response.json());
     signal?.throwIfAborted();
     uploadedFiles.push(mapPrivateUploadedFile(uploaded, apiBaseURL, threadId));
   }
@@ -232,18 +239,50 @@ export async function listUploadedFiles(
 ): Promise<ListFilesResponse> {
   signal?.throwIfAborted();
   const apiBaseURL = uploadAPIBaseURL(options);
-  const response = await fetch(
-    `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads`,
-    { signal },
-  );
-  signal?.throwIfAborted();
+  const files: PrivateUploadedFile[] = [];
+  const seenFileIds = new Set<string>();
+  let offset = 0;
 
-  if (!response.ok) {
-    throw await readUploadError(response, "Failed to list uploaded files");
+  for (let pageIndex = 0; pageIndex < MAX_UPLOAD_LIST_PAGES; pageIndex += 1) {
+    const response = await fetch(
+      `${apiBaseURL}/threads/${encodeURIComponent(threadId)}/uploads?limit=${UPLOAD_LIST_PAGE_SIZE}&offset=${offset}`,
+      { signal },
+    );
+    signal?.throwIfAborted();
+
+    if (!response.ok) {
+      throw await readUploadError(response, "Failed to list uploaded files");
+    }
+
+    const page = privateUploadedFileSchema.array().parse(await response.json());
+    signal?.throwIfAborted();
+    for (const file of page) {
+      if (seenFileIds.has(file.id)) {
+        throw new Error("Uploaded file pagination did not advance");
+      }
+      seenFileIds.add(file.id);
+      files.push(file);
+    }
+    if (page.length < UPLOAD_LIST_PAGE_SIZE) {
+      break;
+    }
+
+    const nextOffset = offset + page.length;
+    const advertisedOffset = response.headers?.get("x-next-offset");
+    if (
+      advertisedOffset !== null &&
+      advertisedOffset !== undefined &&
+      advertisedOffset !== String(nextOffset)
+    ) {
+      throw new Error("Uploaded file pagination did not advance");
+    }
+    offset = nextOffset;
+
+    if (pageIndex === MAX_UPLOAD_LIST_PAGES - 1) {
+      throw new Error("Uploaded file pagination exceeded its safety bound");
+    }
   }
 
-  const files = (await response.json()) as PrivateUploadedFile[];
-  signal?.throwIfAborted();
   return {
     files: files.map((file) =>
       mapPrivateUploadedFile(file, apiBaseURL, threadId),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -9,7 +10,16 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from deerflow.mcp.config import ExtensionsConfig
-from deerflow.tools.mcp_metadata import MCP_TOOL_METADATA_KEY, MCP_TOOL_ROUTING_METADATA_KEY, get_mcp_routing, tag_mcp_routing, tag_mcp_tool
+from deerflow.tools.mcp_metadata import (
+    MCP_TOOL_METADATA_KEY,
+    MCP_TOOL_ROUTING_METADATA_KEY,
+    PRIVATE_MCP_TOOL_METADATA_KEY,
+    get_mcp_routing,
+    is_private_mcp_tool,
+    tag_mcp_routing,
+    tag_mcp_tool,
+    tag_private_mcp_tool,
+)
 
 
 class _Args(BaseModel):
@@ -26,6 +36,36 @@ def _tool(name: str = "postgres_query") -> StructuredTool:
         args_schema=_Args,
         coroutine=_call,
     )
+
+
+def test_tag_private_mcp_tool_preserves_metadata_and_returns_same_object():
+    tool = tag_mcp_tool(_tool())
+    tool.metadata = {**(tool.metadata or {}), "existing": "value"}
+
+    tagged = tag_private_mcp_tool(tool)
+
+    assert tagged is tool
+    assert tagged.metadata == {
+        MCP_TOOL_METADATA_KEY: True,
+        "existing": "value",
+        PRIVATE_MCP_TOOL_METADATA_KEY: True,
+    }
+    assert is_private_mcp_tool(tagged) is True
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        [],
+        {},
+        {PRIVATE_MCP_TOOL_METADATA_KEY: False},
+        {PRIVATE_MCP_TOOL_METADATA_KEY: 1},
+        {PRIVATE_MCP_TOOL_METADATA_KEY: "true"},
+    ],
+)
+def test_private_mcp_provenance_requires_mapping_with_exact_true(metadata):
+    assert is_private_mcp_tool(SimpleNamespace(metadata=metadata)) is False
 
 
 def test_tag_mcp_routing_preserves_existing_mcp_flag():

@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import html
 import json
 import logging
 import math
@@ -18,13 +19,44 @@ from deerflow.agents.memory.prompt import (
     format_conversation_for_update,
 )
 from deerflow.agents.memory.storage import utc_now_iso_z
-from deerflow.config.memory_config import get_memory_config
+from deerflow.config.app_config import AppConfig
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.models import create_chat_model
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.trace_context import request_trace_context
 from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_source_confidence(fact: dict[str, Any]) -> float:
+    """Return a finite, bounded confidence for persisted/imported facts."""
+
+    raw = fact.get("confidence")
+    if raw is None or isinstance(raw, bool):
+        return 0.5
+    try:
+        confidence = float(raw)
+    except (TypeError, ValueError):
+        return 0.5
+    if not math.isfinite(confidence):
+        return 0.5
+    return max(0.0, min(confidence, 1.0))
+
+
+def _trim_facts_to_max(
+    facts: list[dict[str, Any]],
+    max_facts: int,
+) -> list[dict[str, Any]]:
+    """Keep the highest-confidence facts without trusting stored types."""
+
+    if len(facts) <= max_facts:
+        return facts
+    return sorted(
+        facts,
+        key=_coerce_source_confidence,
+        reverse=True,
+    )[:max_facts]
 
 
 def _extract_text(content: Any) -> str:
@@ -288,16 +320,31 @@ def _build_staleness_section(
     lines: list[str] = []
     for fact in stale_candidates:
         fid = fact.get("id", "?")
-        cat = str(fact.get("category", "context")).strip() or "context"
-        conf = fact.get("confidence", 0.0)
+        cat = html.escape(
+            str(fact.get("category", "context")).strip() or "context",
+            quote=False,
+        )
+        conf = _coerce_source_confidence(fact)
         created_raw = fact.get("createdAt", "")
         created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
-        content = str(fact.get("content", ""))
+        content = html.escape(str(fact.get("content", "")), quote=False)
         lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short}] "{content}"')
     return STALENESS_REVIEW_PROMPT.format(
         stale_facts="\n".join(lines),
         age_days=age_days,
     )
+
+
+def _escape_memory_for_prompt(memory: Any) -> Any:
+    """Copy a memory value while escaping every string leaf for XML embedding."""
+
+    if isinstance(memory, str):
+        return html.escape(memory)
+    if isinstance(memory, dict):
+        return {(html.escape(key, quote=False) if isinstance(key, str) else key): _escape_memory_for_prompt(value) for key, value in memory.items()}
+    if isinstance(memory, list):
+        return [_escape_memory_for_prompt(item) for item in memory]
+    return memory
 
 
 class MemoryUpdater:
@@ -311,14 +358,24 @@ class MemoryUpdater:
         """
         self._model_name = model_name
 
-    def _get_model(self):
+    def _get_model(
+        self,
+        memory_config: MemoryConfig,
+        app_config: AppConfig,
+    ):
         """Get the model for memory updates."""
-        return create_chat_model(name=self._resolve_model_name(), thinking_enabled=False)
+        return create_chat_model(
+            name=self._resolve_model_name(memory_config),
+            thinking_enabled=False,
+            app_config=app_config,
+        )
 
-    def _resolve_model_name(self) -> str | None:
+    def _resolve_model_name(
+        self,
+        memory_config: MemoryConfig,
+    ) -> str | None:
         """Return the configured model name for memory updates."""
-        config = get_memory_config()
-        return self._model_name or config.model_name
+        return self._model_name or memory_config.model_name
 
     def _build_correction_hint(
         self,
@@ -354,16 +411,23 @@ class MemoryUpdater:
         messages: tuple[Any, ...] | list[Any],
         thread_id: str,
         run_id: str,
+        memory_config: MemoryConfig,
+        app_config: AppConfig,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         deerflow_trace_id: str | None = None,
+        langfuse_trace_correlation_enabled: bool = False,
     ) -> bool:
         """Update PostgreSQL project memory without consulting user ContextVars."""
 
         trace_ctx = request_trace_context(deerflow_trace_id) if deerflow_trace_id else nullcontext()
         with trace_ctx:
             try:
-                config = get_memory_config()
+                if type(memory_config) is not MemoryConfig:
+                    raise TypeError("project memory update requires exact MemoryConfig")
+                if type(app_config) is not AppConfig:
+                    raise TypeError("project memory update requires exact AppConfig")
+                config = memory_config
                 if not config.enabled or not messages:
                     return False
                 snapshot = await storage.load(scope=scope, namespace=namespace)
@@ -385,12 +449,16 @@ class MemoryUpdater:
                             config.staleness_age_days,
                         )
                 prompt = MEMORY_UPDATE_PROMPT.format(
-                    current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
+                    current_memory=json.dumps(
+                        _escape_memory_for_prompt(current_memory),
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
                     conversation=conversation_text,
                     correction_hint=correction_hint,
                     staleness_review_section=staleness_section,
                 )
-                model_name = self._resolve_model_name()
+                model_name = self._resolve_model_name(config)
                 invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
                 inject_langfuse_metadata(
                     invoke_config,
@@ -400,9 +468,10 @@ class MemoryUpdater:
                     model_name=model_name,
                     environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
                     deerflow_trace_id=deerflow_trace_id,
+                    include_deerflow_trace_id=langfuse_trace_correlation_enabled,
                 )
                 response = await asyncio.to_thread(
-                    self._get_model().invoke,
+                    self._get_model(config, app_config).invoke,
                     prompt,
                     config=invoke_config,
                 )
@@ -412,6 +481,7 @@ class MemoryUpdater:
                     copy.deepcopy(current_memory),
                     update_data,
                     thread_id,
+                    memory_config=config,
                 )
                 for fact in updated_memory.get("facts", []):
                     if not isinstance(fact, dict) or fact.get("id") in existing_fact_ids:
@@ -438,6 +508,8 @@ class MemoryUpdater:
         current_memory: dict[str, Any],
         update_data: dict[str, Any],
         thread_id: str | None = None,
+        *,
+        memory_config: MemoryConfig,
     ) -> dict[str, Any]:
         """Apply LLM-generated updates to memory.
 
@@ -449,7 +521,9 @@ class MemoryUpdater:
         Returns:
             Updated memory data.
         """
-        config = get_memory_config()
+        if type(memory_config) is not MemoryConfig:
+            raise TypeError("memory updates require exact MemoryConfig")
+        config = memory_config
         now = utc_now_iso_z()
 
         # Update user sections
@@ -487,7 +561,7 @@ class MemoryUpdater:
             # non-aged fact id is silently rejected.  Runs unconditionally
             # so the apply-layer protection is independent of model behavior
             # AND of the staleness_review_enabled flag.
-            candidate_ids = {f["id"] for f in _select_stale_candidates(current_memory, config)}
+            candidate_ids = {fact["id"] for fact in _select_stale_candidates(current_memory, config) if fact.get("id") is not None}
             stale_ids_to_remove &= candidate_ids
 
             if not stale_ids_to_remove:
@@ -501,7 +575,7 @@ class MemoryUpdater:
                 max_stale = config.staleness_max_removals_per_cycle
                 if len(stale_ids_to_remove) > max_stale:
                     stale_facts = [f for f in current_memory.get("facts", []) if f.get("id") in stale_ids_to_remove]
-                    stale_facts.sort(key=lambda f: f.get("confidence", 0))
+                    stale_facts.sort(key=_coerce_source_confidence)
                     stale_ids_to_remove = {f["id"] for f in stale_facts[:max_stale]}
 
                 current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in stale_ids_to_remove]
@@ -552,12 +626,9 @@ class MemoryUpdater:
                     existing_fact_keys.add(fact_key)
 
         # Enforce max facts limit
-        if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
-            current_memory["facts"] = sorted(
-                current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
-                reverse=True,
-            )[: config.max_facts]
+        current_memory["facts"] = _trim_facts_to_max(
+            current_memory["facts"],
+            config.max_facts,
+        )
 
         return current_memory

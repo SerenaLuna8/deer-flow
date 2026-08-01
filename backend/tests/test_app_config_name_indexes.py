@@ -8,6 +8,7 @@ first-match-wins on duplicate names) and confirm a config reload rebuilds them.
 """
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
 
 
 def _build(model_names=(), tool_names=(), group_names=()):
@@ -65,3 +66,21 @@ def test_empty_config_lookups_return_none():
     assert cfg.get_model_config("anything") is None
     assert cfg.get_tool_config("anything") is None
     assert cfg.get_tool_group_config("anything") is None
+
+
+def test_runtime_model_catalog_copy_does_not_mutate_yaml_config():
+    cfg = _build()
+    runtime = cfg.with_runtime_models(
+        [
+            ModelConfig(
+                name="database-model",
+                use="pkg:Model",
+                model="provider/model",
+            )
+        ]
+    )
+
+    assert cfg.models == []
+    assert cfg.get_model_config("database-model") is None
+    assert runtime.models[0].name == "database-model"
+    assert runtime.get_model_config("database-model") is runtime.models[0]

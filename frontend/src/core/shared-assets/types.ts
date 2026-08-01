@@ -667,6 +667,23 @@ export const createAssetInputSchema = z
 export const expectedAssetVersionInputSchema = z
   .object({ expected_asset_version: z.number().int().positive() })
   .strict();
+export const projectDefaultAgentSchema = z
+  .object({
+    agent_asset_id: assetIdSchema.nullable(),
+    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    request_id: z.string().min(1),
+  })
+  .strict();
+export const projectDefaultAgentInputSchema = z
+  .object({
+    agent_asset_id: assetIdSchema.nullable(),
+    expected_revision: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
 
 export const agentInstructionsInputSchema = z
   .object({
@@ -825,6 +842,7 @@ export type CredentialRotationStatus = z.infer<
 export type SystemBinding = z.infer<typeof systemBindingSchema>;
 export type ProjectAssetList = z.infer<typeof projectAssetListSchema>;
 export type ProjectCredentialList = z.infer<typeof projectCredentialListSchema>;
+export type ProjectDefaultAgent = z.infer<typeof projectDefaultAgentSchema>;
 export type AdminAssetList = z.infer<typeof adminAssetListSchema>;
 export type AdminCredentialList = z.infer<typeof adminCredentialListSchema>;
 export type AssetMutationResponse = z.infer<typeof assetMutationResponseSchema>;
@@ -863,6 +881,9 @@ export type McpVersionInput = z.input<typeof mcpVersionInputSchema>;
 export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<
   typeof expectedAssetVersionInputSchema
+>;
+export type ProjectDefaultAgentInput = z.input<
+  typeof projectDefaultAgentInputSchema
 >;
 export type ReplaceCredentialInput = z.input<
   typeof replaceCredentialInputSchema

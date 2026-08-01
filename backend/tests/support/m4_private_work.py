@@ -37,6 +37,7 @@ PRIVATE_PERSISTENCE_TABLES = (
     "channel_credentials",
     "channel_oauth_states",
     "channel_conversations",
+    "channel_inbound_deliveries",
 )
 LANGGRAPH_CHECKPOINT_TABLES = (
     "checkpoints",

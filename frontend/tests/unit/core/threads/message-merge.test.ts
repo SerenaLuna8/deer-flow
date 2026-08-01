@@ -1,14 +1,22 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
+import { deriveHumanInputThreadState } from "@/core/messages/human-input";
 import { buildRunMessagesUrl } from "@/core/threads/api";
 import {
   attachRunIdToNewMessages,
   buildVisibleHistoryMessages,
+  canStartPreparedReplay,
+  classifyPreparedReplaySdkError,
   computeSummarizationMovedMessages,
+  countHumanMessagesExcludingSuperseded,
+  filterMessagesBySupersededRunIds,
   findLatestUnloadedRunIndex,
+  getMessageMasksAfterPreparedReplayFailure,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
+  getPreparedReplayStopRollback,
+  getRunMasksAfterPreparedReplayFailure,
   getSupersededRunIds,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
@@ -16,17 +24,18 @@ import {
   MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
   mergeMessages,
   mergeRunMessageRows,
+  overlayThreadProjection,
+  type PendingPreparedReplayMask,
   rememberActiveRun,
   resolveActiveRunIdForMessages,
   pruneConfirmedArchivedMessages,
-  removeSetItems,
   resolvePreservedHistory,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
-function runMessage(seq?: number): RunMessage {
+function runMessage(seq?: string): RunMessage {
   return {
     run_id: "run-1",
     ...(seq === undefined ? {} : { seq }),
@@ -36,9 +45,52 @@ function runMessage(seq?: number): RunMessage {
   };
 }
 
+test("edit replay hides its optimistic copy after the replacement human persists", () => {
+  const supersededHuman = {
+    id: "human-1__user",
+    type: "human",
+    content: "introduce Li Bai",
+  } as Message;
+  const optimisticHuman = {
+    id: "replacement-1",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+
+  const baseline = countHumanMessagesExcludingSuperseded(
+    [supersededHuman],
+    ["human-1__user", "ai-1"],
+  );
+
+  expect(baseline).toBe(0);
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 0)).toEqual([
+    optimisticHuman,
+  ]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 1)).toEqual(
+    [],
+  );
+});
+
+test("prepared replay baseline keeps human turns it does not supersede", () => {
+  const keptHuman = { id: "human-1", type: "human", content: "one" } as Message;
+  const supersededHuman = {
+    id: "human-2",
+    type: "human",
+    content: "two",
+  } as Message;
+  const ai = { id: "ai-1", type: "ai", content: "answer" } as Message;
+
+  expect(
+    countHumanMessagesExcludingSuperseded(
+      [keptHuman, ai, supersededHuman],
+      ["human-2", "ai-2"],
+    ),
+  ).toBe(1);
+});
+
 function orderedRunMessage(
   runId: string,
-  seq: number,
+  seq: string,
   messageId: string,
   content: string,
 ): RunMessage {
@@ -55,10 +107,7 @@ function orderedRunMessage(
   };
 }
 
-function threadRun(
-  runId: string,
-  status: Run["status"] = "success",
-): Run {
+function threadRun(runId: string, status: Run["status"] = "success"): Run {
   return {
     run_id: runId,
     thread_id: "thread-1",
@@ -69,6 +118,39 @@ function threadRun(
     metadata: {},
     multitask_strategy: null,
   };
+}
+
+function clarificationToolMessage(
+  requestId: string,
+  toolCallId: string,
+  runId?: string,
+): Message {
+  return {
+    id: requestId,
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: toolCallId,
+    content: "fallback",
+    ...(runId ? { run_id: runId } : {}),
+    artifact: {
+      human_input: {
+        version: 2,
+        kind: "human_input_request",
+        source: "ask_clarification",
+        request_id: requestId,
+        question: `Question for ${requestId}`,
+        input_mode: "form",
+        fields: [
+          {
+            name: "answer",
+            label: "Answer",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+    },
+  } as unknown as Message;
 }
 
 test("rememberActiveRun exposes a newly admitted run before the list refetch completes", () => {
@@ -138,9 +220,9 @@ test("reconnect infers the active run from the latest admission Human message", 
     },
   ] as unknown as Message[];
 
-  expect(
-    resolveActiveRunIdForMessages(checkpointMessages, true, null),
-  ).toBe("run-current");
+  expect(resolveActiveRunIdForMessages(checkpointMessages, true, null)).toBe(
+    "run-current",
+  );
   expect(
     resolveActiveRunIdForMessages(checkpointMessages, false, null),
   ).toBeNull();
@@ -187,6 +269,51 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
     liveHuman,
     liveAi,
   ]);
+});
+
+test("mergeMessages preserves persisted reasoning timing over a stale live duplicate", () => {
+  const historyAi = {
+    id: "ai-reasoned",
+    type: "ai",
+    content: "answer",
+    additional_kwargs: {
+      reasoning_content: "analysis",
+      reasoning_duration_ms: 19_000,
+    },
+  } as Message;
+  const liveAi = {
+    id: "ai-reasoned",
+    type: "ai",
+    content: "answer",
+    additional_kwargs: {
+      reasoning_content: "analysis",
+    },
+  } as Message;
+
+  expect(
+    mergeMessages([historyAi], [liveAi], [])[0]?.additional_kwargs
+      ?.reasoning_duration_ms,
+  ).toBe(19_000);
+});
+
+test("mergeMessages keeps a newer live reasoning timing over persisted history", () => {
+  const historyAi = {
+    id: "ai-reasoned-newer",
+    type: "ai",
+    content: "answer",
+    additional_kwargs: { reasoning_duration_ms: 4_000 },
+  } as Message;
+  const liveAi = {
+    id: "ai-reasoned-newer",
+    type: "ai",
+    content: "answer",
+    additional_kwargs: { reasoning_duration_ms: 7_000 },
+  } as Message;
+
+  expect(
+    mergeMessages([historyAi], [liveAi], [])[0]?.additional_kwargs
+      ?.reasoning_duration_ms,
+  ).toBe(7_000);
 });
 
 test("completed live Run messages expose exact run_id without a page refresh", () => {
@@ -268,6 +395,117 @@ test("mergeMessages keeps repeated tool_call_id values from different runs", () 
     firstRunTool,
     secondRunTool,
   ]);
+});
+
+test("history hydration does not pair the latest clarification with an older checkpoint human", () => {
+  const historyLatest = [
+    {
+      id: "human-latest",
+      type: "human",
+      content: "ask the latest question",
+      run_id: "run-latest",
+    },
+    {
+      id: "ai-latest",
+      type: "ai",
+      content: "",
+      run_id: "run-latest",
+    },
+    clarificationToolMessage(
+      "clarification:latest",
+      "call-latest",
+      "run-latest",
+    ),
+  ] as unknown as Message[];
+  const checkpoint = [
+    {
+      id: "human-first",
+      type: "human",
+      content: "the first old prompt",
+      additional_kwargs: { run_id: "run-first" },
+    },
+    { id: "ai-first", type: "ai", content: "old answer" },
+    {
+      id: "human-older-clarification",
+      type: "human",
+      content: "ask the older question",
+      additional_kwargs: { run_id: "run-older-clarification" },
+    },
+    { id: "ai-older-clarification", type: "ai", content: "" },
+    clarificationToolMessage("clarification:older", "call-older"),
+    {
+      id: "human-reply",
+      type: "human",
+      content: "ordinary reply to the older question",
+      additional_kwargs: { run_id: "run-reply" },
+    },
+    { id: "ai-reply", type: "ai", content: "continued" },
+    {
+      id: "human-latest",
+      type: "human",
+      content: "ask the latest question",
+      additional_kwargs: { run_id: "run-latest" },
+    },
+    { id: "ai-latest", type: "ai", content: "" },
+    clarificationToolMessage("clarification:latest", "call-latest"),
+  ] as unknown as Message[];
+  const runsNewestFirst = [
+    threadRun("run-latest"),
+    threadRun("run-reply"),
+    threadRun("run-older-clarification"),
+    threadRun("run-first"),
+  ];
+
+  const merged = mergeMessages(historyLatest, checkpoint, [], runsNewestFirst);
+  const state = deriveHumanInputThreadState(merged);
+
+  expect(
+    merged.filter(
+      (message) =>
+        message.type === "tool" &&
+        Reflect.get(message, "tool_call_id") === "call-latest",
+    ),
+  ).toHaveLength(1);
+  expect(state.answeredResponses.get("clarification:older")?.value).toBe(
+    "ordinary reply to the older question",
+  );
+  expect(state.answeredResponses.has("clarification:latest")).toBe(false);
+  expect(state.latestOpenRequestId).toBe("clarification:latest");
+});
+
+test("a stale live duplicate keeps its canonical history position before a later clarification", () => {
+  const historyHuman = {
+    id: "human-first",
+    type: "human",
+    content: "the first old prompt",
+    run_id: "run-first",
+  } as unknown as Message;
+  const staleLiveHuman = {
+    id: "human-first",
+    type: "human",
+    content: "the first old prompt",
+    additional_kwargs: { run_id: "run-first" },
+  } as Message;
+  const latestRequest = clarificationToolMessage(
+    "clarification:latest",
+    "call-latest",
+    "run-latest",
+  );
+
+  const merged = mergeMessages(
+    [historyHuman, latestRequest],
+    [staleLiveHuman],
+    [],
+    [threadRun("run-latest"), threadRun("run-first")],
+  );
+  const state = deriveHumanInputThreadState(merged);
+
+  expect(merged.map((message) => message.id)).toEqual([
+    "human-first",
+    "clarification:latest",
+  ]);
+  expect(state.answeredResponses.has("clarification:latest")).toBe(false);
+  expect(state.latestOpenRequestId).toBe("clarification:latest");
 });
 
 test("mergeMessages keeps a visible history message when a hidden live message reuses its id", () => {
@@ -572,8 +810,12 @@ test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
 
 test("getOldestRunMessageSeq returns the cursor for the next older run page", () => {
   expect(
-    getOldestRunMessageSeq([runMessage(8), runMessage(9), runMessage(10)]),
-  ).toBe(8);
+    getOldestRunMessageSeq([
+      runMessage("9007199254740993"),
+      runMessage("9007199254740994"),
+      runMessage("9007199254740995"),
+    ]),
+  ).toBe("9007199254740993");
 });
 
 test("getOldestRunMessageSeq ignores rows without seq", () => {
@@ -598,7 +840,7 @@ test("buildRunMessagesUrl encodes path segments and optional before_seq", () => 
       "https://api.example.test/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work/",
       "thread/with space",
       "run?one",
-      18,
+      "18",
     ),
   ).toBe(
     "https://api.example.test/api/projects/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/private-work/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
@@ -618,6 +860,7 @@ test("buildRunMessagesUrl omits before_seq when loading the latest page", () => 
 });
 
 test("buildRunMessagesUrl rejects a non-project API root", () => {
+  // @ts-expect-error The runtime guard must reject legacy numeric cursors.
   expect(() => buildRunMessagesUrl("/api", "thread-1", "run-1", 42)).toThrow();
 });
 
@@ -654,10 +897,10 @@ test("mergeRunMessageRows keeps a newly discovered latest run after older loaded
     { run_id: "R1" },
   ] as unknown as Run[];
   const previous = [
-    orderedRunMessage("R1", 10, "R1-human", "first"),
-    orderedRunMessage("R2", 20, "R2-human", "second"),
+    orderedRunMessage("R1", "10", "R1-human", "first"),
+    orderedRunMessage("R2", "20", "R2-human", "second"),
   ];
-  const incoming = [orderedRunMessage("R3", 30, "R3-human", "third")];
+  const incoming = [orderedRunMessage("R3", "30", "R3-human", "third")];
 
   expect(
     mergeRunMessageRows(previous, incoming, runs).map(
@@ -668,15 +911,29 @@ test("mergeRunMessageRows keeps a newly discovered latest run after older loaded
 
 test("mergeRunMessageRows orders older pages by seq inside the same run", () => {
   const runs = [{ run_id: "R1" }] as unknown as Run[];
-  const previous = [orderedRunMessage("R1", 30, "R1-30", "latest page")];
+  const previous = [orderedRunMessage("R1", "30", "R1-30", "latest page")];
   const incoming = [
-    orderedRunMessage("R1", 10, "R1-10", "oldest page"),
-    orderedRunMessage("R1", 20, "R1-20", "middle page"),
+    orderedRunMessage("R1", "10", "R1-10", "oldest page"),
+    orderedRunMessage("R1", "20", "R1-20", "middle page"),
   ];
 
   expect(
     mergeRunMessageRows(previous, incoming, runs).map((message) => message.seq),
-  ).toEqual([10, 20, 30]);
+  ).toEqual(["10", "20", "30"]);
+});
+
+test("mergeRunMessageRows keeps adjacent sequences above Number.MAX_SAFE_INTEGER distinct", () => {
+  const runs = [{ run_id: "R1" }] as unknown as Run[];
+  const previous = [
+    orderedRunMessage("R1", "9007199254740994", "R1-newer", "newer"),
+  ];
+  const incoming = [
+    orderedRunMessage("R1", "9007199254740993", "R1-older", "older"),
+  ];
+
+  expect(
+    mergeRunMessageRows(previous, incoming, runs).map((message) => message.seq),
+  ).toEqual(["9007199254740993", "9007199254740994"]);
 });
 
 test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {
@@ -737,10 +994,181 @@ test("latestRunHasTerminalFailure restores only the newest failed Run state", ()
   ).toBe(false);
 });
 
-test("removeSetItems removes pending superseded ids after submit failure", () => {
+test("replay rollback removes only the failed replay and preserves earlier successful masks", () => {
+  const replay: PendingPreparedReplayMask = {
+    kind: "edit",
+    targetRunId: "run-old",
+    supersededMessageIds: ["message-old"],
+    replacementHumanMessageId: "replacement-failed",
+  };
+
   expect(
-    removeSetItems(new Set(["run-old", "run-other"]), ["run-old"]),
-  ).toEqual(new Set(["run-other"]));
+    getRunMasksAfterPreparedReplayFailure(
+      new Set(["run-old", "run-other"]),
+      replay,
+      "run-failed",
+    ),
+  ).toEqual(new Set(["run-other", "run-failed"]));
+  expect(
+    getMessageMasksAfterPreparedReplayFailure(
+      new Set(["message-old", "message-other", "replacement-other"]),
+      replay,
+    ),
+  ).toEqual(
+    new Set(["message-other", "replacement-other", "replacement-failed"]),
+  );
+});
+
+test("prepared replay waits for initial SDK thread state before opening its error-attribution window", () => {
+  expect(
+    canStartPreparedReplay({
+      threadId: "thread-1",
+      sendInFlight: false,
+      isThreadLoading: false,
+    }),
+  ).toBe(true);
+  expect(
+    canStartPreparedReplay({
+      threadId: "thread-1",
+      sendInFlight: false,
+      isThreadLoading: true,
+    }),
+  ).toBe(false);
+  expect(
+    canStartPreparedReplay({
+      threadId: "thread-1",
+      sendInFlight: true,
+      isThreadLoading: false,
+    }),
+  ).toBe(false);
+  expect(
+    canStartPreparedReplay({
+      threadId: null,
+      sendInFlight: false,
+      isThreadLoading: false,
+    }),
+  ).toBe(false);
+});
+
+test("stopping a created replay rolls back with its actual Run ID", () => {
+  const replay: PendingPreparedReplayMask = {
+    kind: "edit",
+    targetRunId: "run-old",
+    supersededMessageIds: ["human-old", "ai-old"],
+    replacementHumanMessageId: "human-replacement",
+  };
+
+  expect(
+    getPreparedReplayStopRollback({
+      replay,
+      createdRunId: "run-created-before-stop",
+      status: "submitting",
+    }),
+  ).toEqual({
+    replay,
+    failedRunId: "run-created-before-stop",
+  });
+  expect(
+    getPreparedReplayStopRollback({
+      replay,
+      createdRunId: "run-created-before-stop",
+      status: "succeeded",
+    }),
+  ).toBeUndefined();
+  expect(getPreparedReplayStopRollback(null)).toBeUndefined();
+});
+
+test("failed or stopped replay hides only live messages owned by its Run", () => {
+  const directRunMessage = {
+    id: "ai-failed",
+    type: "ai",
+    content: "partial failed answer",
+    run_id: "run-failed",
+  } as Message;
+  const additionalRunMessage = {
+    id: "tool-stopped",
+    type: "tool",
+    content: "partial stopped tool output",
+    tool_call_id: "call-stopped",
+    additional_kwargs: { run_id: "run-stopped" },
+  } as Message;
+  const unrelatedMessage = {
+    id: "ai-kept",
+    type: "ai",
+    content: "kept answer",
+    run_id: "run-kept",
+  } as Message;
+  const unscopedMessage = {
+    id: "human-kept",
+    type: "human",
+    content: "kept question",
+  } as Message;
+
+  expect(
+    filterMessagesBySupersededRunIds(
+      [
+        directRunMessage,
+        additionalRunMessage,
+        unrelatedMessage,
+        unscopedMessage,
+      ],
+      new Set(["run-failed", "run-stopped"]),
+    ),
+  ).toEqual([unrelatedMessage, unscopedMessage]);
+});
+
+test("prepared replay SDK errors distinguish pre-create, terminal, and post-success history failures", () => {
+  const preCreateError = new Error("run admission unavailable");
+  const preCreateDecision = classifyPreparedReplaySdkError({
+    createdRunId: null,
+    callbackRunId: null,
+    error: preCreateError,
+    historyRefetchError: null,
+  });
+  expect(preCreateDecision).toEqual({
+    kind: "rollback",
+    failedRunId: null,
+  });
+  expect(preCreateDecision).not.toEqual({
+    kind: "rollback",
+    failedRunId: "run-stale-from-an-earlier-submit",
+  });
+
+  const terminalError = new Error("run failed");
+  expect(
+    classifyPreparedReplaySdkError({
+      createdRunId: "run-replay",
+      callbackRunId: "run-replay",
+      error: terminalError,
+      historyRefetchError: null,
+    }),
+  ).toEqual({
+    kind: "rollback",
+    failedRunId: "run-replay",
+  });
+
+  const historyRefetchError = new Error("state refetch failed");
+  expect(
+    classifyPreparedReplaySdkError({
+      createdRunId: "run-replay",
+      callbackRunId: null,
+      error: historyRefetchError,
+      historyRefetchError: null,
+    }),
+  ).toEqual({
+    kind: "history-refetch-failure",
+    error: historyRefetchError,
+  });
+  expect(
+    classifyPreparedReplaySdkError({
+      createdRunId: "run-replay",
+      callbackRunId: "run-replay",
+      error: historyRefetchError,
+      historyRefetchError,
+    }),
+  ).toEqual({
+    kind: "ignore-history-refetch-duplicate",
+  });
 });
 
 test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated run", () => {
@@ -818,7 +1246,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
   const rows: RunMessage[] = [
     {
       run_id: "run-1",
-      seq: 1,
+      seq: "1",
       content: {
         id: "human-1",
         type: "human",
@@ -829,7 +1257,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 2,
+      seq: "2",
       content: {
         id: "lead-ai",
         type: "ai",
@@ -841,7 +1269,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 3,
+      seq: "3",
       content: {
         id: "subagent-ai",
         type: "ai",
@@ -853,7 +1281,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 4,
+      seq: "4",
       content: {
         id: "subagent-tool",
         type: "tool",
@@ -865,7 +1293,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 5,
+      seq: "5",
       content: {
         id: "middleware-ai",
         type: "ai",
@@ -879,7 +1307,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 6,
+      seq: "6",
       content: {
         id: "middleware-tool",
         type: "tool",
@@ -891,7 +1319,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 7,
+      seq: "7",
       content: {
         id: "lead-tool",
         type: "tool",
@@ -903,7 +1331,7 @@ test("buildVisibleHistoryMessages hides subagent and middleware AI messages with
     },
     {
       run_id: "run-1",
-      seq: 8,
+      seq: "8",
       content: {
         id: "lead-final",
         type: "ai",
@@ -925,7 +1353,7 @@ test("buildVisibleHistoryMessages keeps human run admission messages regardless 
   const rows: RunMessage[] = [
     {
       run_id: "run-1",
-      seq: 1,
+      seq: "1",
       content: {
         id: "run-admission-run-1",
         type: "human",
@@ -952,7 +1380,7 @@ test("buildVisibleHistoryMessages hides internal human messages except run admis
   const rows: RunMessage[] = [
     {
       run_id: "run-1",
-      seq: 1,
+      seq: "1",
       content: {
         id: "lead-human",
         type: "human",
@@ -963,7 +1391,7 @@ test("buildVisibleHistoryMessages hides internal human messages except run admis
     },
     {
       run_id: "run-1",
-      seq: 2,
+      seq: "2",
       content: {
         id: "subagent-human",
         type: "human",
@@ -974,7 +1402,7 @@ test("buildVisibleHistoryMessages hides internal human messages except run admis
     },
     {
       run_id: "run-1",
-      seq: 3,
+      seq: "3",
       content: {
         id: "middleware-human",
         type: "human",
@@ -985,7 +1413,7 @@ test("buildVisibleHistoryMessages hides internal human messages except run admis
     },
     {
       run_id: "run-1",
-      seq: 4,
+      seq: "4",
       content: {
         id: "run-admission-run-1",
         type: "human",
@@ -1009,7 +1437,7 @@ test("buildVisibleHistoryMessages hides internal human messages except run admis
 test("buildVisibleHistoryMessages defers an orphan tool result until its lead parent page loads", () => {
   const toolResult: RunMessage = {
     run_id: "run-1",
-    seq: 20,
+    seq: "20",
     content: {
       id: "tool-1",
       type: "tool",
@@ -1021,7 +1449,7 @@ test("buildVisibleHistoryMessages defers an orphan tool result until its lead pa
   };
   const leadParent: RunMessage = {
     run_id: "run-1",
-    seq: 10,
+    seq: "10",
     content: {
       id: "ai-1",
       type: "ai",
@@ -1034,11 +1462,9 @@ test("buildVisibleHistoryMessages defers an orphan tool result until its lead pa
 
   expect(buildVisibleHistoryMessages([toolResult], new Set(), [])).toEqual([]);
   expect(
-    buildVisibleHistoryMessages(
-      [leadParent, toolResult],
-      new Set(),
-      [],
-    ).map((message) => message.id),
+    buildVisibleHistoryMessages([leadParent, toolResult], new Set(), []).map(
+      (message) => message.id,
+    ),
   ).toEqual(["ai-1", "tool-1"]);
 });
 
@@ -1046,7 +1472,7 @@ test("buildVisibleHistoryMessages scopes tool-call ownership to its run", () => 
   const rows: RunMessage[] = [
     {
       run_id: "run-subagent",
-      seq: 1,
+      seq: "1",
       content: {
         id: "subagent-ai",
         type: "ai",
@@ -1058,7 +1484,7 @@ test("buildVisibleHistoryMessages scopes tool-call ownership to its run", () => 
     },
     {
       run_id: "run-subagent",
-      seq: 2,
+      seq: "2",
       content: {
         id: "subagent-tool",
         type: "tool",
@@ -1070,7 +1496,7 @@ test("buildVisibleHistoryMessages scopes tool-call ownership to its run", () => 
     },
     {
       run_id: "run-lead",
-      seq: 1,
+      seq: "1",
       content: {
         id: "lead-ai",
         type: "ai",
@@ -1082,7 +1508,7 @@ test("buildVisibleHistoryMessages scopes tool-call ownership to its run", () => 
     },
     {
       run_id: "run-lead",
-      seq: 2,
+      seq: "2",
       content: {
         id: "lead-tool",
         type: "tool",
@@ -1478,4 +1904,44 @@ test("full summarization rescue pipeline keeps the conversation when history sta
     "summary-1",
     "ai-2",
   ]);
+});
+
+test("thread projection does not eagerly invoke SDK getters during sparse compaction state", () => {
+  let toolCallsGetterCount = 0;
+  const sdkThread = {
+    messages: new Array<Message>(3),
+    values: { messages: new Array<Message>(3) },
+    stop: () => undefined,
+    get toolCalls() {
+      toolCallsGetterCount += 1;
+      throw new TypeError(
+        "Cannot read properties of undefined (reading 'type')",
+      );
+    },
+  };
+  const projectedMessages = [
+    { id: "safe-ai", type: "ai", content: "complete" } as Message,
+  ];
+  const projectedValues = { messages: projectedMessages };
+  const projectedStop = () => "stopped";
+
+  const projection = overlayThreadProjection(sdkThread, {
+    messages: projectedMessages,
+    values: projectedValues,
+    stop: projectedStop,
+  });
+
+  expect(toolCallsGetterCount).toBe(0);
+  expect(projection.messages).toBe(projectedMessages);
+  expect(projection.messages).toHaveLength(1);
+  expect(projection.values).toBe(projectedValues);
+  expect(projection.stop).toBe(projectedStop);
+  const toolCallsDescriptor = Object.getOwnPropertyDescriptor(
+    projection,
+    "toolCalls",
+  );
+  expect(toolCallsDescriptor).toBeDefined();
+  expect("get" in toolCallsDescriptor!).toBe(true);
+  expect("value" in toolCallsDescriptor!).toBe(false);
+  expect(toolCallsGetterCount).toBe(0);
 });

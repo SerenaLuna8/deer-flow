@@ -4,7 +4,9 @@
 # Services:
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
-#   - gateway:     FastAPI Gateway API + agent runtime
+#   - gateway:     FastAPI admission/query/SSE API
+#   - worker:      Required durable Agent-graph executor
+#   - scheduler:   Optional Automation admission process
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
@@ -17,6 +19,7 @@
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
 #   DEER_FLOW_PROXY_AUTH_TOKEN       — nginx-to-Gateway client-IP attestation token
+#   PROVISIONER_API_KEY              — shared config value; Worker authenticates to Provisioner with it
 #
 # LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
 # Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
@@ -80,17 +83,13 @@ services:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ../skills:/app/skills:ro
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
-      # DooD: the host Docker socket is NOT mounted by default. It is added only
-      # for aio (pure-DooD) sandbox mode via the opt-in docker-compose.dood.yaml
-      # overlay (appended by scripts/deploy.sh). See backend/docs/CONFIGURATION.md
-      # Security Note section for details.
+      # DooD: the host Docker socket is never mounted into Gateway. The opt-in
+      # docker-compose.dood.yaml overlay adds it only to Worker for aio mode.
+      # See backend/docs/CONFIGURATION.md Security Note for details.
 
-      # CLI auth dirs (Claude Code / Codex) are NOT mounted by default: they
-      # expose the entire ~/.claude and ~/.codex (history, projects, global
-      # config, credentials) into the container. Mount them only when you use
-      # the Claude/Codex CLI login as a model provider or ACP agent, via the
-      # opt-in docker-compose.cli-auth.yaml overlay. Prefer an env token
-      # (CLAUDE_CODE_OAUTH_TOKEN, see backend/docs/CONFIGURATION.md).
+      # CLI auth dirs are never mounted into Gateway. The opt-in
+      # docker-compose.cli-auth.yaml overlay adds them read-only only to Worker.
+      # Prefer a narrowly scoped environment token when possible.
     working_dir: /app
     environment:
       - CI=true
@@ -100,18 +99,30 @@ services:
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-}
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - DEER_FLOW_AUDIT_ACTIVE_KEY_ID=${DEER_FLOW_AUDIT_ACTIVE_KEY_ID:-}
+      - DEER_FLOW_AUDIT_KEYRING_JSON=${DEER_FLOW_AUDIT_KEYRING_JSON:-}
+      - DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID=${DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID:-}
+      - DEER_FLOW_CREDENTIAL_KEYRING_JSON=${DEER_FLOW_CREDENTIAL_KEYRING_JSON:-}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
       - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN}
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
-      # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
-      # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
+      # Forward only the explicit runtime proxy contract. The root .env is not
+      # mounted wholesale because model provider Credentials live in PostgreSQL.
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - ALL_PROXY=${ALL_PROXY:-}
+      - http_proxy=${http_proxy:-}
+      - https_proxy=${https_proxy:-}
+      - all_proxy=${all_proxy:-}
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-    env_file:
-      - ../.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -163,10 +174,10 @@ services:
       - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - KUBECONFIG_PATH=/root/.kube/config
+      - SANDBOX_SERVICE_TYPE=NodePort
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
-    env_file:
-      - ../.env
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

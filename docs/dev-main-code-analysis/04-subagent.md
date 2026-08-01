@@ -1,9 +1,37 @@
 # 04. Subagent 模块：main 实现、dev 对照与落地边界
 
+## 0. 本轮先迁移什么
+
+本轮以 `dev@785be513` 为实际起点，不按旧分析基线整文件覆盖。先核对后只迁移下列可独立验证的落点：
+
+| 移植项 | 实际落点 | 结果 |
+| --- | --- | --- |
+| child LLM fallback 精确分类 | `subagents/executor.py` | 正常结束与 recursion 都只检查最后一条 `AIMessage` 的显式 marker；普通错误文本和较早的 stale marker 不误判 |
+| compaction 后 step cursor | `subagents/step_events.py` | history 收缩时重置 cursor，后续 AI/Tool step 不再漏记 |
+| task event fail-closed validator | `subagents/step_events.py` | 拒绝空 task ID、非法 description、布尔/负数 index、非对象 message；畸形 usage 不入持久化字段 |
+| event batch 失败恢复 | `runtime/runs/worker.py` | `put_batch()` 普通失败或被取消后，按 `old batch + concurrent new events` 放回 pending；取消继续向外抛出，并保留 dev 的 private scope |
+| parent root fallback 边界 | `runtime/runs/worker.py` | 只有根 namespace 的 marker 能决定父 Run error；child marker 只形成 Subagent failure |
+| effective model + token wire | `status_contract.py`、`task_tool.py`、step/end event、前端 task state/card | executor 每个 stream chunk 发布累计 snapshot；started/running/terminal、ToolMessage 和历史恢复使用同一模型名与三项 token 值；不新增 SQL 列 |
+| concurrent clamp | config、Lead prompt、limit middleware | 单批并发统一为 `1–4`，提示值和执行值不再漂移 |
+
+当前 `dev` 已经具备且本轮只保留、验收，不重新移植：
+
+- 每 Run 总委派上限默认 6、范围 `1–50`；
+- `project_id + owner_user_id + run_id + occurrence` durable ledger；
+- 8192 字符的 persisted step text/tool args 边界；
+- `token_capped` / `turn_capped` / `loop_capped` stop reason；
+- private Run 的 owner-loop authorization/checker、exact MCP、Skill snapshot 与 secret provider proxy。
+
+明确延期 namespace/callback 继承。当前 detached child 会清空父 `RunnableConfig`，这是 dev 防止
+`RunJournal`、Pregel runtime、PostgreSQL store、私有 authority 和 stream writer 跨 isolated loop
+运行的安全边界。main 的“复制整份 config 后只删除带 marker callback”不能机械移植；dev 尚未对这些
+对象建立可跨 loop 的正向 allowlist。后续必须作为独立安全重构处理，本轮继续以
+`task_*` custom event 和 `subagent.step/subagent.end` 作为唯一 Subagent UI 通道。
+
 ## 1. 分析基线与范围
 
 - `main`：`e317f7b8d9b2afb4c3925812d4774da602c9f8f3`
-- `dev`：`8a91e95799c9b345d9540c7e201b33c603e7870c`
+- `dev` 本轮移植前 HEAD：`785be51341c1c3ddaa073b76aaa4421bee0ac136`
 - main 演进区间：`3be3969f..e317f7b8`
 - 范围：`task` 工具、Subagent 配置/注册/执行、状态契约、step event、并发/总量限制、超时/取消、回退与持久化。
 
@@ -368,7 +396,7 @@ Worker exact admitted runtime
 这阻止父 callback 在 isolated loop 运行，但同时丢失 parent namespace 和 framework streaming callback。
 dev 又显式构造 child `run_config.configurable.thread_id`，所以其 namespace/stream lineage 与 main 不同。
 
-## 13. main 与 dev 精确差异
+## 13. main 与移植后 dev 的精确差异
 
 | 维度 | main | dev |
 | --- | --- | --- |
@@ -376,43 +404,54 @@ dev 又显式构造 child `run_config.configurable.thread_id`，所以其 namesp
 | Skill 来源 | 当前 user registry，child session lazy load | admission 时冻结的 exact immutable Skill snapshot |
 | MCP | parent tool groups/deferred discovery | exact admitted MCP，owner-loop proxy；private run 禁全局 discovery |
 | secrets | 通用运行环境 | exact Skill credential 引用，按边界解密/注入 |
-| callbacks | 剔除 loop-bound，保留 streaming | 清空整个 child runnable config |
-| namespace | 保留 ambient parent namespace | 当前 detached config 丢失 parent namespace |
-| step cursor 收缩 | 已 reset | 缺少 main 的 reset 修复 |
-| LLM fallback | 正常/recursion 均检查 marker | 普通 fallback 扫描存在，但 child executor 缺 main 两条精确分类 |
+| callbacks | 剔除 loop-bound，保留 streaming | 清空整个 child runnable config，作为当前跨 loop 安全边界 |
+| namespace | 保留 ambient parent namespace | detached config 不继承 parent namespace；本轮明确延期 |
+| step cursor 收缩 | 已 reset | 已选择性移植 reset；保留 dev event/权限链 |
+| LLM fallback | 正常/recursion 均检查 marker | 已移植最后 AI marker 分类；parent 仅 root namespace 判 error |
 | recursion 普通输出 | partial completed / empty failed | 已有相同基本语义 |
-| total cap | concurrent + per-run total | 只有旧 concurrent cap，最小值语义也较旧 |
-| status metadata | model + token usage | 尚无完整字段 |
-| event flush failure | re-buffer | 清空后仅日志，失败 batch 丢失 |
+| total cap | concurrent + per-run total | 已有更强的 project + owner + run + occurrence ledger；本轮未降级覆盖 |
+| concurrent clamp | `1–4` | 已统一为 `1–4`，prompt/middleware 共用 canonical helper |
+| status metadata | model + token usage | 已移植 executor 每个 stream chunk 的累计 snapshot、ToolMessage、live event、persisted end event 与前端 reader/card |
+| event flush failure | re-buffer | 已移植普通异常与取消异常的 re-buffer，并保留 private event-store scope |
 
-## 14. 已确认缺陷与风险
+## 14. 已确认缺陷、处理结果与剩余风险
 
-1. **dev root/subgraph fallback 误判**：dev 的
-   `runtime/runs/worker.py::_stream_once()` 在 multi-mode/subgraph 分支对所有 namespace 调
-   `_extract_llm_error_fallback_message()`；child fallback 可把 parent Run 标为 error。main 只在
-   `if not namespace` 时判断。
-2. **dev step batch 丢失**：`_SubagentEventBuffer.flush()` 先清 pending，`put_batch()` 失败只日志，不 re-buffer。
-3. **dev compaction cursor**：history 收缩后仍保留旧 cursor，新追加 step 在长度追平前可能被漏掉。
-4. **dev namespace/callback 全清**：避免 loop-bound callback 是对的，但连 framework namespaced streaming 一起清除；直接复制 main 又可能让 owner-loop 私有 callback 越 loop。
-5. **cooperative cancel 的共同限制**：长工具调用不 yield 时，取消不会即时生效；private side effect 必须继续由 dev boundary 在调用前重验证。
-6. **总量限制缺失**：并发限制不能防止一次 run 串行委派无限多 task。
+1. **root/subgraph fallback 误判：已修复。** multi-mode/subgraph 解包后只在
+   `namespace == ()` 检查父 Run fallback；测试同时证明 child frame 确实以 namespaced SSE 发出，
+   不是通过丢帧让断言空通过。
+2. **step batch 丢失：已修复。** 首次 `put_batch()` 失败后旧 batch 放回新事件之前；如果
+   `put_batch()` 被取消，也先回填 batch 再重新抛出 `CancelledError`，使 Worker 的 finally flush
+   仍可保序重试。普通重试沿用同一个 server-issued scope。它不是 durable queue：如果最终 flush
+   持续失败，进程退出后内存 pending 仍会丢失。
+3. **compaction cursor：已修复。** history 收缩后 cursor 回到新 tail，再由已有 ID/content 去重阻止
+   重复。当前 invariant 是 summarization 不会在 reset cursor 之前插入新的可捕获 AI/Tool 消息。
+4. **namespace/callback 全清：延期。** 直接复制 main 会携带 `__pregel_runtime`、store、control、
+   journal、authorization、Memory、MCP 和 secret provider 等私有对象跨 loop；必须先建立正向 allowlist。
+5. **cooperative cancel：共同限制仍在。** 长工具调用不 yield 时取消不会即时生效；private side effect
+   继续由 dev boundary 在每次调用前重验证。
+6. **总量限制：移植前 HEAD 已完成。** 文档旧结论来自 `8a91e957`，当前实现已按精确 private scope
+   和 run occurrence 计数，不能再用 main 的 run_id-only ledger 覆盖。
 
-## 15. 可移植落点
+## 15. 移植计划与落地状态
 
-建议按以下精确符号移植：
+按依赖关系执行，而不是按文件整块合并：
 
-1. `subagents/executor.py::_extract_llm_error_fallback()` 与
-   `SubagentExecutor._aexecute()` 的正常/recursion 分支。
-2. `subagents/step_events.py::capture_new_step_messages()` 的 contraction reset 和边界化 tool args。
-3. `runtime/runs/worker.py::_SubagentEventBuffer.flush()` 的失败 re-buffer。
-4. `agents/middlewares/subagent_limit_middleware.py::SubagentLimitMiddleware` 的 per-run total cap，
-   并同步 `durable_context_middleware.py` 的 run_id ledger。
-5. `status_contract.py` 的 model/token 字段与前端 task reader/card 保持 wire 字段一致。
-6. namespace 修复应重写 dev 的 `_copy_detached_subagent_context()`：只保留可跨 loop 的 framework
-   streaming/namespace context，继续删除 private owner-loop callback；不能机械替换。
-7. root fallback 修复落在
-   `backend/packages/harness/deerflow/runtime/runs/worker.py::_stream_once()`，判断必须位于
-   `_unpack_stream_item()` 后且仅 `namespace == ()` 生效。
+1. **完成：纯分类。** 移植 `_extract_llm_error_fallback()`，再接正常与 recursion 两条终态分支；
+   marker 必须严格为 `True`，只看最后 AI。
+2. **完成：纯 step/event。** 移植 contraction reset；tool args 边界原本已存在，只做回归验证；
+   补 event identity/index/message fail-closed validator。
+3. **完成：Worker 局部可靠性。** `flush()` 在普通异常和 `CancelledError` 下均先 re-buffer；
+   root fallback 判断放在 `_unpack_stream_item()` 之后并限定空 namespace。
+4. **保留：总量与 ledger。** 当前 dev 的 per-run total cap 和 private occurrence ledger 已强于 main，
+   不重新移植。
+5. **完成：wire 契约。** 后端只公开 effective model 与
+   `{input_tokens, output_tokens, total_tokens}` 累计值；executor 在每个 stream chunk 后以锁保护
+   更新运行中 snapshot，`task` 轮询无需等待终态即可读到；前端统一规范化为 camelCase state，
+   token 显示受全局 `token_usage.enabled` 控制。
+6. **完成：并发值一致性。** config helper、Lead prompt、middleware 共用 `1–4` clamp；
+   不把超额 task 截断升级成父 Run terminal stop reason。
+7. **延期：namespace/callback。** 继续使用 detached config；后续以可跨线程对象正向 allowlist、
+   owner-loop 实测和 production-shaped private Run 集成测试为前置。
 
 ## 16. 禁止直接合并
 
@@ -437,8 +476,19 @@ dev 又显式构造 child `run_config.configurable.thread_id`，所以其 namesp
 | root fallback | child marked fallback => task failed、parent 可继续；root marked fallback => parent error |
 | recursion | partial/empty/marked fallback，分别覆盖 guard reason 与 turn reason |
 | compaction | cursor 收缩后新 AI/Tool step 不漏、不重复 |
-| batching | 阈值、terminal eager flush、首轮失败后次轮按原序写入 |
+| batching | 阈值、terminal eager flush、普通失败/取消后次轮按原序写入 |
 | limits | 并发 1–4、总量 1–50、跨 run ledger 不串计数 |
 | cancel/timeout | pre-start、stream boundary、长工具、first-terminal-wins |
 | wire fields | Python validator、TypeScript reader、legacy `max_turns_reached`、model/token validation |
 | durable replay | reload 后 step 顺序、terminal 唯一、message feed 不混入内部 step |
+
+本轮已经新增或强化的自动化覆盖包括：
+
+- executor：marked/unmarked/stale fallback，normal 与 recursion，stop reason 保留，运行中真实 collector snapshot；
+- step/event：history contraction、多 Tool tail、字段校验、model/token 持久化；
+- worker：child/root fallback 配对、失败/取消期间并发 add、`old + new` 顺序与 private scope 重试；
+- limits：`0/1/5/99` clamp，prompt HARD LIMIT 与 middleware 一致；
+- task tool/status：started/running/terminal model + cumulative usage，所有终态 ToolMessage metadata；
+- frontend：live lifecycle、历史 ToolMessage、畸形 usage、累计 usage 防回退、模型显示名与 Token 格式。
+
+namespace/callback 行仍是后续安全重构的准入矩阵，不得把本轮“明确延期”写成已通过。

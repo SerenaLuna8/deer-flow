@@ -3,13 +3,7 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardAction,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   projectArtifactDownloadURL,
@@ -25,16 +19,19 @@ import {
 } from "@/core/utils/files";
 import { cn } from "@/lib/utils";
 
-import { useArtifacts } from "./context";
+import { Tooltip } from "../tooltip";
 
+import { useArtifacts } from "./context";
 export function ArtifactFileList({
   className,
   files,
+  surface = "directory",
   threadId,
   canDelete = false,
 }: {
   className?: string;
   files: string[];
+  surface?: "directory" | "message";
   threadId: string;
   canDelete?: boolean;
 }) {
@@ -95,7 +92,16 @@ export function ArtifactFileList({
   );
 
   return (
-    <ul className={cn("flex w-full flex-col gap-4", className)}>
+    <ul
+      className={cn(
+        "flex w-full flex-col",
+        surface === "message" ? "gap-2" : "gap-4",
+        className,
+      )}
+      data-testid={
+        surface === "message" ? "assistant-delivered-files" : undefined
+      }
+    >
       {files.map((file) => {
         const normalizedPath = file
           .replace(/^\/mnt\/(?:data|user-data)\//u, "")
@@ -103,59 +109,100 @@ export function ArtifactFileList({
         const projectFile = projectFiles.data?.files.find(
           (candidate) => candidate.logical_path === normalizedPath,
         );
+        const fileDownloadURL = downloadURL(file);
         return (
-          <Card
-            key={file}
-            className="relative cursor-pointer p-3"
-            onClick={() => handleClick(file)}
-          >
-            <CardHeader className="grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 pr-2 pl-1">
-              <CardTitle className="relative min-w-0 pl-8 leading-tight [overflow-wrap:anywhere] break-words">
-                <div className="min-w-0">{getFileName(file)}</div>
-                <div className="absolute top-2 -left-0.5">
-                  {getFileIcon(file, "size-6")}
-                </div>
-              </CardTitle>
-              <CardDescription className="min-w-0 pl-8 text-xs">
-                {getFileExtensionDisplayName(file)} file
-              </CardDescription>
-              <CardAction className="row-span-1 self-center">
-                {projectFile?.id &&
-                  canDeleteProjectFile(canDelete, projectFile.kind) && (
+          <li key={file}>
+            <Card
+              className={cn(
+                "p-2",
+                surface === "message" &&
+                  "border-border/70 bg-muted/15 shadow-none",
+              )}
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  className="hover:bg-muted/60 focus-visible:ring-ring/50 flex min-w-0 flex-1 items-center gap-3 rounded-lg p-2 text-left transition-colors outline-none focus-visible:ring-[3px]"
+                  aria-label={`${t.workspaceChanges.openFile}: ${getFileName(file)}`}
+                  onClick={() => handleClick(file)}
+                >
+                  <span className="text-muted-foreground shrink-0">
+                    {getFileIcon(
+                      file,
+                      surface === "message" ? "size-5" : "size-6",
+                    )}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block font-medium [overflow-wrap:anywhere] break-words">
+                      {getFileName(file)}
+                    </span>
+                    <span className="text-muted-foreground block text-xs">
+                      {getFileExtensionDisplayName(file)} {t.common.file}
+                    </span>
+                  </span>
+                </button>
+                <div className="flex shrink-0 items-center">
+                  {surface === "directory" &&
+                    projectFile?.id &&
+                    canDeleteProjectFile(canDelete, projectFile.kind) && (
+                      <Button
+                        variant="ghost"
+                        disabled={deleteProjectFile.isPending}
+                        onClick={(event) =>
+                          handleDeleteProjectFile(event, file)
+                        }
+                      >
+                        {deleteProjectFile.isPending ? (
+                          <LoaderIcon className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2Icon className="size-4" />
+                        )}
+                        {t.common.delete}
+                      </Button>
+                    )}
+                  {fileDownloadURL ? (
+                    surface === "message" ? (
+                      <Tooltip content={t.common.download}>
+                        <Button size="icon-sm" variant="ghost" asChild>
+                          <a
+                            aria-label={t.common.download}
+                            href={fileDownloadURL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <DownloadIcon className="size-4" />
+                          </a>
+                        </Button>
+                      </Tooltip>
+                    ) : (
+                      <Button variant="ghost" asChild>
+                        <a
+                          href={fileDownloadURL}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          <DownloadIcon className="size-4" />
+                          {t.common.download}
+                        </a>
+                      </Button>
+                    )
+                  ) : (
                     <Button
+                      aria-label={
+                        surface === "message" ? t.common.download : undefined
+                      }
+                      size={surface === "message" ? "icon-sm" : "default"}
                       variant="ghost"
-                      disabled={deleteProjectFile.isPending}
-                      onClick={(event) => handleDeleteProjectFile(event, file)}
-                    >
-                      {deleteProjectFile.isPending ? (
-                        <LoaderIcon className="size-4 animate-spin" />
-                      ) : (
-                        <Trash2Icon className="size-4" />
-                      )}
-                      {t.common.delete}
-                    </Button>
-                  )}
-                {downloadURL(file) ? (
-                  <Button variant="ghost" asChild>
-                    <a
-                      href={downloadURL(file)!}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
+                      disabled
                     >
                       <DownloadIcon className="size-4" />
-                      {t.common.download}
-                    </a>
-                  </Button>
-                ) : (
-                  <Button variant="ghost" disabled>
-                    <DownloadIcon className="size-4" />
-                    {t.common.download}
-                  </Button>
-                )}
-              </CardAction>
-            </CardHeader>
-          </Card>
+                      {surface === "directory" && t.common.download}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </Card>
+          </li>
         );
       })}
     </ul>

@@ -27,6 +27,7 @@ _EXTENSION_TO_MIME = {
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
+    ".gif": "image/gif",
 }
 
 
@@ -61,6 +62,8 @@ def _detect_image_mime(image_data: bytes) -> str | None:
         return "image/png"
     if len(image_data) >= 12 and image_data.startswith(b"RIFF") and image_data[8:12] == b"WEBP":
         return "image/webp"
+    if image_data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
     return None
 
 

@@ -4,6 +4,7 @@ import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useI18n } from "@/core/i18n/hooks";
 import type { AssetListKind, ProjectAssetList } from "@/core/shared-assets";
 
 import {
@@ -24,21 +25,22 @@ export function ProjectAssetSection({
   onCreateVersion?: (item: ProjectAssetItem) => void;
   renderDetails?: (item: ProjectAssetItem) => React.ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <section aria-labelledby="project-assets-heading" className="space-y-4">
       <div>
         <h2 id="project-assets-heading" className="text-xl font-semibold">
-          项目资产
+          {t.adminAssets.catalog.projectAssets}
         </h2>
         <p className="text-muted-foreground mt-1 text-sm">
           {kind === "agents"
-            ? "只属于当前项目；Agent 设定在项目 Agent 页面维护，保存后立即生效。"
-            : "只属于当前项目；内容变更通过不可变新版本完成。"}
+            ? t.adminAssets.catalog.projectAgentDescription
+            : t.adminAssets.catalog.projectVersionedDescription}
         </p>
       </div>
       {items.length === 0 ? (
         <p className="text-muted-foreground rounded-xl border border-dashed p-6 text-sm">
-          当前项目还没有此类资产。
+          {t.adminAssets.catalog.noProjectAssets}
         </p>
       ) : (
         <div className="grid gap-4 xl:grid-cols-2">
@@ -55,7 +57,7 @@ export function ProjectAssetSection({
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Badge>项目</Badge>
+                    <Badge>{t.adminAssets.catalog.project}</Badge>
                     <AssetStatusBadge status={item.status} />
                   </div>
                 </div>
@@ -64,15 +66,19 @@ export function ProjectAssetSection({
                 {kind !== "agents" ? (
                   <dl className="grid gap-3 sm:grid-cols-2">
                     <div>
-                      <dt className="text-muted-foreground text-xs">资产版本</dt>
+                      <dt className="text-muted-foreground text-xs">
+                        {t.adminAssets.common.assetVersion}
+                      </dt>
                       <dd>{item.version}</dd>
                     </div>
                     <div>
-                      <dt className="text-muted-foreground text-xs">发布状态</dt>
+                      <dt className="text-muted-foreground text-xs">
+                        {t.adminAssets.catalog.publishStatus}
+                      </dt>
                       <dd>
                         {item.current_published_version_id
-                          ? "已有发布版本"
-                          : "尚未发布"}
+                          ? t.adminAssets.catalog.publishedAvailable
+                          : t.adminAssets.catalog.unpublished}
                       </dd>
                     </div>
                   </dl>
@@ -86,7 +92,7 @@ export function ProjectAssetSection({
                     size="sm"
                     onClick={() => onCreateVersion?.(item)}
                   >
-                    创建新版本
+                    {t.adminAssets.catalog.createNewVersion}
                   </Button>
                 )}
                 {renderDetails?.(item)}

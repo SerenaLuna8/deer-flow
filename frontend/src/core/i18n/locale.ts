@@ -40,6 +40,68 @@ export function normalizeLocale(locale: string | null | undefined): Locale {
   return DEFAULT_LOCALE;
 }
 
+function parseSupportedLocale(value: string | null | undefined): Locale | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "en" || normalized.startsWith("en-")) {
+    return "en-US";
+  }
+  if (normalized === "zh" || normalized.startsWith("zh-")) {
+    return "zh-CN";
+  }
+  return null;
+}
+
+/**
+ * Resolve the application locale in request priority order:
+ * an explicit supported cookie, the browser's weighted language list,
+ * and finally the product default.
+ */
+export function resolveRequestLocale(
+  cookieLocale: string | null | undefined,
+  acceptLanguage: string | null | undefined,
+): Locale {
+  const cookieMatch = parseSupportedLocale(cookieLocale);
+  if (cookieMatch) {
+    return cookieMatch;
+  }
+
+  const accepted = (acceptLanguage ?? "")
+    .split(",")
+    .map((entry, index) => {
+      const [language = "", ...parameters] = entry.trim().split(";");
+      const qualityParameter = parameters.find((parameter) =>
+        parameter.trim().startsWith("q="),
+      );
+      const quality = qualityParameter
+        ? Number.parseFloat(qualityParameter.trim().slice(2))
+        : 1;
+      return {
+        language,
+        quality: Number.isFinite(quality) ? quality : 0,
+        index,
+      };
+    })
+    .sort(
+      (left, right) => right.quality - left.quality || left.index - right.index,
+    );
+
+  for (const preference of accepted) {
+    if (preference.quality <= 0) {
+      continue;
+    }
+    const match = parseSupportedLocale(preference.language);
+    if (match) {
+      return match;
+    }
+  }
+
+  return DEFAULT_LOCALE;
+}
+
 // Helper function to detect browser locale
 export function detectLocale(): Locale {
   if (typeof window === "undefined") {

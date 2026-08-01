@@ -28,6 +28,7 @@ import {
   enableProjectSystemBinding,
   enableAdminProjectSystemBinding,
   forkProjectSkillVersion,
+  getProjectDefaultAgent,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
   listAdminAssets,
@@ -39,6 +40,7 @@ import {
   publishProjectAssetVersion,
   replaceProjectCredential,
   revokeProjectCredential,
+  setProjectDefaultAgent,
   submitProjectMcpVersion,
   updateProjectAgentInstructions,
   upgradeProjectSystemBinding,
@@ -474,6 +476,63 @@ describe("shared asset api", () => {
       ["/backend/api/admin/assets/agents", { signal }],
       ["/backend/api/assets/catalog/agents", { signal }],
     ]);
+  });
+
+  test("reads and revision-guards the project default Agent setting", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          agent_asset_id: asset.id,
+          revision: 4,
+          request_id: "req-default-agent-read",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          agent_asset_id: null,
+          revision: 5,
+          request_id: "req-default-agent-write",
+        }),
+      );
+    const signal = new AbortController().signal;
+
+    await expect(getProjectDefaultAgent(PROJECT_ID, signal)).resolves.toEqual({
+      agent_asset_id: asset.id,
+      revision: 4,
+      request_id: "req-default-agent-read",
+    });
+    await expect(
+      setProjectDefaultAgent(
+        PROJECT_ID,
+        { agent_asset_id: null, expected_revision: 4 },
+        signal,
+      ),
+    ).resolves.toMatchObject({ agent_asset_id: null, revision: 5 });
+    expect(mockedFetch.mock.calls).toEqual([
+      [`/backend/api/projects/${PROJECT_ID}/default-agent`, { signal }],
+      [
+        `/backend/api/projects/${PROJECT_ID}/default-agent`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_asset_id: null,
+            expected_revision: 4,
+          }),
+          signal,
+        },
+      ],
+    ]);
+  });
+
+  test("rejects an unsafe default-Agent revision before sending a request", async () => {
+    await expect(
+      setProjectDefaultAgent(PROJECT_ID, {
+        agent_asset_id: asset.id,
+        expected_revision: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).rejects.toThrow();
+    expect(mockedFetch).not.toHaveBeenCalled();
   });
 
   test("validates mutation input before sending it through the authenticated fetcher", async () => {

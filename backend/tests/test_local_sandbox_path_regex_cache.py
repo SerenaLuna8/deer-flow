@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from deerflow.sandbox.local import local_sandbox as local_sandbox_module
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
@@ -65,6 +68,53 @@ def test_reverse_resolve_output_maps_local_back_to_container(tmp_path):
     ws_local = str((tmp_path / "workspace").resolve())
     out = sb._reverse_resolve_paths_in_output(f"wrote {ws_local}/foo.txt ok")
     assert out == "wrote /mnt/user-data/workspace/foo.txt ok"
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["-extra/data.txt", "2/x", ".bak", "foo", "_backup/y"],
+)
+def test_reverse_resolve_does_not_match_inside_longer_sibling(
+    tmp_path,
+    suffix,
+):
+    sb = _make_sandbox(tmp_path)
+    skills_local = str((tmp_path / "skills").resolve())
+    sibling = f"{skills_local}{suffix}"
+    out = sb._reverse_resolve_paths_in_output(f"see {sibling}")
+    assert out == f"see {sibling}"
+    assert "/mnt/skills" not in out
+
+
+def test_reverse_resolve_path_matches_windows_backslash_containment(
+    monkeypatch,
+):
+    sb = LocalSandbox(
+        id="windows-sep-test",
+        path_mappings=[
+            PathMapping(
+                container_path="/mnt/user-data/workspace",
+                local_path="C:\\Users\\test\\workspace",
+            )
+        ],
+    )
+    mapping = sb.path_mappings[0]
+    monkeypatch.setattr(local_sandbox_module.os, "sep", "\\")
+    sb._resolved_local_paths = {mapping: "C:\\Users\\test\\workspace"}
+
+    class _FakeWindowsPath:
+        def __init__(self, raw: str) -> None:
+            self._raw = raw
+
+        def resolve(self) -> _FakeWindowsPath:
+            return _FakeWindowsPath(self._raw.replace("/", "\\"))
+
+        def __str__(self) -> str:
+            return self._raw
+
+    monkeypatch.setattr(local_sandbox_module, "Path", _FakeWindowsPath)
+    result = sb._reverse_resolve_path("C:\\Users\\test\\workspace\\sub\\f.txt")
+    assert result == "/mnt/user-data/workspace/sub/f.txt"
 
 
 def test_resolved_paths_and_sorted_views_are_cached(tmp_path):

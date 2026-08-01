@@ -12,6 +12,7 @@ from deerflow.tools.builtins.view_image_tool import view_image_tool
 view_image_module = importlib.import_module("deerflow.tools.builtins.view_image_tool")
 
 PNG_BYTES = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+GIF_BYTES = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
 
 
 def _make_thread_data(tmp_path: Path) -> dict[str, str]:
@@ -124,6 +125,23 @@ def test_view_image_reads_virtual_uploads_path(tmp_path: Path) -> None:
             "run_id": "legacy:thread-1",
         },
     }
+
+
+def test_view_image_reads_gif_with_matching_magic(tmp_path: Path) -> None:
+    thread_data = _make_thread_data(tmp_path)
+    image_path = Path(thread_data["uploads_path"]) / "sample.gif"
+    image_path.write_bytes(GIF_BYTES)
+
+    result = view_image_tool.func(
+        runtime=_make_runtime(thread_data),
+        image_path="/mnt/user-data/uploads/sample.gif",
+        tool_call_id="tc-gif",
+    )
+
+    assert _message_content(result) == "Successfully read image"
+    viewed_image = result.update["viewed_images"]["/mnt/user-data/uploads/sample.gif"]
+    assert viewed_image["mime_type"] == "image/gif"
+    assert viewed_image["size"] == len(GIF_BYTES)
 
 
 def test_view_image_rejects_spoofed_extension(tmp_path: Path) -> None:

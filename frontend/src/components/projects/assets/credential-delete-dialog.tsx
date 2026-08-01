@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useI18n } from "@/core/i18n/hooks";
 
 const CREDENTIAL_DELETE_DELAY_MS = 5_000;
 
@@ -69,14 +70,13 @@ export function CredentialDeleteConfirmation({
   onConfirm: () => void;
 }) {
   const waiting = remainingSeconds > 0;
+  const { t } = useI18n();
   return (
     <>
       <DialogHeader>
-        <DialogTitle>删除 Credential？</DialogTitle>
+        <DialogTitle>{t.adminAssets.dialogs.deleteTitle}</DialogTitle>
         <DialogDescription>
-          删除“{credentialName}”后，其所有版本会从普通列表与运行时查询中移除，
-          相关 MCP Grant 与 Skill
-          环境变量绑定将失效。仅审计记录保留，此操作不可恢复。
+          {t.adminAssets.dialogs.deleteDescription(credentialName)}
         </DialogDescription>
       </DialogHeader>
       {errorMessage ? (
@@ -91,7 +91,7 @@ export function CredentialDeleteConfirmation({
           disabled={pending}
           onClick={onCancel}
         >
-          取消
+          {t.adminAssets.dialogs.cancel}
         </Button>
         <Button
           type="button"
@@ -100,10 +100,10 @@ export function CredentialDeleteConfirmation({
           onClick={onConfirm}
         >
           {pending
-            ? "删除中…"
+            ? t.adminAssets.dialogs.deleting
             : waiting
-              ? `确认删除（${remainingSeconds} 秒）`
-              : "确认删除"}
+              ? t.adminAssets.dialogs.confirmDeleteCountdown(remainingSeconds)
+              : t.adminAssets.dialogs.confirmDelete}
         </Button>
       </DialogFooter>
     </>

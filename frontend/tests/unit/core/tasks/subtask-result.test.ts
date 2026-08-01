@@ -3,9 +3,11 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   SUBAGENT_ERROR_KEY,
+  SUBAGENT_MODEL_NAME_KEY,
   SUBAGENT_RESULT_BRIEF_KEY,
   SUBAGENT_STATUS_KEY,
   SUBAGENT_STOP_REASON_KEY,
+  SUBAGENT_TOKEN_USAGE_KEY,
   derivePendingSubtaskStatus,
   hasSubtaskToolResult,
   isSubtaskRunActive,
@@ -168,6 +170,32 @@ describe("parseSubtaskTerminalEvent", () => {
     });
   });
 
+  it("maps terminal model and token usage metadata", () => {
+    expect(
+      parseSubtaskTerminalEvent({
+        type: "task_completed",
+        task_id: "call-runtime",
+        result: "done",
+        model_name: "claude-3-7-sonnet",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 120,
+        },
+      }),
+    ).toEqual({
+      id: "call-runtime",
+      status: "completed",
+      result: "done",
+      modelName: "claude-3-7-sonnet",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+      },
+    });
+  });
+
   it("maps failed, cancelled, and timed-out events to terminal failure updates", () => {
     expect(
       parseSubtaskTerminalEvent({
@@ -231,6 +259,41 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
       [SUBAGENT_STATUS_KEY]: "completed",
     });
     expect(parsed.status).toBe("completed");
+  });
+
+  it("restores terminal model and token usage metadata", () => {
+    expect(
+      parseSubtaskResult("Task Succeeded. Result: done", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_MODEL_NAME_KEY]: "claude-3-7-sonnet",
+        [SUBAGENT_TOKEN_USAGE_KEY]: {
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 120,
+        },
+      }),
+    ).toMatchObject({
+      status: "completed",
+      modelName: "claude-3-7-sonnet",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+      },
+    });
+  });
+
+  it("drops malformed structured token usage without losing terminal status", () => {
+    expect(
+      parseSubtaskResult("ignored", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_TOKEN_USAGE_KEY]: {
+          input_tokens: 100,
+          output_tokens: -1,
+          total_tokens: 99,
+        },
+      }),
+    ).toEqual({ status: "completed" });
   });
 
   it("collapses cancelled / timed_out / polling_timed_out to failed for the card UI", () => {

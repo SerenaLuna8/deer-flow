@@ -24,11 +24,16 @@ from deerflow.agents.middlewares.tool_result_meta import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.sandbox.sandbox import check_authorization_boundary
+from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
+from deerflow.sandbox.sandbox import (
+    AuthorizationRevoked,
+    check_authorization_boundary,
+)
 from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.tools.mcp_metadata import is_private_mcp_tool
 
 if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
@@ -38,6 +43,18 @@ logger = logging.getLogger(__name__)
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
+
+
+def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
+    """Recognize only canonical code-registered read-only tool objects."""
+
+    from deerflow.agents.memory.tools import memory_search_tool
+    from deerflow.tools.builtins.list_uploaded_files_tool import (
+        list_uploaded_files_tool,
+    )
+
+    tool = getattr(request, "tool", None)
+    return tool is memory_search_tool or tool is list_uploaded_files_tool
 
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
@@ -68,25 +85,32 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._skills_root = app_config.skills.container_path
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
+        del exc
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
         tool_call_id = str(request.tool_call.get("id") or _MISSING_TOOL_CALL_ID)
-        detail = str(exc).strip() or exc.__class__.__name__
-        if len(detail) > 500:
-            detail = detail[:497] + "..."
 
-        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
+        content = f"Error: Tool '{tool_name}' failed ({TOOL_EXECUTION_FAILED_ERROR_CODE}). {_RECOVERY_HINT}"
         message = ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
             name=tool_name,
             status="error",
+            additional_kwargs={
+                "error_code": TOOL_EXECUTION_FAILED_ERROR_CODE,
+            },
         )
         # This middleware is the producer for exception wrappers, so task
         # failures raised before task_tool can build its own Command still
         # carry the same structured metadata.
-        structured_error = f"{exc.__class__.__name__}: {detail}"
-        message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
-        return stamp_exception_meta(message, structured_error)
+        message = _stamp_task_exception_status(
+            message,
+            tool_name=tool_name,
+            error=TOOL_EXECUTION_FAILED_ERROR_CODE,
+        )
+        return stamp_exception_meta(
+            message,
+            TOOL_EXECUTION_FAILED_ERROR_CODE,
+        )
 
     def _stamp_skill_read_metadata(
         self,
@@ -145,13 +169,21 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
+        runtime_context = self._runtime_context(request)
+        if isinstance(runtime_context, dict) and "private_scope" in runtime_context:
+            raise AuthorizationRevoked
         try:
             result = handler(request)
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
-            logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
+            logger.error(
+                "Tool execution failed (sync): error_code=%s name=%s id=%s",
+                TOOL_EXECUTION_FAILED_ERROR_CODE,
+                request.tool_call.get("name"),
+                request.tool_call.get("id"),
+            )
             return self._build_error_message(request, exc)
         return normalize_tool_result(self._maybe_stamp(result, request))
 
@@ -165,10 +197,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             runtime_context = self._runtime_context(request)
             await check_authorization_boundary(
                 runtime_context,
-                "before_tool_call",
+                ("before_read_only_tool_call" if _is_trusted_read_only_tool(request) else "before_tool_call"),
             )
-            metadata = getattr(getattr(request, "tool", None), "metadata", None)
-            if isinstance(metadata, dict) and metadata.get("deerflow_private_mcp") is True:
+            if is_private_mcp_tool(getattr(request, "tool", None)):
                 await check_authorization_boundary(
                     runtime_context,
                     "before_mcp_call",
@@ -178,7 +209,12 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
-            logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
+            logger.error(
+                "Tool execution failed (async): error_code=%s name=%s id=%s",
+                TOOL_EXECUTION_FAILED_ERROR_CODE,
+                request.tool_call.get("name"),
+                request.tool_call.get("id"),
+            )
             return self._build_error_message(request, exc)
         return normalize_tool_result(self._maybe_stamp(result, request))
 
@@ -231,7 +267,12 @@ def _build_runtime_middlewares(
         tail.append(DanglingToolCallMiddleware())
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
-    # Guardrail middleware (if configured)
+    # Build the optional operator Guardrail now, but register it only after the
+    # private authorization middleware below. The first registered middleware
+    # is outermost, so ToolErrorHandlingMiddleware must execute its
+    # database-backed boundary before an external provider can inspect tool
+    # names or arguments.
+    guardrail_middleware: AgentMiddleware | None = None
     guardrails_config = app_config.guardrails
     if guardrails_config.enabled and guardrails_config.provider:
         import inspect
@@ -252,7 +293,11 @@ def _build_runtime_middlewares(
             except (ValueError, TypeError):
                 pass
         provider = provider_cls(**provider_kwargs)
-        tail.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
+        guardrail_middleware = GuardrailMiddleware(
+            provider,
+            fail_closed=guardrails_config.fail_closed,
+            passport=guardrails_config.passport,
+        )
 
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
@@ -279,6 +324,8 @@ def _build_runtime_middlewares(
 
         tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
 
+    if guardrail_middleware is not None:
+        tail.append(guardrail_middleware)
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
@@ -292,6 +339,15 @@ def _build_runtime_middlewares(
         _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
         if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
             raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
+
+    if guardrail_middleware is not None:
+        _error_idx = next(
+            (i for i, middleware in enumerate(middlewares) if isinstance(middleware, ToolErrorHandlingMiddleware)),
+            None,
+        )
+        _guardrail_idx = middlewares.index(guardrail_middleware)
+        if _error_idx is not None and _guardrail_idx > _error_idx:
+            raise RuntimeError("GuardrailMiddleware must be outer of ToolErrorHandlingMiddleware so a denial happens before the side-effect fence")
 
     return middlewares
 

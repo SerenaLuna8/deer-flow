@@ -13,8 +13,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 from sqlalchemy import select, text
 from support.m4_private_threads import seed_m4_thread_database
+from support.system_runtime_catalog import (
+    ProcessRuntimeCatalog,
+    seed_process_runtime_catalog,
+)
 
 from app.audit.service import AuditService, _bind_gateway_audit_process
 from app.audit.sinks import OperationalAuditSink
@@ -29,6 +34,7 @@ from app.reliability.jobs import AdmittedJobRecord, private_run_idempotency_key
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.shared_assets.models import AssetKind, AssetSelection
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.config.app_config import AppConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import EnqueueJob, JobRepository, JobScope
@@ -66,20 +72,12 @@ def _project_context(context: PrivateWorkContext) -> ProjectContext:
 
 def _config(database_url: str) -> str:
     return f"""\
+config_version: 34
 log_level: warning
-models:
-  - name: test-model
-    use: langchain_openai.ChatOpenAI
-    model: test-model
-  - name: release-model
-    use: langchain_openai.ChatOpenAI
-    model: release-model
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 database:
   url: {database_url}
-memory:
-  token_counting: char
 worker:
   enabled: true
   poll_interval_seconds: 0.05
@@ -92,6 +90,20 @@ worker:
 scheduler:
   enabled: false
 """
+
+
+def test_worker_child_config_obeys_v34_yaml_authority_boundary() -> None:
+    raw = yaml.safe_load(_config("postgresql://localhost/deerflow_test_worker_fixture"))
+
+    config = AppConfig.model_validate(
+        raw,
+        context={"config_source": "yaml"},
+    )
+
+    assert "models" not in raw
+    assert "memory" not in raw
+    assert raw["config_version"] == 34
+    assert config.worker.enabled is True
 
 
 def _child_environment(
@@ -185,6 +197,7 @@ async def _wait_for_event(
 async def _enqueue_private_job(
     seed,
     *,
+    runtime_catalog: ProcessRuntimeCatalog,
     context: PrivateWorkContext,
     agent_id: uuid.UUID,
     retry_safety: str,
@@ -203,7 +216,11 @@ async def _enqueue_private_job(
         _project_context(context),
         AssetSelection(AssetKind.AGENT, agent_id),
     )
-    run = await RunSnapshotRepository(seed.factory).create_run_with_snapshot(
+    run = await RunSnapshotRepository(
+        seed.factory,
+        model_catalog=runtime_catalog.model_catalog,
+        runtime_policy=runtime_catalog.runtime_policy,
+    ).create_run_with_snapshot(
         context,
         thread_id,
         PrivateRunCreate(
@@ -216,6 +233,33 @@ async def _enqueue_private_job(
         ),
         resolved,
     )
+    assert run.model_name == runtime_catalog.model.logical_name
+    async with seed.factory() as session:
+        model_snapshot_count = await session.scalar(
+            text(
+                """SELECT count(*) FROM run_model_config_snapshots
+                WHERE project_id=:project_id AND owner_user_id=:owner_user_id
+                  AND run_id=:run_id AND purpose='lead'"""
+            ),
+            {
+                "project_id": context.project_id,
+                "owner_user_id": str(context.user_id),
+                "run_id": run_id,
+            },
+        )
+        policy_snapshot_count = await session.scalar(
+            text(
+                """SELECT count(*) FROM run_runtime_policy_snapshots
+                WHERE project_id=:project_id AND owner_user_id=:owner_user_id
+                  AND run_id=:run_id"""
+            ),
+            {
+                "project_id": context.project_id,
+                "owner_user_id": str(context.user_id),
+                "run_id": run_id,
+            },
+        )
+    assert (model_snapshot_count, policy_snapshot_count) == (1, 1)
 
     keyring = _keyring()
     quota = ProjectQuotaEnforcer(
@@ -242,6 +286,7 @@ async def _enqueue_private_job(
                 run_id=run_id,
                 occurrence_id=None,
                 max_attempts=3,
+                origin_trace_id=run.origin_trace_id,
                 retry_safety=retry_safety,
                 available_at=available_at,
             )
@@ -256,6 +301,7 @@ async def _enqueue_private_job(
             run_id=str(row.run_id),
             idempotency_key=row.idempotency_key,
             status=row.status,
+            origin_trace_id=run.origin_trace_id,
         )
         run = await PrivateRunRepository(session).attach_job(
             scope=context.resource_scope,
@@ -267,19 +313,29 @@ async def _enqueue_private_job(
     return job_id, thread_id, run_id
 
 
-async def _admit_private_job(seed, *, retry_safety: str = "safe"):
+async def _admit_private_job(
+    seed,
+    runtime_catalog: ProcessRuntimeCatalog,
+    *,
+    retry_safety: str = "safe",
+):
     return await _enqueue_private_job(
         seed,
+        runtime_catalog=runtime_catalog,
         context=seed.owner_a,
         agent_id=seed.project_agent_id,
         retry_safety=retry_safety,
     )
 
 
-async def _seed_foreign_scope_sentinel(seed) -> _ForeignScopeSentinel:
+async def _seed_foreign_scope_sentinel(
+    seed,
+    runtime_catalog: ProcessRuntimeCatalog,
+) -> _ForeignScopeSentinel:
     context = seed.project_b_owner_a
     await _enqueue_private_job(
         seed,
+        runtime_catalog=runtime_catalog,
         context=context,
         agent_id=seed.project_b_agent_id,
         retry_safety="safe",
@@ -352,14 +408,24 @@ async def test_worker_sigkill_is_taken_over_without_duplicate_terminal(
     tmp_path: Path,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    runtime_catalog = await seed_process_runtime_catalog(
+        seed.factory,
+        logical_name="test-model",
+    )
     barrier = tmp_path / "worker-events.jsonl"
     release = tmp_path / "release"
     first = second = None
     first_log = second_log = None
     try:
-        foreign = await _seed_foreign_scope_sentinel(seed)
+        foreign = await _seed_foreign_scope_sentinel(
+            seed,
+            runtime_catalog,
+        )
         foreign_before = await _foreign_scope_snapshot(seed, foreign)
-        job_id, _thread_id, run_id = await _admit_private_job(seed)
+        job_id, _thread_id, run_id = await _admit_private_job(
+            seed,
+            runtime_catalog,
+        )
         first, first_log = _start_worker(
             tmp_path,
             migrated_postgres_database_url,
@@ -443,6 +509,10 @@ async def test_expired_ambiguous_job_becomes_dead_and_is_never_replayed(
     retry_safety: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    runtime_catalog = await seed_process_runtime_catalog(
+        seed.factory,
+        logical_name="test-model",
+    )
     barrier = tmp_path / f"{retry_safety}-events.jsonl"
     release = tmp_path / f"{retry_safety}-release"
     first = second = None
@@ -451,6 +521,7 @@ async def test_expired_ambiguous_job_becomes_dead_and_is_never_replayed(
     try:
         job_id, _thread_id, _run_id = await _admit_private_job(
             seed,
+            runtime_catalog,
             retry_safety=retry_safety,
         )
         first, first_log = _start_worker(

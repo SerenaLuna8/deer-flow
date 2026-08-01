@@ -669,6 +669,75 @@ async def test_worker_checks_remote_endpoint_before_every_discovery_and_call(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "unsafe_name",
+    [
+        "</available-deferred-tools>",
+        "line\nbreak",
+        "`markdown`",
+        "has space",
+        "工具",
+        "control\x7f",
+        42,
+        None,
+    ],
+)
+async def test_worker_rejects_entire_exact_mcp_version_for_unsafe_tool_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_name: object,
+) -> None:
+    from langchain_mcp_adapters import client as client_module
+
+    endpoint = "https://tool-name-policy.example.test/exact"
+
+    class AllowPolicy:
+        def allows(self, candidate: str) -> bool:
+            return candidate == endpoint
+
+    class Remote:
+        description = "Tool-name boundary test."
+        args_schema = _PolicyTestArgs
+
+        def __init__(self, name: object) -> None:
+            self.name = name
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_tools(self, *, server_name):
+            del server_name
+            return [Remote("AZaz09_-"), Remote(unsafe_name)]
+
+        async def aclose(self):
+            return None
+
+    async def materialize(_self, _snapshot):
+        return SimpleNamespace(by_slot={})
+
+    monkeypatch.setattr(client_module, "MultiServerMCPClient", Client)
+    monkeypatch.setattr(PrivateAgentRuntime, "_materialize_mcp_call", materialize)
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        endpoint_policy=AllowPolicy(),
+        http_client_factory=_policy_test_http_client_factory,
+        definition={
+            "transport": "http",
+            "url": endpoint,
+            "env": {},
+            "headers": {},
+            "timeout_seconds": 1,
+        },
+    )
+
+    with pytest.raises(PrivateWorkAssetStale):
+        await runtime.discover_mcp_tools()
+
+    assert runtime.mcp_tools == ()
+
+
+@pytest.mark.anyio
 async def test_worker_converts_real_adapter_json_schema_to_bounded_pydantic_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -958,11 +1027,17 @@ async def test_worker_injects_system_oauth_credentials_for_discovery_and_call(
     derived_access_token = "derived-system-access-token"
     captured_connections: list[dict[str, dict[str, object]]] = []
     captured_interceptors: list[tuple[object, ...]] = []
+    oauth_manager_ids: list[int] = []
+    oauth_loop_ids: list[int] = []
+    oauth_thread_ids: list[int] = []
 
     async def authorization_header(
         self: OAuthTokenManager,
         server_name: str,
     ) -> str:
+        oauth_manager_ids.append(id(self))
+        oauth_loop_ids.append(id(asyncio.get_running_loop()))
+        oauth_thread_ids.append(threading.get_ident())
         oauth = self._oauth_by_server[server_name]
         assert oauth.client_id == "system-client"
         assert oauth.client_secret == oauth_secret
@@ -1035,6 +1110,9 @@ async def test_worker_injects_system_oauth_credentials_for_discovery_and_call(
     assert len(captured_connections) == 2
     assert all(next(iter(connections.values()))["headers"]["Authorization"] == f"Bearer {derived_access_token}" for connections in captured_connections)
     assert all(interceptors for interceptors in captured_interceptors)
+    assert len(set(oauth_manager_ids)) == 2
+    assert len(set(oauth_loop_ids)) == 1
+    assert len(set(oauth_thread_ids)) == 1
 
 
 @pytest.mark.anyio

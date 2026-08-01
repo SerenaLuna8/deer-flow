@@ -14,6 +14,60 @@ import doctor
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
+# check_pnpm
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPnpm:
+    def test_uses_shared_runner_from_frontend_and_accepts_corepack(
+        self,
+        monkeypatch,
+    ):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return doctor.subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="10.26.2\n",
+                stderr="Using pnpm via Corepack.\n",
+            )
+
+        monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+        result = doctor.check_pnpm()
+
+        expected_runner = doctor.Path(doctor.__file__).with_name("pnpm.py")
+        assert result.status == "ok"
+        assert result.detail == "10.26.2 (via Corepack)"
+        assert captured["cmd"] == [sys.executable, str(expected_runner), "-v"]
+        assert captured["kwargs"]["cwd"] == expected_runner.parent.parent / "frontend"
+        assert captured["kwargs"]["shell"] is False
+        assert captured["kwargs"]["check"] is False
+
+    def test_runner_failure_is_reported_as_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            doctor.subprocess,
+            "run",
+            lambda cmd, **_kwargs: doctor.subprocess.CompletedProcess(
+                cmd,
+                42,
+                stdout="partial output\n",
+                stderr="Error: pnpm command failed with exit status 42.\n",
+            ),
+        )
+
+        result = doctor.check_pnpm()
+
+        assert result.status == "fail"
+        assert "exit status 42" in result.detail
+        assert "partial output" in result.detail
+        assert result.fix is not None
+
+
+# ---------------------------------------------------------------------------
 # check_python
 # ---------------------------------------------------------------------------
 
@@ -183,76 +237,79 @@ class TestCheckConfigLoadable:
 
 
 # ---------------------------------------------------------------------------
-# check_models_configured
+# check_model_catalog
 # ---------------------------------------------------------------------------
 
 
-class TestCheckModelsConfigured:
-    def test_no_models(self, tmp_path):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nmodels: []\n")
-        result = doctor.check_models_configured(cfg)
-        assert result.status == "fail"
+class TestCheckModelCatalog:
+    def test_missing_database_url_skips(self, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
 
-    def test_one_model(self, tmp_path):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nmodels:\n  - name: default\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n    api_key: $OPENAI_API_KEY\n")
-        result = doctor.check_models_configured(cfg)
-        assert result.status == "ok"
+        result = doctor.check_model_catalog()
 
-    def test_missing_config_skipped(self, tmp_path):
-        result = doctor.check_models_configured(tmp_path / "config.yaml")
         assert result.status == "skip"
 
+    def test_active_database_models_are_ready(self, monkeypatch):
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            "postgresql://owner:secret@db.internal/deerflow",
+        )
+        monkeypatch.setattr(
+            doctor,
+            "_run_model_catalog_query",
+            lambda _url: {"table_exists": True, "active_count": 2},
+        )
 
-# ---------------------------------------------------------------------------
-# check_llm_api_key
-# ---------------------------------------------------------------------------
+        result = doctor.check_model_catalog()
 
+        assert result.status == "ok"
+        assert result.detail == "2 active model(s)"
+        assert "secret" not in f"{result.detail}\n{result.fix}"
 
-class TestCheckLLMApiKey:
-    def test_key_set(self, tmp_path, monkeypatch):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nmodels:\n  - name: default\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n    api_key: $OPENAI_API_KEY\n")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        results = doctor.check_llm_api_key(cfg)
-        assert any(r.status == "ok" for r in results)
-        assert all(r.status != "fail" for r in results)
+    def test_empty_database_catalog_points_to_admin_settings(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://db.internal/deerflow")
+        monkeypatch.setattr(
+            doctor,
+            "_run_model_catalog_query",
+            lambda _url: {"table_exists": True, "active_count": 0},
+        )
 
-    def test_key_missing(self, tmp_path, monkeypatch):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nmodels:\n  - name: default\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n    api_key: $OPENAI_API_KEY\n")
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        results = doctor.check_llm_api_key(cfg)
-        assert any(r.status == "fail" for r in results)
-        failed = [r for r in results if r.status == "fail"]
-        assert all(r.fix is not None for r in failed)
-        assert any("OPENAI_API_KEY" in (r.fix or "") for r in failed)
+        result = doctor.check_model_catalog()
 
-    def test_missing_config_returns_empty(self, tmp_path):
-        results = doctor.check_llm_api_key(tmp_path / "config.yaml")
-        assert results == []
+        assert result.status == "fail"
+        assert "/admin/settings/models" in (result.fix or "")
+        assert "config.yaml" not in (result.fix or "")
 
+    def test_missing_catalog_table_requires_fresh_schema(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL", "postgresql://db.internal/deerflow")
+        monkeypatch.setattr(
+            doctor,
+            "_run_model_catalog_query",
+            lambda _url: {"table_exists": False, "active_count": 0},
+        )
 
-# ---------------------------------------------------------------------------
-# check_llm_auth
-# ---------------------------------------------------------------------------
+        result = doctor.check_model_catalog()
 
+        assert result.status == "fail"
+        assert "make setup-db" in (result.fix or "")
 
-class TestCheckLLMAuth:
-    def test_codex_auth_file_missing_fails(self, tmp_path, monkeypatch):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nmodels:\n  - name: codex\n    use: deerflow.models.openai_codex_provider:CodexChatModel\n    model: gpt-5.4\n")
-        monkeypatch.setenv("CODEX_AUTH_PATH", str(tmp_path / "missing-auth.json"))
-        results = doctor.check_llm_auth(cfg)
-        assert any(result.status == "fail" and "Codex CLI auth available" in result.label for result in results)
+    def test_catalog_failure_is_generic_and_redacted(self, monkeypatch):
+        secret = "MODEL-CATALOG-DOCTOR-SECRET"
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            f"postgresql://owner:{secret}@db.internal/deerflow",
+        )
 
-    def test_claude_oauth_env_passes(self, tmp_path, monkeypatch):
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("config_version: 5\nmodels:\n  - name: claude\n    use: deerflow.models.claude_provider:ClaudeChatModel\n    model: claude-sonnet-4-6\n")
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
-        results = doctor.check_llm_auth(cfg)
-        assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+        def fail(_url):
+            raise RuntimeError(f"driver echoed {secret}")
+
+        monkeypatch.setattr(doctor, "_run_model_catalog_query", fail)
+
+        result = doctor.check_model_catalog()
+
+        assert result.status == "fail"
+        assert secret not in f"{result.detail}\n{result.fix}"
+        assert "make check-db" in (result.fix or "")
 
 
 # ---------------------------------------------------------------------------

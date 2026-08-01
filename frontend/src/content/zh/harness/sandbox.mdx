@@ -100,7 +100,7 @@ sandbox:
   # 可选：创建沙箱时传入的环境变量。
   # 以 "$" 开头的值会从主机环境变量解析。
   environment:
-    OPENAI_API_KEY: $OPENAI_API_KEY
+    WORKLOAD_PROFILE: batch
 ```
 
 安装：`e2b-code-interpreter` 已经是 `deerflow-harness` 的核心依赖，无需额外安装 —— 只需配置 API Key，并在 `config.yaml` 中切换 provider 即可。

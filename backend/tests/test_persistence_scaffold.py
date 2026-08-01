@@ -163,6 +163,10 @@ class TestDatabaseConfig:
             "max_overflow": 10,
             "pool_timeout_seconds": 30,
             "statement_timeout_seconds": 30,
+            "checkpoint_channel_mode": "full",
+            "checkpoint_delta": {
+                "snapshot_frequency": 10,
+            },
         }
 
 

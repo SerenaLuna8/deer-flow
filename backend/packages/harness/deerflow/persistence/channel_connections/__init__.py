@@ -4,6 +4,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
     ChannelCredentialRow,
+    ChannelInboundDeliveryRow,
     ChannelOAuthStateRow,
 )
 from deerflow.persistence.channel_connections.sql import (
@@ -17,5 +18,6 @@ __all__ = [
     "ChannelConversationRow",
     "ChannelCredentialCipher",
     "ChannelCredentialRow",
+    "ChannelInboundDeliveryRow",
     "ChannelOAuthStateRow",
 ]

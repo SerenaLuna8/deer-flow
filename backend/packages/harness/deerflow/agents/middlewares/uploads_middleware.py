@@ -12,6 +12,9 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    neutralize_untrusted_tags,
+)
 from deerflow.config.paths import Paths, get_paths
 from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import get_effective_user_id
@@ -29,13 +32,13 @@ _QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 def _extension_label(file: dict) -> str:
     extension = str(file.get("extension") or Path(str(file.get("filename") or "")).suffix).lower()
-    return extension or "(no extension)"
+    return neutralize_untrusted_tags(extension) or "(no extension)"
 
 
 def _format_omitted_file_types(files: list[dict]) -> str:
     counts = Counter(_extension_label(file) for file in files)
     parts = [f"{count} {extension}" for extension, count in sorted(counts.items())]
-    return ", ".join(parts)
+    return neutralize_untrusted_tags(", ".join(parts))
 
 
 def _query_match_strength(file: dict, query_text: str) -> int:
@@ -64,6 +67,25 @@ def _query_match_strength(file: dict, query_text: str) -> int:
     if extension and re.search(rf"\b{re.escape(extension)}s?\b", query):
         return 1
     return 0
+
+
+def _original_user_text_for_upload_injection(
+    content: object,
+    additional_kwargs: dict,
+) -> str:
+    """Recover a prior server marker only from an existing upload wrapper.
+
+    ``before_agent`` can run again against state already annotated by this
+    middleware. Preserve that server-issued suffix marker for idempotence.
+    Otherwise derive the marker from the actual incoming content, replacing
+    any client-supplied value. Private HTTP ingress also strips this field
+    before graph admission, so clients cannot create a trusted prefix.
+    """
+    text = message_content_to_text(content)
+    marker = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+    if isinstance(marker, str) and text.lstrip().startswith("<uploaded_files>") and text.endswith(marker):
+        return marker
+    return text
 
 
 def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
@@ -140,11 +162,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         self._max_files_per_context_section = max_files_per_context_section
 
     def _format_file_entry(self, file: dict, lines: list[str]) -> None:
-        """Append a single file entry (name, size, path, optional outline) to lines."""
+        """Append one file entry with every untrusted field neutralized."""
         size_kb = file["size"] / 1024
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-        lines.append(f"- {file['filename']} ({size_str})")
-        lines.append(f"  Path: {file['path']}")
+        lines.append(f"- {neutralize_untrusted_tags(str(file['filename']))} ({size_str})")
+        lines.append(f"  Path: {neutralize_untrusted_tags(str(file['path']))}")
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
@@ -153,7 +175,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             visible = [e for e in outline if not e.get("truncated")]
             lines.append("  Document outline (use `read_file` with line ranges to read sections):")
             for entry in visible:
-                lines.append(f"    L{entry['line']}: {entry['title']}")
+                line = neutralize_untrusted_tags(str(entry["line"]))
+                title = neutralize_untrusted_tags(str(entry["title"]))
+                lines.append(f"    L{line}: {title}")
             if truncated:
                 lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
         else:
@@ -161,7 +185,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if preview:
                 lines.append("  No structural headings detected. Document begins with:")
                 for text in preview:
-                    lines.append(f"    > {text}")
+                    lines.append(f"    > {neutralize_untrusted_tags(str(text))}")
             lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
         lines.append("")
 
@@ -326,6 +350,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     requested.append(file_id)
         by_id = {file["file_id"]: file for file in authorized}
         new_files = [dict(by_id[file_id]) for file_id in requested if file_id in by_id]
+        record_current_upload_ids = getattr(
+            authority,
+            "record_current_upload_ids",
+            None,
+        )
+        if callable(record_current_upload_ids):
+            record_current_upload_ids(tuple(file["file_id"] for file in new_files))
         requested_set = set(requested)
         historical_candidates = [dict(file) for file in authorized if file["file_id"] not in requested_set]
         query_text = get_original_user_content_text(
@@ -350,9 +381,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         )
         original_content = last_message.content
         additional_kwargs = dict(last_message.additional_kwargs or {})
-        additional_kwargs.setdefault(
-            ORIGINAL_USER_CONTENT_KEY,
-            message_content_to_text(original_content),
+        additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = _original_user_text_for_upload_injection(
+            original_content,
+            additional_kwargs,
         )
         if isinstance(original_content, str):
             updated_content = f"{files_message}\n\n{original_content}"
@@ -489,7 +520,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         # Extract original content - handle both string and list formats
         original_content = last_message.content
         additional_kwargs = dict(last_message.additional_kwargs or {})
-        additional_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(original_content))
+        additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = _original_user_text_for_upload_injection(
+            original_content,
+            additional_kwargs,
+        )
         if isinstance(original_content, str):
             # Simple case: string content, just prepend files message
             updated_content = f"{files_message}\n\n{original_content}"

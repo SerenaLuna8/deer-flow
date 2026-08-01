@@ -25,8 +25,11 @@ _SECRET_NAME_PATTERNS: tuple[str, ...] = (
     "*KEY*",
     "*SECRET*",
     "*TOKEN*",
-    "*PASSWORD*",
-    "*PASSWD*",
+    # Covers full PASSWORD/PASSWD spellings, abbreviated password variables
+    # such as DB_PASS, Postgres PGPASSFILE, and credential helper locators such
+    # as GIT_ASKPASS. False-positive scrubbing is fail-safe: an authorized
+    # request-scoped value can still be injected explicitly below.
+    "*PASS*",
     "*CREDENTIAL*",
     "*DSN*",  # data source name — almost always a connection string with a password
 )
@@ -66,6 +69,7 @@ _BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
         "MYSQL_PWD",
         "REDISCLI_AUTH",
         "REDIS_AUTH",
+        "PGSERVICEFILE",
     }
 )
 

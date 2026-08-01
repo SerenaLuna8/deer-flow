@@ -89,10 +89,14 @@ def test_auto_title_only_syncs_after_a_successful_complete_run() -> None:
     from deerflow.runtime.runs.worker import run_agent
 
     executor_source = inspect.getsource(RunAgentPrivateExecutor.execute)
+    traced_executor_source = inspect.getsource(
+        RunAgentPrivateExecutor._execute_with_trace,
+    )
     source = inspect.getsource(run_agent)
     module_source = inspect.getsource(worker_module)
 
-    assert "thread_store=_PrivateRunThreadMetadataStore(" in executor_source
+    assert "return await self._execute_with_trace(" in executor_source
+    assert "thread_store=_PrivateRunThreadMetadataStore(" in traced_executor_source
     assert "record.status is RunStatus.success" in source
     assert "_ensure_interrupted_title" not in module_source
 

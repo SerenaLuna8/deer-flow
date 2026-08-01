@@ -33,6 +33,8 @@ import {
   migrateCredentialGrantsInputSchema,
   projectAssetListSchema,
   projectCredentialListSchema,
+  projectDefaultAgentInputSchema,
+  projectDefaultAgentSchema,
   projectSkillImportResponseSchema,
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
@@ -68,6 +70,8 @@ import {
   type MigrateCredentialGrantsInput,
   type ProjectAssetList,
   type ProjectCredentialList,
+  type ProjectDefaultAgent,
+  type ProjectDefaultAgentInput,
   type ProjectSkillImportResponse,
   type ReplaceCredentialInput,
   type RevokeCredentialInput,
@@ -248,6 +252,11 @@ function projectAssetUrl(projectId: string, kind: AssetListKind): string {
   return `${getBackendBaseURL()}/api/projects/${parsedProjectId}/${parsedKind}`;
 }
 
+function projectDefaultAgentUrl(projectId: string): string {
+  const parsedProjectId = parseInput(assetIdSchema, projectId);
+  return `${getBackendBaseURL()}/api/projects/${parsedProjectId}/default-agent`;
+}
+
 function adminAssetUrl(kind: AssetListKind): string {
   return `${getBackendBaseURL()}/api/admin/assets/${parseInput(
     assetListKindSchema,
@@ -304,6 +313,33 @@ export async function listProjectAssets(
     return parseResponse(response, projectCredentialListSchema);
   }
   return parseResponse(response, projectAssetListSchema);
+}
+
+export async function getProjectDefaultAgent(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectDefaultAgent> {
+  return parseResponse(
+    await request(projectDefaultAgentUrl(projectId), { signal }),
+    projectDefaultAgentSchema,
+  );
+}
+
+export async function setProjectDefaultAgent(
+  projectId: string,
+  input: ProjectDefaultAgentInput,
+  signal?: AbortSignal,
+): Promise<ProjectDefaultAgent> {
+  const body = parseInput(projectDefaultAgentInputSchema, input);
+  return parseResponse(
+    await request(projectDefaultAgentUrl(projectId), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }),
+    projectDefaultAgentSchema,
+  );
 }
 
 export function listAdminAssets(

@@ -4,19 +4,21 @@ import {
   ArrowLeftIcon,
   BotIcon,
   KeyRoundIcon,
+  LockKeyholeIcon,
   NetworkIcon,
   SparklesIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 const NAVIGATION = [
-  { segment: "agents", label: "Agent", icon: BotIcon },
-  { segment: "skills", label: "Skill", icon: SparklesIcon },
-  { segment: "mcp", label: "MCP", icon: NetworkIcon },
-  { segment: "credentials", label: "Credential", icon: KeyRoundIcon },
+  { segment: "agents", labelKey: "agent", icon: BotIcon },
+  { segment: "skills", labelKey: "skill", icon: SparklesIcon },
+  { segment: "mcp", labelKey: "mcp", icon: NetworkIcon },
+  { segment: "credentials", labelKey: "credential", icon: KeyRoundIcon },
 ] as const;
 
 export function AdminProjectAssetsShell({
@@ -28,42 +30,63 @@ export function AdminProjectAssetsShell({
 }) {
   const pathname = usePathname();
   const base = `/admin/projects/${projectId}/assets`;
+  const { t } = useI18n();
 
   return (
     <section
       data-testid="admin-project-assets-shell"
-      aria-label="项目共享资产代管"
+      aria-label={t.adminAssets.shell.projectAria}
       className="bg-background min-w-0 overflow-x-clip"
     >
-      <div className="border-border/70 bg-muted/20 border-b px-4 py-4 lg:px-6">
-        <div className="mx-auto max-w-7xl space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
+      <div className="border-border bg-card border-b">
+        <div className="mx-auto max-w-[90rem] px-4 sm:px-5 lg:px-6">
+          <div
+            data-testid="admin-project-assets-context"
+            className="grid min-w-0 gap-3 border-b py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"
+          >
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:gap-4">
               <Link
                 href="/admin/projects"
-                className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-sm"
+                className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex h-8 w-fit shrink-0 items-center gap-1 text-sm focus-visible:rounded-sm focus-visible:ring-2 focus-visible:outline-none"
               >
                 <ArrowLeftIcon aria-hidden className="size-4" />
-                返回项目选择
+                {t.adminAssets.shell.backToProjects}
               </Link>
-              <h2 className="mt-2 text-lg font-semibold">项目共享资产代管</h2>
-              <p className="text-muted-foreground mt-1 max-w-3xl text-sm">
-                仅治理共享 Agent、Skill、MCP、Credential
-                与系统资产绑定；不会读取成员、聊天、运行、记忆、文件或其他用户私有内容。
-              </p>
+              <span
+                aria-hidden
+                className="bg-border mt-2 hidden h-4 w-px sm:block"
+              />
+              <div className="min-w-0">
+                <p className="text-sm font-semibold">
+                  {t.adminAssets.shell.projectGovernance}
+                </p>
+                <p className="text-muted-foreground mt-0.5 max-w-3xl text-xs">
+                  <LockKeyholeIcon
+                    aria-hidden
+                    className="mr-1 inline size-3.5"
+                  />
+                  {t.adminAssets.shell.projectBoundary}
+                </p>
+              </div>
             </div>
-            <div className="border-border bg-background min-w-0 rounded-lg border px-3 py-2 text-xs">
-              <span className="text-muted-foreground block">当前项目 ID</span>
-              <span className="block max-w-full font-mono break-all">
+            <div
+              className="border-border bg-muted/45 min-w-0 rounded-md border px-3 py-2 text-xs sm:whitespace-nowrap"
+              title={projectId}
+            >
+              <span className="text-muted-foreground mr-2 font-medium">
+                {t.adminAssets.shell.projectId}
+              </span>
+              <span className="font-mono [overflow-wrap:anywhere] sm:[overflow-wrap:normal]">
                 {projectId}
               </span>
             </div>
           </div>
           <nav
-            aria-label="项目资产代管导航"
-            className="grid grid-cols-2 gap-1 sm:flex sm:flex-wrap"
+            aria-label={t.adminAssets.navigation.projectLabel}
+            data-variant="line"
+            className="grid min-w-0 grid-cols-4 items-center gap-1 sm:flex sm:grid-cols-4 sm:gap-5"
           >
-            {NAVIGATION.map(({ segment, label, icon: Icon }) => {
+            {NAVIGATION.map(({ segment, labelKey, icon: Icon }) => {
               const href = `${base}/${segment}`;
               const active = pathname === href;
               return (
@@ -72,14 +95,16 @@ export function AdminProjectAssetsShell({
                   href={href}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "focus-visible:ring-ring flex min-w-0 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none sm:justify-start",
+                    "focus-visible:ring-ring -mb-px flex min-w-0 items-center justify-center gap-1.5 border-b-2 border-transparent px-1 py-3 text-sm font-medium focus-visible:rounded-sm focus-visible:ring-2 focus-visible:outline-none sm:justify-start sm:gap-2",
                     active
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                      ? "border-primary text-foreground"
+                      : "text-muted-foreground hover:border-border hover:text-foreground",
                   )}
                 >
                   <Icon aria-hidden className="size-4 shrink-0" />
-                  <span className="truncate">{label}</span>
+                  <span className="truncate">
+                    {t.adminAssets.navigation[labelKey]}
+                  </span>
                 </Link>
               );
             })}

@@ -300,7 +300,10 @@ async def test_design_commit_boundary_creates_complete_suspended_published_v1(
         lock_skill_version_slugs=AsyncMock(return_value=()),
     )
 
+    repository_workflow_statuses = []
+
     async def create_version(_actor, _asset_id, row, skill_ids, mcp_ids):
+        repository_workflow_statuses.append(row.workflow_status)
         row.id = uuid.uuid4()
         row.created_at = now
         return service_module.AgentVersionRecord(
@@ -340,6 +343,7 @@ async def test_design_commit_boundary_creates_complete_suspended_published_v1(
     )
 
     assert result.asset.status == "suspended"
+    assert repository_workflow_statuses == [service_module.WorkflowStatus.DRAFT.value]
     assert result.version.workflow_status is service_module.WorkflowStatus.PUBLISHED
     assert result.version.agents_instructions == "# AGENTS"
     assert result.version.soul == "# SOUL"
@@ -440,6 +444,7 @@ async def test_project_agent_delete_removes_the_complete_locked_package(
     )
     repository = SimpleNamespace(
         session=session,
+        ensure_not_current_project_default=AsyncMock(),
         get_project_asset=AsyncMock(return_value=asset),
         plan_project_asset_deletion=AsyncMock(return_value=version_ids),
         delete_project_asset=AsyncMock(),
@@ -510,6 +515,7 @@ async def test_historical_archived_agent_cannot_be_moved_back_to_suspended(
     )
     repository = SimpleNamespace(
         session=session,
+        ensure_not_current_project_default=AsyncMock(),
         get_project_asset=AsyncMock(return_value=asset),
     )
     monkeypatch.setattr(

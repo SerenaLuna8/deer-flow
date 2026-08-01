@@ -1,3 +1,5 @@
+import { buildWriteFileArtifactURL } from "./utils";
+
 export type ArtifactViewMode = "code" | "preview";
 
 type ArtifactPreviewMessage = {
@@ -33,12 +35,13 @@ export function extractWriteArtifactSelections(
       ) {
         continue;
       }
-      const url = new URL(`write-file:${toolCall.args.path}`);
-      url.searchParams.set("message_id", message.id);
-      url.searchParams.set("tool_call_id", toolCall.id);
       selections.push({
         key: `${message.id}/${toolCall.id}`,
-        url: url.toString(),
+        url: buildWriteFileArtifactURL({
+          filepath: toolCall.args.path,
+          messageId: message.id,
+          toolCallId: toolCall.id,
+        }),
       });
     }
   }
@@ -108,6 +111,68 @@ function parseWriteFileArtifact(filepath: string) {
   } catch {
     return undefined;
   }
+}
+
+function normalizeArtifactLogicalPath(filepath: string) {
+  return filepath
+    .replace(/^\/mnt\/(?:data|user-data)\//u, "")
+    .replace(/^\/+/, "");
+}
+
+export function resolveDurableArtifactSelection(
+  selectedArtifact: string | null,
+  readyFiles: ReadonlyArray<{ logical_path?: string | null }>,
+) {
+  if (!selectedArtifact) {
+    return undefined;
+  }
+  const transient = parseWriteFileArtifact(selectedArtifact);
+  if (!transient) {
+    return undefined;
+  }
+  const logicalPath = normalizeArtifactLogicalPath(transient.path);
+  return readyFiles.find(
+    (file) =>
+      typeof file.logical_path === "string" &&
+      normalizeArtifactLogicalPath(file.logical_path) === logicalPath,
+  )?.logical_path;
+}
+
+export function mergeDurableArtifactPaths(
+  stateArtifacts: readonly string[],
+  readyFiles: ReadonlyArray<{ logical_path?: string | null }>,
+) {
+  const readyByLogicalPath = new Map<string, string>();
+  for (const file of readyFiles) {
+    if (typeof file.logical_path === "string" && file.logical_path) {
+      readyByLogicalPath.set(
+        normalizeArtifactLogicalPath(file.logical_path),
+        file.logical_path,
+      );
+    }
+  }
+
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  const add = (artifact: string) => {
+    const key = normalizeArtifactLogicalPath(artifact);
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    merged.push(artifact);
+  };
+
+  for (const artifact of stateArtifacts) {
+    add(
+      readyByLogicalPath.get(normalizeArtifactLogicalPath(artifact)) ??
+        artifact,
+    );
+  }
+  for (const logicalPath of readyByLogicalPath.values()) {
+    add(logicalPath);
+  }
+  return merged;
 }
 
 export function buildWriteFileDraftContent({

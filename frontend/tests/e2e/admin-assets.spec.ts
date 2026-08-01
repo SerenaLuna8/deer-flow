@@ -683,6 +683,50 @@ async function mockAdminAssets(
   return mcpWorkflowRequests;
 }
 
+test("desktop Skill inspector overlays the catalog without resizing it", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await mockAdminAssets(page);
+  await page.goto("/admin/assets/skills");
+
+  const catalog = page.getByTestId("admin-asset-table");
+  const desktopRow = page.getByTestId(`admin-asset-row-${SKILL_ID}`);
+  const mobileRow = page.getByTestId(`admin-asset-row-mobile-${SKILL_ID}`);
+  const catalogRect = () =>
+    catalog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+      };
+    });
+
+  await expect(catalog).toBeVisible();
+  await expect(desktopRow).toBeVisible();
+  await expect(mobileRow).toBeHidden();
+  const beforeOpen = await catalogRect();
+
+  await desktopRow.click();
+
+  const inspector = page.getByTestId("admin-asset-inspector");
+  await expect(inspector).toBeVisible();
+  await expect(desktopRow).toBeVisible();
+  await expect(mobileRow).toBeHidden();
+  await expect.poll(catalogRect).toEqual(beforeOpen);
+
+  const [catalogBox, inspectorBox] = await Promise.all([
+    catalog.boundingBox(),
+    inspector.boundingBox(),
+  ]);
+  expect(catalogBox).not.toBeNull();
+  expect(inspectorBox).not.toBeNull();
+  expect(inspectorBox!.x).toBeLessThan(catalogBox!.x + catalogBox!.width);
+  expect(inspectorBox!.x + inspectorBox!.width).toBeGreaterThan(catalogBox!.x);
+  expect(inspectorBox!.y).toBeLessThan(catalogBox!.y + catalogBox!.height);
+  expect(inspectorBox!.y + inspectorBox!.height).toBeGreaterThan(catalogBox!.y);
+});
+
 test("system Agent Skill and MCP catalog is read only while Credential governance remains available", async ({
   page,
 }) => {
@@ -692,35 +736,78 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
 
   await page.goto("/admin/assets");
   await expect(page).toHaveURL(/\/admin\/assets\/agents$/);
-  await expect(page.getByRole("heading", { name: "系统 Agent" })).toBeVisible();
-  await expect(page.getByText("Research Agent", { exact: true })).toBeVisible();
-  await expect(page.getByRole("note")).toContainText("packaged catalog");
-  await expect(page.getByRole("note")).toContainText("运行期只读");
-  await expect(page.getByRole("button", { name: "创建 Agent" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "创建新版本" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "归档" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "暂停" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "发布版本" })).toHaveCount(0);
+  await expect(
+    page.getByRole("navigation", { name: "Platform asset navigation" }),
+  ).toHaveAttribute("data-variant", "line");
+  await expect(
+    page.getByRole("heading", { name: "System Agents" }),
+  ).toBeVisible();
+  const agentTable = page.getByTestId("admin-asset-table");
+  await expect(agentTable).toBeVisible();
+  const desktopAgentTable = agentTable.getByRole("table");
+  await expect(
+    desktopAgentTable.getByText("Research Agent", { exact: true }),
+  ).toBeVisible();
+  const agentRow = desktopAgentTable
+    .getByRole("row")
+    .filter({ hasText: "Research Agent" });
+  await expect(agentRow).toContainText("Not published");
+  await expect(
+    page.getByText(
+      "Governance metadata for system Agents initialized from the packaged catalog.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Runtime read-only", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create Agent" })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole("button", { name: "Create new version" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Archive" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Suspend" })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Publish version" }),
+  ).toHaveCount(0);
 
   await page.getByRole("link", { name: "Skill" }).first().click();
-  await expect(page.getByRole("heading", { name: "系统 Skill" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "创建 Skill" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "创建新版本" })).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "System Skills" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create Skill" })).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByRole("button", { name: "Create new version" }),
+  ).toHaveCount(0);
 
   await page.getByRole("link", { name: "MCP" }).first().click();
-  await expect(page.getByRole("heading", { name: "系统 MCP" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "创建 MCP" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "创建新版本" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "提交审批" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "批准并发布" })).toHaveCount(0);
-  await page.getByRole("button", { name: "配置 Credential 授权" }).click();
+  await expect(page.getByRole("heading", { name: "System MCP" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create MCP" })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Create new version" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Submit for approval" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Approve and publish" }),
+  ).toHaveCount(0);
+  await page.getByTestId(`admin-asset-row-${MCP_ID}`).click();
+  const mcpInspector = page.getByTestId("admin-asset-inspector");
+  await mcpInspector
+    .getByRole("button", { name: "Configure Credential grants" })
+    .click();
   const grantDialog = page.getByRole("dialog", {
-    name: "配置 MCP Credential 授权",
+    name: "Configure MCP Credential grants",
   });
   await grantDialog
-    .getByLabel("github-token Credential")
+    .getByRole("combobox", { name: "github-token required GitHub API" })
     .selectOption("20000000-0000-4000-8000-000000000005");
-  await grantDialog.getByRole("button", { name: "保存授权" }).click();
+  await grantDialog.getByRole("button", { name: "Save grants" }).click();
   await expect(grantDialog).toHaveCount(0);
   expect(mcpWorkflowRequests).toEqual({
     submit: null,
@@ -733,13 +820,18 @@ test("system Agent Skill and MCP catalog is read only while Credential governanc
     },
     credentialDelete: null,
   });
+  await page.keyboard.press("Escape");
 
   await page.getByRole("link", { name: "Credential" }).first().click();
   await expect(
-    page.getByRole("heading", { name: "系统 Credential" }),
+    page.getByRole("heading", { name: "System Credentials" }),
   ).toBeVisible();
-  await expect(page.getByText("显示明文")).toHaveCount(0);
-  await expect(page.getByText("复制密钥")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Show plaintext" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Copy secret" })).toHaveCount(
+    0,
+  );
 });
 
 test("system admin manages the separate system Credential lifecycle", async ({
@@ -748,74 +840,106 @@ test("system admin manages the separate system Credential lifecycle", async ({
   const state = await mockAdminAssets(page);
 
   await page.goto("/admin/assets/credentials");
-  await expect(page.getByText("轮换正常", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "创建 Credential" }).click();
+  const rotationStatus = page.getByTestId("credential-rotation-status");
+  await expect(rotationStatus).toHaveAttribute("data-density", "compact");
+  await expect(rotationStatus).toContainText("Rotation current");
+  await page.getByRole("button", { name: "Create Credential" }).click();
   const createCredential = page.getByRole("dialog", {
-    name: "创建 Credential",
+    name: "Create Credential",
   });
-  await createCredential.getByLabel("名称").fill("GitHub Token");
-  await createCredential.getByLabel("Credential 标识").fill("github-token");
-  await createCredential.getByLabel("类型").fill("token");
-  await createCredential.getByLabel("字段名").fill("TOKEN");
-  await createCredential.getByLabel("凭据值").fill("create-secret-sentinel");
-  await createCredential.getByRole("button", { name: "加密写入" }).click();
-  const credentialCard = page.getByTestId(`credential-card-${CREDENTIAL_ID}`);
+  await createCredential
+    .getByLabel("Name", { exact: true })
+    .fill("GitHub Token");
+  await createCredential.getByLabel("Credential slug").fill("github-token");
+  await createCredential.getByLabel("Type").fill("token");
+  await createCredential.getByLabel("Field name").fill("TOKEN");
+  await createCredential
+    .getByLabel("Secret value")
+    .fill("create-secret-sentinel");
+  await createCredential
+    .getByRole("button", { name: "Encrypt and save" })
+    .click();
+  const credentialRow = page.getByTestId(`admin-asset-row-${CREDENTIAL_ID}`);
+  await expect(credentialRow).toBeVisible();
+  expect(await page.content()).not.toContain("create-secret-sentinel");
+
+  await credentialRow.click();
+  const credentialCard = page.getByTestId("admin-asset-inspector");
   await expect(
     credentialCard.getByText("GitHub Token", { exact: true }),
   ).toBeVisible();
-  expect(await page.content()).not.toContain("create-secret-sentinel");
-
-  await credentialCard.getByRole("button", { name: "替换凭据" }).click();
-  const replaceCredential = page.getByRole("dialog", { name: "替换凭据" });
-  await replaceCredential.getByLabel("字段名").fill("TOKEN");
-  await replaceCredential.getByLabel("凭据值").fill("replace-secret-sentinel");
-  await replaceCredential.getByRole("button", { name: "替换凭据" }).click();
+  await credentialCard
+    .getByRole("button", { name: "Replace Credential" })
+    .click();
+  const replaceCredential = page.getByRole("dialog", {
+    name: "Replace Credential",
+  });
+  await replaceCredential.getByLabel("Field name").fill("TOKEN");
+  await replaceCredential
+    .getByLabel("Secret value")
+    .fill("replace-secret-sentinel");
+  await replaceCredential
+    .getByRole("button", { name: "Replace Credential" })
+    .click();
   await expect(replaceCredential).toHaveCount(0);
   expect(await page.content()).not.toContain("replace-secret-sentinel");
   await expect(credentialCard).toContainText(
-    "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
+    "Existing MCP Grants and Skill environment bindings remain pinned until they are migrated explicitly.",
   );
-  await credentialCard.getByRole("button", { name: "迁移兼容引用" }).click();
-  const migrationDialog = page.getByRole("dialog", {
-    name: "迁移 Credential 兼容引用",
-  });
-  await expect(migrationDialog).toContainText("字段结构完全兼容");
-  await migrationDialog.getByRole("button", { name: "确认迁移引用" }).click();
-  await expect(page.getByRole("status")).toContainText("已完成兼容引用迁移");
-
-  await credentialCard.getByRole("button", { name: "撤销凭据" }).click();
-  const revokeDialog = page.getByRole("dialog", {
-    name: "确认撤销 Credential",
-  });
-  await expect(revokeDialog).toContainText("此操作不可恢复");
-  await revokeDialog.getByRole("button", { name: "取消" }).click();
-  await expect(credentialCard.getByText("已撤销", { exact: true })).toHaveCount(
-    0,
-  );
-  await credentialCard.getByRole("button", { name: "撤销凭据" }).click();
-  await page
-    .getByRole("dialog", { name: "确认撤销 Credential" })
-    .getByRole("button", { name: "确认永久撤销" })
+  await credentialCard
+    .getByRole("button", { name: "Migrate compatible references" })
     .click();
+  const migrationDialog = page.getByRole("dialog", {
+    name: "Migrate compatible Credential references",
+  });
+  await expect(migrationDialog).toContainText(
+    "only when every field schema is compatible",
+  );
+  await migrationDialog
+    .getByRole("button", { name: "Migrate references" })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "Compatible reference migration completed",
+  );
+
+  await credentialCard
+    .getByRole("button", { name: "Revoke Credential" })
+    .click();
+  const revokeDialog = page.getByRole("dialog", {
+    name: "Revoke Credential?",
+  });
+  await expect(revokeDialog).toContainText("cannot be undone");
+  await revokeDialog.getByRole("button", { name: "Cancel" }).click();
   await expect(
-    credentialCard.getByText("已撤销", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    credentialCard.getByRole("button", { name: "替换凭据" }),
+    credentialCard.getByText("Revoked", { exact: true }),
   ).toHaveCount(0);
   await credentialCard
-    .getByRole("button", { name: "删除", exact: true })
+    .getByRole("button", { name: "Revoke Credential" })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Revoke Credential?" })
+    .getByRole("button", { name: "Permanently revoke" })
+    .click();
+  await expect(
+    credentialCard.getByText("Revoked", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    credentialCard.getByRole("button", { name: "Replace Credential" }),
+  ).toHaveCount(0);
+  await credentialCard
+    .getByRole("button", { name: "Delete", exact: true })
     .click();
   const deleteDialog = page.getByRole("dialog", {
-    name: "删除 Credential？",
+    name: "Delete Credential?",
   });
   const confirmDelete = deleteDialog.getByRole("button", {
-    name: /确认删除/u,
+    name: /Confirm delete/u,
   });
   await expect(confirmDelete).toBeDisabled();
   await expect(confirmDelete).toBeEnabled({ timeout: 6_000 });
   await confirmDelete.click();
   await expect(credentialCard).toHaveCount(0);
+  await expect(credentialRow).toHaveCount(0);
   expect(state.credentialDelete).toEqual({
     expected_credential_version: 3,
   });

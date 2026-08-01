@@ -7,7 +7,9 @@ import {
   extractReasoningContentFromMessage,
   getMessageCopyData,
   getAssistantTurnCopyData,
+  getAssistantTurnDisplays,
   getAssistantTurnUsageMessages,
+  getLatestEditableTurn,
   getMessageGroups,
   getStreamingMessageLookup,
   hasActiveAssistantReasoning,
@@ -84,6 +86,289 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+describe("assistant turn display projection", () => {
+  test("attaches process and delivered files to the terminal answer", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Create ReopenProof.java" },
+      {
+        id: "ai-write",
+        type: "ai",
+        content: "",
+        additional_kwargs: { reasoning_content: "Write the requested file." },
+        tool_calls: [
+          {
+            id: "write-1",
+            name: "write_file",
+            args: { path: "/mnt/user-data/outputs/ReopenProof.java" },
+          },
+        ],
+      },
+      {
+        id: "write-result",
+        type: "tool",
+        name: "write_file",
+        tool_call_id: "write-1",
+        content: "ok",
+      },
+      {
+        id: "ai-present",
+        type: "ai",
+        content: "Written. Here it is:",
+        tool_calls: [
+          {
+            id: "present-1",
+            name: "present_files",
+            args: {
+              filepaths: [
+                "/mnt/user-data/outputs/ReopenProof.java",
+                "/mnt/user-data/outputs/ReopenProof.java",
+              ],
+            },
+          },
+        ],
+      },
+      {
+        id: "present-result",
+        type: "tool",
+        name: "present_files",
+        tool_call_id: "present-1",
+        content: "ok",
+      },
+      {
+        id: "ai-final",
+        type: "ai",
+        content: "ReopenProof.java is ready.",
+        additional_kwargs: { reasoning_content: "Give a concise answer." },
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant:present-files",
+      "assistant",
+    ]);
+    expect(getAssistantTurnDisplays(groups)).toEqual([
+      {
+        finalGroupIndex: 3,
+        hiddenGroupIndexes: [1, 2],
+        processStepCount: 4,
+        processGroupIndexes: [1, 2],
+        presentFilesGroupIndexes: [2],
+        presentedFiles: ["/mnt/user-data/outputs/ReopenProof.java"],
+      },
+    ]);
+  });
+
+  test("keeps present-files visible until a terminal answer exists", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Create a file" },
+      {
+        id: "ai-present",
+        type: "ai",
+        content: "Here it is:",
+        tool_calls: [
+          {
+            id: "present-1",
+            name: "present_files",
+            args: { filepaths: ["/mnt/user-data/outputs/result.txt"] },
+          },
+        ],
+      },
+    ] as Message[];
+
+    expect(getAssistantTurnDisplays(getMessageGroups(messages))).toEqual([]);
+  });
+
+  test("hides completed subagent execution behind the terminal answer", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Compare two products" },
+      {
+        id: "ai-task",
+        type: "ai",
+        content: "",
+        additional_kwargs: {
+          reasoning_content: "Delegate the calculation.",
+          reasoning_duration_ms: 2_000,
+        },
+        tool_calls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: {
+              description: "Compare products",
+              prompt: "Calculate both products.",
+              subagent_type: "general-purpose",
+            },
+          },
+        ],
+      },
+      {
+        id: "task-result",
+        type: "tool",
+        name: "task",
+        tool_call_id: "task-1",
+        content: "Calculation completed.",
+      },
+      {
+        id: "ai-final",
+        type: "ai",
+        content: "The second product is larger.",
+        additional_kwargs: {
+          reasoning_content: "State the result.",
+          reasoning_duration_ms: 3_000,
+        },
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:subagent",
+      "assistant",
+    ]);
+    expect(getAssistantTurnDisplays(groups)).toEqual([
+      {
+        finalGroupIndex: 2,
+        hiddenGroupIndexes: [1],
+        processStepCount: 2,
+        processGroupIndexes: [1],
+        presentFilesGroupIndexes: [],
+        presentedFiles: [],
+      },
+    ]);
+  });
+
+  test("keeps subagent execution visible while the terminal answer is streaming", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Compare two products" },
+      {
+        id: "ai-task",
+        type: "ai",
+        content: "",
+        additional_kwargs: { reasoning_content: "Delegate the work." },
+        tool_calls: [
+          {
+            id: "task-1",
+            name: "task",
+            args: {
+              description: "Compare products",
+              prompt: "Calculate both products.",
+              subagent_type: "general-purpose",
+            },
+          },
+        ],
+      },
+      {
+        id: "task-result",
+        type: "tool",
+        name: "task",
+        tool_call_id: "task-1",
+        content: "Calculation completed.",
+      },
+      {
+        id: "ai-final-streaming",
+        type: "ai",
+        content: "The second product",
+        additional_kwargs: { reasoning_content: "State the result." },
+      },
+    ] as Message[];
+
+    expect(
+      getAssistantTurnDisplays(getMessageGroups(messages), {
+        isCurrentTurnLoading: true,
+      }),
+    ).toEqual([]);
+  });
+
+  test("never moves process groups across the next visible human turn", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Start" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      { id: "human-2", type: "human", content: "Stop and answer" },
+      { id: "ai-final", type: "ai", content: "Stopped." },
+    ] as Message[];
+
+    expect(getAssistantTurnDisplays(getMessageGroups(messages))).toEqual([]);
+  });
+});
+
+describe("latest editable user turn", () => {
+  test("returns the latest completed human turn", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-history", type: "ai", content: "Historical answer" },
+      { id: "human-2", type: "human", content: "Use tools" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+      { id: "ai-final", type: "ai", content: "Final answer" },
+    ] as Message[];
+
+    const turn = getLatestEditableTurn(getMessageGroups(messages), false);
+
+    expect(turn?.humanMessage.id).toBe("human-2");
+  });
+
+  test("returns null while the current turn is loading", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      { id: "ai-1", type: "ai", content: "Answer" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), true)).toBeNull();
+  });
+
+  test("returns null when the latest turn has no final assistant text", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when a later human turn is incomplete", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-1", type: "ai", content: "First answer" },
+      { id: "human-2", type: "human", content: "Follow up" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
 });
 
 test("reasoning + content (no tool calls) yields a single assistant bubble, not a duplicate processing group", () => {
@@ -216,6 +501,41 @@ test("recognizes clarification-only processing as redundant beside the standalon
 
   expect(isClarificationOnlyProcessingGroup(clarificationOnly)).toBe(true);
   expect(isClarificationOnlyProcessingGroup(mixedTools)).toBe(false);
+});
+
+test("keeps a clarification card identity stable when stream hydration replaces the tool message id", () => {
+  const request = {
+    version: 2,
+    kind: "human_input_request",
+    source: "ask_clarification",
+    request_id: "clarification:call-form",
+    tool_call_id: "call-form",
+    question: "Please complete the acceptance form.",
+    input_mode: "form",
+    fields: [
+      {
+        name: "title",
+        label: "Title",
+        type: "text",
+        required: true,
+      },
+    ],
+  };
+  const clarificationGroupId = (messageId: string) =>
+    getMessageGroups([
+      {
+        id: messageId,
+        type: "tool",
+        name: "ask_clarification",
+        tool_call_id: "call-form",
+        content: "Please complete the acceptance form.",
+        artifact: { human_input: request },
+      } as unknown as Message,
+    ]).find((group) => group.type === "assistant:clarification")?.id;
+
+  expect(clarificationGroupId("stream-tool-message")).toBe(
+    clarificationGroupId("persisted-tool-message"),
+  );
 });
 
 describe("inline <think> tag splitting", () => {

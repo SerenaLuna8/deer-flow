@@ -30,6 +30,8 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import (
     RunScopedReadOnlyMount,
@@ -426,6 +428,8 @@ def _format_glob_results(root_path: str, matches: list[str], truncated: bool) ->
 
 def _format_grep_results(root_path: str, matches: list[GrepMatch], truncated: bool) -> str:
     if not matches:
+        if truncated:
+            return f"Results truncated while searching under {root_path}; matches may exist beyond the provider scan budget. Narrow the path or add a glob filter."
         return f"No matches found under {root_path}"
 
     lines = [f"Found {len(matches)} matches under {root_path}"]
@@ -595,8 +599,16 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
                 if variant in seen:
                     continue
                 seen.add(variant)
-                escaped = re.escape(variant).replace(r"\\", r"[/\\]")
-                compiled.append((re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?"), variant, virtual_base))
+                compiled.append(
+                    (
+                        build_output_mask_pattern(
+                            variant,
+                            separator_agnostic=True,
+                        ),
+                        variant,
+                        virtual_base,
+                    )
+                )
     return tuple(compiled)
 
 
@@ -1086,7 +1098,11 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+        pattern = re.compile(
+            rf"{re.escape(VIRTUAL_PATH_PREFIX)}"
+            r"(?=/|$|[^\w./-])"
+            r"(/[^\s\"';&|<>()]*)?"
+        )
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -1132,7 +1148,7 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
         return False
     if runtime.state is None:
         return False
-    sandbox_state = runtime.state.get("sandbox")
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         return False
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1155,7 +1171,7 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    sandbox_state = runtime.state.get("sandbox")
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1199,7 +1215,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
 
     # A checkpointed legacy sandbox is never authoritative for a private run.
     # Exact mounts force a fresh run-scoped acquisition and overwrite state.
-    sandbox_state = runtime.state.get("sandbox")
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if not mounts and sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
@@ -1257,7 +1273,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     raw_mounts = (runtime.context or {}).get("__run_read_only_mounts", ())
     mounts = raw_mounts if isinstance(raw_mounts, tuple) and all(type(item) is RunScopedReadOnlyMount for item in raw_mounts) else ()
 
-    sandbox_state = runtime.state.get("sandbox")
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if not mounts and sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
@@ -1676,6 +1692,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
+        command = f"cd -- {shlex.quote(f'{VIRTUAL_PATH_PREFIX}/workspace')} && {command}"
         if identity_prefix:
             command = identity_prefix + command
         try:
@@ -1857,12 +1874,12 @@ def grep_tool(
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
 ) -> str:
-    """Search for matching lines inside text files under a root directory.
+    """Search for matching lines inside a text file or files under a directory.
 
     Args:
         description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The string or regex pattern to search for.
-        path: The **absolute** root directory to search under.
+        path: The **absolute** file or root directory to search.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
         case_sensitive: Whether matching is case-sensitive. Default is False.
@@ -1905,9 +1922,9 @@ def grep_tool(
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
-        return f"Error: Directory not found: {requested_path}"
+        return f"Error: Path not found: {requested_path}"
     except NotADirectoryError:
-        return f"Error: Path is not a directory: {requested_path}"
+        return f"Error: Invalid search path: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
     except PermissionError:
@@ -1991,8 +2008,17 @@ def read_file_tool(
         content = read_current_file_content(runtime, path)
         if not content:
             return "(empty)"
-        if start_line is not None and end_line is not None:
-            content = "\n".join(content.splitlines()[start_line - 1 : end_line])
+        if start_line is not None or end_line is not None:
+            lines = content.splitlines()
+            start = max(start_line, 1) if start_line is not None else 1
+            end = end_line if end_line is not None else len(lines)
+            if end < 1:
+                return "(end_line must be >= 1)"
+            if start > len(lines):
+                return "(start_line exceeds file length)"
+            if start > end:
+                return "(start_line > end_line — no lines in range)"
+            content = "\n".join(lines[start - 1 : end])
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -2064,6 +2090,12 @@ def write_file_tool(
     Any write invalidates earlier reads, so re-read between consecutive
     modifications — a ranged read of the relevant section is enough. Writes
     that fail this check are rejected with an error.
+
+    FINAL DELIVERABLES:
+    If the user asks you to create or write a file, including a source-code file,
+    script, configuration, or document, write the completed file under
+    `/mnt/user-data/outputs` and call `present_files` before the final response.
+    Use `/mnt/user-data/workspace` only for temporary or intermediate files.
 
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
@@ -2190,9 +2222,9 @@ def str_replace_tool(
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
-            if not content:
+            if not old_str:
                 return "OK"
-            if old_str not in content:
+            if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
                 content = content.replace(old_str, new_str)

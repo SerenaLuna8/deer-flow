@@ -77,27 +77,12 @@ The Lead Agent resolves which model to use at runtime using the following priori
 
 1. `model_name` (or `model`) from the per-request configuration, if provided and valid.
 2. The `model` field of the active custom agent's config, if an agent is specified.
-3. The first model in the `models:` list in `config.yaml` (the global default).
+3. The active default model in the PostgreSQL-backed system model catalog.
 
-If the requested model name is not found in the config, the system falls back to the default model and logs a warning.
-
-```yaml
-models:
-  - name: my-primary-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-    supports_vision: true
-
-  - name: my-fast-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o-mini
-    api_key: $OPENAI_API_KEY
-```
-
-The first entry (`my-primary-model`) becomes the default. Any request that does not specify a model, or specifies an unknown model name, will use it.
+Platform administrators manage logical names, provider settings, capabilities,
+versioned System Credential references, activation, and the default selection
+under **Admin → System Settings → Models**. A Run freezes the exact selected
+model and Credential versions at admission.
 
 ## Thinking mode
 
@@ -105,22 +90,9 @@ If the model supports extended thinking (e.g., DeepSeek Reasoner, Doubao with th
 
 Thinking mode is controlled per-request through the `thinking_enabled` flag. If thinking is enabled but the configured model does not support it, the system falls back gracefully and logs a warning.
 
-```yaml
-models:
-  - name: deepseek-v4
-    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-    model: deepseek-v4-pro
-    api_key: $DEEPSEEK_API_KEY
-    supports_thinking: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-    when_thinking_disabled:
-      extra_body:
-        thinking:
-          type: disabled
-```
+The administrator marks thinking support and supplies any safe provider-specific
+thinking options on the model settings page. API keys remain encrypted
+Credential material and are not part of those settings.
 
 ## Plan mode
 

@@ -93,6 +93,11 @@ describe("project shell navigation", () => {
     expect(items.find((item) => item.label === "Memory")?.section).toBe(
       "capabilities",
     );
+    expect(
+      items
+        .filter((item) => item.section === "capabilities")
+        .map((item) => item.label),
+    ).toEqual(["Agent", "Skill", "MCP", "Memory"]);
     expect(items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -109,7 +114,7 @@ describe("project shell navigation", () => {
     );
   });
 
-  test("gates project Memory with private-work readiness and hides Connections", () => {
+  test("gates all project private-work destinations with readiness", () => {
     const readyItems = projectNavigationItems(
       adminProject,
       true,
@@ -119,23 +124,35 @@ describe("project shell navigation", () => {
     );
 
     expect(readyItems.map((item) => item.label)).toEqual(
-      expect.arrayContaining(["会话", "Memory"]),
+      expect.arrayContaining(["会话", "Connections", "Memory"]),
     );
-    expect(readyItems).not.toEqual(
+    expect(readyItems).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ label: "Connections" }),
+        expect.objectContaining({
+          href: "/projects/alpha/connections",
+          label: "Connections",
+          section: "work",
+        }),
       ]),
     );
-    expect(
-      projectNavigationItems(adminProject, false, true, false, false),
-    ).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ label: "Memory" })]),
-    );
-    expect(
-      projectNavigationItems(adminProject, true, false, false, false),
-    ).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ label: "Memory" })]),
-    );
+    const notReadyLabels = projectNavigationItems(
+      adminProject,
+      false,
+      true,
+      false,
+      false,
+    ).map((item) => item.label);
+    const featureDisabledLabels = projectNavigationItems(
+      adminProject,
+      true,
+      false,
+      false,
+      false,
+    ).map((item) => item.label);
+    for (const label of ["会话", "Connections", "Memory"]) {
+      expect(notReadyLabels).not.toContain(label);
+      expect(featureDisabledLabels).not.toContain(label);
+    }
   });
 
   test("renders implemented M3 asset destinations from shared_assets.read", () => {

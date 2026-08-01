@@ -74,19 +74,27 @@ export function useUpdateSubtask() {
       // fetchSubtaskSteps().then(updateSubtask) resolving late would write a stale
       // map, clobbering SSE steps/status and sibling subtasks added meanwhile (#3779).
       const current = tasksRef.current;
-      const { next, becameTerminal } = computeNextSubtask(
+      const { next, becameTerminal, changed } = computeNextSubtask(
         current[task.id],
         task,
       );
 
+      if (!changed) {
+        return;
+      }
       current[task.id] = next;
 
-      if (task.latestMessage || task.steps) {
-        setTasks({ ...current });
-      } else if (becameTerminal) {
+      if (becameTerminal || task.statusSource === "tool_result") {
         // Defer the render to the after-render effect so a terminal-only update
         // does not loop with MessageList's same-render pending write.
         shouldNotifyAfterRenderRef.current = true;
+      } else if (
+        task.latestMessage ||
+        task.steps ||
+        task.modelName ||
+        task.usage
+      ) {
+        setTasks({ ...current });
       }
     },
     [tasksRef, setTasks],

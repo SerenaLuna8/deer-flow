@@ -16,6 +16,7 @@ import type { ScopedMcpVersion } from "@/core/shared-assets/mcp-runtime";
 
 import {
   ensureMainSystemAgentBindings,
+  type MainAgentTarget,
   type MainDependencyTarget,
 } from "./agent-selector-dialog";
 
@@ -39,7 +40,7 @@ type MainRuntimeDependencies = {
   ) => Promise<unknown>;
   moveBinding?: (
     projectId: string,
-    kind: Exclude<BindingKind, "agent">,
+    kind: BindingKind,
     assetId: string,
     action: "upgrade" | "rollback",
     input: MoveSystemBindingInput,
@@ -110,7 +111,7 @@ export function scopedMcpVersions(
 
 async function defaultMoveBinding(
   projectId: string,
-  kind: Exclude<BindingKind, "agent">,
+  kind: BindingKind,
   assetId: string,
   action: "upgrade" | "rollback",
   input: MoveSystemBindingInput,
@@ -136,10 +137,7 @@ export async function prepareMainProjectChatRuntime({
     listAssets(projectId, "skills"),
     listAssets(projectId, "mcp-servers"),
   ]);
-  const selectedVersionId =
-    agent.binding?.enabled === true
-      ? agent.binding.version_id
-      : agent.current_published_version_id;
+  const selectedVersionId = agent.current_published_version_id;
   const currentVersion = agentHistory.data.find(
     (version) =>
       "agent_id" in version &&
@@ -149,6 +147,18 @@ export async function prepareMainProjectChatRuntime({
   if (!currentVersion || !("agent_id" in currentVersion)) {
     throw new Error("Main 智能体当前版本不可用");
   }
+  const boundAgentVersion =
+    agent.binding?.enabled === true
+      ? agentHistory.data.find(
+          (version) =>
+            "agent_id" in version && version.id === agent.binding?.version_id,
+        )
+      : undefined;
+  const agentTarget: MainAgentTarget = {
+    versionId: currentVersion.id,
+    versionNumber: currentVersion.version_number,
+    boundVersionNumber: boundAgentVersion?.version_number ?? null,
+  };
 
   const skillItems = catalogItems(skillCatalog);
   const mcpItems = catalogItems(mcpCatalog);
@@ -180,6 +190,7 @@ export async function prepareMainProjectChatRuntime({
   );
   const bindingsChanged = await ensureMainSystemAgentBindings({
     agent,
+    agentTarget,
     requiredSkillVersionIds: currentVersion.skill_version_ids,
     requiredMcpVersionIds: currentVersion.mcp_version_ids,
     skillDependencies,

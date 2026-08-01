@@ -9,6 +9,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.private_work.checkpoint_state import (
+    bind_scoped_checkpoint_state,
+    bind_transaction_checkpoint_state,
+    checkpoint_config,
+    replacement_values,
+    snapshot_checkpoint_id,
+)
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import (
     PrivateWorkContext,
@@ -17,6 +24,7 @@ from app.private_work.context import (
 )
 from app.private_work.errors import (
     PrivateWorkConflict,
+    PrivateWorkDefaultAgentUnavailable,
     PrivateWorkError,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
@@ -29,9 +37,23 @@ from app.private_work.thread_repository import (
     ThreadAgentRef,
 )
 from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext
+from app.shared_assets.default_agent_service import ProjectDefaultAgentService
+from app.shared_assets.errors import AssetStorageUnavailable, SharedAssetError
+from app.shared_assets.models import (
+    AssetKind,
+    AssetScope,
+    AssetSelection,
+    ResolvedAgentSnapshot,
+)
+from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.shared_assets import AgentRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
+
+_BUILTIN_MAIN_AGENT_SOURCE_KEY = "builtin:agent:project-assistant"
 
 
 class BranchAuthorityCopyHook(Protocol):
@@ -77,13 +99,18 @@ class PrivateThreadService:
         self._project_scoped_checkpointer = project_scoped_checkpointer
         self._branch_copy_hook = branch_copy_hook
         self._revalidator = PrivateWorkRevalidator()
+        self._asset_resolver = ProjectAssetResolver(session_factory)
+        self._default_agent_service = ProjectDefaultAgentService(
+            session_factory,
+            resolver=self._asset_resolver,
+        )
 
     async def create(
         self,
         context: PrivateWorkContext,
         *,
         thread_id: str,
-        agent: ThreadAgentRef,
+        agent: ThreadAgentRef | None,
         display_name: str | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> PrivateThreadRecord:
@@ -92,21 +119,29 @@ class PrivateThreadService:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    await self._revalidator.require(
+                    current_project = await self._revalidator.require(
                         session,
                         context,
                         Capability.PRIVATE_WORK_CREATE,
                         lock=True,
                     )
-                    await self._require_executable_agent(
-                        session,
-                        context,
-                        agent,
-                    )
+                    selected_agent = agent
+                    if selected_agent is None:
+                        selected_agent = await self._resolve_default_agent(
+                            session,
+                            context,
+                            current_project,
+                        )
+                    else:
+                        await self._require_executable_agent(
+                            session,
+                            context,
+                            selected_agent,
+                        )
                     record = await PrivateThreadRepository(session).create(
                         scope=context.resource_scope,
                         thread_id=thread_id,
-                        agent=agent,
+                        agent=selected_agent,
                         display_name=display_name,
                         metadata=clean_metadata,
                     )
@@ -242,13 +277,17 @@ class PrivateThreadService:
         target_thread_id: str,
         checkpoint_id: str,
         expected_source_version: int,
+        replay_base_checkpoint_id: str,
+        app_config: AppConfig | None = None,
         display_name: str | None = None,
     ) -> PrivateThreadRecord:
         context = require_issued_private_work_context(context)
         saver = self._project_scoped_checkpointer.for_context(context)
+        resolved_app_config = app_config or get_app_config()
 
         record: PrivateThreadRecord
-        source_item: Any
+        source_snapshot: Any
+        replay_base_snapshot: Any
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -303,17 +342,45 @@ class PrivateThreadService:
                     )
                     if source_item is None or self._checkpoint_tuple_id(source_item) != checkpoint_id:
                         raise PrivateWorkNotFound(context.request_id)
-                    try:
-                        latest_item = await saver.aget_tuple_already_authorized(
-                            self._checkpoint_config(source_thread_id),
-                            session=session,
+                    replay_base_item = await saver.aget_tuple_already_authorized(
+                        self._checkpoint_config(
+                            source_thread_id,
+                            checkpoint_id=replay_base_checkpoint_id,
+                        ),
+                        session=session,
+                    )
+                    if replay_base_item is None or self._checkpoint_tuple_id(replay_base_item) != replay_base_checkpoint_id:
+                        raise PrivateWorkNotFound(context.request_id)
+                    state = bind_transaction_checkpoint_state(
+                        saver,
+                        session,
+                        resolved_app_config,
+                        as_node="branch",
+                    )
+                    source_snapshot = await state.aget(
+                        checkpoint_config(
+                            source_thread_id,
+                            checkpoint_id=checkpoint_id,
                         )
+                    )
+                    if snapshot_checkpoint_id(source_snapshot) != checkpoint_id:
+                        raise PrivateWorkNotFound(context.request_id)
+                    replay_base_snapshot = await state.aget(
+                        checkpoint_config(
+                            source_thread_id,
+                            checkpoint_id=replay_base_checkpoint_id,
+                        )
+                    )
+                    if snapshot_checkpoint_id(replay_base_snapshot) != replay_base_checkpoint_id:
+                        raise PrivateWorkNotFound(context.request_id)
+                    try:
+                        latest_snapshot = await state.aget(checkpoint_config(source_thread_id))
                     except PrivateWorkError:
-                        latest_item = None
+                        latest_snapshot = None
                     selection = self._classify_branch_checkpoint(
                         checkpoint_id,
-                        source_item,
-                        latest_item,
+                        source_snapshot,
+                        latest_snapshot,
                     )
                     branch_metadata = {
                         "branch_parent_thread_id": source_thread_id,
@@ -358,16 +425,32 @@ class PrivateThreadService:
         except Exception:
             raise PrivateWorkUnavailable(context.request_id) from None
 
-        target_config = self._checkpoint_config(target_thread_id)
-        source_channel_versions = source_item.checkpoint.get("channel_versions", {})
-        if not isinstance(source_channel_versions, Mapping):
-            source_channel_versions = {}
         try:
-            await saver.aput(
-                target_config,
-                source_item.checkpoint,
-                source_item.metadata,
-                dict(source_channel_versions),
+            target_state = bind_scoped_checkpoint_state(
+                self._project_scoped_checkpointer,
+                context,
+                resolved_app_config,
+                as_node="branch",
+            )
+            excluded = {"sandbox", "thread_data"}
+            base_values = {key: value for key, value in replay_base_snapshot.values.items() if key not in excluded}
+            selected_values = {key: value for key, value in source_snapshot.values.items() if key not in excluded}
+            await target_state.aupdate(
+                checkpoint_config(target_thread_id),
+                replacement_values(
+                    target_state,
+                    base_values,
+                ),
+                as_node="branch",
+            )
+            await target_state.aupdate(
+                checkpoint_config(target_thread_id),
+                replacement_values(
+                    target_state,
+                    selected_values,
+                    current_values=base_values,
+                ),
+                as_node="branch",
             )
         except Exception as exc:
             await self._compensate_create(
@@ -426,13 +509,10 @@ class PrivateThreadService:
     def _visible_tail_message(cls, item: object | None) -> object | None:
         if item is None:
             return None
-        checkpoint = getattr(item, "checkpoint", {}) or {}
-        if not isinstance(checkpoint, Mapping):
+        snapshot_values = getattr(item, "values", None)
+        if not isinstance(snapshot_values, Mapping):
             return None
-        channel_values = checkpoint.get("channel_values", {}) or {}
-        if not isinstance(channel_values, Mapping):
-            return None
-        messages = channel_values.get("messages", []) or []
+        messages = snapshot_values.get("messages", []) or []
         if not isinstance(messages, list):
             return None
         for message in reversed(messages):
@@ -545,6 +625,58 @@ class PrivateThreadService:
         if checkpoint_id is not None:
             configurable["checkpoint_id"] = checkpoint_id
         return {"configurable": configurable}
+
+    async def _resolve_default_agent(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        actor: ProjectContext,
+    ) -> ThreadAgentRef:
+        try:
+            configured = await self._default_agent_service.resolve_configured_agent_in_session(
+                session,
+                actor,
+            )
+        except AssetStorageUnavailable:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except SharedAssetError:
+            raise PrivateWorkDefaultAgentUnavailable(context.request_id) from None
+
+        if configured is not None:
+            selected = ThreadAgentRef(configured.asset_id, "project")
+        else:
+            builtin_main_id = (
+                await session.execute(
+                    select(AgentRow.id)
+                    .where(
+                        AgentRow.scope == "system",
+                        AgentRow.project_id.is_(None),
+                        AgentRow.source_key == _BUILTIN_MAIN_AGENT_SOURCE_KEY,
+                    )
+                    .with_for_update(read=True, of=AgentRow)
+                )
+            ).scalar_one_or_none()
+            if builtin_main_id is None:
+                raise PrivateWorkDefaultAgentUnavailable(context.request_id)
+            try:
+                resolved_main = await self._asset_resolver.resolve_project_asset_snapshot_in_session(
+                    session,
+                    actor,
+                    AssetSelection(AssetKind.AGENT, builtin_main_id),
+                )
+            except AssetStorageUnavailable:
+                raise PrivateWorkUnavailable(context.request_id) from None
+            except SharedAssetError:
+                raise PrivateWorkDefaultAgentUnavailable(context.request_id) from None
+            if not isinstance(resolved_main, ResolvedAgentSnapshot) or resolved_main.scope is not AssetScope.SYSTEM or resolved_main.asset_id != builtin_main_id:
+                raise PrivateWorkDefaultAgentUnavailable(context.request_id)
+            selected = ThreadAgentRef(resolved_main.asset_id, "system")
+
+        try:
+            await require_executable_agent(session, context, selected)
+        except PrivateWorkNotFound:
+            raise PrivateWorkDefaultAgentUnavailable(context.request_id) from None
+        return selected
 
     @staticmethod
     async def _require_executable_agent(

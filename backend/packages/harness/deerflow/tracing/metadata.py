@@ -34,6 +34,7 @@ def build_langfuse_trace_metadata(
     model_name: str | None = None,
     environment: str | None = None,
     deerflow_trace_id: str | None = None,
+    include_deerflow_trace_id: bool = True,
 ) -> dict[str, Any]:
     """Return Langfuse trace-attribute metadata for ``RunnableConfig.metadata``.
 
@@ -51,6 +52,8 @@ def build_langfuse_trace_metadata(
             ``env:<value>`` in ``langfuse_tags``.
         deerflow_trace_id: Optional DeerFlow request trace id; falls back to
             the current request trace context when omitted.
+        include_deerflow_trace_id: Whether request correlation may be exposed
+            to Langfuse. Internal Worker trace authority remains independent.
     """
     if "langfuse" not in get_enabled_tracing_providers():
         return {}
@@ -62,9 +65,10 @@ def build_langfuse_trace_metadata(
         "langfuse_user_id": user_id or DEFAULT_USER_ID,
         "langfuse_trace_name": assistant_id or _DEFAULT_TRACE_NAME,
     }
-    request_trace_id = normalize_trace_id(deerflow_trace_id) or get_current_trace_id()
-    if request_trace_id:
-        metadata[DEERFLOW_TRACE_METADATA_KEY] = request_trace_id
+    if include_deerflow_trace_id:
+        request_trace_id = normalize_trace_id(deerflow_trace_id) or get_current_trace_id()
+        if request_trace_id:
+            metadata[DEERFLOW_TRACE_METADATA_KEY] = request_trace_id
 
     tags: list[str] = []
     if environment:
@@ -86,6 +90,7 @@ def inject_langfuse_metadata(
     model_name: str | None = None,
     environment: str | None = None,
     deerflow_trace_id: str | None = None,
+    include_deerflow_trace_id: bool = True,
 ) -> None:
     """Merge Langfuse trace-attribute metadata into ``config["metadata"]``.
 
@@ -104,6 +109,7 @@ def inject_langfuse_metadata(
         model_name=model_name,
         environment=environment,
         deerflow_trace_id=deerflow_trace_id,
+        include_deerflow_trace_id=include_deerflow_trace_id,
     )
     if not langfuse_metadata:
         return

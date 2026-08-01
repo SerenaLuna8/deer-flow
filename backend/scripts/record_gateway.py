@@ -7,9 +7,12 @@ frontend produces (date system-reminder, suggestions/title calls, ...), so the
 resulting fixture replays cleanly against the browser.
 
 Used by ``frontend/playwright.record.config.ts``. Env:
-  OPENAI_API_KEY / OPENAI_API_BASE  - the real upstream (never committed)
-  DEERFLOW_RECORD_OUT               - JSONL path to append captured turns to
-  RECORD_PORT (default 8012), RECORD_MODEL (default gpt-5.5)
+  DEERFLOW_RECORD_OUT  - JSONL path to append captured turns to
+  RECORD_PORT          - listener port (default 8012)
+
+The target database must already contain an active ``scenario-model`` and a
+matching Agent runtime policy (memory and summarization disabled). Model and
+runtime settings are PostgreSQL-owned and are never injected through YAML.
 """
 
 from __future__ import annotations
@@ -86,26 +89,21 @@ def _install_capture(out_path: Path) -> None:
 
 
 def main() -> int:
-    if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("OPENAI_API_BASE"):
-        print("ERROR: set OPENAI_API_KEY and OPENAI_API_BASE (an OpenAI-compatible /v1 endpoint)", file=sys.stderr)
-        return 2
-
     record_out = os.environ.get("DEERFLOW_RECORD_OUT")
     if not record_out:
         print("ERROR: set DEERFLOW_RECORD_OUT to the JSONL path to append captured turns to", file=sys.stderr)
         return 2
 
     port = int(os.environ.get("RECORD_PORT", "8012"))
-    model = os.environ.get("RECORD_MODEL", "gpt-5.5")
     out = Path(record_out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("", encoding="utf-8")  # fresh capture per recording run
 
-    from _replay_fixture import build_config_yaml, prepare_hermetic_skills, real_model_block, replay_worker
+    from _replay_fixture import build_config_yaml, prepare_hermetic_skills, replay_worker
 
     home = Path(tempfile.mkdtemp(prefix="record-gw-"))
     cfg = home / "config.yaml"
-    cfg.write_text(build_config_yaml(model_block=real_model_block(model), home=home), encoding="utf-8")
+    cfg.write_text(build_config_yaml(home=home), encoding="utf-8")
     # Override (not setdefault): the recorder must be hermetic, so an outer
     # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
     os.environ["DEER_FLOW_HOME"] = str(home)
@@ -118,8 +116,8 @@ def main() -> int:
 
     import uvicorn
 
-    print(f"[record-gw] model={model} out={out} port={port}", flush=True)
-    with replay_worker():
+    print(f"[record-gw] model=scenario-model out={out} port={port}", flush=True)
+    with replay_worker(replay_adapter=False):
         uvicorn.run("app.gateway.app:app", host="127.0.0.1", port=port, log_level="warning")
     return 0
 

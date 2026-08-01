@@ -1,7 +1,11 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
-import { accumulateUsage, selectHeaderTokenUsage } from "@/core/messages/usage";
+import {
+  accumulateUsage,
+  normalizeTokenUsage,
+  selectHeaderTokenUsage,
+} from "@/core/messages/usage";
 import {
   getAssistantTurnUsageMessages,
   getMessageGroups,
@@ -20,6 +24,32 @@ test("accumulates each AI message usage only once by message id", () => {
     outputTokens: 5,
     totalTokens: 15,
   });
+});
+
+test("normalizes strict cumulative token usage snapshots", () => {
+  expect(
+    normalizeTokenUsage({
+      input_tokens: 100,
+      output_tokens: 20,
+      total_tokens: 120,
+    }),
+  ).toEqual({
+    inputTokens: 100,
+    outputTokens: 20,
+    totalTokens: 120,
+  });
+
+  expect(normalizeTokenUsage({ input_tokens: 1, output_tokens: 2 })).toBe(
+    undefined,
+  );
+  expect(
+    normalizeTokenUsage({
+      input_tokens: -1,
+      output_tokens: 2,
+      total_tokens: 1,
+    }),
+  ).toBeUndefined();
+  expect(normalizeTokenUsage("1/2/3")).toBeUndefined();
 });
 
 test("counts later usage-bearing snapshots for the same AI message id", () => {

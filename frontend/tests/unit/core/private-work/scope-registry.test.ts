@@ -4,6 +4,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { agentBuilderRootKey } from "@/core/agent-builder/query-keys";
 import { privateWorkRoot } from "@/core/private-work/query-keys";
 import {
+  clearProjectReconnectStorage,
   createPrivateWorkScopeRegistry,
   projectReconnectStorage,
   transitionPrivateWorkScope,
@@ -25,7 +26,11 @@ const A_P2 = {
 function makeSessionStorage() {
   const values = new Map<string, string>();
   return {
+    get length() {
+      return values.size;
+    },
     getItem: rs.fn((key: string) => values.get(key) ?? null),
+    key: rs.fn((index: number) => [...values.keys()][index] ?? null),
     removeItem: rs.fn((key: string) => values.delete(key)),
     setItem: rs.fn((key: string, value: string) => values.set(key, value)),
   };
@@ -363,5 +368,36 @@ describe("project private-work scope registry", () => {
     expect(storage.setItem.mock.calls[0]?.[0]).not.toBe(
       storage.setItem.mock.calls[1]?.[0],
     );
+  });
+
+  test("detaches a project scope without discarding its resumable run id", () => {
+    const storage = makeSessionStorage();
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+    const registry = createPrivateWorkScopeRegistry();
+    const access = registry.acquire(A_P1);
+    const reconnect = (
+      access.reconnectOnMount as () => ReturnType<
+        typeof projectReconnectStorage
+      >
+    )();
+    reconnect.setItem("lg:stream:thread-live", "run-live");
+
+    registry.dispose(A_P1);
+    expect(access.isActive?.()).toBe(false);
+    const resumed = registry.acquire(A_P1);
+    expect(
+      (
+        resumed.reconnectOnMount as () => ReturnType<
+          typeof projectReconnectStorage
+        >
+      )().getItem("lg:stream:thread-live"),
+    ).toBe("run-live");
+
+    clearProjectReconnectStorage(A_P1);
+    registry.dispose(A_P1);
+    rs.unstubAllGlobals();
   });
 });

@@ -71,11 +71,13 @@ class AuditAction(StrEnum):
     QUOTA_RECONCILED = "quota.reconciled"
     RUN_ADMITTED = "run.admitted"
     RUN_CANCEL_REQUESTED = "run.cancel_requested"
+    RUN_FILES_FINALIZED = "run.files_finalized"
     RUN_TERMINAL = "run.terminal"
     JOB_DEAD = "job.dead"
     JOB_REQUEUED = "job.requeued"
     PURGE_COMPLETED = "purge.completed"
     AUDIT_CORRECTED = "audit.corrected"
+    SYSTEM_SETTING_UPDATED = "system_setting.updated"
 
 
 class AuditTargetKind(StrEnum):
@@ -89,6 +91,7 @@ class AuditTargetKind(StrEnum):
     JOB = "job"
     PURGE = "purge"
     AUDIT = "audit"
+    SYSTEM_SETTING = "system_setting"
 
 
 class AuditOutcome(StrEnum):
@@ -311,6 +314,12 @@ _ACTION_CONTRACTS[AuditAction.RUN_CANCEL_REQUESTED] = _contract(
     AuditScope.PROJECT,
     "user",
 )
+_ACTION_CONTRACTS[AuditAction.RUN_FILES_FINALIZED] = _contract(
+    AuditTargetKind.RUN,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.WORKER,),
+)
 _ACTION_CONTRACTS[AuditAction.RUN_TERMINAL] = AuditActionContract(
     target_kind=AuditTargetKind.RUN,
     variants=(
@@ -370,6 +379,11 @@ _ACTION_CONTRACTS[AuditAction.PURGE_COMPLETED] = AuditActionContract(
 _ACTION_CONTRACTS[AuditAction.AUDIT_CORRECTED] = _contract(
     AuditTargetKind.AUDIT,
     AuditScope.EITHER,
+    "system",
+)
+_ACTION_CONTRACTS[AuditAction.SYSTEM_SETTING_UPDATED] = _contract(
+    AuditTargetKind.SYSTEM_SETTING,
+    AuditScope.PLATFORM,
     "system",
 )
 AUDIT_ACTION_CONTRACTS: Mapping[AuditAction, AuditActionContract] = MappingProxyType(_ACTION_CONTRACTS)
@@ -696,6 +710,14 @@ class RunTerminalAuditMetadata(_AuditMetadata):
     public_error_code: StrictStr | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
+class RunFilesFinalizedAuditMetadata(_AuditMetadata):
+    created_count: StrictInt = Field(ge=0)
+    modified_count: StrictInt = Field(ge=0)
+    deleted_count: StrictInt = Field(ge=0)
+    artifact_count: StrictInt = Field(ge=0)
+    committed_bytes: StrictInt = Field(ge=0)
+
+
 class JobAuditMetadata(_AuditMetadata):
     job_type: Literal["private_run", "automation_run", "retention_purge"]
     public_error_code: StrictStr | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -710,6 +732,18 @@ class PurgeAuditMetadata(_AuditMetadata):
 
 class CorrectionAuditMetadata(_AuditMetadata):
     correction_kind: Literal["outcome", "metadata", "target"]
+
+
+class SystemSettingAuditMetadata(_AuditMetadata):
+    section: Literal["agent_runtime", "auth", "quotas"]
+    revision: StrictInt = Field(ge=2)
+    schema_version: StrictInt = Field(ge=1)
+    payload_checksum: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    effect_scope: Literal[
+        "new_requests_and_runs",
+        "new_requests",
+        "next_authoritative_check",
+    ]
 
 
 _AUDIT_METADATA_MODELS: dict[AuditAction, type[_AuditMetadata]] = {action: EmptyAuditMetadata for action in AuditAction}
@@ -746,11 +780,13 @@ _AUDIT_METADATA_MODELS[AuditAction.AUTOMATION_TRIGGERED] = AutomationTriggeredAu
 _AUDIT_METADATA_MODELS[AuditAction.QUOTA_POLICY_UPDATED] = QuotaPolicyAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.QUOTA_RECONCILED] = QuotaReconciledAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_ADMITTED] = RunAdmittedAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.RUN_FILES_FINALIZED] = RunFilesFinalizedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_TERMINAL] = RunTerminalAuditMetadata
 for _action in (AuditAction.JOB_DEAD, AuditAction.JOB_REQUEUED):
     _AUDIT_METADATA_MODELS[_action] = JobAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.PURGE_COMPLETED] = PurgeAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.AUDIT_CORRECTED] = CorrectionAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.SYSTEM_SETTING_UPDATED] = SystemSettingAuditMetadata
 AUDIT_METADATA_MODELS: Mapping[AuditAction, type[_AuditMetadata]] = MappingProxyType(_AUDIT_METADATA_MODELS)
 
 

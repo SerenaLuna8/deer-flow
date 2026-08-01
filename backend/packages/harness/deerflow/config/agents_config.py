@@ -29,6 +29,13 @@ AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 MAX_AGENT_OUTPUT_TOKENS = 200_000
 
 
+def _blank_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 class AgentModelSettings(BaseModel):
     """Strict immutable settings carried by one exact Agent version."""
 
@@ -98,6 +105,11 @@ class GitHubTriggerConfig(BaseModel):
     # Useful when one agent answers as @bot-a and another as @bot-b.
     mention_login: str | None = None
 
+    @field_validator("mention_login")
+    @classmethod
+    def _normalize_mention_login(cls, value: str | None) -> str | None:
+        return _blank_to_none(value)
+
 
 class GitHubBinding(BaseModel):
     """One (agent, repo) binding with per-event trigger overrides."""
@@ -143,6 +155,11 @@ class GitHubAgentConfig(BaseModel):
     # Repos this agent is bound to. Empty list = bound to nothing = the agent
     # never fires from a webhook, even if it has a ``github:`` block.
     bindings: list[GitHubBinding] = Field(default_factory=list)
+
+    @field_validator("bot_login")
+    @classmethod
+    def _normalize_bot_login(cls, value: str | None) -> str | None:
+        return _blank_to_none(value)
 
     @model_validator(mode="after")
     def _unique_binding_repos(self) -> "GitHubAgentConfig":

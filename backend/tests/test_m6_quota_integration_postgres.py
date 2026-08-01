@@ -681,6 +681,7 @@ async def test_unowned_dead_job_terminal_port_releases_run_reservation_once(
             public_error_code="MAX_ATTEMPTS_EXCEEDED",
             cancel_reason=None,
             occurred_at=occurred_at,
+            origin_trace_id=admitted.run.origin_trace_id,
         )
         terminal = PrivateRunJobTerminalPort(quota=enforcer)
         async with seed.factory() as session, session.begin():

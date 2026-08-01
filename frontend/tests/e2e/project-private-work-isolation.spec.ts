@@ -103,6 +103,7 @@ async function installScopeFixture(page: Page): Promise<ScopeState> {
       email: `${state.accountId}@example.test`,
       system_role: "user",
       needs_setup: false,
+      oauth_provider: null,
     }),
   );
   await page.route(/\/api\/projects(?:\?.*)?$/, (route) =>
@@ -125,6 +126,37 @@ async function installScopeFixture(page: Page): Promise<ScopeState> {
         status: "ready",
         code: "PRIVATE_WORK_READY",
         request_id: `ready-${current.slug}`,
+      });
+    }
+    if (path.endsWith("/default-agent")) {
+      return json(route, {
+        agent_asset_id: null,
+        revision: 0,
+        request_id: `default-agent-${current.slug}`,
+      });
+    }
+    if (path.endsWith("/agents")) {
+      return json(route, {
+        system_items: [
+          {
+            id: "30000000-0000-4000-8000-000000000001",
+            scope: "system",
+            project_id: null,
+            slug: "project-assistant",
+            display_name: "Main",
+            status: "active",
+            current_published_version_id:
+              "40000000-0000-4000-8000-000000000001",
+            version: 1,
+            created_by_user_id: "system",
+            created_at: "2026-07-15T00:00:00Z",
+            updated_at: "2026-07-15T00:00:00Z",
+            capabilities: ["shared_assets.read", "shared_assets.execute"],
+            binding: null,
+          },
+        ],
+        project_items: [],
+        request_id: `agents-${current.slug}`,
       });
     }
     if (path.endsWith("/private-work/threads/search")) {

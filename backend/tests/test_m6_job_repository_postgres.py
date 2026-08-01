@@ -94,6 +94,7 @@ async def _create_private_run(seed: JobSeed) -> str:
                 owner_user_id=seed.scope.owner_user_id,
                 project_id=seed.scope.project_id,
                 status="pending",
+                origin_trace_id=f"trace:{run_id}",
             )
         )
     return run_id
@@ -115,6 +116,7 @@ def _private_request(
         run_id=run_id,
         occurrence_id=None,
         max_attempts=max_attempts,
+        origin_trace_id=f"trace:{run_id}",
         retry_safety=retry_safety,  # type: ignore[arg-type]
         available_at=available_at,
     )
@@ -203,6 +205,7 @@ async def test_enqueue_is_idempotent_and_rejects_cross_authority_key_reuse(seed:
         run_id=run_id,
         occurrence_id=None,
         max_attempts=3,
+        origin_trace_id=f"trace:{run_id}",
     )
     async with seed.data.factory() as session, session.begin():
         with pytest.raises(JobIdempotencyConflict):

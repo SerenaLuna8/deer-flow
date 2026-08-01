@@ -26,6 +26,7 @@ from deerflow.persistence.private_work.file_repository import (
     PrivateFileRepository,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.sandbox.sandbox import PRIVATE_FILE_IO_CHUNK_SIZE
 from deerflow.sandbox.sandbox_provider import (
     PrivateSandboxLease,
     RunScopedReadOnlyMount,
@@ -43,6 +44,7 @@ _LOGICAL_ROOTS = {
     "workspace": "workspace",
     "output": "outputs",
 }
+_PRIVATE_FILE_REMOVE_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +289,8 @@ class PrivateRunFileAuthority:
         self._sandbox: Any | None = None
         self._manifest: AuthorityManifest | None = None
         self._presented_paths: list[str] = []
+        self._current_upload_ids: list[str] = []
+        self._cleanup_failed = False
         self._release_lock = asyncio.Lock()
 
     @property
@@ -331,8 +335,151 @@ class PrivateRunFileAuthority:
             raise ValueError("Invalid private presented paths")
         self._presented_paths = list(dict.fromkeys((*self._presented_paths, *presented_paths)))
 
+    def record_current_upload_ids(self, file_ids: tuple[str, ...]) -> None:
+        """Remember authorized current-Run uploads for lead and subagents."""
+
+        if type(file_ids) is not tuple or any(type(file_id) is not str or not file_id for file_id in file_ids):
+            raise ValueError("Invalid current private upload ids")
+        visible_ids = {str(entry.file_id) for entry in (self._manifest.entries if self._manifest else ()) if entry.kind == "upload"}
+        if any(file_id not in visible_ids for file_id in file_ids):
+            raise ValueError("Current private uploads are outside authority")
+        self._current_upload_ids = list(dict.fromkeys((*self._current_upload_ids, *file_ids)))
+
+    def current_upload_ids(self) -> tuple[str, ...]:
+        return tuple(self._current_upload_ids)
+
+    async def write_output(
+        self,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        """Atomically write one uniquely named presentable Run output."""
+
+        return await self._write_private_file(
+            root_kind="outputs",
+            relative_path=relative_path,
+            content=content,
+        )
+
+    async def write_internal(
+        self,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        """Write internal Run data below the durable workspace root.
+
+        These files remain readable by the model and are finalized into
+        PostgreSQL, but the Worker does not treat them as unpresented
+        user-facing artifacts.
+        """
+
+        return await self._write_private_file(
+            root_kind="workspace",
+            relative_path=relative_path,
+            content=content,
+        )
+
+    async def _write_private_file(
+        self,
+        *,
+        root_kind: str,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        """Own validation, fencing, bounded writes, and cancellation cleanup."""
+
+        if self._cleanup_failed or self._manifest is None or self._sandbox is None:
+            raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+        if root_kind not in {"outputs", "workspace"}:
+            raise PrivateWorkInvalid(self._run_scope.context.request_id)
+        if type(relative_path) is not str or type(content) is not bytes or not content:
+            raise PrivateWorkInvalid(self._run_scope.context.request_id)
+
+        logical_path = normalize_private_logical_path(
+            f"{root_kind}/{relative_path}",
+            request_id=self._run_scope.context.request_id,
+        )
+        path = PurePosixPath(logical_path)
+        if len(path.parts) < 2 or path.parts[0] != root_kind or any(part.startswith(".deerflow") for part in path.parts[1:]):
+            raise PrivateWorkInvalid(self._run_scope.context.request_id)
+
+        unique_name = f"{path.stem}-{uuid.uuid4().hex[:12]}{path.suffix}"
+        unique_relative = PurePosixPath(*path.parts[1:-1], unique_name)
+        virtual_path = f"/mnt/user-data/{root_kind}/{unique_relative.as_posix()}"
+
+        boundary = self._run_scope.authorization_boundary
+        check = getattr(boundary, "before_sandbox_write", None)
+        if not callable(check):
+            raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+
+        sandbox = self._sandbox
+        handle: str | None = None
+        published_path: str | None = None
+        try:
+            await check()
+            handle = await _joined_to_thread(
+                sandbox.begin_atomic_file,
+                virtual_path,
+                cancel_cleanup=sandbox.abort_atomic_file,
+            )
+            for offset in range(
+                0,
+                len(content),
+                PRIVATE_FILE_IO_CHUNK_SIZE,
+            ):
+                await check()
+                await _joined_to_thread(
+                    sandbox.append_atomic_file,
+                    handle,
+                    content[offset : offset + PRIVATE_FILE_IO_CHUNK_SIZE],
+                )
+            await check()
+            await _joined_to_thread(
+                sandbox.publish_atomic_file,
+                handle,
+                cancel_cleanup=lambda _result: self._remove_published_file(
+                    sandbox,
+                    virtual_path,
+                ),
+            )
+            handle = None
+            published_path = virtual_path
+            await check()
+            published_path = None
+            return virtual_path
+        finally:
+            if handle is not None:
+                try:
+                    await _joined_to_thread(
+                        sandbox.abort_atomic_file,
+                        handle,
+                    )
+                except Exception:
+                    pass
+            if published_path is not None:
+                try:
+                    await _joined_to_thread(
+                        self._remove_published_file,
+                        sandbox,
+                        published_path,
+                    )
+                except Exception:
+                    pass
+
+    def _remove_published_file(self, sandbox: Any, path: str) -> None:
+        last_error: Exception | None = None
+        for _attempt in range(_PRIVATE_FILE_REMOVE_MAX_ATTEMPTS):
+            try:
+                sandbox.remove_file(path)
+                return
+            except Exception as exc:
+                last_error = exc
+        self._cleanup_failed = True
+        assert last_error is not None
+        raise last_error
+
     async def finalize(self):
-        if self._manifest is None or self._sandbox is None:
+        if self._cleanup_failed or self._manifest is None or self._sandbox is None:
             raise PrivateWorkUnavailable(self._run_scope.context.request_id)
         return await self._finalizer.finalize(
             self._run_scope,
@@ -344,6 +491,14 @@ class PrivateRunFileAuthority:
     async def mark_failed(self) -> None:
         await self._finalizer.mark_failed(self._run_scope)
 
+    def _clear_released_state(self) -> None:
+        self._lease = None
+        self._sandbox = None
+        self._manifest = None
+        self._presented_paths = []
+        self._current_upload_ids = []
+        self._cleanup_failed = False
+
     async def release(self) -> None:
         async with self._release_lock:
             lease = self._lease
@@ -352,11 +507,21 @@ class PrivateRunFileAuthority:
             provider = self._provider
             if provider is None:
                 raise PrivateWorkUnavailable(self._run_scope.context.request_id)
-            await provider.release_private_async(lease)
-            self._lease = None
-            self._sandbox = None
-            self._manifest = None
-            self._presented_paths = []
+            current = asyncio.current_task()
+            cancellation_count = current.cancelling() if current is not None else 0
+            try:
+                await provider.release_private_async(lease)
+            except asyncio.CancelledError:
+                # SandboxProvider.release_private_async() joins its blocking
+                # destroy before propagating caller cancellation. Forget the
+                # completed lease so a cleanup retry cannot target an already
+                # destroyed private sandbox. An internally-raised
+                # CancelledError does not increase this task's cancellation
+                # count and keeps the state available for an explicit retry.
+                if current is not None and current.cancelling() > cancellation_count:
+                    self._clear_released_state()
+                raise
+            self._clear_released_state()
 
     def thread_data_paths(self) -> dict[str, str]:
         if self._manifest is None:
@@ -379,6 +544,7 @@ class PrivateRunFileAuthority:
             result.append(
                 {
                     "file_id": str(entry.file_id),
+                    "version": entry.version,
                     "filename": path.name,
                     "size": entry.size,
                     "path": f"/mnt/user-data/uploads/{PurePosixPath(*path.parts[1:]).as_posix()}",

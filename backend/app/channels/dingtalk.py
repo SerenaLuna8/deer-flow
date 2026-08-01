@@ -423,6 +423,7 @@ class DingTalkChannel(Channel):
                 text=text,
                 msg_type=msg_type,
                 thread_ts=msg_id,
+                provider_delivery_id=msg_id,
                 metadata={
                     "conversation_type": conversation_type,
                     "conversation_id": conversation_id,

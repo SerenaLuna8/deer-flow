@@ -1,60 +1,71 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECK_SCRIPT_PATH = REPO_ROOT / "scripts" / "check.py"
+PNPM_SCRIPT_PATH = REPO_ROOT / "scripts" / "pnpm.py"
 
 
-spec = importlib.util.spec_from_file_location("deerflow_check_script", CHECK_SCRIPT_PATH)
-assert spec is not None
-assert spec.loader is not None
-check_script = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(check_script)
+def _load_script(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_find_pnpm_command_prefers_resolved_executable(monkeypatch):
-    def fake_which(name: str) -> str | None:
-        if name == "pnpm":
-            return r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"
-        if name == "pnpm.cmd":
-            return r"C:\Users\tester\AppData\Roaming\npm\pnpm.cmd"
-        return None
-
-    monkeypatch.setattr(check_script.shutil, "which", fake_which)
-
-    assert check_script.find_pnpm_command() == [r"C:\Users\tester\AppData\Roaming\npm\pnpm.CMD"]
+check_script = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script")
 
 
-def test_find_pnpm_command_falls_back_to_corepack(monkeypatch):
-    def fake_which(name: str) -> str | None:
-        if name == "corepack":
-            return r"C:\Program Files\nodejs\corepack.exe"
-        return None
+def test_check_script_uses_shared_pnpm_runner() -> None:
+    source = CHECK_SCRIPT_PATH.read_text(encoding="utf-8")
 
-    monkeypatch.setattr(check_script.shutil, "which", fake_which)
-
-    assert check_script.find_pnpm_command() == [
-        r"C:\Program Files\nodejs\corepack.exe",
-        "pnpm",
-    ]
+    assert 'Path(__file__).with_name("pnpm.py")' in source
 
 
-def test_find_pnpm_command_falls_back_to_corepack_cmd(monkeypatch):
-    def fake_which(name: str) -> str | None:
-        if name == "corepack":
-            return None
-        if name == "corepack.cmd":
-            return r"C:\Program Files\nodejs\corepack.cmd"
-        return None
+def test_check_script_preserves_runner_failure_diagnostics(monkeypatch) -> None:
+    module = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script_failure")
+    observed: dict[str, object] = {}
 
-    monkeypatch.setattr(check_script.shutil, "which", fake_which)
+    def fake_run(*args, **kwargs):
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=["python", "pnpm.py", "-v"],
+            returncode=42,
+            stdout="partial pnpm output\n",
+            stderr="Error: pnpm command failed with exit status 42.\n",
+        )
 
-    assert check_script.find_pnpm_command() == [
-        r"C:\Program Files\nodejs\corepack.cmd",
-        "pnpm",
-    ]
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module.run_pnpm_version() == (
+        None,
+        False,
+        "Error: pnpm command failed with exit status 42.\npartial pnpm output",
+    )
+    assert observed["cwd"] == REPO_ROOT / "frontend"
+    assert observed["shell"] is False
+
+
+def test_check_script_preserves_corepack_resolution_hint(monkeypatch) -> None:
+    module = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script_corepack")
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["python", "pnpm.py", "-v"],
+            returncode=0,
+            stdout="10.26.2\n",
+            stderr="Using pnpm via Corepack.\n",
+        ),
+    )
+
+    assert module.run_pnpm_version() == ("10.26.2", True, None)
 
 
 def test_postgres_endpoint_requires_database_url(tmp_path, monkeypatch):

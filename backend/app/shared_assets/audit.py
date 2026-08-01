@@ -27,6 +27,8 @@ _ACTIONS: dict[str, AuditAction] = {
     "agent.delete": AuditAction.ASSET_DELETED,
     "agent.activate": AuditAction.ASSET_UPDATED,
     "agent.suspend": AuditAction.ASSET_DEPRECATED,
+    "agent.default.set": AuditAction.ASSET_BOUND,
+    "agent.default.clear": AuditAction.ASSET_UNBOUND,
     "skill.create": AuditAction.ASSET_CREATED,
     "skill.version.create": AuditAction.ASSET_UPDATED,
     "skill.publish": AuditAction.ASSET_PUBLISHED,

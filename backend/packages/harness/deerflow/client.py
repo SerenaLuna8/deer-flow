@@ -36,7 +36,10 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import (
+    get_thread_state_schema,
+    normalize_middleware_state_schemas,
+)
 from deerflow.assets.catalog import (
     AssetCatalogUnavailable,
     trusted_asset_context,
@@ -45,6 +48,13 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.checkpoint_mode import (
+    ensure_checkpoint_mode_compatible,
+    freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
+    inject_checkpoint_mode,
+)
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
@@ -175,6 +185,8 @@ class DeerFlowClient:
         if config_path is not None:
             reload_app_config(config_path)
         self._app_config = get_app_config()
+        self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
+        self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
@@ -252,6 +264,8 @@ class DeerFlowClient:
             cfg.get("subagent_enabled"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
+            self._checkpoint_channel_mode,
+            self._checkpoint_snapshot_frequency,
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -290,16 +304,20 @@ class DeerFlowClient:
             # Attaching them again on the model would emit duplicate spans.
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
             "tools": final_tools,
-            "middleware": build_middlewares(
-                config,
-                model_name=model_name,
-                agent_name=self._agent_name,
-                available_skills=self._available_skills,
-                custom_middlewares=self._middlewares,
-                app_config=self._app_config,
-                deferred_setup=deferred_setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=get_effective_user_id(),
+            "middleware": normalize_middleware_state_schemas(
+                build_middlewares(
+                    config,
+                    model_name=model_name,
+                    agent_name=self._agent_name,
+                    available_skills=self._available_skills,
+                    custom_middlewares=self._middlewares,
+                    app_config=self._app_config,
+                    deferred_setup=deferred_setup,
+                    mcp_routing_middleware=mcp_routing_middleware,
+                    user_id=get_effective_user_id(),
+                ),
+                self._checkpoint_channel_mode,
+                self._checkpoint_snapshot_frequency,
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -312,7 +330,10 @@ class DeerFlowClient:
                 user_id=get_effective_user_id(),
                 skill_names=skill_setup.skill_names or None,
             ),
-            "state_schema": ThreadState,
+            "state_schema": get_thread_state_schema(
+                self._checkpoint_channel_mode,
+                self._checkpoint_snapshot_frequency,
+            ),
         }
         checkpointer = self._checkpointer
         if checkpointer is not None:
@@ -556,40 +577,61 @@ class DeerFlowClient:
         return {"thread_list": threads[:limit]}
 
     def get_thread(self, thread_id: str) -> dict:
-        """Get the complete thread record, including all node execution records.
-
-        Args:
-            thread_id: Thread ID.
-
-        Returns:
-            Dict containing the thread's full checkpoint history.
-        """
+        """Get the complete materialized checkpoint history for a thread."""
         checkpointer = self._get_thread_checkpointer()
+        config = self._get_runnable_config(thread_id)
+        self._ensure_agent(config)
+        if self._agent is None:
+            raise RuntimeError("Agent was not initialized")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        accessor = CheckpointStateAccessor.bind(
+            self._agent,
+            checkpointer,
+            mode=self._checkpoint_channel_mode,
+        )
+        pending_writes_by_checkpoint: dict[str, list] = {}
+        for raw_tuple in checkpointer.list(config):
+            raw_checkpoint_id = raw_tuple.config.get(
+                "configurable",
+                {},
+            ).get("checkpoint_id")
+            if raw_checkpoint_id:
+                pending_writes_by_checkpoint[raw_checkpoint_id] = list(getattr(raw_tuple, "pending_writes", ()) or ())
+
         checkpoints = []
+        for snapshot in accessor.history(config):
+            values = dict(snapshot.values or {})
+            if "messages" in values:
+                values["messages"] = [self._serialize_message(message) if hasattr(message, "content") else message for message in values["messages"]]
 
-        for cp in checkpointer.list(config):
-            channel_values = dict(cp.checkpoint.get("channel_values", {}))
-            if "messages" in channel_values:
-                channel_values["messages"] = [self._serialize_message(m) if hasattr(m, "content") else m for m in channel_values["messages"]]
-
-            cfg = cp.config.get("configurable", {})
-            parent_cfg = cp.parent_config.get("configurable", {}) if cp.parent_config else {}
+            snapshot_config = snapshot.config or {}
+            configurable = snapshot_config.get("configurable", {})
+            parent_config = snapshot.parent_config or {}
+            parent_configurable = parent_config.get("configurable", {})
+            pending_writes = pending_writes_by_checkpoint.get(
+                configurable.get("checkpoint_id"),
+                [],
+            )
 
             checkpoints.append(
                 {
-                    "checkpoint_id": cfg.get("checkpoint_id"),
-                    "parent_checkpoint_id": parent_cfg.get("checkpoint_id"),
-                    "ts": cp.checkpoint.get("ts"),
-                    "metadata": cp.metadata,
-                    "values": channel_values,
-                    "pending_writes": [{"task_id": w[0], "channel": w[1], "value": w[2]} for w in getattr(cp, "pending_writes", [])],
+                    "checkpoint_id": configurable.get("checkpoint_id"),
+                    "parent_checkpoint_id": parent_configurable.get("checkpoint_id"),
+                    "ts": snapshot.created_at,
+                    "metadata": snapshot.metadata,
+                    "values": values,
+                    "pending_writes": [
+                        {
+                            "task_id": write[0],
+                            "channel": write[1],
+                            "value": write[2],
+                        }
+                        for write in pending_writes
+                    ],
                 }
             )
 
-        # Sort globally by timestamp to prevent partial ordering issues caused by different namespaces (e.g., subgraphs)
-        checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
+        checkpoints.sort(key=lambda checkpoint: checkpoint["ts"] or "")
 
         return {"thread_id": thread_id, "checkpoints": checkpoints}
 
@@ -610,11 +652,9 @@ class DeerFlowClient:
         ``logging.enhance.enabled`` is off the embedded client does **not**
         create a fresh request-level trace id, so Langfuse traces from
         embedded / TUI / CLI callers keep their pre-enhancement schema and
-        do not gain a ``metadata.deerflow_trace_id`` key by default. A
-        caller that explicitly binds its own trace via
-        :func:`deerflow.trace_context.request_trace_context` still opts in:
-        the inner ``get_current_trace_id()`` read propagates that value
-        into Langfuse metadata regardless of the flag.
+        do not gain a ``metadata.deerflow_trace_id`` key. A caller-bound
+        trace remains available to the local runtime context, but the
+        startup switch is authoritative for external Langfuse correlation.
         """
         if not is_trace_correlation_enabled(self._app_config):
             yield from self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
@@ -737,6 +777,19 @@ class DeerFlowClient:
             thread_id = str(uuid.uuid4())
 
         config = self._get_runnable_config(thread_id, **kwargs)
+        inject_checkpoint_mode(config, self._checkpoint_channel_mode)
+        checkpoint_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+        if self._checkpointer is not None:
+            ensure_checkpoint_mode_compatible(
+                self._checkpointer,
+                checkpoint_config,
+                self._checkpoint_channel_mode,
+            )
 
         # Inject tracing callbacks and Langfuse trace metadata at the graph
         # invocation root so the embedded client matches the gateway worker's
@@ -759,6 +812,9 @@ class DeerFlowClient:
             model_name=configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=deerflow_trace_id,
+            include_deerflow_trace_id=is_trace_correlation_enabled(
+                self._app_config,
+            ),
         )
 
         self._ensure_agent(config)
@@ -998,17 +1054,29 @@ class DeerFlowClient:
         if not isinstance(token_usage_enabled, bool):
             token_usage_enabled = False
 
+        models = tuple(self._app_config.models)
         return {
             "models": [
                 {
                     "name": model.name,
-                    "model": getattr(model, "model", None),
-                    "display_name": getattr(model, "display_name", None),
-                    "description": getattr(model, "description", None),
-                    "supports_thinking": getattr(model, "supports_thinking", False),
-                    "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+                    # Keep the embedded client aligned with the Gateway's safe
+                    # selector projection: provider identifiers are admin-only.
+                    "model": model.name,
+                    "display_name": (model.display_name if isinstance(model.display_name, str) else model.name),
+                    "description": (model.description if isinstance(model.description, str) else ""),
+                    "supports_thinking": (getattr(model, "supports_thinking", False) is True),
+                    "supports_reasoning_effort": (
+                        getattr(
+                            model,
+                            "supports_reasoning_effort",
+                            False,
+                        )
+                        is True
+                    ),
+                    "supports_vision": (getattr(model, "supports_vision", False) is True),
+                    "is_default": index == 0,
                 }
-                for model in self._app_config.models
+                for index, model in enumerate(models)
             ],
             "token_usage": {"enabled": token_usage_enabled},
         }
@@ -1026,13 +1094,16 @@ class DeerFlowClient:
         model = self._app_config.get_model_config(name)
         if model is None:
             return None
+        models = tuple(self._app_config.models)
         return {
             "name": model.name,
-            "model": getattr(model, "model", None),
-            "display_name": getattr(model, "display_name", None),
-            "description": getattr(model, "description", None),
-            "supports_thinking": getattr(model, "supports_thinking", False),
-            "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+            "model": model.name,
+            "display_name": (model.display_name if isinstance(model.display_name, str) else model.name),
+            "description": (model.description if isinstance(model.description, str) else ""),
+            "supports_thinking": (getattr(model, "supports_thinking", False) is True),
+            "supports_reasoning_effort": (getattr(model, "supports_reasoning_effort", False) is True),
+            "supports_vision": (getattr(model, "supports_vision", False) is True),
+            "is_default": bool(models and getattr(models[0], "name", None) == model.name),
         }
 
     # ------------------------------------------------------------------

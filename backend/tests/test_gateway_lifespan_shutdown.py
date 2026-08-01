@@ -39,6 +39,10 @@ async def _run_lifespan_with_hanging_stop() -> float:
     startup_config = MagicMock()
     startup_config.log_level = "INFO"
     startup_config.memory.token_counting = "char"
+    startup_config.database = SimpleNamespace(
+        checkpoint_channel_mode="full",
+        checkpoint_delta=SimpleNamespace(snapshot_frequency=10),
+    )
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
     started_with_apps = []
@@ -89,6 +93,10 @@ async def _run_lifespan_with_upload_staging_cleanup():
         auth=AuthAppConfig(),
         log_level="INFO",
         memory=SimpleNamespace(token_counting="char"),
+        database=SimpleNamespace(
+            checkpoint_channel_mode="full",
+            checkpoint_delta=SimpleNamespace(snapshot_frequency=10),
+        ),
     )
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})

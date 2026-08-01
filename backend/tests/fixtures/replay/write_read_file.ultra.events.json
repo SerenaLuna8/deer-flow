@@ -75,7 +75,6 @@
         "sandbox",
         "skill_context",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -88,7 +87,6 @@
         "sandbox",
         "skill_context",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -101,7 +99,6 @@
         "sandbox",
         "skill_context",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -114,7 +111,6 @@
         "sandbox",
         "skill_context",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -127,7 +123,6 @@
         "sandbox",
         "skill_context",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -140,7 +135,42 @@
         "sandbox",
         "skill_context",
         "thread_data",
-        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
         "viewed_images"
       ]
     },

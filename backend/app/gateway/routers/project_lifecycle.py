@@ -48,7 +48,7 @@ async def request_project_deletion(
             identity[1],
         )
         view = await ProjectLifecycleService(
-            ProjectLifecycleRepository(session, quota_config=quota_service.config),
+            ProjectLifecycleRepository(session, quota_policy=quota_service),
             audit=audit,
         ).request_deletion(context, datetime.now(UTC))
         return _response(view)
@@ -66,7 +66,7 @@ async def restore_project(
 ):
     try:
         view = await ProjectLifecycleService(
-            ProjectLifecycleRepository(session, quota_config=quota_service.config),
+            ProjectLifecycleRepository(session, quota_policy=quota_service),
             audit=audit,
         ).restore(identity[0], project_id, identity[1], datetime.now(UTC))
         return _response(view)

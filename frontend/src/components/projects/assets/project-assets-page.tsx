@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   createProjectCredential,
   deleteProjectCredential,
@@ -152,6 +153,7 @@ export function ProjectCredentialCatalogView({
   onDelete?: (credential: ProjectCredentialItem) => void;
   renderDetails?: (credential: ProjectCredentialItem) => React.ReactNode;
 }) {
+  const { locale, t } = useI18n();
   const [source, setSource] = useState<"system" | "project">(() =>
     data.project_items.length === 0 && data.system_items.length > 0
       ? "system"
@@ -160,14 +162,14 @@ export function ProjectCredentialCatalogView({
   const groups = [
     {
       value: "system",
-      label: "系统提供",
-      title: "系统 Credential",
+      label: t.adminAssets.common.systemProvided,
+      title: t.adminAssets.catalog.systemCredentials,
       items: data.system_items,
     },
     {
       value: "project",
-      label: "项目自建",
-      title: "项目 Credential",
+      label: t.adminAssets.common.projectOwned,
+      title: t.adminAssets.catalog.projectCredentials,
       items: data.project_items,
     },
   ] as const;
@@ -178,7 +180,10 @@ export function ProjectCredentialCatalogView({
       className="gap-0"
     >
       <div className="flex flex-col gap-3 border-b pb-3 sm:flex-row sm:items-center sm:justify-between">
-        <TabsList variant="line" aria-label="Credential 来源">
+        <TabsList
+          variant="line"
+          aria-label={t.adminAssets.catalog.credentialSource}
+        >
           {groups.map((group) => (
             <TabsTrigger key={group.value} value={group.value}>
               {group.label}
@@ -195,7 +200,7 @@ export function ProjectCredentialCatalogView({
         <TabsContent key={value} value={value} className="pt-4">
           {items.length === 0 ? (
             <p className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm">
-              暂无 {title}。
+              {t.adminAssets.catalog.emptyCredentials(title)}
             </p>
           ) : (
             <div className="grid gap-4 xl:grid-cols-2">
@@ -221,29 +226,33 @@ export function ProjectCredentialCatalogView({
                             : "secondary"
                         }
                       >
-                        {credential.status === "active" ? "有效" : "已撤销"}
+                        {credential.status === "active"
+                          ? t.adminAssets.common.active
+                          : t.adminAssets.common.revoked}
                       </Badge>
                     </div>
                   </CardHeader>
                   <CardContent className="space-y-4 px-4">
                     <dl className="grid gap-2 text-sm sm:grid-cols-2">
                       <div>
-                        <dt className="text-muted-foreground text-xs">类型</dt>
+                        <dt className="text-muted-foreground text-xs">
+                          {t.adminAssets.common.type}
+                        </dt>
                         <dd>{credential.credential_type}</dd>
                       </div>
                       <div>
                         <dt className="text-muted-foreground text-xs">
-                          元数据版本
+                          {t.adminAssets.common.metadataVersion}
                         </dt>
                         <dd>{credential.version}</dd>
                       </div>
                       <div className="sm:col-span-2">
                         <dt className="text-muted-foreground text-xs">
-                          更新时间
+                          {t.adminAssets.common.updatedAt}
                         </dt>
                         <dd>
                           {new Date(credential.updated_at).toLocaleString(
-                            "zh-CN",
+                            locale,
                           )}
                         </dd>
                       </div>
@@ -256,8 +265,7 @@ export function ProjectCredentialCatalogView({
                               role="note"
                               className="border-border bg-muted/30 text-muted-foreground rounded-lg border px-3 py-2 text-xs"
                             >
-                              替换只创建新版本；既有 MCP Grant 与 Skill
-                              环境变量绑定仍固定到旧版本，轮换需要显式迁移。
+                              {t.adminAssets.common.credentialRotationNote}
                             </div>
                           )}
                         <div className="flex flex-wrap gap-2">
@@ -270,7 +278,7 @@ export function ProjectCredentialCatalogView({
                                 disabled={pending}
                                 onClick={() => onReplace?.(credential)}
                               >
-                                替换凭据
+                                {t.adminAssets.common.replaceCredential}
                               </Button>
                               {credential.version > 1 && (
                                 <Button
@@ -280,7 +288,7 @@ export function ProjectCredentialCatalogView({
                                   disabled={pending}
                                   onClick={() => onMigrate?.(credential)}
                                 >
-                                  迁移兼容引用
+                                  {t.adminAssets.common.migrateReferences}
                                 </Button>
                               )}
                               <Button
@@ -290,7 +298,7 @@ export function ProjectCredentialCatalogView({
                                 disabled={pending}
                                 onClick={() => onRevoke?.(credential)}
                               >
-                                撤销凭据
+                                {t.adminAssets.common.revokeCredential}
                               </Button>
                             </>
                           ) : null}
@@ -302,7 +310,7 @@ export function ProjectCredentialCatalogView({
                               disabled={pending}
                               onClick={() => onDelete(credential)}
                             >
-                              删除
+                              {t.adminAssets.common.delete}
                             </Button>
                           ) : null}
                         </div>
@@ -338,10 +346,11 @@ export function projectCredentialShowsHistory(
 export { projectAssetCanAuthor };
 
 function ErrorNotice({ error }: { error: unknown }) {
+  const { t } = useI18n();
   if (!error) return null;
   return (
     <p role="alert" className="text-destructive text-sm">
-      {adminAssetErrorMessage(error)}
+      {adminAssetErrorMessage(error, t.adminAssets.errors)}
     </p>
   );
 }
@@ -386,6 +395,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   ) => boolean | void | Promise<boolean | void>;
   onRetryApprovalCredentials?: () => void;
 }) {
+  const { t } = useI18n();
   const canAuthor = projectAssetCanAuthor(item, kind);
   const canApprove = item.capabilities.includes("mcp.credentials.approve");
   const waiting = versions.some(
@@ -397,7 +407,9 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   return (
     <div className="border-border/70 mt-4 space-y-3 border-t pt-4">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold">版本历史</h3>
+        <h3 className="text-sm font-semibold">
+          {t.adminAssets.common.versionHistory}
+        </h3>
         <div className="flex flex-wrap gap-2">
           {projectAssetDetailLifecycleActions(kind, item).map((action) => (
             <Button
@@ -409,12 +421,12 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
               onClick={() => onChangeStatus?.(action)}
             >
               {action === "archive"
-                ? "归档"
+                ? t.adminAssets.catalog.archive
                 : action === "activate"
-                  ? "启用"
+                  ? t.adminAssets.catalog.activate
                   : kind === "agents"
-                    ? "停用"
-                    : "暂停"}
+                    ? t.adminAssets.catalog.disable
+                    : t.adminAssets.catalog.suspend}
             </Button>
           ))}
         </div>
@@ -444,7 +456,9 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
         />
       )}
       {waiting && !canApprove && (
-        <p className="text-muted-foreground text-sm">等待 Admin 审批</p>
+        <p className="text-muted-foreground text-sm">
+          {t.adminAssets.catalog.waitingForAdmin}
+        </p>
       )}
       <ErrorNotice error={actionError} />
     </div>
@@ -452,6 +466,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
 }
 
 function useSecureProjectCredentialWrite(accountId: string, projectId: string) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -474,7 +489,7 @@ function useSecureProjectCredentialWrite(accountId: string, projectId: string) {
       setNoticeMessage(successMessage ?? null);
       return true;
     } catch (error) {
-      setErrorMessage(adminAssetErrorMessage(error));
+      setErrorMessage(adminAssetErrorMessage(error, t.adminAssets.errors));
       return false;
     } finally {
       setPending(false);
@@ -502,6 +517,7 @@ function CredentialHistory({
   projectId: string;
   credential: ProjectCredentialItem;
 }) {
+  const { t } = useI18n();
   const history = useProjectAssetVersions(
     accountId,
     projectId,
@@ -510,7 +526,9 @@ function CredentialHistory({
   );
   return (
     <div className="border-border/70 border-t pt-4">
-      <h3 className="mb-3 text-sm font-semibold">版本历史</h3>
+      <h3 className="mb-3 text-sm font-semibold">
+        {t.adminAssets.common.versionHistory}
+      </h3>
       {history.isLoading ? (
         <Skeleton className="h-16 w-full" />
       ) : history.error ? (
@@ -533,6 +551,7 @@ export function ProjectCredentialsWorkspace({
   accountId: string;
   projectId: string;
 }) {
+  const { t } = useI18n();
   const project = useCurrentProject();
   const queryClient = useQueryClient();
   const query = useProjectAssets(accountId, projectId, "credentials");
@@ -580,7 +599,7 @@ export function ProjectCredentialsWorkspace({
               }}
             >
               <PlusIcon aria-hidden className="size-4" />
-              创建 Credential
+              {t.adminAssets.common.createCredential}
             </Button>
           ) : null
         }
@@ -650,7 +669,7 @@ export function ProjectCredentialsWorkspace({
                       expected_credential_version: credentialToMigrate.version,
                     },
                   ),
-                "已完成兼容引用迁移；没有待迁移的 MCP Grant 或 Skill 环境变量绑定时不会更改授权。",
+                t.adminAssets.common.migrationSuccess,
               )
               .then((success) => success && setCredentialToMigrate(null));
           }}
@@ -738,6 +757,7 @@ function ProjectCredentialReplaceDialog({
   secureWrite: ReturnType<typeof useSecureProjectCredentialWrite>;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const history = useProjectAssetVersions(
     accountId,
     projectId,
@@ -751,9 +771,9 @@ function ProjectCredentialReplaceDialog({
       )
     : null;
   const historyMessage = history.error
-    ? adminAssetErrorMessage(history.error)
+    ? adminAssetErrorMessage(history.error, t.adminAssets.errors)
     : history.data && !initialFields
-      ? "无法确认当前 Credential 的字段结构，请重新加载后再试。"
+      ? t.adminAssets.common.historySchemaUnavailable
       : null;
   const disabled =
     history.isLoading || Boolean(history.error) || initialFields === null;

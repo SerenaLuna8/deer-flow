@@ -6,6 +6,7 @@ import inspect
 import json
 import shutil
 import uuid
+from base64 import b64encode
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,8 +17,24 @@ import yaml
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from app.bootstrap_identities import (
+    BUILTIN_MODEL_EMAIL,
+    BUILTIN_MODEL_USER_ID,
+)
 from app.shared_assets.contexts import resolve_asset_actor
+from app.shared_assets.crypto import EncryptedEnvelope, decrypt_credential_payload
 from app.shared_assets.errors import AssetForbidden
+from app.shared_assets.keyring import CredentialKeyring
+from app.shared_assets.models import AssetScope
+from app.system_settings.bootstrap import (
+    DEFAULT_CREDENTIAL_ID,
+    DEFAULT_CREDENTIAL_VERSION_ID,
+    DEFAULT_MODEL_ID,
+    DEFAULT_MODEL_VERSION_ID,
+    DefaultSystemModelBootstrapConflict,
+    bootstrap_default_system_model,
+    prepare_default_system_model_bootstrap,
+)
 from deerflow.persistence.projects import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
@@ -37,6 +54,11 @@ from deerflow.persistence.shared_assets import (
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
+)
+from deerflow.persistence.system_settings import (
+    SystemModelCatalogStateRow,
+    SystemModelConfigRow,
+    SystemModelConfigVersionRow,
 )
 from deerflow.persistence.user import UserRow
 
@@ -474,6 +496,176 @@ async def test_builtin_principal_is_non_login_and_has_no_project_membership(m7_d
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_default_system_model_bootstrap_is_encrypted_idempotent_and_keyring_validated(
+    m7_database: M7Database,
+    monkeypatch,
+) -> None:
+    secret = "m7-default-model-bootstrap-secret"
+    key = b"m" * 32
+    encoded = b64encode(key).decode("ascii")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID",
+        "m7-model-bootstrap",
+    )
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_KEYRING_JSON",
+        f'{{"m7-model-bootstrap":"{encoded}"}}',
+    )
+    keyring = CredentialKeyring(
+        active_key_id="m7-model-bootstrap",
+        _keys={"m7-model-bootstrap": key},
+    )
+
+    assert await bootstrap_default_system_model(
+        m7_database.session_factory,
+        prepare_default_system_model_bootstrap(),
+    )
+
+    async with m7_database.session_factory() as session:
+        principal = await session.get(
+            UserRow,
+            str(BUILTIN_MODEL_USER_ID),
+        )
+        assert principal is not None
+        assert principal.email == BUILTIN_MODEL_EMAIL
+        assert principal.password_hash is None
+        assert principal.system_role == "user"
+        assert principal.oauth_provider is None
+        assert principal.oauth_id is None
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ProjectMembershipRow)
+                .where(
+                    ProjectMembershipRow.user_id == str(BUILTIN_MODEL_USER_ID),
+                )
+            )
+        ) == 0
+
+        credential = await session.get(
+            CredentialRow,
+            DEFAULT_CREDENTIAL_ID,
+        )
+        credential_version = await session.get(
+            CredentialVersionRow,
+            DEFAULT_CREDENTIAL_VERSION_ID,
+        )
+        envelope = (
+            await session.execute(
+                select(CredentialEnvelopeRow).where(
+                    CredentialEnvelopeRow.credential_version_id == DEFAULT_CREDENTIAL_VERSION_ID,
+                    CredentialEnvelopeRow.is_active.is_(True),
+                )
+            )
+        ).scalar_one()
+        assert credential is not None
+        assert credential.scope == "system"
+        assert credential.credential_type == "model_api_key"
+        assert credential.current_version_id == DEFAULT_CREDENTIAL_VERSION_ID
+        assert credential_version is not None
+        assert credential_version.payload_schema == {
+            "env": ["DEEPSEEK_API_KEY"],
+        }
+        envelope_id = envelope.id
+        original_ciphertext = bytes(envelope.ciphertext)
+        assert secret.encode() not in envelope.ciphertext
+        assert decrypt_credential_payload(
+            EncryptedEnvelope(
+                key_id=envelope.key_id,
+                nonce=bytes(envelope.nonce),
+                ciphertext=bytes(envelope.ciphertext),
+            ),
+            AssetScope.SYSTEM,
+            None,
+            DEFAULT_CREDENTIAL_VERSION_ID,
+            keyring,
+        ) == {"env": {"DEEPSEEK_API_KEY": secret}}
+
+        model = await session.get(SystemModelConfigRow, DEFAULT_MODEL_ID)
+        model_version = await session.get(
+            SystemModelConfigVersionRow,
+            DEFAULT_MODEL_VERSION_ID,
+        )
+        state = await session.get(SystemModelCatalogStateRow, 1)
+        assert model is not None
+        assert model.logical_name == "deepseek-v4"
+        assert model.status == "active"
+        assert model.current_version_id == DEFAULT_MODEL_VERSION_ID
+        assert model_version is not None
+        assert model_version.provider_adapter == "patched_deepseek"
+        assert model_version.provider_model == "deepseek-v4-pro"
+        assert model_version.credential_id == DEFAULT_CREDENTIAL_ID
+        assert model_version.credential_version_id == DEFAULT_CREDENTIAL_VERSION_ID
+        assert state is not None
+        assert state.default_model_config_id == DEFAULT_MODEL_ID
+
+    missing_old_key = b64encode(b"n" * 32).decode("ascii")
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID",
+        "missing-old-key",
+    )
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_KEYRING_JSON",
+        f'{{"missing-old-key":"{missing_old_key}"}}',
+    )
+    with pytest.raises(
+        DefaultSystemModelBootstrapConflict,
+        match="DEFAULT_SYSTEM_MODEL_BOOTSTRAP_CONFLICT",
+    ) as missing_key_error:
+        await bootstrap_default_system_model(
+            m7_database.session_factory,
+            prepare_default_system_model_bootstrap(),
+        )
+    assert secret not in str(missing_key_error.value)
+
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID",
+        "m7-model-bootstrap",
+    )
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_KEYRING_JSON",
+        f'{{"m7-model-bootstrap":"{encoded}"}}',
+    )
+    async with m7_database.session_factory() as session, session.begin():
+        stored_envelope = await session.get(
+            CredentialEnvelopeRow,
+            envelope_id,
+            with_for_update=True,
+        )
+        assert stored_envelope is not None
+        stored_envelope.ciphertext = b"\x00" * len(original_ciphertext)
+
+    with pytest.raises(
+        DefaultSystemModelBootstrapConflict,
+        match="DEFAULT_SYSTEM_MODEL_BOOTSTRAP_CONFLICT",
+    ) as damaged_envelope_error:
+        await bootstrap_default_system_model(
+            m7_database.session_factory,
+            prepare_default_system_model_bootstrap(),
+        )
+    assert secret not in str(damaged_envelope_error.value)
+
+    async with m7_database.session_factory() as session, session.begin():
+        stored_envelope = await session.get(
+            CredentialEnvelopeRow,
+            envelope_id,
+            with_for_update=True,
+        )
+        assert stored_envelope is not None
+        stored_envelope.ciphertext = original_ciphertext
+
+    assert (
+        await bootstrap_default_system_model(
+            m7_database.session_factory,
+            prepare_default_system_model_bootstrap(),
+        )
+        is False
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_bootstrap_rejects_preexisting_builtin_membership(
     m7_database: M7Database,
 ) -> None:
@@ -713,6 +905,11 @@ def test_legacy_skill_storage_and_installer_imports_are_absent() -> None:
 def test_process_module_import_does_not_read_legacy_asset_sources(monkeypatch, module_name: str) -> None:
     from deerflow.mcp.config import ExtensionsConfig
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://test-role@localhost/deerflow_test_unit",
+    )
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("legacy asset source was read during process startup import")

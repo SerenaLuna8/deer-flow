@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import uuid
+from base64 import b64encode
 from contextlib import asynccontextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +15,20 @@ from postgres_utils import RedactedURL, replace_database
 
 from app.projects.errors import ProjectBootstrapFailed
 from scripts import check_postgres, setup_postgres
+
+
+@pytest.fixture(autouse=True)
+def _default_model_bootstrap_environment(monkeypatch) -> None:
+    encoded = b64encode(b"s" * 32).decode("ascii")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "unit-bootstrap-secret")
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID",
+        "unit-bootstrap",
+    )
+    monkeypatch.setenv(
+        "DEER_FLOW_CREDENTIAL_KEYRING_JSON",
+        f'{{"unit-bootstrap":"{encoded}"}}',
+    )
 
 
 def _connection(*, database_exists: bool = False, owner_exists: bool = True):
@@ -203,20 +220,48 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
     async def builtin(_engine):
         calls.append("builtin")
 
+    async def default_model(_engine, material):
+        assert material is bootstrap_material
+        calls.append("default-model")
+
+    async def runtime_policy(_engine):
+        calls.append("runtime-policy")
+
     async def projects(_engine):
         calls.append("projects")
 
+    bootstrap_material = MagicMock(
+        spec=setup_postgres.DefaultSystemModelBootstrapMaterial,
+    )
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", bootstrap)
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", builtin)
+    monkeypatch.setattr(
+        setup_postgres,
+        "_bootstrap_default_model_schema",
+        default_model,
+    )
+    monkeypatch.setattr(
+        setup_postgres,
+        "_bootstrap_runtime_policy_schema",
+        runtime_policy,
+    )
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", langgraph)
     monkeypatch.setattr(setup_postgres, "_bootstrap_default_project_schema", projects)
 
-    assert await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc") == "full_schema_v1"
+    assert (
+        await setup_postgres._bootstrap_existing(
+            "postgresql://owner:private-password@localhost/deerflow_test_1_abc",
+            default_model_bootstrap=bootstrap_material,
+        )
+        == "full_schema_v1"
+    )
     assert calls == [
         "lock:enter",
         "SELECT 1",
         "orm",
         "builtin",
+        "default-model",
+        "runtime-policy",
         "langgraph",
         "projects",
         "lock:exit",
@@ -604,7 +649,41 @@ async def test_setup_validates_explicit_database_and_always_closes_engine(monkey
         )
     assert "secret" not in str(exc_info.value)
     bootstrap.assert_awaited_once()
-    assert bootstrap.await_args.kwargs == {}
+    material = bootstrap.await_args.kwargs["default_model_bootstrap"]
+    assert isinstance(
+        material,
+        setup_postgres.DefaultSystemModelBootstrapMaterial,
+    )
+    assert "unit-bootstrap-secret" not in repr(material)
+
+
+@pytest.mark.asyncio
+async def test_setup_preflights_default_model_before_creating_database(
+    monkeypatch,
+) -> None:
+    ensure = AsyncMock()
+    monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
+    monkeypatch.setattr(
+        setup_postgres,
+        "prepare_default_system_model_bootstrap",
+        MagicMock(
+            side_effect=setup_postgres.PostgresSetupError(
+                "默认模型初始化前置条件不满足",
+            )
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(
+        setup_postgres.PostgresSetupError,
+        match="默认模型初始化前置条件不满足",
+    ):
+        await setup_postgres.setup_postgres(
+            "postgresql://admin:secret@localhost/postgres",
+            "postgresql://owner:secret@localhost/deerflow_test_1_abc",
+        )
+
+    ensure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -679,6 +758,36 @@ def test_makefiles_expose_database_targets() -> None:
     ):
         assert removed not in backend_makefile
         assert removed not in root_makefile
+    assert "SETUP_ENV_FILE := $(wildcard ../.env)" in backend_makefile
+    assert "uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py" in backend_makefile
+
+
+def test_backend_setup_db_only_passes_env_file_when_it_exists(
+    tmp_path: Path,
+) -> None:
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    source = (Path(__file__).resolve().parents[1] / "Makefile").read_text(encoding="utf-8")
+    (backend_dir / "Makefile").write_text(source, encoding="utf-8")
+
+    without_env = subprocess.run(
+        ["make", "-n", "setup-db"],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "--env-file" not in without_env
+
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    with_env = subprocess.run(
+        ["make", "-n", "setup-db"],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "--env-file ../.env" in with_env
 
 
 @pytest_asyncio.fixture

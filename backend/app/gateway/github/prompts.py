@@ -130,9 +130,13 @@ def _pr_review_prompt(payload: dict[str, Any]) -> str:
     number = pr.get("number")
     parent_block = _render_parent_context(pr, "pull request")
     review = payload.get("review") or {}
+    review_id = review.get("id")
     state = review.get("state") or "(unknown state)"
     author = (review.get("user") or {}).get("login") or "(unknown)"
     body = _truncate(review.get("body"))
+    fetch_hint = ""
+    if review_id is not None and number is not None:
+        fetch_hint = f"This review's inline comments are not included in this message. Before deciding what to do, fetch them with `gh api repos/{repo}/pulls/{number}/reviews/{review_id}/comments`.\n\n"
     return (
         f"A pull request review was submitted on #{number} in {repo}.\n\n"
         f"{parent_block}\n"
@@ -140,6 +144,7 @@ def _pr_review_prompt(payload: dict[str, Any]) -> str:
         f"  Reviewer: {author}\n"
         f"  State: {state}\n\n"
         f"  Body:\n{body or '(no review body)'}\n\n"
+        f"{fetch_hint}"
         f"Decide what action (if any) to take in response to this review, in the context "
         f"of the parent pull request above. Your final assistant message is for the run "
         f"log only — it will NOT be posted to GitHub. If you want to reply (or push a fix), "

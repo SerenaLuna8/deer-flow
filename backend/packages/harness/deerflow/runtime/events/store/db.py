@@ -319,6 +319,50 @@ class DbRunEventStore(RunEventStore):
             )
         )
 
+    @classmethod
+    async def _require_authorized_event_parent(
+        cls,
+        session: AsyncSession,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        lease: StreamLeaseProof | None,
+    ) -> tuple[uuid.UUID, str]:
+        """Resolve the parent and, when supplied, atomically enforce Job authority."""
+
+        if lease is None:
+            return await cls._require_parent_run(
+                session,
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+        project_id, owner_user_id, job_id = await cls._require_stream_parent_run(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+        )
+        if job_id is None:
+            raise StreamWriteAuthorityRequired(
+                "jobless event write cannot accept a job lease",
+            )
+        cancel_requested = await cls._authorize_stream_lease(
+            session,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            membership_version=scope.membership_version,
+            run_id=run_id,
+            job_id=job_id,
+            lease=lease,
+        )
+        if cancel_requested:
+            raise StreamWriteCancelled(
+                "cancelled execution cannot append an internal event",
+            )
+        return project_id, owner_user_id
+
     @staticmethod
     def _row_to_dict(row: RunEventRow) -> dict:
         d = row.to_dict()
@@ -697,7 +741,19 @@ class DbRunEventStore(RunEventStore):
         await session.flush()
         return self._stream_row(row, created=True)
 
-    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None, scope=None):  # noqa: D401
+    async def put(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+        scope=None,
+        lease: StreamLeaseProof | None = None,
+    ):  # noqa: D401
         """Write a single event — low-frequency path only.
 
         This opens a dedicated transaction with a FOR UPDATE lock to
@@ -716,11 +772,12 @@ class DbRunEventStore(RunEventStore):
             raise ValueError("private event scope is required")
         async with self._sf() as session:
             async with session.begin():
-                project_id, owner_user_id = await self._require_parent_run(
+                project_id, owner_user_id = await self._require_authorized_event_parent(
                     session,
                     scope=scope,
                     thread_id=thread_id,
                     run_id=run_id,
+                    lease=lease,
                 )
                 sequence = await self._lock_event_sequence(
                     session,
@@ -743,7 +800,13 @@ class DbRunEventStore(RunEventStore):
                 session.add(row)
             return self._row_to_dict(row)
 
-    async def put_batch(self, events, *, scope=None):
+    async def put_batch(
+        self,
+        events,
+        *,
+        scope=None,
+        lease: StreamLeaseProof | None = None,
+    ):
         if not events:
             return []
         for event in events:
@@ -762,11 +825,12 @@ class DbRunEventStore(RunEventStore):
                 thread_id = events[0]["thread_id"]
                 parent_by_run: dict[str, tuple[uuid.UUID, str]] = {}
                 for run_id in {e["run_id"] for e in events}:
-                    parent_by_run[run_id] = await self._require_parent_run(
+                    parent_by_run[run_id] = await self._require_authorized_event_parent(
                         session,
                         scope=scope,
                         thread_id=thread_id,
                         run_id=run_id,
+                        lease=lease,
                     )
                 sequence = await self._lock_event_sequence(
                     session,
@@ -932,6 +996,23 @@ class DbRunEventStore(RunEventStore):
         )
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
+
+    async def get_last_visible_ai_seq_by_run(
+        self,
+        thread_id,
+        run_ids,
+        *,
+        scope: PrivateResourceScope | None = None,
+    ):
+        # The maximum AI sequence is not necessarily visible: a hidden lead
+        # message or nested-caller tail may follow the final user-facing answer.
+        # Reuse the bounded scoped reader until a grouped SQL query can express
+        # the exact same caller/content visibility contract.
+        return await super().get_last_visible_ai_seq_by_run(
+            thread_id,
+            run_ids,
+            scope=scope,
+        )
 
     async def delete_by_thread(
         self,

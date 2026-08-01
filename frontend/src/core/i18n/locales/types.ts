@@ -23,7 +23,9 @@ export interface Translations {
     retry: string;
     historyLoadFailed: string;
     download: string;
+    file: string;
     thinking: string;
+    thinkingProcess: string;
     thinkingInProgress: (seconds?: number) => string;
     thoughtFor: (seconds?: number) => string;
     artifacts: string;
@@ -45,11 +47,25 @@ export interface Translations {
     exportAsJSON: string;
     exportSuccess: string;
     regenerate: string;
+    editAndRerun: string;
+    updateAndRerun: string;
+    editRerunWarning: string;
     branch: string;
     showArtifacts: string;
     feedbackHelpful: string;
     feedbackNotHelpful: string;
     feedbackSaveFailed: string;
+  };
+
+  runDuration: {
+    working: string;
+    completedIn: (duration: string) => string;
+    description: string;
+    lessThanSecond: string;
+    hours: (value: number) => string;
+    minutes: (value: number) => string;
+    seconds: (value: number) => string;
+    separator: string;
   };
 
   home: {
@@ -112,6 +128,17 @@ export interface Translations {
     inputPolishFailed: string;
     inputPolishUndo: string;
     inputPolishCancel: string;
+    voiceInputStartLabel: string;
+    voiceInputStopLabel: string;
+    voiceInputStart: string;
+    voiceInputListening: string;
+    voiceInputUnsupported: string;
+    voiceInputPermissionDenied: string;
+    voiceInputMicrophoneUnavailable: string;
+    voiceInputUnsupportedLanguage: string;
+    voiceInputNetworkError: string;
+    voiceInputNoSpeech: string;
+    voiceInputFailed: string;
     model: string;
     mode: string;
     flashMode: string;
@@ -122,15 +149,6 @@ export interface Translations {
     proModeDescription: string;
     ultraMode: string;
     ultraModeDescription: string;
-    reasoningEffort: string;
-    reasoningEffortMinimal: string;
-    reasoningEffortMinimalDescription: string;
-    reasoningEffortLow: string;
-    reasoningEffortLowDescription: string;
-    reasoningEffortMedium: string;
-    reasoningEffortMediumDescription: string;
-    reasoningEffortHigh: string;
-    reasoningEffortHighDescription: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
@@ -243,6 +261,31 @@ export interface Translations {
     shellDescription: string;
     signOut: string;
     retry: string;
+    gatewayUnavailable: {
+      title: string;
+      description: string;
+      reload: string;
+    };
+    ui: {
+      navigationGroups: {
+        operations: string;
+        governance: string;
+      };
+      skipToContent: string;
+      close: string;
+      backToWorkspace: string;
+      expandNavigation: string;
+      collapseNavigation: string;
+      previousPage: string;
+      page: (page: number) => string;
+      copy: string;
+      copied: string;
+      platformHealthy: string;
+      publicErrorCode: string;
+      eventId: string;
+      jobId: string;
+      clearFilters: string;
+    };
     navigation: {
       label: string;
       overview: string;
@@ -250,6 +293,8 @@ export interface Translations {
       jobs: string;
       audit: string;
       assets: string;
+      systemSettings: string;
+      settings: string;
     };
     overview: {
       title: string;
@@ -272,6 +317,9 @@ export interface Translations {
           unavailable: string;
           disabled: string;
           polling: string;
+          owned: string;
+          unowned: string;
+          ownership_lost: string;
           unknown: string;
         };
         components: {
@@ -286,6 +334,7 @@ export interface Translations {
       };
       channels: {
         title: string;
+        emptyTitle: string;
         empty: string;
         checkedAt: string;
       };
@@ -297,6 +346,7 @@ export interface Translations {
         deadJobs: string;
       };
       usage: {
+        title: string;
         members: string;
         storage_bytes: string;
         concurrent_runs: string;
@@ -330,12 +380,14 @@ export interface Translations {
         queryPlaceholder: string;
         status: string;
         suspension: string;
+        notSuspended: string;
         all: string;
         apply: string;
         clear: string;
         invalid: string;
       };
       actions: {
+        governAssets: string;
         suspend: string;
         resume: string;
         pending: string;
@@ -360,6 +412,26 @@ export interface Translations {
       requeue: string;
       requeueing: string;
       requeueError: string;
+      statuses: {
+        queued: string;
+        leased: string;
+        running: string;
+        retry_wait: string;
+        succeeded: string;
+        failed: string;
+        cancelled: string;
+        dead: string;
+      };
+      types: {
+        private_run: string;
+        automation_run: string;
+        retention_purge: string;
+      };
+      retrySafety: {
+        safe: string;
+        unsafe: string;
+        unknown: string;
+      };
       filters: {
         project: string;
         status: string;
@@ -380,6 +452,579 @@ export interface Translations {
       emptyTitle: string;
       emptyDescription: string;
       older: string;
+    };
+  };
+
+  adminAssets: {
+    navigation: {
+      platformLabel: string;
+      projectLabel: string;
+      agent: string;
+      skill: string;
+      mcp: string;
+      credential: string;
+    };
+    shell: {
+      platformAria: string;
+      systemCatalog: string;
+      systemCatalogDescription: string;
+      adminScope: string;
+      projectAria: string;
+      backToProjects: string;
+      projectGovernance: string;
+      projectBoundary: string;
+      projectId: string;
+    };
+    common: {
+      assetVersion: string;
+      versionId: string;
+      currentPublishedVersion: string;
+      updatedAt: string;
+      versionHistory: string;
+      versionCount: (count: number) => string;
+      credentialMetadata: string;
+      details: string;
+      dangerZone: string;
+      type: string;
+      credentialTypes: {
+        modelApiKey: string;
+        apiKey: string;
+        token: string;
+        oauth: string;
+        database: string;
+      };
+      transportTypes: {
+        stdio: string;
+        sse: string;
+        http: string;
+      };
+      credentialPayloadGroups: {
+        env: string;
+        headers: string;
+        oauth: string;
+      };
+      metadataVersion: string;
+      replaceCredential: string;
+      migrateReferences: string;
+      revokeCredential: string;
+      delete: string;
+      createCredential: string;
+      createProjectCredential: string;
+      createProjectAsset: string;
+      retry: string;
+      retrying: string;
+      create: string;
+      creating: string;
+      createVersion: string;
+      creatingVersion: string;
+      reload: string;
+      systemProvided: string;
+      projectOwned: string;
+      active: string;
+      revoked: string;
+      loading: string;
+      migrationSuccess: string;
+      credentialRotationNote: string;
+      historySchemaUnavailable: string;
+    };
+    status: {
+      active: string;
+      archived: string;
+      suspended: string;
+      draft: string;
+      pending_approval: string;
+      published: string;
+      rejected: string;
+      retired: string;
+      revoked: string;
+    };
+    pages: {
+      systemEyebrow: string;
+      databaseCatalog: string;
+      runtimeReadOnly: string;
+      controlledWrite: string;
+      loading: string;
+      loadFailed: string;
+      systemCount: (count: number) => string;
+      credentialCount: (count: number) => string;
+      systemNote: (kind: string) => string;
+      emptySystem: (kind: string) => string;
+      emptyCreate: string;
+      system: {
+        agentsTitle: string;
+        agentsDescription: string;
+        skillsTitle: string;
+        skillsDescription: string;
+        mcpTitle: string;
+        mcpDescription: string;
+        credentialsTitle: string;
+        credentialsDescription: string;
+      };
+      projectEyebrow: string;
+      projectDatabaseCatalog: string;
+      sharedOnly: string;
+      projectLoadFailed: string;
+      sourceCounts: (systemCount: number, projectCount: number) => string;
+      project: {
+        agentsTitle: string;
+        agentsDescription: string;
+        skillsTitle: string;
+        skillsDescription: string;
+        mcpTitle: string;
+        mcpDescription: string;
+        credentialsTitle: string;
+        credentialsDescription: string;
+      };
+    };
+    catalog: {
+      systemAssets: string;
+      systemAssetsDescription: string;
+      searchPlaceholder: string;
+      filterAll: string;
+      catalogReady: string;
+      catalogReadyDetail: string;
+      totalAssets: string;
+      activeAssets: string;
+      unpublishedAssets: string;
+      latestUpdate: string;
+      noUpdate: string;
+      publicationFilter: string;
+      publicationAll: string;
+      publishedOnly: string;
+      unpublishedOnly: string;
+      updatedSort: string;
+      newestFirst: string;
+      oldestFirst: string;
+      identifier: string;
+      source: string;
+      systemCatalogSource: string;
+      lifecycleStatus: string;
+      publicationStatus: string;
+      published: string;
+      assetRevision: string;
+      actions: string;
+      viewDetails: string;
+      refresh: string;
+      refreshing: string;
+      resultRange: (from: number, to: number, total: number) => string;
+      page: (page: number, totalPages: number) => string;
+      previousPage: string;
+      nextPage: string;
+      noResults: string;
+      noSystemAssets: string;
+      system: string;
+      systemPublishStatus: string;
+      pinnedVersion: string;
+      bindingStatus: string;
+      bindingRevision: string;
+      publishedAvailable: string;
+      unpublished: string;
+      enabledAndPinned: string;
+      closed: string;
+      notBound: string;
+      enabled: string;
+      none: string;
+      manageBinding: string;
+      projectAssets: string;
+      projectAgentDescription: string;
+      projectVersionedDescription: string;
+      noProjectAssets: string;
+      project: string;
+      publishStatus: string;
+      createNewVersion: string;
+      credentialSource: string;
+      systemCredentials: string;
+      projectCredentials: string;
+      emptyCredentials: (title: string) => string;
+      waitingForAdmin: string;
+      archive: string;
+      activate: string;
+      disable: string;
+      suspend: string;
+    };
+    version: {
+      none: string;
+      selectHint: string;
+      number: (number: number) => string;
+      publish: string;
+      submit: string;
+      approve: string;
+      configureGrants: string;
+    };
+    diff: {
+      payloadChecksum: string;
+      description: string;
+      model: string;
+      toolGroups: string;
+      skillVersions: string;
+      mcpVersions: string;
+      compatibility: string;
+      scanDecision: string;
+      scanAllow: string;
+      scanWarn: string;
+      scanBlock: string;
+      scanRules: string;
+      files: string;
+      credentialRequirements: string;
+      transport: string;
+      command: string;
+      url: string;
+      arguments: string;
+      timeout: string;
+      credentialSlots: string;
+      status: string;
+      payloadSchemaVersion: string;
+      payloadFields: string;
+      optional: string;
+      required: string;
+      noDescription: string;
+      seconds: (seconds: number) => string;
+      noChanges: string;
+      field: string;
+      previous: string;
+      current: string;
+    };
+    runtime: {
+      unsupportedProjectTransport: string;
+      unsupportedSystemTransport: string;
+      missingProjectUrl: string;
+      invalidProjectUrl: string;
+      projectOAuth: string;
+      projectHeadersOnly: string;
+      missingSystemCommand: string;
+      missingSystemUrl: string;
+      systemEnvOnly: string;
+      systemRemoteCredentialsOnly: string;
+    };
+    dialogs: {
+      createAssetTitle: (kind: string) => string;
+      skillCreationDescription: string;
+      assetCreationDescription: (scope: "system" | "project") => string;
+      name: string;
+      assetSlug: string;
+      slugTitle: string;
+      slugHelp: string;
+      filePath: string;
+      mediaType: string;
+      fileContent: string;
+      skillTemplateDescription: string;
+      skillTemplateInstructions: string;
+      description: string;
+      transport: string;
+      sseTransport: string;
+      workerUrlHelp: string;
+      timeoutHelp: string;
+      credentialSlotOptional: string;
+      slotPublicationHelp: string;
+      slotName: string;
+      slotNameTitle: string;
+      slotNameHelp: string;
+      purpose: string;
+      credentialHeaderGroup: string;
+      requiredFields: string;
+      requiredFieldsHelp: string;
+      unsupportedMcpTransport: string;
+      missingMcpUrl: string;
+      createVersionTitle: (kind: string) => string;
+      secretCreateTitle: string;
+      secretReplaceTitle: string;
+      secretDescription: string;
+      credentialSlug: string;
+      credentialFields: string;
+      credentialFieldsHelp: string;
+      addField: string;
+      group: string;
+      envGroup: string;
+      headersGroup: string;
+      fieldName: string;
+      credentialValue: string;
+      removeField: (index: number) => string;
+      remove: string;
+      writing: string;
+      encryptWrite: string;
+      validation: {
+        emptyFields: string;
+        unsupportedGroup: string;
+        emptyField: string;
+        fieldTooLong: string;
+        duplicateField: string;
+        emptyValue: string;
+      };
+      revokeTitle: string;
+      revokeDescription: (name: string) => string;
+      cancel: string;
+      revoking: string;
+      confirmRevoke: string;
+      migrateTitle: string;
+      migrateDescription: (name: string) => string;
+      migrating: string;
+      confirmMigrate: string;
+      deleteTitle: string;
+      deleteDescription: (name: string) => string;
+      deleting: string;
+      confirmDeleteCountdown: (seconds: number) => string;
+      confirmDelete: string;
+      binding: {
+        switchTitle: string;
+        enableTitle: string;
+        description: (name: string) => string;
+        selectPublished: string;
+        selectPublishedAria: string;
+        selectPlaceholder: string;
+        unavailableSuffix: string;
+        noBindableVersions: string;
+        currentProject: (version: string) => string;
+        notEnabled: string;
+        disable: string;
+        enable: string;
+        rollback: string;
+        switchVersion: string;
+      };
+      approval: {
+        configureTitle: string;
+        configureDescription: string;
+        saveGrants: string;
+        configureEmptyOptional: string;
+        clearOptionalGrant: string;
+        publishTitle: string;
+        publishDescription: string;
+        approve: string;
+        publishEmptyOptional: string;
+        selectCredential: string;
+        currentVersion: string;
+        loadingCredentials: string;
+        credentialsFailed: string;
+        requiredUnavailable: string;
+      };
+    };
+    rotation: {
+      title: string;
+      summary: (current: number, total: number) => string;
+      current: string;
+      pending: (count: number) => string;
+    };
+    errors: {
+      notFound: string;
+      forbidden: string;
+      conflict: string;
+      validationFailed: string;
+      storageQuota: string;
+      storageUnavailable: string;
+      authRequired: string;
+      network: string;
+      invalidResponse: string;
+      invalidErrorResponse: string;
+      fallback: string;
+    };
+  };
+
+  adminModelSettings: {
+    header: {
+      eyebrow: string;
+      title: string;
+      description: string;
+      create: string;
+    };
+    overview: {
+      label: string;
+      configured: string;
+      configuredDetail: string;
+      active: string;
+      activeDetail: string;
+      defaultModel: string;
+      defaultDetail: string;
+      notSet: string;
+      revision: string;
+      revisionDetail: string;
+    };
+    states: {
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      retry: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      catalogLabel: string;
+      catalogDescription: string;
+      modelCount: (count: number) => string;
+    };
+    card: {
+      defaultModel: string;
+      active: string;
+      suspended: string;
+      updatedAt: (formattedDate: string) => string;
+      providerModel: string;
+      credential: string;
+      environmentKey: string;
+      version: string;
+      versionMeta: (
+        versionNumber: number,
+        revision: number,
+        sortOrder: number,
+      ) => string;
+      capabilities: string;
+      thinking: string;
+      reasoningEffort: string;
+      vision: string;
+      edit: string;
+      pause: string;
+      enable: string;
+      currentDefault: string;
+      setDefault: string;
+      actions: string;
+      actionFor: (action: string, name: string) => string;
+      defaultCannotPause: string;
+      credentialUnbound: string;
+      credentialUnavailable: string;
+      credentialHistorical: string;
+    };
+    adapters: {
+      patchedOpenAI: string;
+      patchedDeepSeek: string;
+      patchedMiMo: string;
+      patchedMiniMax: string;
+      patchedStepFun: string;
+    };
+    editor: {
+      editTitle: string;
+      createTitle: string;
+      description: string;
+      basicInformation: string;
+      basicDescription: string;
+      logicalName: string;
+      displayName: string;
+      displayNamePlaceholder: string;
+      providerAdapter: string;
+      providerModel: string;
+      status: string;
+      active: string;
+      suspended: string;
+      modelDescription: string;
+      modelDescriptionPlaceholder: string;
+      sortOrder: string;
+      sortOrderHint: string;
+      capabilities: string;
+      capabilitiesDescription: string;
+      supportsThinking: string;
+      supportsReasoningEffort: string;
+      supportsVision: string;
+      commonProviderSettings: string;
+      commonProviderSettingsDescription: string;
+      baseUrl: string;
+      temperature: string;
+      maxTokens: string;
+      requestTimeout: string;
+      maxRetries: string;
+      credentialBinding: string;
+      credentialBindingDescription: string;
+      systemCredential: string;
+      credentialsUnavailableHint: string;
+      credentialSelectionHint: string;
+      selectCredential: string;
+      providerDoesNotUseCredential: string;
+      environmentKey: string;
+      environmentKeyHint: string;
+      advancedJson: string;
+      advancedJsonHint: string;
+      cancel: string;
+      saving: string;
+      saveChanges: string;
+      createModel: string;
+    };
+    validation: {
+      invalidNumber: (label: string) => string;
+      temperature: string;
+      maxTokens: string;
+      requestTimeout: string;
+      maxRetries: string;
+      sortOrder: string;
+      advancedJsonInvalid: string;
+      advancedJsonObject: string;
+      advancedJsonUnsafe: string;
+      invalidForm: string;
+      invalidConfiguration: string;
+    };
+    actionErrors: {
+      authRequired: string;
+      conflict: string;
+      invalid: string;
+      generic: string;
+    };
+    success: {
+      updated: (name: string) => string;
+      created: (name: string) => string;
+      enabled: (name: string) => string;
+      suspended: (name: string) => string;
+      defaultSet: (name: string) => string;
+    };
+  };
+
+  adminSystemSettings: {
+    header: {
+      eyebrow: string;
+      title: string;
+      description: string;
+      refresh: string;
+      refreshing: string;
+    };
+    states: {
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      retry: string;
+    };
+    sections: {
+      auth: { title: string; description: string };
+      quotas: { title: string; description: string };
+      agentRuntime: { title: string; description: string };
+    };
+    groups: {
+      runLimits: string;
+      assistantExperience: string;
+      summarization: string;
+      memory: string;
+      tools: string;
+      safeguards: string;
+    };
+    fields: {
+      allowRegistration: string;
+      defaultMemberLimit: string;
+      defaultStorageLimit: string;
+      defaultConcurrentRuns: string;
+      defaultDailyMcpCalls: string;
+      quotaWarningThreshold: string;
+      defaultModel: string;
+      unavailableModel: string;
+      addRow: string;
+      removeRow: string;
+      listHint: string;
+    };
+    common: {
+      save: string;
+      saving: string;
+      reset: string;
+      revision: (revision: number) => string;
+      effectiveRevision: (revision: number) => string;
+      updatedAt: (value: string) => string;
+      storedRevision: (revision: number) => string;
+      pendingRoles: (roles: string) => string;
+      noPendingRoles: string;
+    };
+    effects: {
+      newRequests: string;
+      newRuns: string;
+      newRequestsAndRuns: string;
+      nextAuthoritativeCheck: string;
+      restartRequired: string;
+    };
+    feedback: {
+      saved: string;
+      registrationConfirmation: string;
+      conflict: string;
+      invalid: string;
+      inactiveModel: string;
+      authRequired: string;
+      generic: string;
     };
   };
 
@@ -669,6 +1314,8 @@ export interface Translations {
   toolCalls: {
     moreSteps: (count: number) => string;
     lessSteps: string;
+    executionDetails: string;
+    stepCount: (count: number) => string;
     executeCommand: string;
     presentFiles: string;
     needYourHelp: string;
@@ -697,6 +1344,9 @@ export interface Translations {
     otherPlaceholder: string;
     submit: string;
     emptyError: string;
+    requiredError: string;
+    requiredA11yLabel: string;
+    selectPlaceholder: string;
     answeredValue: (value: string) => string;
   };
 
@@ -967,6 +1617,11 @@ export interface Translations {
     emailPlaceholder: string;
     password: string;
     passwordPlaceholder: string;
+    rememberMe: string;
+    checkingRegistration: string;
+    registrationUnavailable: string;
+    registrationDisabled: string;
+    retry: string;
     pleaseWait: string;
     signIn: string;
     createAccount: string;

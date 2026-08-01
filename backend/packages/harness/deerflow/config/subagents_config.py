@@ -11,6 +11,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN = 6
 MIN_TOTAL_SUBAGENTS_PER_RUN = 1
 MAX_TOTAL_SUBAGENTS_PER_RUN = 50
+MIN_CONCURRENT_SUBAGENT_CALLS = 1
+MAX_CONCURRENT_SUBAGENT_CALLS = 4
+
+
+def clamp_subagent_concurrency(value: int) -> int:
+    """Clamp per-response task call concurrency to the enforced range."""
+    return max(
+        MIN_CONCURRENT_SUBAGENT_CALLS,
+        min(MAX_CONCURRENT_SUBAGENT_CALLS, value),
+    )
 
 
 def clamp_total_subagents_per_run(value: int) -> int:

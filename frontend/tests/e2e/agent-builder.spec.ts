@@ -350,6 +350,17 @@ async function mockAgentBuilder(page: Page): Promise<BuilderMockState> {
       );
       return;
     }
+    if (
+      path === `/api/projects/${PROJECT_ID}/default-agent` &&
+      method === "GET"
+    ) {
+      await json(route, {
+        agent_asset_id: null,
+        revision: 0,
+        request_id: "request-default-agent",
+      });
+      return;
+    }
     if (path === `/api/projects/${PROJECT_ID}/agents` && method === "GET") {
       await json(route, {
         system_items: [],

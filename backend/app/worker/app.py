@@ -15,6 +15,7 @@ from app.final_schema import FinalSchemaProbe
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
+from app.quotas.system_policy import SystemQuotaPolicyReader
 from app.reliability.execution import (
     PrivateRunJobHandler,
     PrivateRunJobTerminalPort,
@@ -22,15 +23,27 @@ from app.reliability.execution import (
 )
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.reliability.workers import WorkerRegistry
+from app.system_runtime_settings.materializer import (
+    SystemRuntimePolicyMaterializer,
+)
+from app.system_settings import SystemModelMaterializer
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
+from deerflow.config.database_config import (
+    DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
+)
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.quota_config import QuotaConfig
+from deerflow.logging_config import configure_logging
 from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
 from deerflow.persistence import close_engine, get_session_factory, init_engine
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import make_store
+from deerflow.runtime.checkpoint_mode import (
+    freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
+)
 from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.stream import PostgresStreamBridge
@@ -66,8 +79,22 @@ async def run_worker(
         )
     except Exception:
         raise WorkerConfigurationUnavailable() from None
+    configure_logging(config)
     if not config.worker.enabled:
         return
+    try:
+        database = config.database
+        mode = getattr(database, "checkpoint_channel_mode", "full")
+        checkpoint_delta = getattr(database, "checkpoint_delta", None)
+        snapshot_frequency = getattr(
+            checkpoint_delta,
+            "snapshot_frequency",
+            DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
+        )
+        freeze_checkpoint_channel_mode(mode)
+        freeze_checkpoint_snapshot_frequency(snapshot_frequency)
+    except Exception:
+        raise WorkerConfigurationUnavailable() from None
     async with AsyncExitStack() as stack:
         await init_engine(config.database)
         stack.push_async_callback(close_engine)
@@ -98,6 +125,7 @@ async def run_worker(
                 session_factory,
                 quota_config,
                 source_ref_hasher=audit_keyring,
+                current_policy_reader=SystemQuotaPolicyReader(),
             )
         )
         terminal_port = PrivateRunJobTerminalPort(
@@ -137,11 +165,16 @@ async def run_worker(
             executor = RunAgentPrivateExecutor(
                 session_factory,
                 app_config=config,
+                model_materializer=SystemModelMaterializer(session_factory),
+                runtime_policy_materializer=SystemRuntimePolicyMaterializer(
+                    session_factory,
+                ),
                 bridge=bridge,
                 project_checkpointer=project_checkpointer,
                 store=store,
                 event_store=DbRunEventStore(session_factory),
                 quota=quota_enforcer,
+                audit=audit_sink,
             )
             private_run_handler = PrivateRunJobHandler(
                 session_factory,

@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.manager import ConflictError, RunManager
@@ -18,6 +19,7 @@ from deerflow.runtime.runs.worker import (
     _agent_factory_supports_app_config,
     _build_runtime_context,
     _collect_pre_existing_message_ids,
+    _complete_state_replacement_values,
     _extract_llm_error_fallback_message,
     _install_runtime_context,
     _rollback_to_pre_run_checkpoint,
@@ -35,6 +37,25 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aput = AsyncMock(return_value=put_result)
         self.aput_writes = AsyncMock()
+
+
+def test_public_run_error_rejects_unclassified_message() -> None:
+    with pytest.raises(TypeError, match="PublicRunErrorCode"):
+        PublicRunError("provider-secret-sentinel")  # type: ignore[arg-type]
+
+
+def test_public_run_error_codes_have_closed_stable_payloads() -> None:
+    expected_messages = {
+        PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
+        PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
+        PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
+    }
+
+    assert set(PublicRunErrorCode) == set(expected_messages)
+    for code, expected_message in expected_messages.items():
+        error = PublicRunError(code)
+        assert error.code is code
+        assert error.public_message == expected_message
 
 
 def _make_checkpoint(checkpoint_id: str, messages: list[str], version: int):
@@ -104,6 +125,62 @@ def test_build_runtime_context_rejects_caller_verified_skill_read_evidence():
     )
 
     assert VERIFIED_SKILL_SOURCE_CONTEXT_KEY not in context
+
+
+def test_build_runtime_context_rejects_forged_memory_authority():
+    forged = object()
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            "__memory_authority": forged,
+            "memory_authority": forged,
+        },
+    )
+
+    assert "__memory_authority" not in context
+    assert "memory_authority" not in context
+
+
+def test_build_runtime_context_installs_worker_memory_authority():
+    authority = object()
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        None,
+        memory_authority=authority,
+    )
+
+    assert context["__memory_authority"] is authority
+
+
+def test_build_runtime_context_replaces_forged_guardrail_attribution():
+    forged = {
+        "user_id": "forged-user",
+        "authz_attributes": {"project_role": "forged-admin"},
+    }
+    issued = {
+        "user_id": "trusted-user",
+        "user_role": "runner",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "is_subagent": False,
+        "authz_attributes": {"project_role": "runner"},
+    }
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {"__guardrail_attribution": forged},
+        private_scope=object(),
+        guardrail_attribution=issued,
+    )
+
+    assert context["__guardrail_attribution"] == issued
+    assert context["__guardrail_attribution"] is not issued
+    assert context["__guardrail_attribution"]["authz_attributes"] is not issued["authz_attributes"]
 
 
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
@@ -247,6 +324,48 @@ def test_install_runtime_context_clears_verified_reads_when_config_is_reused():
     assert VERIFIED_SKILL_SOURCE_CONTEXT_KEY not in config["context"]
 
 
+def test_install_runtime_context_overwrites_forged_memory_authority():
+    exact = object()
+    config = {
+        "context": {
+            "__memory_authority": "forged-memory-authority",
+            "memory_authority": "forged-memory-authority",
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "private_scope": object(),
+            "__memory_authority": exact,
+        },
+    )
+
+    assert config["context"]["__memory_authority"] is exact
+    assert "memory_authority" not in config["context"]
+
+
+def test_install_runtime_context_clears_stale_memory_authority():
+    config = {
+        "context": {
+            "__memory_authority": object(),
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-2",
+            "private_scope": object(),
+        },
+    )
+
+    assert "__memory_authority" not in config["context"]
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "checkpointer",
@@ -322,6 +441,13 @@ async def test_private_run_fails_closed_when_pre_run_message_boundary_is_unavail
 
     assert record.status == RunStatus.error
     assert record.error == "Private Run pre-run message boundary is unavailable"
+    error_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert error_events == [
+        {
+            "message": "Private Run pre-run message boundary is unavailable",
+            "name": "PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE",
+        }
+    ]
     factory.assert_not_called()
 
 
@@ -369,6 +495,80 @@ async def test_private_run_allows_first_empty_checkpoint():
 
     assert record.status == RunStatus.success
     assert captured["boundary"] == frozenset()
+
+
+@pytest.mark.anyio
+async def test_private_run_forces_persisted_thread_and_root_checkpoint_namespace():
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="persisted-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, Any] = {}
+
+    class DummyAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            del graph_input, stream_mode, subgraphs
+            captured["stream_configurable"] = dict(config["configurable"])
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_configurable"] = dict(config["configurable"])
+        return DummyAgent()
+
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=None),
+    )
+    caller_config = {
+        "configurable": {
+            "thread_id": "forged-thread",
+            "checkpoint_ns": "forged-subgraph",
+            "checkpoint_id": "admitted-checkpoint",
+            "checkpoint_map": {"": "admitted-checkpoint"},
+        }
+    }
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=factory,
+        graph_input={},
+        config=caller_config,
+    )
+
+    for configurable in (
+        captured["factory_configurable"],
+        captured["stream_configurable"],
+        caller_config["configurable"],
+    ):
+        assert configurable["thread_id"] == "persisted-thread"
+        assert configurable["checkpoint_ns"] == ""
+        assert configurable["checkpoint_id"] == "admitted-checkpoint"
+        assert configurable["checkpoint_map"] == {"": "admitted-checkpoint"}
+    for checkpoint_call in checkpointer.aget_tuple.await_args_list:
+        durable_configurable = checkpoint_call.args[0]["configurable"]
+        assert durable_configurable["thread_id"] == "persisted-thread"
+        assert durable_configurable["checkpoint_ns"] == ""
 
 
 @pytest.mark.anyio
@@ -741,6 +941,42 @@ async def test_rollback_deletes_thread_when_no_snapshot_exists():
     checkpointer.adelete_thread.assert_awaited_once_with("thread-1")
     checkpointer.aput.assert_not_awaited()
     checkpointer.aput_writes.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_private_rollback_without_checkpoint_never_deletes_business_thread():
+    checkpointer = FakeCheckpointer(put_result=None)
+
+    restored = await _rollback_to_pre_run_checkpoint(
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        pre_run_checkpoint_id=None,
+        pre_run_snapshot=None,
+        snapshot_capture_failed=False,
+        allow_thread_delete=False,
+    )
+
+    assert restored is False
+    checkpointer.adelete_thread.assert_not_awaited()
+    checkpointer.aput.assert_not_awaited()
+    checkpointer.aput_writes.assert_not_awaited()
+
+
+def test_state_replacement_rejects_channels_outside_effective_schema():
+    mutation_graph = SimpleNamespace(channels={"messages": object()})
+
+    with pytest.raises(RuntimeError, match="outside the effective schema"):
+        _complete_state_replacement_values(
+            mutation_graph=mutation_graph,
+            selected_values={
+                "messages": [],
+                "unknown_middleware_channel": "must-not-be-dropped",
+            },
+            current_values={"messages": []},
+            run_id="run-1",
+            operation="rollback",
+        )
 
 
 @pytest.mark.anyio

@@ -474,6 +474,29 @@ def test_missing_event_header_returns_400(client: TestClient) -> None:
     assert "X-GitHub-Event" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("delivery_header", [None, ""])
+def test_missing_or_empty_delivery_header_returns_400(
+    client: TestClient,
+    delivery_header: str | None,
+) -> None:
+    body = b'{"zen": "x"}'
+    headers = {
+        "X-GitHub-Event": "ping",
+        "X-Hub-Signature-256": _signature(body),
+    }
+    if delivery_header is not None:
+        headers["X-GitHub-Delivery"] = delivery_header
+
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "X-GitHub-Delivery" in response.json()["detail"]
+
+
 def test_invalid_json_body_returns_400(client: TestClient) -> None:
     body = b"this-is-not-json"
     response = client.post(
@@ -488,6 +511,22 @@ def test_invalid_json_body_returns_400(client: TestClient) -> None:
 
     assert response.status_code == 400
     assert "Invalid JSON" in response.json()["detail"]
+
+
+def test_non_object_json_body_returns_400(client: TestClient) -> None:
+    body = b"[]"
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-GitHub-Delivery": DELIVERY_ID,
+            "X-Hub-Signature-256": _signature(body),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "GitHub webhook payload must be a JSON object"
 
 
 # ---------------------------------------------------------------------------
@@ -542,17 +581,15 @@ def test_dispatch_result_included_in_response(client: TestClient, monkeypatch: p
     assert fake.await_count == 1
 
 
-def test_dispatch_failure_returns_503_so_github_retries(client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """A crashing fan-out helper must return 503 so GitHub retries.
+def test_dispatch_failure_returns_503_for_operator_redelivery(client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A crashing fan-out helper must return 503 for operator redelivery.
 
     The earlier behaviour swallowed every fan-out exception into a 200 OK
-    response (``dispatch={"error": "fanout failed"}``). GitHub only retries
-    5xx — a 200 ack permanently drops the delivery. The route now lets
-    runtime failures propagate as 503 so a transient registry/bus error
-    triggers GitHub's redelivery path. The startup-time
-    ``is_route_enabled`` check still handles *configuration* failures
-    fail-closed (route absent → 404); 503 is reserved for runtime
-    failures GitHub can retry past.
+    response (``dispatch={"error": "fanout failed"}``). GitHub does not
+    automatically retry failed webhooks, so the route uses 503 to keep the
+    delivery visibly failed for an operator or recovery script to redeliver.
+    The startup-time ``is_route_enabled`` check still handles configuration
+    failures fail-closed (route absent → 404).
     """
 
     async def fake_fanout(*args, **kwargs) -> dict:
@@ -575,19 +612,20 @@ def test_dispatch_failure_returns_503_so_github_retries(client: TestClient, monk
     detail = response.json()["detail"]
     assert "fan-out failed" in detail
     assert DELIVERY_ID in detail
-    assert "transient registry hiccup" in detail
+    assert "transient registry hiccup" not in detail
+    assert "transient registry hiccup" in caplog.text
     # Operator-visible log: stack trace + delivery id so the redelivery
     # page entry can be correlated.
-    assert any("fanout failed" in rec.message for rec in caplog.records)
+    assert any("manual or API redelivery" in rec.message for rec in caplog.records)
 
 
-def test_dispatch_failure_503_lets_github_redeliver_successfully(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A retried delivery (after the transient error resolves) lands on 200.
+def test_dispatch_failure_503_allows_operator_redelivery_successfully(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator-redelivered event lands on 200 after recovery.
 
     Regression: confirm the 503 response is a real signal — once the
-    underlying failure is gone, the same delivery (re-sent by GitHub)
-    succeeds normally. If we ever cache "failed delivery" state on the
-    route, this test would catch it.
+    underlying failure is gone, the same delivery manually or API
+    redelivered by an operator succeeds normally. If we ever cache "failed
+    delivery" state on the route, this test would catch it.
     """
     calls: list[int] = []
 
@@ -611,7 +649,7 @@ def test_dispatch_failure_503_lets_github_redeliver_successfully(client: TestCli
     )
     assert first.status_code == 503
 
-    # GitHub redelivers — same payload, same signature.
+    # An operator/API redelivery uses the same payload and signature.
     second = client.post(
         "/api/webhooks/github",
         content=body,
@@ -672,8 +710,8 @@ def test_channel_disabled_skips_fanout(client: TestClient, monkeypatch: pytest.M
     publishing inbound onto the bus would let the ChannelManager consumer
     pick it up and run agents that then post back to GitHub via ``gh``,
     contradicting the documented off-switch. Returns 200 (permanent
-    state, not transient) so GitHub doesn't retry; ``dispatch.skipped``
-    surfaces the reason in the Recent Deliveries panel.
+    state, not transient) and marks the delivery successful;
+    ``dispatch.skipped`` surfaces the reason in the Recent Deliveries panel.
     """
     bus = MessageBus()
 

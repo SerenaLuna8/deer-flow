@@ -59,7 +59,7 @@ def main() -> int:
 
         from wizard.steps.llm import run_llm_step
 
-        llm = run_llm_step(f"Step 1/{total_steps}")
+        model_setup = run_llm_step(f"Step 1/{total_steps}")
 
         from wizard.steps.search import run_search_step
 
@@ -81,13 +81,6 @@ def main() -> int:
 
         write_config_yaml(
             config_path,
-            provider_use=llm.provider.use,
-            model_name=llm.model_name,
-            display_name=f"{llm.provider.display_name} / {llm.model_name}",
-            api_key_field=llm.provider.api_key_field,
-            env_var=llm.provider.env_var,
-            extra_model_config=llm.provider.extra_config_for(llm.model_name) or None,
-            base_url=llm.base_url,
             search_use=search_provider.use if search_provider else None,
             search_tool_name=search_provider.tool_name if search_provider else "web_search",
             search_extra_config=search_provider.extra_config if search_provider else None,
@@ -103,8 +96,6 @@ def main() -> int:
         print_success(f"Config written to: {config_path.relative_to(project_root)}")
 
         env_pairs: dict[str, str] = {}
-        if llm.api_key:
-            env_pairs[llm.provider.env_var] = llm.api_key
         if search_api_key and search_provider and search_provider.env_var:
             env_pairs[search_provider.env_var] = search_api_key
         if fetch_api_key and fetch_provider and fetch_provider.env_var:
@@ -112,7 +103,7 @@ def main() -> int:
 
         if env_pairs:
             write_env_file(env_path, env_pairs)
-            print_success(f"API keys written to: {env_path.relative_to(project_root)}")
+            print_success(f"Tool provider API keys written to: {env_path.relative_to(project_root)}")
 
         frontend_env = project_root / "frontend" / ".env"
         frontend_env_example = project_root / "frontend" / ".env.example"
@@ -123,7 +114,7 @@ def main() -> int:
             print_success("frontend/.env created from example")
 
         print_header("Setup complete!")
-        print(f"  {green('✓')} LLM:        {llm.provider.display_name} / {llm.model_name}")
+        print(f"  {'—':>3} Models:     configure in {model_setup.admin_path}")
         if search_provider:
             print(f"  {green('✓')} Web search: {search_provider.display_name}")
         else:
@@ -152,7 +143,9 @@ def main() -> int:
         print()
         print("Next steps:")
         print(f"  {cyan('make install')}    # Install dependencies (first time only)")
+        print(f"  {cyan('make setup-db')}   # Initialize a new empty PostgreSQL database")
         print(f"  {cyan('make dev')}        # Start DeerFlow")
+        print(f"  Sign in as a system administrator, then open {cyan(model_setup.admin_path)} to configure and activate a model.")
         print()
         print(f"Run {cyan('make doctor')} to verify your setup at any time.")
         print()

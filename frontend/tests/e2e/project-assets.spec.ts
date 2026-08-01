@@ -11,6 +11,8 @@ import type {
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
+test.use({ locale: "zh-CN" });
+
 type AgentVersion = Extract<AssetVersion, { agent_id: string }>;
 type SkillVersion = Extract<AssetVersion, { skill_id: string }>;
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
@@ -28,6 +30,7 @@ const SYSTEM_SKILL_ID = "20000000-0000-4000-8000-000000000007";
 const CREATED_SKILL_ID = "20000000-0000-4000-8000-000000000008";
 const SYSTEM_VERSION_1 = "30000000-0000-4000-8000-000000000001";
 const SYSTEM_VERSION_2 = "30000000-0000-4000-8000-000000000002";
+const PROJECT_AGENT_VERSION_ID = "30000000-0000-4000-8000-000000000003";
 const CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000005";
 const SYSTEM_CREDENTIAL_VERSION_ID = "30000000-0000-4000-8000-000000000006";
 const CREATED_SKILL_VERSION_ID = "30000000-0000-4000-8000-000000000012";
@@ -197,12 +200,17 @@ type AssetMock = {
     }>;
   }>;
   credentialDeleteExpectedVersions: () => number[];
+  defaultAgentRequests: () => Array<{
+    agent_asset_id: string | null;
+    expected_revision: number;
+  }>;
 };
 
 async function mockProjectAssets(
   page: Page,
   options: {
     agentLifecycle?: boolean;
+    defaultAgentWorkflow?: boolean;
     skillFileWorkflow?: boolean;
     skillCredentialWorkflow?: boolean;
   } = {},
@@ -217,7 +225,7 @@ async function mockProjectAssets(
     PROJECT_AGENT_ID,
     "analyst",
     "Analyst",
-    options.agentLifecycle
+    options.agentLifecycle || options.defaultAgentWorkflow
       ? [...projectCapabilities, "shared_assets.manage_bindings"]
       : projectCapabilities,
   );
@@ -246,7 +254,29 @@ async function mockProjectAssets(
   );
   let binding: ProjectAssetItem["binding"] = null;
   let skillBinding: ProjectAssetItem["binding"] = null;
-  let agentVersions: AgentVersion[] = [];
+  const projectAgentVersion: AgentVersion = {
+    id: PROJECT_AGENT_VERSION_ID,
+    agent_id: PROJECT_AGENT_ID,
+    version_number: 1,
+    workflow_status: "published",
+    description: "Project Analyst",
+    agents_instructions: "",
+    soul: "",
+    identity: "",
+    user_context: "",
+    payload_schema_version: 2,
+    model_ref: "default",
+    tool_groups: [],
+    skill_version_ids: [],
+    mcp_version_ids: [],
+    supersedes_version_id: null,
+    payload_checksum: "project-agent-v1",
+    created_by_user_id: "user-1",
+    created_at: now,
+  };
+  let agentVersions: AgentVersion[] = options.defaultAgentWorkflow
+    ? [projectAgentVersion]
+    : [];
   const agentInstructionRequests: AgentInstructionsInput[] = [];
   const sourceSkillVersion: SkillVersion = {
     id: SKILL_SOURCE_VERSION_ID,
@@ -314,6 +344,12 @@ async function mockProjectAssets(
     }>;
   }> = [];
   const credentialDeleteExpectedVersions: number[] = [];
+  const defaultAgentRequests: Array<{
+    agent_asset_id: string | null;
+    expected_revision: number;
+  }> = [];
+  let defaultAgentId: string | null = null;
+  let defaultAgentRevision = 0;
   let skillCredentialRevision = 0;
   let skillCredentialVersionId: string | null = null;
   const skillFileContents = new Map<string, string>([
@@ -324,6 +360,12 @@ async function mockProjectAssets(
     projectSkill = {
       ...projectSkill,
       current_published_version_id: SKILL_SOURCE_VERSION_ID,
+    };
+  }
+  if (options.defaultAgentWorkflow) {
+    projectAgent = {
+      ...projectAgent,
+      current_published_version_id: PROJECT_AGENT_VERSION_ID,
     };
   }
 
@@ -415,6 +457,50 @@ async function mockProjectAssets(
     const projectId = path.includes(SECOND_PROJECT_ID)
       ? SECOND_PROJECT_ID
       : PROJECT_ID;
+    if (path.endsWith("/default-agent") && method === "GET") {
+      await json(route, {
+        agent_asset_id: projectId === PROJECT_ID ? defaultAgentId : null,
+        revision: projectId === PROJECT_ID ? defaultAgentRevision : 0,
+        request_id: `request-default-agent-${projectId}`,
+      });
+      return;
+    }
+    if (
+      projectId === PROJECT_ID &&
+      path.endsWith("/default-agent") &&
+      method === "PUT"
+    ) {
+      const body = request.postDataJSON() as {
+        agent_asset_id: string | null;
+        expected_revision: number;
+      };
+      defaultAgentRequests.push(body);
+      if (
+        body.expected_revision !== defaultAgentRevision ||
+        (body.agent_asset_id !== null &&
+          body.agent_asset_id !== PROJECT_AGENT_ID)
+      ) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_conflict",
+              request_id: "request-default-agent-conflict",
+            },
+          },
+          409,
+        );
+        return;
+      }
+      defaultAgentId = body.agent_asset_id;
+      defaultAgentRevision += 1;
+      await json(route, {
+        agent_asset_id: defaultAgentId,
+        revision: defaultAgentRevision,
+        request_id: "request-default-agent-updated",
+      });
+      return;
+    }
     if (projectId === SECOND_PROJECT_ID && method === "GET") {
       if (/\/(agents|skills|mcp-servers)$/.test(path)) {
         await json(route, {
@@ -1536,6 +1622,7 @@ async function mockProjectAssets(
     credentialDeleteExpectedVersions: () => [
       ...credentialDeleteExpectedVersions,
     ],
+    defaultAgentRequests: () => [...defaultAgentRequests],
   };
 }
 
@@ -1547,12 +1634,14 @@ test("Agent menu hides system-provided Agents without deleting project Agents", 
     await json(route, {
       models: [
         {
-          id: "model-default",
           name: "default",
-          model: "provider-model-id",
+          model: "default",
           display_name: "Default logical model",
+          description: "",
           supports_thinking: false,
           supports_reasoning_effort: false,
+          supports_vision: false,
+          is_default: true,
         },
       ],
       token_usage: { enabled: false },
@@ -1569,6 +1658,33 @@ test("Agent menu hides system-provided Agents without deleting project Agents", 
   ).toBeVisible();
   expect(mock.validatedMutations()).toBe(0);
   expect(mock.staleConflicts()).toBe(0);
+});
+
+test("project Admin can set a project Agent as default and restore Main", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  const mock = await mockProjectAssets(page, { defaultAgentWorkflow: true });
+
+  await page.goto("/projects/research-lab/agents");
+  const card = page.getByRole("listitem").filter({ hasText: "Analyst" });
+  const setDefault = card.getByRole("button", {
+    name: "将 Analyst 设为默认",
+  });
+  await expect(setDefault).toBeEnabled();
+  await setDefault.click();
+
+  await expect(card.getByText("默认", { exact: true })).toBeVisible();
+  const restoreMain = card.getByRole("button", { name: "恢复 Main" });
+  await expect(restoreMain).toBeEnabled();
+  await restoreMain.click();
+
+  await expect(card.getByText("默认", { exact: true })).toHaveCount(0);
+  await expect(setDefault).toBeEnabled();
+  expect(mock.defaultAgentRequests()).toEqual([
+    { agent_asset_id: PROJECT_AGENT_ID, expected_revision: 0 },
+    { agent_asset_id: null, expected_revision: 1 },
+  ]);
 });
 
 test("Agent detail distinguishes reversible disable from permanent deletion", async ({
@@ -1910,7 +2026,11 @@ test("list Skill creation opens its atomic SKILL.md Draft and forks all later ve
   const mock = await mockProjectAssets(page);
 
   await page.goto("/projects/research-lab/skills");
-  await page.getByRole("button", { name: "新建Skill" }).click();
+  await page.getByRole("button", { name: "新建 Skill", exact: true }).click();
+  await page
+    .getByRole("menu", { name: "新建 Skill" })
+    .getByRole("menuitem", { name: "从空白创建", exact: true })
+    .click();
   const create = page.getByRole("dialog", { name: "创建 Skill" });
   await expect(create).toContainText(
     "创建后会自动生成 SKILL.md 草稿版本（已填入基础模板），Skill 默认停用。",
@@ -2001,10 +2121,10 @@ test("project Credential replace requires explicit grant migration and confirmed
 
   await page.goto("/projects/research-lab/credentials");
   await page.getByRole("tab", { name: /项目自建/u }).click();
-  await page.getByRole("button", { name: "创建 Credential" }).click();
-  const createDialog = page.getByRole("dialog", { name: "创建 Credential" });
+  await page.getByRole("button", { name: "创建凭据" }).click();
+  const createDialog = page.getByRole("dialog", { name: "创建凭据" });
   await createDialog.getByLabel("名称").fill("GitHub");
-  await createDialog.getByLabel("Credential 标识").fill("github");
+  await createDialog.getByLabel("凭据标识").fill("github");
   await createDialog.getByLabel("类型").fill("token");
   await createDialog.getByLabel("字段名").fill("TOKEN");
   await createDialog.getByLabel("凭据值").fill("project-secret-sentinel");
@@ -2012,6 +2132,12 @@ test("project Credential replace requires explicit grant migration and confirmed
   await expect(page.locator("body")).not.toContainText(
     "project-secret-sentinel",
   );
+  const credentialCard = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByText("GitHub", { exact: true }) })
+    .filter({ hasText: "github" })
+    .first();
+  await expect(credentialCard).toBeVisible();
 
   await page.getByRole("button", { name: "替换凭据" }).click();
   const replaceDialog = page.getByRole("dialog", { name: "替换凭据" });
@@ -2021,12 +2147,12 @@ test("project Credential replace requires explicit grant migration and confirmed
     "rotated-project-secret",
   );
   await expect(page.getByRole("note")).toContainText(
-    "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
+    "既有 MCP 授权与 Skill 环境变量绑定仍固定到旧版本",
   );
 
   await page.getByRole("button", { name: "迁移兼容引用" }).click();
   const migrationDialog = page.getByRole("dialog", {
-    name: "迁移 Credential 兼容引用",
+    name: "迁移凭据兼容引用",
   });
   await expect(migrationDialog).toContainText("字段结构完全兼容");
   await migrationDialog.getByRole("button", { name: "确认迁移引用" }).click();
@@ -2034,21 +2160,28 @@ test("project Credential replace requires explicit grant migration and confirmed
 
   await page.getByRole("button", { name: "撤销凭据" }).click();
   const revokeDialog = page.getByRole("dialog", {
-    name: "确认撤销 Credential",
+    name: "确认撤销凭据",
   });
   await expect(revokeDialog).toContainText("此操作不可恢复");
   await revokeDialog.getByRole("button", { name: "取消" }).click();
   await expect(page.getByText("已撤销", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "撤销凭据" }).click();
   await page
-    .getByRole("dialog", { name: "确认撤销 Credential" })
+    .getByRole("dialog", { name: "确认撤销凭据" })
     .getByRole("button", { name: "确认永久撤销" })
     .click();
-  await expect(page.getByText("已撤销", { exact: true })).toHaveCount(3);
+  await expect(
+    credentialCard
+      .locator('[data-slot="badge"]')
+      .filter({ hasText: "已撤销" }),
+  ).toHaveCount(1);
+  await expect(
+    credentialCard.getByRole("button", { name: "撤销凭据" }),
+  ).toHaveCount(0);
 
   await page.getByRole("button", { name: "删除", exact: true }).click();
   const deleteDialog = page.getByRole("dialog", {
-    name: "删除 Credential？",
+    name: "删除凭据？",
   });
   await expect(deleteDialog).toContainText("仅审计记录保留");
   const confirmDelete = deleteDialog.getByRole("button", {
@@ -2069,12 +2202,14 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
     json(route, {
       models: [
         {
-          id: "model-default",
           name: "default",
-          model: "provider-model-id",
+          model: "default",
           display_name: "Default logical model",
+          description: "",
           supports_thinking: false,
           supports_reasoning_effort: false,
+          supports_vision: false,
+          is_default: true,
         },
       ],
       token_usage: { enabled: false },
@@ -2161,6 +2296,9 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
     name: "创建 MCP 版本",
   });
   await mcpVersionDialog.getByLabel("描述").fill("GitHub MCP");
+  await mcpVersionDialog
+    .getByLabel(/URL/u)
+    .fill("https://mcp.example.test/sse");
   await mcpVersionDialog.getByLabel("槽位名称").fill("github-token");
   await mcpVersionDialog.getByLabel("必需字段（逗号或换行分隔）").fill("TOKEN");
   await mcpVersionDialog.getByRole("button", { name: "创建版本" }).click();
@@ -2173,13 +2311,13 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   await mcpSheet.getByRole("button", { name: "Close" }).click();
 
   await page
-    .getByRole("link", { name: "Credential", exact: true })
+    .getByRole("link", { name: "项目凭证", exact: true })
     .first()
     .click();
   await page.getByRole("tab", { name: /项目自建/u }).click();
-  await page.getByRole("button", { name: "创建 Credential" }).click();
+  await page.getByRole("button", { name: "创建凭据" }).click();
   await page.getByLabel("名称").fill("GitHub");
-  await page.getByLabel("Credential 标识").fill("github");
+  await page.getByLabel("凭据标识").fill("github");
   await page.getByLabel("类型").fill("token");
   await page.getByLabel("字段名").fill("TOKEN");
   await page.getByLabel("凭据值").fill("never-render-this-secret");
@@ -2211,7 +2349,7 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   await mcpSheet.getByRole("button", { name: "Close" }).click();
 
   await page
-    .getByRole("link", { name: "Credential", exact: true })
+    .getByRole("link", { name: "项目凭证", exact: true })
     .first()
     .click();
   const credentialCard = page
@@ -2225,11 +2363,11 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   await page.getByRole("button", { name: "替换凭据" }).last().click();
   await expect(page.locator("body")).not.toContainText("rotated-secret");
   await expect(credentialCard).toContainText(
-    "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
+    "既有 MCP 授权与 Skill 环境变量绑定仍固定到旧版本",
   );
   await page.getByRole("button", { name: "迁移兼容引用" }).click();
   const migrationDialog = page.getByRole("dialog", {
-    name: "迁移 Credential 兼容引用",
+    name: "迁移凭据兼容引用",
   });
   await expect(migrationDialog).toContainText("字段结构完全兼容");
   await migrationDialog.getByRole("button", { name: "确认迁移引用" }).click();
@@ -2237,22 +2375,27 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
 
   await page.getByRole("button", { name: "撤销凭据" }).click();
   const revokeDialog = page.getByRole("dialog", {
-    name: "确认撤销 Credential",
+    name: "确认撤销凭据",
   });
   await expect(revokeDialog).toContainText("此操作不可恢复");
-  await expect(revokeDialog).toContainText("相关 active Grant");
+  await expect(revokeDialog).toContainText("相关有效授权");
   await revokeDialog.getByRole("button", { name: "取消" }).click();
   await expect(credentialCard.getByText("已撤销", { exact: true })).toHaveCount(
     0,
   );
   await page.getByRole("button", { name: "撤销凭据" }).click();
   await page
-    .getByRole("dialog", { name: "确认撤销 Credential" })
+    .getByRole("dialog", { name: "确认撤销凭据" })
     .getByRole("button", { name: "确认永久撤销" })
     .click();
-  await expect(credentialCard.getByText("已撤销", { exact: true })).toHaveCount(
-    3,
-  );
+  await expect(
+    credentialCard
+      .locator('[data-slot="badge"]')
+      .filter({ hasText: "已撤销" }),
+  ).toHaveCount(1);
+  await expect(
+    credentialCard.getByRole("button", { name: "撤销凭据" }),
+  ).toHaveCount(0);
 
   const staleStatus = await page.evaluate(
     async ({ projectId, assetId }) =>

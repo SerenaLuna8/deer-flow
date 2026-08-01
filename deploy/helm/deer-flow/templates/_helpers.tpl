@@ -64,12 +64,6 @@ imagePullSecrets:
 {{- printf "%s-home" (include "deer-flow.fullname" .) -}}
 {{- end -}}
 
-{{/* Name of the Secret holding provider/channel keys. */}}
-{{- define "deer-flow.providerSecret" -}}
-{{- if .Values.existingSecret -}}{{- .Values.existingSecret -}}
-{{- else -}}{{- printf "%s-provider" (include "deer-flow.fullname" .) -}}{{- end -}}
-{{- end -}}
-
 {{/* Name of the Secret holding generated app secrets (auth token, better-auth). */}}
 {{- define "deer-flow.appSecret" -}}
 {{- if .Values.existingAppSecret -}}{{- .Values.existingAppSecret -}}
@@ -104,6 +98,70 @@ imagePullSecrets:
 
 {{- define "deer-flow.nginxChecksum" -}}
 {{- include (print $.Template.BasePath "/configmap-nginx.yaml") . | sha256sum -}}
+{{- end -}}
+
+{{/*
+Environment shared by the three backend process roles.  The values live in
+separate keys even when the chart generates them in one Secret: JWT signing,
+audit correlation, credential encryption, internal calls, proxy attestation,
+and Provisioner control are independent trust domains and must never reuse key
+material.
+
+This is a closed platform-secret contract. Model definitions and provider
+Credentials are PostgreSQL-backed and must not be broadcast through envFrom.
+*/}}
+{{- define "deer-flow.backendSecretEnv" -}}
+- name: AUTH_JWT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: AUTH_JWT_SECRET
+- name: DEER_FLOW_AUDIT_ACTIVE_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_AUDIT_ACTIVE_KEY_ID
+- name: DEER_FLOW_AUDIT_KEYRING_JSON
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_AUDIT_KEYRING_JSON
+- name: DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID
+- name: DEER_FLOW_CREDENTIAL_KEYRING_JSON
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_CREDENTIAL_KEYRING_JSON
+- name: DEER_FLOW_INTERNAL_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_INTERNAL_AUTH_TOKEN
+- name: DEER_FLOW_PROXY_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_PROXY_AUTH_TOKEN
+- name: PROVISIONER_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: PROVISIONER_API_KEY
+{{- end -}}
+
+{{- define "deer-flow.backendDatabaseEnv" -}}
+{{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+{{- if $pgConfigured }}
+- name: DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.databaseUrlSecret" . }}
+      key: database-url
+{{- end }}
 {{- end -}}
 
 {{/* Percent-encode a string for safe interpolation into a URL userinfo

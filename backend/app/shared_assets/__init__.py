@@ -19,6 +19,10 @@ from app.shared_assets.credential_service import (
     CredentialVersionView,
     CredentialView,
 )
+from app.shared_assets.default_agent_service import (
+    ProjectDefaultAgentSelection,
+    ProjectDefaultAgentService,
+)
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
@@ -117,6 +121,8 @@ __all__ = [
     "MAX_AGENT_INSTRUCTION_FIELD_BYTES",
     "MAX_AGENT_INSTRUCTIONS_TOTAL_BYTES",
     "ProjectAssetResolver",
+    "ProjectDefaultAgentSelection",
+    "ProjectDefaultAgentService",
     "ProjectSkillArchiveCreateResult",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",

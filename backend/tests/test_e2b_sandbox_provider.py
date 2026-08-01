@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import threading
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -219,6 +220,80 @@ def test_stable_seed_is_deterministic_and_user_scoped():
     assert s_a == s_b
     assert s_a != s_other_user
     assert s_a != s_other_thread
+
+
+def test_grep_single_file_path_with_matching_glob():
+    raw_stdout = "/home/user/uploads/report.md:2:needle here\n"
+    client = FakeClient(
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(
+                    stdout=raw_stdout,
+                    stderr="",
+                    exit_code=0,
+                )
+            ]
+        )
+    )
+    sandbox = _make_sandbox(client)
+
+    matches, truncated = sandbox.grep(
+        "/mnt/user-data/uploads/report.md",
+        "needle",
+        glob="*.md",
+    )
+
+    assert [match.path for match in matches] == ["/home/user/uploads/report.md"]
+    assert truncated is False
+
+
+def test_grep_single_file_path_applies_nonmatching_glob():
+    raw_stdout = "/home/user/uploads/report.md:2:needle here\n"
+    client = FakeClient(
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(
+                    stdout=raw_stdout,
+                    stderr="",
+                    exit_code=0,
+                )
+            ]
+        )
+    )
+    sandbox = _make_sandbox(client)
+
+    matches, truncated = sandbox.grep(
+        "/mnt/user-data/uploads/report.md",
+        "needle",
+        glob="*.txt",
+    )
+
+    assert matches == []
+    assert truncated is False
+
+
+def test_grep_drops_provider_paths_outside_requested_root():
+    raw_stdout = "/home/user/workspace/app.py:1:needle ok\n/home/user/workspace-sibling/leak.py:2:needle leak\n"
+    client = FakeClient(
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(
+                    stdout=raw_stdout,
+                    stderr="",
+                    exit_code=0,
+                )
+            ]
+        )
+    )
+    sandbox = _make_sandbox(client)
+
+    matches, truncated = sandbox.grep(
+        "/mnt/user-data/workspace",
+        "needle",
+    )
+
+    assert [match.path for match in matches] == ["/home/user/workspace/app.py"]
+    assert truncated is False
 
 
 def test_is_sandbox_gone_error_matches_known_signatures():
@@ -685,6 +760,45 @@ def test_sync_outputs_to_host_skips_unchanged_files(monkeypatch, tmp_path):
 
     assert files.read_calls == [], "size match should skip the download round-trip"
     assert target.read_bytes() == b"%PDF-1.4hello"
+
+
+def test_sync_outputs_to_host_updates_changed_same_size_file(
+    monkeypatch,
+    tmp_path,
+):
+    provider = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    out_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / "random.pdf"
+    target.write_bytes(b"%PDF-1.4hello")
+    os.utime(target, ns=(1_000_000_000, 1_000_000_000))
+
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"changed-value"})
+    commands = FakeCommandsAPI(
+        [
+            SimpleNamespace(
+                stdout=listing,
+                stderr="",
+                exit_code=0,
+            )
+        ]
+    )
+    sandbox = _make_sandbox(
+        FakeClient(commands=commands, files=files),
+        sandbox_id="sb-sync-same-size",
+    )
+
+    provider._sync_outputs_to_host(
+        sandbox,
+        thread_id="t1",
+        user_id="u1",
+    )
+
+    assert files.read_calls
+    assert target.read_bytes() == b"changed-value"
+    assert target.stat().st_mtime_ns == 2_000_000_000
 
 
 def test_sync_outputs_to_host_marks_dead_on_sandbox_gone(monkeypatch, tmp_path):

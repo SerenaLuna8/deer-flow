@@ -50,6 +50,7 @@ def _run(context: PrivateWorkContext, *, run_id: str, thread_id: str) -> Private
         multitask_strategy="reject",
         metadata={},
         kwargs={},
+        origin_trace_id=context.request_id,
         error=None,
         model_name=None,
         created_at=now,
@@ -76,6 +77,7 @@ async def test_channel_admission_uses_resolved_project_scope_not_message_authori
             run_id=run_id,
             idempotency_key="0" * 64,
             status="queued",
+            origin_trace_id=context.request_id,
         ),
     )
     captured = None
@@ -85,7 +87,7 @@ async def test_channel_admission_uses_resolved_project_scope_not_message_authori
             nonlocal captured
             assert passed_context is context
             assert passed_thread_id == thread_id
-            assert server_context is None
+            assert server_context.origin_trace_id == context.request_id
             captured = request
             return admitted
 
@@ -161,6 +163,7 @@ def test_independent_worker_rebuilds_admission_from_issued_project_context() -> 
         occurrence_id=None,
         retry_safety="safe",
         cancel_requested=False,
+        origin_trace_id=run.origin_trace_id,
     )
 
     admitted = RunAgentPrivateExecutor._admitted(execution, claim)

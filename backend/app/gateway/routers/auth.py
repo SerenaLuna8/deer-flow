@@ -8,7 +8,15 @@ import time
 import urllib.parse
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import text
@@ -41,6 +49,14 @@ from app.gateway.auth.rate_limit import (
     AuthenticationRateLimitAdmission,
     AuthenticationRateLimitRepository,
 )
+from app.gateway.auth.session_cookie import (
+    ACCESS_TOKEN_COOKIE_NAME,
+    SESSION_PERSISTENCE_COOKIE_NAME,
+    set_session_cookie,
+)
+from app.gateway.auth.session_cookie_state import (
+    SKIP_AUTH_CSRF_COOKIE_STATE_ATTR,
+)
 from app.gateway.auth.sessions import (
     AuthSessionUnavailable,
     issue_access_session,
@@ -48,13 +64,23 @@ from app.gateway.auth.sessions import (
     revoke_all_access_sessions,
 )
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
-from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
+from app.gateway.csrf_middleware import (
+    CSRF_COOKIE_NAME,
+    _request_origin,
+    auth_csrf_cookie_settings,
+    generate_csrf_token,
+    is_secure_request,
+)
 from app.gateway.deps import (
     get_current_user_from_request,
     get_local_provider,
     get_project_quota_enforcer,
 )
 from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
+from app.system_runtime_settings import (
+    AuthPolicyValue,
+    RuntimePolicySection,
+)
 from deerflow.config import get_app_config
 from deerflow.config.auth_config import OIDCProviderConfig
 from deerflow.persistence.engine import get_engine, get_session_factory
@@ -230,6 +256,7 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -240,6 +267,7 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
     new_email: EmailStr | None = None
+    remember_me: bool | None = None
 
     _strong_password = field_validator("new_password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -250,21 +278,55 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class SetupStatusResponse(BaseModel):
+    """Public first-boot and self-registration status."""
+
+    needs_setup: bool
+    registration_enabled: bool
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _set_session_cookie(response: Response, token: str, request: Request) -> None:
+def _set_session_cookie(
+    response: Response,
+    token: str,
+    request: Request,
+    *,
+    remember_me: bool | None = None,
+) -> None:
     """Set the access_token HttpOnly cookie on the response."""
-    config = get_auth_config()
-    is_https = is_secure_request(request)
-    response.set_cookie(
-        key="access_token",
-        value=token,
-        httponly=True,
-        secure=is_https,
-        samesite="lax",
-        max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
+    set_session_cookie(
+        response,
+        request,
+        token,
+        remember_me=remember_me,
     )
+
+
+def _delete_browser_session_cookies(
+    response: Response,
+    request: Request,
+) -> None:
+    """Clear every browser cookie that belongs to the current auth session."""
+
+    secure = is_secure_request(request)
+    response.delete_cookie(
+        key=ACCESS_TOKEN_COOKIE_NAME,
+        secure=secure,
+        samesite="lax",
+    )
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        secure=secure,
+        samesite="strict",
+    )
+    response.delete_cookie(
+        key=SESSION_PERSISTENCE_COOKIE_NAME,
+        secure=secure,
+        samesite="lax",
+    )
+    setattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, True)
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
@@ -375,6 +437,7 @@ async def login_local(
     request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
+    remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
     admission = await _admit_auth_attempt(
@@ -394,7 +457,12 @@ async def login_local(
         admission,
     )
     token = await _issue_session(user)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=remember_me,
+    )
 
     return LoginResponse(
         expires_in=get_auth_config().token_expiry_days * 24 * 3600,
@@ -409,6 +477,14 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
     """
+    if not await _local_registration_enabled(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.REGISTRATION_DISABLED,
+                message="Self-registration is disabled on this deployment",
+            ).model_dump(),
+        )
     await _admit_auth_attempt(
         AuthenticationRateLimitAction.REGISTER,
         request,
@@ -422,7 +498,12 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         )
 
     token = await _issue_session(user)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=body.remember_me,
+    )
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -431,7 +512,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 async def logout(request: Request, response: Response):
     """Revoke the current durable session, then clear the cookie."""
 
-    access_token = request.cookies.get("access_token")
+    access_token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
     if access_token:
         payload = decode_token(access_token)
         if not isinstance(payload, TokenError):
@@ -446,13 +527,9 @@ async def logout(request: Request, response: Response):
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     content={"detail": _auth_session_unavailable_detail()},
                 )
-                failure.delete_cookie(
-                    key="access_token",
-                    secure=is_secure_request(request),
-                    samesite="lax",
-                )
+                _delete_browser_session_cookies(failure, request)
                 return failure
-    response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
+    _delete_browser_session_cookies(response, request)
     return MessageResponse(message="Successfully logged out")
 
 
@@ -503,7 +580,16 @@ async def change_password(request: Request, response: Response, body: ChangePass
     if user.needs_setup and body.new_email is not None:
         user.needs_setup = False
 
-    await provider.update_user(user)
+    try:
+        await provider.update_user(user)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.EMAIL_ALREADY_EXISTS,
+                message="Email already in use",
+            ).model_dump(),
+        ) from None
 
     # The token_version update already invalidates every old JWT. Persist the
     # corresponding session revocations before admitting one fresh session.
@@ -512,7 +598,12 @@ async def change_password(request: Request, response: Response, body: ChangePass
     except AuthSessionUnavailable:
         raise _auth_session_unavailable_error() from None
     token = await _issue_session(user)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=body.remember_me,
+    )
 
     return MessageResponse(message="Password changed successfully")
 
@@ -530,18 +621,59 @@ async def get_me(request: Request):
     )
 
 
-# Per-IP cache: ip → (timestamp, result_dict).
+# Per-IP cache: ip → (timestamp, needs_setup).
 # Returns the cached result within the TTL instead of 429, because
 # the answer (whether an admin exists) rarely changes and returning
 # 429 breaks multi-tab / post-restart reconnection storms.
-_SETUP_STATUS_CACHE: dict[str, tuple[float, dict]] = {}
+_SETUP_STATUS_CACHE: dict[str, tuple[float, bool]] = {}
 _SETUP_STATUS_CACHE_TTL_SECONDS = 60
 _MAX_TRACKED_SETUP_STATUS_IPS = 10000
-_SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[dict]] = {}
+_SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[bool]] = {}
 _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
 
 
-@router.get("/setup-status")
+async def _local_registration_enabled(request: Request) -> bool:
+    """Read the current database-owned local registration policy."""
+
+    materializer = getattr(
+        request.app.state,
+        "system_runtime_policy_materializer",
+        None,
+    )
+    try:
+        if materializer is None:
+            raise RuntimeError
+        policy = await materializer.materialize_current(
+            RuntimePolicySection.AUTH,
+        )
+        if type(policy) is not AuthPolicyValue:
+            raise RuntimeError
+        return policy.allow_registration
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "AUTH_POLICY_UNAVAILABLE",
+                "message": "Authentication policy unavailable",
+            },
+        ) from None
+
+
+async def _setup_status_response(
+    request: Request,
+    needs_setup: bool,
+) -> dict[str, bool]:
+    """Combine cached initialization state with the live registration policy."""
+
+    return {
+        "needs_setup": needs_setup,
+        "registration_enabled": await _local_registration_enabled(request),
+    }
+
+
+@router.get("/setup-status", response_model=SetupStatusResponse)
 async def setup_status(request: Request):
     """Check if an admin account exists. Returns needs_setup=True when no admin exists."""
     client_ip = _get_client_ip(request)
@@ -550,18 +682,21 @@ async def setup_status(request: Request):
     # Return cached result when within TTL — avoids 429 on multi-tab reconnection.
     cached = _SETUP_STATUS_CACHE.get(client_ip)
     if cached is not None:
-        cached_time, cached_result = cached
+        cached_time, cached_needs_setup = cached
         if now - cached_time < _SETUP_STATUS_CACHE_TTL_SECONDS:
-            return cached_result
+            return await _setup_status_response(request, cached_needs_setup)
 
     async with _SETUP_STATUS_INFLIGHT_GUARD:
         # Recheck cache after waiting for the inflight guard.
         now = time.time()
         cached = _SETUP_STATUS_CACHE.get(client_ip)
         if cached is not None:
-            cached_time, cached_result = cached
+            cached_time, cached_needs_setup = cached
             if now - cached_time < _SETUP_STATUS_CACHE_TTL_SECONDS:
-                return cached_result
+                return await _setup_status_response(
+                    request,
+                    cached_needs_setup,
+                )
 
         task = _SETUP_STATUS_INFLIGHT.get(client_ip)
         if task is None:
@@ -576,11 +711,11 @@ async def setup_status(request: Request):
                     for k, _ in by_time[: len(by_time) // 2]:
                         del _SETUP_STATUS_CACHE[k]
 
-            async def _compute_setup_status() -> dict:
+            async def _compute_needs_setup() -> bool:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0}
+                return admin_count == 0
 
-            task = asyncio.create_task(_compute_setup_status())
+            task = asyncio.create_task(_compute_needs_setup())
             _SETUP_STATUS_INFLIGHT[client_ip] = task
 
     try:
@@ -591,11 +726,11 @@ async def setup_status(request: Request):
                 del _SETUP_STATUS_INFLIGHT[client_ip]
 
     # Cache only the stable "initialized" result to avoid stale setup redirects.
-    if result["needs_setup"] is False:
+    if result is False:
         _SETUP_STATUS_CACHE[client_ip] = (time.time(), result)
     else:
         _SETUP_STATUS_CACHE.pop(client_ip, None)
-    return result
+    return await _setup_status_response(request, result)
 
 
 class InitializeAdminRequest(BaseModel):
@@ -603,6 +738,7 @@ class InitializeAdminRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -665,7 +801,12 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         raise HTTPException(status_code=503, detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"}) from None
 
     token = await _issue_session(user)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=body.remember_me,
+    )
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -692,17 +833,17 @@ async def close_oidc_service() -> None:
 def _set_csrf_cookie(response: Response, request: Request) -> None:
     """Set the CSRF double-submit cookie (needed for GET-based OIDC callback)."""
     csrf_token = generate_csrf_token()
-    is_https = is_secure_request(request)
+    secure, max_age = auth_csrf_cookie_settings(request)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
         httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
-        secure=is_https,
+        secure=secure,
         samesite="strict",
         # Persist for the same lifetime as the access_token (see _set_session_cookie)
         # so the double-submit pair is evicted together, never leaving a logged-in
         # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
-        max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
+        max_age=max_age,
     )
 
 
@@ -757,6 +898,7 @@ async def oauth_login(
     request: Request,
     provider: str,
     next: str | None = None,  # noqa: A002 (shadowing built-in is intentional — this is the query param name)
+    remember_me: bool = True,
 ):
     """Initiate OIDC login flow.
 
@@ -822,6 +964,7 @@ async def oauth_login(
         nonce=nonce_value,
         code_verifier=code_verifier,
         next_path=redirect_path,
+        remember_me=remember_me,
     )
     redirect_response = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
     set_state_cookie(redirect_response, request, state_payload)
@@ -937,7 +1080,12 @@ async def oauth_callback(
     redirect_response = RedirectResponse(url=callback_redirect, status_code=status.HTTP_302_FOUND)
 
     # Set session cookie (reuse existing helper)
-    _set_session_cookie(redirect_response, token, request)
+    _set_session_cookie(
+        redirect_response,
+        token,
+        request,
+        remember_me=state_payload.remember_me,
+    )
 
     # Set CSRF cookie (callback is a GET, so CSRF middleware won't set it)
     _set_csrf_cookie(redirect_response, request)

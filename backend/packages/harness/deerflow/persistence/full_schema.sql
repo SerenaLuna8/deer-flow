@@ -44,6 +44,7 @@ CREATE TABLE jobs (
     run_id VARCHAR(64),
     automation_occurrence_id VARCHAR(64),
     predecessor_dead_job_id UUID,
+    origin_trace_id VARCHAR(512),
     idempotency_key CHAR(64) NOT NULL,
     status VARCHAR(16) DEFAULT 'queued' NOT NULL,
     priority SMALLINT DEFAULT 0 NOT NULL,
@@ -63,7 +64,7 @@ CREATE TABLE jobs (
     completed_at TIMESTAMP WITH TIME ZONE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (id),
-    CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL)),
+    CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
     CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge')),
     CONSTRAINT ck_jobs_retry_safety CHECK (retry_safety IN ('safe', 'unknown', 'unsafe')),
     CONSTRAINT ck_jobs_status CHECK (status IN ('queued', 'leased', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'dead')),
@@ -101,6 +102,7 @@ CREATE TABLE runs (
     multitask_strategy VARCHAR(20) NOT NULL,
     metadata_json JSON NOT NULL,
     kwargs_json JSON NOT NULL,
+    origin_trace_id VARCHAR(512) NOT NULL,
     error TEXT,
     message_count INTEGER NOT NULL,
     first_human_message TEXT,
@@ -130,6 +132,7 @@ CREATE TABLE runs (
     PRIMARY KEY (run_id),
     CONSTRAINT ck_runs_finalization_status CHECK (finalization_status IN ('pending', 'finalizing', 'complete', 'failed')),
     CONSTRAINT uq_runs_job_scope UNIQUE (project_id, owner_user_id, run_id),
+    CONSTRAINT uq_runs_job_trace_scope UNIQUE (project_id, owner_user_id, run_id, origin_trace_id),
     CONSTRAINT uq_runs_private_scope UNIQUE (project_id, owner_user_id, thread_id, run_id)
 );
 
@@ -203,7 +206,7 @@ CREATE TABLE users (
 
 CREATE UNIQUE INDEX idx_users_oauth_identity ON users (oauth_provider, oauth_id) WHERE oauth_provider IS NOT NULL AND oauth_id IS NOT NULL;
 
-CREATE UNIQUE INDEX ix_users_email ON users (email);
+CREATE UNIQUE INDEX ix_users_email ON users (lower(email));
 
 CREATE TABLE auth_sessions (
     session_id_hash CHAR(64) NOT NULL,
@@ -317,6 +320,22 @@ CREATE TABLE agents (
 CREATE UNIQUE INDEX uq_agents_project_slug ON agents (project_id, lower(slug)) WHERE scope = 'project';
 
 CREATE UNIQUE INDEX uq_agents_system_slug ON agents (lower(slug)) WHERE scope = 'system';
+
+CREATE TABLE project_default_agents (
+    project_id UUID NOT NULL,
+    agent_asset_id UUID,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    updated_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (project_id),
+    CONSTRAINT ck_project_default_agents_revision CHECK (revision >= 1),
+    CONSTRAINT fk_project_default_agents_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_default_agents_project_agent FOREIGN KEY(project_id, agent_asset_id) REFERENCES agents (project_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_default_agents_creator FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_default_agents_updater FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
 
 CREATE TABLE audit_logs (
     id UUID NOT NULL,
@@ -889,7 +908,7 @@ CREATE TABLE run_asset_versions (
 );
 
 CREATE TABLE run_events (
-    id SERIAL NOT NULL,
+    id BIGSERIAL NOT NULL,
     thread_id VARCHAR(64) NOT NULL,
     run_id VARCHAR(64) NOT NULL,
     owner_user_id VARCHAR(36) NOT NULL,
@@ -897,7 +916,7 @@ CREATE TABLE run_events (
     category VARCHAR(16) NOT NULL,
     content TEXT NOT NULL,
     event_metadata JSON NOT NULL,
-    seq INTEGER NOT NULL,
+    seq BIGINT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     project_id UUID NOT NULL,
     PRIMARY KEY (id),
@@ -1041,7 +1060,8 @@ CREATE TABLE channel_conversations (
     CONSTRAINT fk_channel_conversations_private_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
     CONSTRAINT fk_channel_conversations_project_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
     CONSTRAINT fk_channel_conversations_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT uq_channel_conversation_connection_external UNIQUE (connection_id, external_conversation_id, external_topic_id)
+    CONSTRAINT uq_channel_conversation_connection_external UNIQUE (connection_id, external_conversation_id, external_topic_id),
+    CONSTRAINT uq_channel_conversation_delivery_scope UNIQUE (project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, thread_id)
 );
 
 CREATE INDEX ix_channel_conversations_connection_id ON channel_conversations (connection_id);
@@ -1053,6 +1073,27 @@ CREATE INDEX ix_channel_conversations_project_id ON channel_conversations (proje
 CREATE INDEX ix_channel_conversations_provider ON channel_conversations (provider);
 
 CREATE INDEX ix_channel_conversations_thread_id ON channel_conversations (thread_id);
+
+CREATE TABLE channel_inbound_deliveries (
+    id VARCHAR(64) NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    connection_id VARCHAR(64) NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    external_conversation_id VARCHAR(128) NOT NULL,
+    external_topic_id VARCHAR(128) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    provider_delivery_digest VARCHAR(64) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_channel_inbound_deliveries_digest CHECK (provider_delivery_digest <> ''),
+    CONSTRAINT fk_channel_inbound_deliveries_conversation FOREIGN KEY(project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, thread_id) REFERENCES channel_conversations (project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_channel_inbound_deliveries_run FOREIGN KEY(project_id, owner_user_id, thread_id, run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT uq_channel_inbound_deliveries_scope UNIQUE (project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, provider_delivery_digest)
+);
+
+CREATE INDEX ix_channel_inbound_deliveries_run ON channel_inbound_deliveries (project_id, owner_user_id, run_id);
 
 CREATE TABLE channel_credentials (
     connection_id VARCHAR(64) NOT NULL,
@@ -1392,7 +1433,7 @@ ALTER TABLE jobs ADD CONSTRAINT fk_jobs_predecessor_dead_job FOREIGN KEY(predece
 
 ALTER TABLE jobs ADD CONSTRAINT fk_jobs_automation_occurrence FOREIGN KEY(project_id, owner_user_id, automation_occurrence_id) REFERENCES scheduled_task_runs (project_id, owner_user_id, id) ON DELETE RESTRICT;
 
-ALTER TABLE jobs ADD CONSTRAINT fk_jobs_private_run FOREIGN KEY(project_id, owner_user_id, run_id) REFERENCES runs (project_id, owner_user_id, run_id) ON DELETE RESTRICT;
+ALTER TABLE jobs ADD CONSTRAINT fk_jobs_private_run FOREIGN KEY(project_id, owner_user_id, run_id, origin_trace_id) REFERENCES runs (project_id, owner_user_id, run_id, origin_trace_id) ON DELETE RESTRICT;
 
 ALTER TABLE jobs ADD CONSTRAINT fk_jobs_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT;
 
@@ -1893,6 +1934,8 @@ CREATE TRIGGER trg_project_invitation_rate_limits_updated_at BEFORE UPDATE ON pr
 
 CREATE TRIGGER trg_project_memberships_updated_at BEFORE UPDATE ON project_memberships FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
 
+CREATE TRIGGER trg_project_default_agents_updated_at BEFORE UPDATE ON project_default_agents FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
 CREATE TRIGGER trg_project_quotas_updated_at BEFORE UPDATE ON project_quotas FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
 
 CREATE TRIGGER trg_project_system_agent_bindings_updated_at BEFORE UPDATE ON project_system_agent_bindings FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
@@ -2115,6 +2158,306 @@ CREATE TABLE run_skill_credential_snapshots (
 CREATE INDEX ix_run_skill_credential_snapshots_binding ON run_skill_credential_snapshots (skill_credential_binding_id);
 
 CREATE INDEX ix_run_skill_credential_snapshots_private_run ON run_skill_credential_snapshots (project_id, owner_user_id, thread_id, run_id);
+
+CREATE TABLE system_model_catalog_state (
+    id SMALLINT DEFAULT 1 NOT NULL,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    default_model_config_id UUID,
+    updated_by_user_id VARCHAR(36),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_system_model_catalog_state_singleton CHECK (id = 1),
+    CONSTRAINT ck_system_model_catalog_state_revision CHECK (revision >= 1),
+    FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
+
+CREATE TABLE system_model_configs (
+    id UUID NOT NULL,
+    logical_name VARCHAR(128) NOT NULL,
+    display_name VARCHAR(120) NOT NULL,
+    description TEXT DEFAULT '' NOT NULL,
+    status VARCHAR(16) DEFAULT 'suspended' NOT NULL,
+    current_version_id UUID,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    sort_order BIGINT DEFAULT 0 NOT NULL,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    updated_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_system_model_configs_status CHECK (status IN ('active', 'suspended')),
+    CONSTRAINT ck_system_model_configs_revision CHECK (revision >= 1),
+    CONSTRAINT ck_system_model_configs_sort_order CHECK (sort_order >= 0),
+    CONSTRAINT uq_system_model_configs_id_current_version UNIQUE (id, current_version_id),
+    FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_system_model_configs_status_order ON system_model_configs (status, sort_order, id);
+
+CREATE UNIQUE INDEX uq_system_model_configs_logical_name ON system_model_configs (lower(logical_name));
+
+CREATE TABLE system_model_config_versions (
+    id UUID NOT NULL,
+    model_config_id UUID NOT NULL,
+    version_number BIGINT NOT NULL,
+    provider_adapter VARCHAR(64) NOT NULL,
+    provider_model VARCHAR(255) NOT NULL,
+    settings JSONB DEFAULT '{}'::jsonb NOT NULL,
+    supports_thinking BOOLEAN DEFAULT false NOT NULL,
+    supports_reasoning_effort BOOLEAN DEFAULT false NOT NULL,
+    supports_vision BOOLEAN DEFAULT false NOT NULL,
+    credential_id UUID,
+    credential_version_id UUID,
+    credential_env_key VARCHAR(255),
+    payload_checksum CHAR(64) NOT NULL,
+    supersedes_version_id UUID,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_system_model_config_versions_number CHECK (version_number >= 1),
+    CONSTRAINT ck_system_model_config_versions_settings_object CHECK (jsonb_typeof(settings) = 'object'),
+    CONSTRAINT ck_system_model_config_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_system_model_config_versions_credential_group CHECK ((credential_id IS NULL AND credential_version_id IS NULL AND credential_env_key IS NULL) OR (credential_id IS NOT NULL AND credential_version_id IS NOT NULL AND credential_env_key IS NOT NULL)),
+    CONSTRAINT ck_system_model_config_versions_env_key CHECK (credential_env_key IS NULL OR credential_env_key ~ '^[A-Za-z_][A-Za-z0-9_]*$'),
+    CONSTRAINT uq_system_model_config_versions_number UNIQUE (model_config_id, version_number),
+    CONSTRAINT uq_system_model_config_versions_model_id UNIQUE (model_config_id, id),
+    CONSTRAINT uq_system_model_config_versions_exact UNIQUE (model_config_id, id, payload_checksum),
+    CONSTRAINT uq_system_model_config_versions_snapshot_closure UNIQUE (model_config_id, id, payload_checksum, credential_id, credential_version_id, credential_env_key),
+    CONSTRAINT fk_system_model_config_versions_credential_version FOREIGN KEY(credential_id, credential_version_id) REFERENCES credential_versions (credential_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_system_model_config_versions_supersedes FOREIGN KEY(model_config_id, supersedes_version_id) REFERENCES system_model_config_versions (model_config_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY(model_config_id) REFERENCES system_model_configs (id) ON DELETE RESTRICT,
+    FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_system_model_config_versions_credential ON system_model_config_versions (credential_id, credential_version_id);
+
+ALTER TABLE system_model_configs ADD CONSTRAINT fk_system_model_configs_current_version FOREIGN KEY(id, current_version_id) REFERENCES system_model_config_versions (model_config_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE system_model_catalog_state ADD CONSTRAINT fk_system_model_catalog_state_default_model FOREIGN KEY(default_model_config_id) REFERENCES system_model_configs (id) ON DELETE RESTRICT;
+
+CREATE TABLE run_model_config_snapshots (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    purpose VARCHAR(64) NOT NULL,
+    logical_name VARCHAR(128) NOT NULL,
+    model_config_id UUID NOT NULL,
+    model_config_version_id UUID NOT NULL,
+    payload_checksum CHAR(64) NOT NULL,
+    credential_id UUID,
+    credential_version_id UUID,
+    credential_env_key VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (project_id, owner_user_id, run_id, purpose),
+    CONSTRAINT ck_run_model_config_snapshots_purpose CHECK (purpose ~ '^[a-z][a-z0-9._-]{0,63}$'),
+    CONSTRAINT ck_run_model_config_snapshots_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_run_model_config_snapshots_credential_group CHECK ((credential_id IS NULL AND credential_version_id IS NULL AND credential_env_key IS NULL) OR (credential_id IS NOT NULL AND credential_version_id IS NOT NULL AND credential_env_key IS NOT NULL)),
+    CONSTRAINT ck_run_model_config_snapshots_env_key CHECK (credential_env_key IS NULL OR credential_env_key ~ '^[A-Za-z_][A-Za-z0-9_]*$'),
+    CONSTRAINT fk_run_model_config_snapshots_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_model_config_snapshots_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_model_config_snapshots_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_model_config_snapshots_private_run FOREIGN KEY(project_id, owner_user_id, thread_id, run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT fk_run_model_config_snapshots_exact_model FOREIGN KEY(model_config_id, model_config_version_id, payload_checksum) REFERENCES system_model_config_versions (model_config_id, id, payload_checksum) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_model_config_snapshots_model_credential FOREIGN KEY(model_config_id, model_config_version_id, payload_checksum, credential_id, credential_version_id, credential_env_key) REFERENCES system_model_config_versions (model_config_id, id, payload_checksum, credential_id, credential_version_id, credential_env_key) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_run_model_config_snapshots_credential ON run_model_config_snapshots (credential_id, credential_version_id);
+
+CREATE INDEX ix_run_model_config_snapshots_model_version ON run_model_config_snapshots (model_config_id, model_config_version_id);
+
+CREATE INDEX ix_run_model_config_snapshots_private_run ON run_model_config_snapshots (project_id, owner_user_id, thread_id, run_id);
+
+CREATE OR REPLACE FUNCTION enforce_run_model_snapshot_credential_closure()
+RETURNS TRIGGER AS $$
+DECLARE
+    expected_credential_id UUID;
+    expected_credential_version_id UUID;
+    expected_credential_env_key VARCHAR(255);
+BEGIN
+    SELECT version.credential_id,
+           version.credential_version_id,
+           version.credential_env_key
+      INTO expected_credential_id,
+           expected_credential_version_id,
+           expected_credential_env_key
+      FROM system_model_config_versions AS version
+     WHERE version.model_config_id = NEW.model_config_id
+       AND version.id = NEW.model_config_version_id
+       AND version.payload_checksum = NEW.payload_checksum;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run model snapshot exact model unavailable'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF ROW(
+        NEW.credential_id,
+        NEW.credential_version_id,
+        NEW.credential_env_key
+    ) IS DISTINCT FROM ROW(
+        expected_credential_id,
+        expected_credential_version_id,
+        expected_credential_env_key
+    ) THEN
+        RAISE EXCEPTION 'run model snapshot credential closure mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION reject_direct_run_model_snapshot_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'run model snapshots cannot be updated or directly deleted'
+            USING ERRCODE = '55000';
+    END IF;
+
+    PERFORM 1
+      FROM runs
+     WHERE project_id = OLD.project_id
+       AND owner_user_id = OLD.owner_user_id
+       AND thread_id = OLD.thread_id
+       AND run_id = OLD.run_id;
+
+    IF FOUND THEN
+        RAISE EXCEPTION 'run model snapshots cannot be updated or directly deleted'
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- The parent row is already absent only while PostgreSQL is executing the
+    -- FK-owned ON DELETE CASCADE from an unreferenced Run retention delete.
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_system_model_catalog_state_updated_at BEFORE UPDATE ON system_model_catalog_state FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_system_model_configs_updated_at BEFORE UPDATE ON system_model_configs FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_system_model_config_versions_immutable BEFORE UPDATE OR DELETE ON system_model_config_versions FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation();
+
+CREATE TRIGGER trg_run_model_config_snapshots_credential_closure BEFORE INSERT ON run_model_config_snapshots FOR EACH ROW EXECUTE FUNCTION enforce_run_model_snapshot_credential_closure();
+
+CREATE TRIGGER trg_run_model_config_snapshots_immutable BEFORE UPDATE OR DELETE ON run_model_config_snapshots FOR EACH ROW EXECUTE FUNCTION reject_direct_run_model_snapshot_mutation();
+
+INSERT INTO system_model_catalog_state (id, revision) VALUES (1, 1);
+
+CREATE TABLE system_runtime_policy_catalog_state (
+    id SMALLINT DEFAULT 1 NOT NULL,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    updated_by_user_id VARCHAR(36),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_system_runtime_policy_catalog_state_singleton CHECK (id = 1),
+    CONSTRAINT ck_system_runtime_policy_catalog_state_revision CHECK (revision >= 1),
+    FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
+
+CREATE TABLE system_runtime_policies (
+    section VARCHAR(32) NOT NULL,
+    current_version_id UUID NOT NULL,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    updated_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (section),
+    CONSTRAINT ck_system_runtime_policies_section CHECK (section IN ('agent_runtime', 'auth', 'quotas')),
+    CONSTRAINT ck_system_runtime_policies_revision CHECK (revision >= 1),
+    CONSTRAINT uq_system_runtime_policies_current_version UNIQUE (section, current_version_id),
+    FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
+
+CREATE TABLE system_runtime_policy_versions (
+    id UUID NOT NULL,
+    section VARCHAR(32) NOT NULL,
+    version_number BIGINT NOT NULL,
+    schema_version SMALLINT NOT NULL,
+    value JSONB DEFAULT '{}'::jsonb NOT NULL,
+    payload_checksum CHAR(64) NOT NULL,
+    supersedes_version_id UUID,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_system_runtime_policy_versions_section CHECK (section IN ('agent_runtime', 'auth', 'quotas')),
+    CONSTRAINT ck_system_runtime_policy_versions_number CHECK (version_number >= 1),
+    CONSTRAINT ck_system_runtime_policy_versions_schema CHECK (schema_version >= 1),
+    CONSTRAINT ck_system_runtime_policy_versions_value_object CHECK (jsonb_typeof(value) = 'object'),
+    CONSTRAINT ck_system_runtime_policy_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT uq_system_runtime_policy_versions_number UNIQUE (section, version_number),
+    CONSTRAINT uq_system_runtime_policy_versions_section_id UNIQUE (section, id),
+    CONSTRAINT uq_system_runtime_policy_versions_exact UNIQUE (section, id, schema_version, payload_checksum),
+    CONSTRAINT fk_system_runtime_policy_versions_policy FOREIGN KEY(section) REFERENCES system_runtime_policies (section) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT fk_system_runtime_policy_versions_supersedes FOREIGN KEY(section, supersedes_version_id) REFERENCES system_runtime_policy_versions (section, id) ON DELETE RESTRICT,
+    FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_system_runtime_policy_versions_created_at ON system_runtime_policy_versions (section, created_at);
+
+ALTER TABLE system_runtime_policies ADD CONSTRAINT fk_system_runtime_policies_current_version FOREIGN KEY(section, current_version_id) REFERENCES system_runtime_policy_versions (section, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE run_runtime_policy_snapshots (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    section VARCHAR(32) NOT NULL,
+    policy_version_id UUID NOT NULL,
+    schema_version SMALLINT NOT NULL,
+    payload_checksum CHAR(64) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (project_id, owner_user_id, run_id, section),
+    CONSTRAINT ck_run_runtime_policy_snapshots_section CHECK (section = 'agent_runtime'),
+    CONSTRAINT ck_run_runtime_policy_snapshots_schema CHECK (schema_version >= 1),
+    CONSTRAINT ck_run_runtime_policy_snapshots_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT fk_run_runtime_policy_snapshots_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_runtime_policy_snapshots_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_runtime_policy_snapshots_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_run_runtime_policy_snapshots_private_run FOREIGN KEY(project_id, owner_user_id, thread_id, run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT fk_run_runtime_policy_snapshots_exact_policy FOREIGN KEY(section, policy_version_id, schema_version, payload_checksum) REFERENCES system_runtime_policy_versions (section, id, schema_version, payload_checksum) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_run_runtime_policy_snapshots_private_run ON run_runtime_policy_snapshots (project_id, owner_user_id, thread_id, run_id);
+
+CREATE OR REPLACE FUNCTION reject_direct_run_runtime_policy_snapshot_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'run runtime policy snapshots cannot be updated or directly deleted'
+            USING ERRCODE = '55000';
+    END IF;
+
+    PERFORM 1
+      FROM runs
+     WHERE project_id = OLD.project_id
+       AND owner_user_id = OLD.owner_user_id
+       AND thread_id = OLD.thread_id
+       AND run_id = OLD.run_id;
+
+    IF FOUND THEN
+        RAISE EXCEPTION 'run runtime policy snapshots cannot be updated or directly deleted'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_system_runtime_policy_catalog_state_updated_at BEFORE UPDATE ON system_runtime_policy_catalog_state FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_system_runtime_policies_updated_at BEFORE UPDATE ON system_runtime_policies FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_system_runtime_policy_versions_immutable BEFORE UPDATE OR DELETE ON system_runtime_policy_versions FOR EACH ROW EXECUTE FUNCTION reject_m7_append_only_mutation();
+
+CREATE TRIGGER trg_run_runtime_policy_snapshots_immutable BEFORE UPDATE OR DELETE ON run_runtime_policy_snapshots FOR EACH ROW EXECUTE FUNCTION reject_direct_run_runtime_policy_snapshot_mutation();
+
+INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
 
 

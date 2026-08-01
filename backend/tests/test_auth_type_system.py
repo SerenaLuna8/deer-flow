@@ -9,6 +9,7 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import jwt as pyjwt
@@ -60,6 +61,11 @@ async def _persistence_engine(migrated_postgres_database_url):
     deps._cached_repo = None
     app = _make_auth_app()
     app.router.lifespan_context = _noop_lifespan
+    from app.system_runtime_settings import AuthPolicyValue
+
+    app.state.system_runtime_policy_materializer = SimpleNamespace(
+        materialize_current=AsyncMock(return_value=AuthPolicyValue()),
+    )
     with TestClient(app) as client:
         assert client.portal is not None
         client.portal.call(init_engine, DatabaseConfig(url=migrated_postgres_database_url))
@@ -775,6 +781,226 @@ def test_api_register_duplicate_returns_structured_400(_persistence_engine):
     assert body["detail"]["code"] == "email_already_exists"
 
 
+def test_email_identity_is_case_insensitive_across_register_and_login(
+    _persistence_engine,
+):
+    """One email address must resolve to exactly one account, regardless of case."""
+
+    _setup_config()
+    client = _get_auth_client()
+    mixed_case = f"Case-{secrets.token_hex(4)}@Example.COM"
+    canonical = mixed_case.lower()
+
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": mixed_case, "password": "Tr0ub4dor3a"},
+    )
+    assert registered.status_code == 201
+    assert registered.json()["email"] == canonical
+
+    duplicate = client.post(
+        "/api/v1/auth/register",
+        json={"email": canonical.upper(), "password": "AnotherStr0ngPwd!"},
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["detail"]["code"] == "email_already_exists"
+
+    logged_in = client.post(
+        "/api/v1/auth/login/local",
+        data={"username": canonical.upper(), "password": "Tr0ub4dor3a"},
+    )
+    assert logged_in.status_code == 200
+
+
+def test_registration_gate_rejects_before_account_creation(
+    monkeypatch,
+    _persistence_engine,
+):
+    """Closing local self-registration must not persist the denied account."""
+
+    from app.gateway.routers import auth as auth_router
+
+    _setup_config()
+    client = _get_auth_client()
+    email = _unique_email("registration-gate")
+
+    from app.system_runtime_settings import AuthPolicyValue
+
+    materialize = AsyncMock(
+        side_effect=(AuthPolicyValue(allow_registration=False), AuthPolicyValue()),
+    )
+    client.app.state.system_runtime_policy_materializer = SimpleNamespace(
+        materialize_current=materialize,
+    )
+    denied = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Tr0ub4dor3a"},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "registration_disabled"
+
+    accepted = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Tr0ub4dor3a"},
+    )
+    assert accepted.status_code == 201
+    assert materialize.await_count == 2
+    auth_router._SETUP_STATUS_CACHE.clear()
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_setup_status_reports_registration_gate(
+    monkeypatch,
+    _persistence_engine,
+    allowed,
+):
+    from app.gateway.routers import auth as auth_router
+
+    _setup_config()
+    client = _get_auth_client()
+    auth_router._SETUP_STATUS_CACHE.clear()
+    from app.system_runtime_settings import AuthPolicyValue
+
+    materialize = AsyncMock(
+        return_value=AuthPolicyValue(allow_registration=allowed),
+    )
+    client.app.state.system_runtime_policy_materializer = SimpleNamespace(
+        materialize_current=materialize,
+    )
+
+    response = client.get("/api/v1/auth/setup-status")
+
+    assert response.status_code == 200
+    assert response.json()["registration_enabled"] is allowed
+    materialize.assert_awaited_once()
+
+
+def test_setup_status_rechecks_registration_gate_when_initialized_state_is_cached(
+    monkeypatch,
+    _persistence_engine,
+):
+    """Hot-reloaded registration policy must not be hidden by the setup cache."""
+
+    from app.gateway.routers import auth as auth_router
+
+    _setup_config()
+    client = _get_auth_client()
+    auth_router._SETUP_STATUS_CACHE.clear()
+    provider = SimpleNamespace(
+        count_admin_users=AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(
+        auth_router,
+        "get_local_provider",
+        lambda: provider,
+    )
+
+    from app.system_runtime_settings import AuthPolicyValue
+
+    materialize = AsyncMock(
+        side_effect=(
+            AuthPolicyValue(allow_registration=True),
+            AuthPolicyValue(allow_registration=False),
+        ),
+    )
+    client.app.state.system_runtime_policy_materializer = SimpleNamespace(
+        materialize_current=materialize,
+    )
+    first = client.get("/api/v1/auth/setup-status")
+    assert first.status_code == 200
+    assert first.json() == {
+        "needs_setup": False,
+        "registration_enabled": True,
+    }
+
+    second = client.get("/api/v1/auth/setup-status")
+    assert second.status_code == 200
+    assert second.json() == {
+        "needs_setup": False,
+        "registration_enabled": False,
+    }
+    assert provider.count_admin_users.await_count == 1
+    assert materialize.await_count == 2
+
+
+def test_local_registration_defaults_to_enabled():
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+
+    assert LocalAuthConfig().allow_registration is True
+    assert AuthAppConfig().local.allow_registration is True
+
+
+@pytest.mark.anyio
+async def test_registration_policy_is_materialized_from_current_database_value() -> None:
+    from fastapi import Request
+
+    from app.gateway.routers import auth as auth_router
+    from app.system_runtime_settings import (
+        AuthPolicyValue,
+        RuntimePolicySection,
+    )
+
+    materialize = AsyncMock(
+        return_value=AuthPolicyValue(allow_registration=False),
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            system_runtime_policy_materializer=SimpleNamespace(
+                materialize_current=materialize,
+            ),
+        ),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/auth/setup-status",
+            "headers": [],
+            "app": app,
+        }
+    )
+
+    assert await auth_router._local_registration_enabled(request) is False
+    materialize.assert_awaited_once_with(RuntimePolicySection.AUTH)
+
+
+@pytest.mark.anyio
+async def test_registration_policy_failure_is_a_secret_free_503() -> None:
+    from fastapi import HTTPException, Request
+
+    from app.gateway.routers import auth as auth_router
+
+    materialize = AsyncMock(
+        side_effect=RuntimeError("postgresql://owner:password@db/private"),
+    )
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            system_runtime_policy_materializer=SimpleNamespace(
+                materialize_current=materialize,
+            ),
+        ),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/auth/setup-status",
+            "headers": [],
+            "app": app,
+        }
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await auth_router._local_registration_enabled(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == {
+        "code": "AUTH_POLICY_UNAVAILABLE",
+        "message": "Authentication policy unavailable",
+    }
+    assert "password" not in str(raised.value.detail)
+
+
 # ── Cookie security: HTTP vs HTTPS ────────────────────────────────────
 
 
@@ -817,6 +1043,159 @@ def test_register_https_cookie_httponly_true_secure_true(_persistence_engine):
     assert "httponly" in cookie_header.lower()
     assert "secure" in cookie_header.lower()
     assert "max-age" in cookie_header.lower()
+
+
+def test_remember_false_keeps_access_and_csrf_cookies_session_only(
+    _persistence_engine,
+):
+    _setup_config()
+    client = _get_auth_client()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("remember-false"),
+            "password": "Tr0ub4dor3a",
+            "remember_me": False,
+        },
+        headers={"host": "localhost:2026"},
+    )
+    assert response.status_code == 201
+
+    cookies = _get_set_cookie_headers(response)
+    access = next(value for value in cookies if "access_token=" in value)
+    csrf = next(value for value in cookies if "csrf_token=" in value)
+    preference = next(value for value in cookies if "deerflow_session_persistent=" in value)
+    assert "max-age" not in access.lower()
+    assert "max-age" not in csrf.lower()
+    assert "max-age" not in preference.lower()
+    assert "deerflow_session_persistent=0" in preference
+
+
+def test_remember_true_allows_persistent_cookies_on_localhost_http(
+    _persistence_engine,
+):
+    _setup_config()
+    client = _get_auth_client()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("remember-localhost"),
+            "password": "Tr0ub4dor3a",
+            "remember_me": True,
+        },
+        headers={"host": "localhost:2026"},
+    )
+    assert response.status_code == 201
+
+    cookies = _get_set_cookie_headers(response)
+    for name in (
+        "access_token=",
+        "csrf_token=",
+        "deerflow_session_persistent=",
+    ):
+        cookie = next(value for value in cookies if name in value)
+        assert "max-age" in cookie.lower()
+
+
+def test_remember_true_stays_session_only_on_public_http(
+    _persistence_engine,
+):
+    _setup_config()
+    client = _get_auth_client()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("remember-public-http"),
+            "password": "Tr0ub4dor3a",
+            "remember_me": True,
+        },
+        headers={"host": "public.example.com"},
+    )
+    assert response.status_code == 201
+
+    cookies = _get_set_cookie_headers(response)
+    for name in (
+        "access_token=",
+        "csrf_token=",
+        "deerflow_session_persistent=",
+    ):
+        cookie = next(value for value in cookies if name in value)
+        assert "max-age" not in cookie.lower()
+
+
+def test_change_password_reissues_access_preference_and_csrf_with_one_lifetime(
+    _persistence_engine,
+):
+    """Changing remember-me policy must keep the double-submit pair aligned."""
+
+    _setup_config()
+    client = _get_auth_client()
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("change-password-remember"),
+            "password": "Tr0ub4dor3a",
+            "remember_me": False,
+        },
+        headers={"host": "localhost:2026"},
+    )
+    assert registered.status_code == 201
+    csrf_token = client.cookies[CSRF_COOKIE_NAME]
+
+    changed = client.post(
+        "/api/v1/auth/change-password",
+        json={
+            "current_password": "Tr0ub4dor3a",
+            "new_password": "N3w-Password-For-Cookies!",
+            "remember_me": True,
+        },
+        headers={
+            "host": "localhost:2026",
+            CSRF_HEADER_NAME: csrf_token,
+        },
+    )
+    assert changed.status_code == 200
+
+    cookies = _get_set_cookie_headers(changed)
+    for name in (
+        "access_token=",
+        "csrf_token=",
+        "deerflow_session_persistent=",
+    ):
+        cookie = next(value for value in cookies if name in value)
+        assert "max-age" in cookie.lower()
+
+
+def test_logout_revokes_and_deletes_all_browser_session_cookies(
+    _persistence_engine,
+):
+    _setup_config()
+    client = _get_auth_client()
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": _unique_email("logout-all-cookies"),
+            "password": "Tr0ub4dor3a",
+            "remember_me": True,
+        },
+        headers={"host": "localhost:2026"},
+    )
+    assert registered.status_code == 201
+
+    logout = client.post(
+        "/api/v1/auth/logout",
+        headers={"host": "localhost:2026"},
+    )
+    assert logout.status_code == 200
+    cookies = _get_set_cookie_headers(logout)
+    for name in (
+        "access_token=",
+        "csrf_token=",
+        "deerflow_session_persistent=",
+    ):
+        deleted = [value for value in cookies if name in value]
+        assert len(deleted) == 1
+        assert "max-age=0" in deleted[0].lower()
 
 
 def test_login_https_sets_secure_cookie(_persistence_engine):

@@ -25,10 +25,11 @@ export const MOCK_SIDECAR_THREAD_ID = "00000000-0000-0000-0000-0000000000aa";
 export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
 
 const MOCK_AUTH_USER = {
-  id: "default",
+  id: "10000000-0000-4000-8000-000000000001",
   email: "default@test.local",
   system_role: "system_admin",
   needs_setup: false,
+  oauth_provider: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -341,7 +342,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ needs_setup: false }),
+        body: JSON.stringify({
+          needs_setup: false,
+          registration_enabled: true,
+        }),
       });
     }
     return route.fallback();
@@ -1230,14 +1234,23 @@ export function handleRunStream(
   route: Route,
   values: Record<string, unknown> = {},
   inputMessages?: unknown[],
+  responseHeaders?: Record<string, string>,
 ) {
-  return fulfillRunStreamValues(route, {
-    ...values,
-    messages: mockStreamMessages(route, inputMessages),
-  });
+  return fulfillRunStreamValues(
+    route,
+    {
+      ...values,
+      messages: mockStreamMessages(route, inputMessages),
+    },
+    responseHeaders,
+  );
 }
 
-function fulfillRunStreamValues(route: Route, values: Record<string, unknown>) {
+function fulfillRunStreamValues(
+  route: Route,
+  values: Record<string, unknown>,
+  responseHeaders?: Record<string, string>,
+) {
   const threadId = runStreamThreadId(route);
   const events = [
     {
@@ -1258,6 +1271,7 @@ function fulfillRunStreamValues(route: Route, values: Record<string, unknown>) {
   return route.fulfill({
     status: 200,
     contentType: "text/event-stream",
+    headers: responseHeaders,
     body,
   });
 }
@@ -1509,6 +1523,7 @@ export async function mockProjectAutomationAPI(
       email: account.email,
       system_role: "user",
       needs_setup: false,
+      oauth_provider: null,
     });
   });
   await page.route(/\/api\/projects(?:\?.*)?$/, (route) => {
@@ -1566,6 +1581,37 @@ export async function mockProjectAutomationAPI(
           },
         ],
         request_id: `agents-${scopeKey}`,
+      });
+    }
+    if (
+      path ===
+        `/api/projects/${projectId}/agents/20000000-0000-4000-8000-000000000001/versions` &&
+      method === "GET"
+    ) {
+      return automationJson(route, {
+        data: [
+          {
+            id: "30000000-0000-4000-8000-000000000001",
+            agent_id: "20000000-0000-4000-8000-000000000001",
+            version_number: 1,
+            workflow_status: "published",
+            description: "Automation release agent",
+            agents_instructions: "",
+            soul: "",
+            identity: "",
+            user_context: "",
+            payload_schema_version: 1,
+            model_ref: "mock-model",
+            tool_groups: [],
+            skill_version_ids: [],
+            mcp_version_ids: [],
+            supersedes_version_id: null,
+            payload_checksum: "automation-agent-v1",
+            created_by_user_id: accountId,
+            created_at: "2026-07-16T00:00:00Z",
+          },
+        ],
+        request_id: `agent-versions-${scopeKey}`,
       });
     }
     if (path.endsWith("/private-work/threads/search") && method === "POST") {

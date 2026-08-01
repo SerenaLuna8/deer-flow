@@ -1,24 +1,32 @@
+ifeq ($(OS),Windows_NT)
+    PYTHON ?= python
+else
+    PYTHON ?= python3
+endif
+
+PNPM = $(PYTHON) ../scripts/pnpm.py
+
 install:
-	pnpm install
+	$(PNPM) install
 
 build:
-	pnpm build
+	$(PNPM) build
 
 dev:
-	pnpm dev
+	$(PNPM) dev
 
 test:
-	pnpm test
+	$(PNPM) test
 
 test-e2e:
-	pnpm test:e2e
+	$(PNPM) test:e2e
 
 lint:
-	pnpm lint
+	$(PNPM) lint
 
 format:
-	pnpm format:write
+	$(PNPM) format:write
 
 build-static:
-	BUILD_MODE=static NEXT_CONFIG_BUILD_OUTPUT=standalone SKIP_ENV_VALIDATION=1 pnpm build
+	BUILD_MODE=static NEXT_CONFIG_BUILD_OUTPUT=standalone SKIP_ENV_VALIDATION=1 $(PNPM) build
 	@if [ -d .next-static/static ]; then mkdir -p .next-static/standalone/.next-static && cp -R .next-static/static .next-static/standalone/.next-static/static; fi

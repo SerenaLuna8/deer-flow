@@ -21,6 +21,7 @@ spec:
         app.kubernetes.io/component: postgres
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      automountServiceAccountToken: false
       securityContext:
         # Non-root: postgres:16 ships a `postgres` user (uid 999). The official
         # entrypoint detects non-root, skips the chown/gosu dance, and runs

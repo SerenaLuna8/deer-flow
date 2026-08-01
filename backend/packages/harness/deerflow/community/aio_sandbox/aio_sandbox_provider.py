@@ -196,7 +196,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         provisioner_url = self._config.get("provisioner_url")
         if provisioner_url:
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
-            return RemoteSandboxBackend(provisioner_url=provisioner_url)
+            return RemoteSandboxBackend(
+                provisioner_url=provisioner_url,
+                api_key=self._config.get("provisioner_api_key", ""),
+            )
 
         logger.info("Using local container sandbox backend")
         return LocalContainerBackend(
@@ -227,6 +230,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
+            "provisioner_api_key": getattr(sandbox_config, "provisioner_api_key", None) or "",
         }
 
     @staticmethod
@@ -246,9 +250,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _reconcile_orphans(self) -> None:
         """Reconcile orphaned containers left by previous process lifecycles.
 
-        On startup, enumerate all running containers matching our prefix
-        and adopt them all into the warm pool.  The idle checker will reclaim
-        containers that nobody re-acquires within ``idle_timeout``.
+        On startup, enumerate running legacy containers matching our prefix
+        and adopt them into the warm pool. Private Run containers are never
+        adopted: their authority requires the exact PostgreSQL Job/Run lease,
+        which this provider-local reconciliation cannot prove.
 
         All containers are adopted unconditionally because we cannot
         distinguish "orphaned" from "actively used by another process"
@@ -271,8 +276,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         current_time = time.time()
         adopted = 0
+        private_skipped = 0
 
         for info in running:
+            if info.sandbox_id.startswith("private-"):
+                private_skipped += 1
+                continue
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
             # Single lock acquisition per container: atomic check-and-insert.
             # Avoids a TOCTOU window between the "already tracked?" check and
@@ -285,6 +294,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(f"Startup reconciliation complete: {adopted} adopted into warm pool, {len(running)} total found")
+        if private_skipped:
+            logger.warning(
+                "Startup reconciliation skipped %d private Run containers; only a lease-aware Worker reaper may destroy or reuse them",
+                private_skipped,
+            )
 
     # ── Deterministic ID ─────────────────────────────────────────────────
 

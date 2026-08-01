@@ -107,6 +107,10 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "zh-CN": "已申请取消运行",
     "en-US": "Run cancellation requested",
   },
+  "run.files_finalized": {
+    "zh-CN": "已完成运行文件入库",
+    "en-US": "Run files finalized",
+  },
   "run.terminal": { "zh-CN": "运行已结束", "en-US": "Run finished" },
   "job.dead": { "zh-CN": "任务已停止重试", "en-US": "Job retries exhausted" },
   "job.requeued": { "zh-CN": "任务已重新入队", "en-US": "Job requeued" },
@@ -117,6 +121,10 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
   "audit.corrected": {
     "zh-CN": "已更正审计记录",
     "en-US": "Audit record corrected",
+  },
+  "system_setting.updated": {
+    "zh-CN": "已更新系统设置",
+    "en-US": "System setting updated",
   },
 };
 
@@ -141,6 +149,7 @@ const TARGET_LABELS: Record<ProjectAuditItem["target_kind"], LocalizedLabel> = {
   job: { "zh-CN": "任务", "en-US": "Job" },
   purge: { "zh-CN": "数据清理", "en-US": "Purge" },
   audit: { "zh-CN": "审计记录", "en-US": "Audit record" },
+  system_setting: { "zh-CN": "系统设置", "en-US": "System setting" },
 };
 
 const OUTCOME_LABELS: Record<ProjectAuditItem["outcome"], LocalizedLabel> = {
@@ -171,6 +180,11 @@ const METADATA_LABELS: Record<string, LocalizedLabel> = {
   },
   job_type: { "zh-CN": "任务类型", "en-US": "Job type" },
   non_interactive: { "zh-CN": "运行方式", "en-US": "Run mode" },
+  created_count: { "zh-CN": "新增文件数", "en-US": "Files created" },
+  modified_count: { "zh-CN": "修改文件数", "en-US": "Files modified" },
+  deleted_count: { "zh-CN": "删除文件数", "en-US": "Files deleted" },
+  artifact_count: { "zh-CN": "产物数", "en-US": "Artifacts" },
+  committed_bytes: { "zh-CN": "提交字节数", "en-US": "Committed bytes" },
   status: { "zh-CN": "结束状态", "en-US": "Terminal status" },
   public_error_code: { "zh-CN": "公开错误代码", "en-US": "Public error code" },
   attempt_count: { "zh-CN": "尝试次数", "en-US": "Attempt count" },
@@ -178,6 +192,11 @@ const METADATA_LABELS: Record<string, LocalizedLabel> = {
   resource_kind: { "zh-CN": "资源类型", "en-US": "Resource type" },
   purged_count: { "zh-CN": "清理数量", "en-US": "Purged count" },
   correction_kind: { "zh-CN": "更正内容", "en-US": "Correction type" },
+  section: { "zh-CN": "设置分区", "en-US": "Section" },
+  revision: { "zh-CN": "修订版本", "en-US": "Revision" },
+  schema_version: { "zh-CN": "结构版本", "en-US": "Schema version" },
+  payload_checksum: { "zh-CN": "配置校验和", "en-US": "Payload checksum" },
+  effect_scope: { "zh-CN": "生效范围", "en-US": "Effect scope" },
 };
 
 const VALUE_LABELS: Record<string, LocalizedLabel> = {
@@ -205,6 +224,18 @@ const VALUE_LABELS: Record<string, LocalizedLabel> = {
   outcome: { "zh-CN": "结果", "en-US": "Outcome" },
   metadata: { "zh-CN": "元数据", "en-US": "Metadata" },
   target: { "zh-CN": "目标", "en-US": "Target" },
+  agent_runtime: { "zh-CN": "Agent 运行时", "en-US": "Agent runtime" },
+  auth: { "zh-CN": "认证", "en-US": "Authentication" },
+  quotas: { "zh-CN": "配额", "en-US": "Quotas" },
+  new_requests_and_runs: {
+    "zh-CN": "新请求与新运行",
+    "en-US": "New requests and runs",
+  },
+  new_requests: { "zh-CN": "新请求", "en-US": "New requests" },
+  next_authoritative_check: {
+    "zh-CN": "下次权威校验",
+    "en-US": "Next authoritative check",
+  },
 };
 
 const METADATA_ORDER = Object.keys(METADATA_LABELS);

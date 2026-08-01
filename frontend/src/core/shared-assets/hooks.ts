@@ -29,6 +29,7 @@ import {
   enableAdminProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
+  getProjectDefaultAgent,
   getProjectSkillCredentialBindings,
   getProjectSkillVersionFile,
   getAdminCredentialRotationStatus,
@@ -46,6 +47,7 @@ import {
   revokeProjectCredential,
   rollbackProjectSystemBinding,
   rollbackAdminProjectSystemBinding,
+  setProjectDefaultAgent,
   submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
   updateProjectAgentInstructions,
@@ -63,6 +65,7 @@ import {
   projectAssetKey,
   projectAssetMutationKey,
   projectAssetVersionsKey,
+  projectDefaultAgentKey,
   projectSkillCredentialBindingsKey,
   projectSkillCredentialBindingsMutationKey,
   projectSkillVersionFileKey,
@@ -85,6 +88,8 @@ import type {
   McpVersionInput,
   ProjectAssetList,
   ProjectCredentialList,
+  ProjectDefaultAgent,
+  ProjectDefaultAgentInput,
   RevokeCredentialInput,
   SkillVersionInput,
   SkillFileForkInput,
@@ -231,6 +236,38 @@ export function useProjectAssets(
         ? listProjectAssets(projectId, kind, signal)
         : listProjectAssets(projectId, kind, signal),
     enabled,
+  });
+}
+
+export function useProjectDefaultAgent(
+  accountId: string,
+  projectId: string,
+  enabled = true,
+) {
+  return useQuery<ProjectDefaultAgent>({
+    queryKey: projectDefaultAgentKey(accountId, projectId),
+    queryFn: ({ signal }) => getProjectDefaultAgent(projectId, signal),
+    enabled,
+  });
+}
+
+export function useSetProjectDefaultAgent(
+  accountId: string,
+  projectId: string,
+) {
+  const queryClient = useQueryClient();
+  const key = projectDefaultAgentKey(accountId, projectId);
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: [...key, "mutation"],
+    mutationFn: (input: ProjectDefaultAgentInput) =>
+      runMutation((signal) => setProjectDefaultAgent(projectId, input, signal)),
+    onSuccess: whenActive((data: ProjectDefaultAgent) => {
+      queryClient.setQueryData(key, data);
+    }),
   });
 }
 

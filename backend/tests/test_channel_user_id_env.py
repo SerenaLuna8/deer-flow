@@ -10,11 +10,14 @@ The sandbox ``bash_tool`` exposes the runtime id as the fixed env var
 
 from types import SimpleNamespace
 
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.tools import (
     CHANNEL_USER_ID_ENV,
     _channel_identity_prefix,
     bash_tool,
 )
+
+_REMOTE_WORKSPACE_PREFIX = f"cd -- {VIRTUAL_PATH_PREFIX}/workspace && "
 
 _THREAD_DATA = {
     "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
@@ -56,13 +59,13 @@ class TestBashToolChannelIdentityPrefix:
         sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "ou_feishu_123"}))
 
         assert len(sandbox.calls) == 1
-        assert sandbox.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=ou_feishu_123; echo hi"
+        assert sandbox.calls[0]["command"] == (f"export {CHANNEL_USER_ID_ENV}=ou_feishu_123; {_REMOTE_WORKSPACE_PREFIX}echo hi")
         assert sandbox.calls[0]["env"] is None
 
-    def test_no_channel_user_id_leaves_command_unchanged(self, monkeypatch):
+    def test_no_channel_user_id_only_adds_remote_workspace_prefix(self, monkeypatch):
         sandbox = _run_bash(monkeypatch, _aio_runtime({"thread_id": "t1"}))
 
-        assert sandbox.calls[0]["command"] == "echo hi"
+        assert sandbox.calls[0]["command"] == f"{_REMOTE_WORKSPACE_PREFIX}echo hi"
         assert sandbox.calls[0]["env"] is None
 
     def test_per_call_identity_follows_current_context(self, monkeypatch):
@@ -79,10 +82,10 @@ class TestBashToolChannelIdentityPrefix:
         sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "x'; rm -rf /tmp/y; '"}))
 
         command = sandbox.calls[0]["command"]
-        assert command.endswith("; echo hi")
+        assert command.endswith(f"; {_REMOTE_WORKSPACE_PREFIX}echo hi")
         # shlex.quote wraps the value; the raw injection payload must not appear
         # as executable syntax outside the quoted region.
-        assert "export " + CHANNEL_USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; echo hi" == command
+        assert "export " + CHANNEL_USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; " + _REMOTE_WORKSPACE_PREFIX + "echo hi" == command
 
     def test_secrets_and_identity_compose(self, monkeypatch):
         """Active skill secrets keep the env= channel; the identity keeps the
@@ -124,8 +127,8 @@ class TestBashToolChannelIdentityPrefix:
         a = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "sender-a"}))
         b = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "b" * 5000}))
 
-        assert a.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=sender-a; echo hi"
-        assert b.calls[0]["command"] == f"unset {CHANNEL_USER_ID_ENV}; echo hi"
+        assert a.calls[0]["command"] == (f"export {CHANNEL_USER_ID_ENV}=sender-a; {_REMOTE_WORKSPACE_PREFIX}echo hi")
+        assert b.calls[0]["command"] == (f"unset {CHANNEL_USER_ID_ENV}; {_REMOTE_WORKSPACE_PREFIX}echo hi")
         assert b.calls[0]["env"] is None
 
     def test_windows_local_sandbox_skips_prefix(self, monkeypatch):

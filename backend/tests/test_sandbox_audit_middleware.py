@@ -1,5 +1,6 @@
 """Tests for SandboxAuditMiddleware - command classification and audit logging."""
 
+import logging
 import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -421,6 +422,22 @@ class TestSandboxAuditMiddlewareWrapToolCall:
         assert called, f"handler SHOULD be called for medium-risk cmd: {cmd!r}"
         assert isinstance(result, ToolMessage)
         assert "warning" in result.content.lower()
+
+    def test_audit_and_warning_do_not_expose_secret_from_command(self, caplog):
+        sentinel = "SANDBOX-COMMAND-SECRET-5VTR"
+        command = f"pip install demo --index-url https://user:{sentinel}@packages.example/simple"
+        request = _make_request(command)
+        handler = _make_handler()
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="deerflow.agents.middlewares.sandbox_audit_middleware",
+        ):
+            result = self.mw.wrap_tool_call(request, handler)
+
+        assert handler.called
+        exposed = f"{result!r}\n{caplog.text}"
+        assert sentinel not in exposed
 
     # --- Safe: handler MUST be called ---
 

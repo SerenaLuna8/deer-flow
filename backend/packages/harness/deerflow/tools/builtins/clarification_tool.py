@@ -1,6 +1,25 @@
-from typing import Literal
+from typing import Literal, Required, TypedDict
 
 from langchain.tools import tool
+
+
+class ClarificationFormField(TypedDict, total=False):
+    """One model-provided field in a bounded structured clarification form."""
+
+    name: Required[str]
+    label: str
+    type: Literal[
+        "text",
+        "textarea",
+        "number",
+        "select",
+        "multi_select",
+        "checkbox",
+        "date",
+    ]
+    required: bool
+    options: list[str]
+    placeholder: str
 
 
 @tool("ask_clarification", parse_docstring=True, return_direct=True)
@@ -15,6 +34,7 @@ def ask_clarification_tool(
     ],
     context: str | None = None,
     options: list[str] | None = None,
+    fields: list[ClarificationFormField] | None = None,
 ) -> str:
     """Ask the user for clarification when you need more information to proceed.
 
@@ -36,8 +56,13 @@ def ask_clarification_tool(
     - You're about to perform a potentially dangerous operation
     - You have a recommendation but need user approval
 
+    Choosing the interaction shape:
+    - One open question -> just `question`
+    - Pick one option -> `options`
+    - Collect several related values -> `fields`
+
     Best practices:
-    - Ask ONE clarification at a time for clarity
+    - Ask ONE clarification at a time for clarity; one form still counts as one clarification
     - Be specific and clear in your question
     - Don't make assumptions when clarification is needed
     - For risky operations, ALWAYS ask for confirmation
@@ -48,6 +73,10 @@ def ask_clarification_tool(
         clarification_type: The type of clarification needed (missing_info, ambiguous_requirement, approach_choice, risk_confirmation, suggestion).
         context: Optional context explaining why clarification is needed. Helps the user understand the situation.
         options: Optional list of choices (for approach_choice or suggestion types). Present clear options for the user to choose from.
+        fields: Optional form fields for collecting multiple related values in one card. Fields take precedence over options.
+            Each field requires a unique `name`; supported types are text, textarea, number, select, multi_select,
+            checkbox, and date. Select fields require options. Keep forms to at most 16 fields, 24 options per
+            field, and 200 characters per field name, label, option, or placeholder.
     """
     # This is a placeholder implementation
     # The actual logic is handled by ClarificationMiddleware which intercepts this tool call

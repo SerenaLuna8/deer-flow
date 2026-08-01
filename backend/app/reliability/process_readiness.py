@@ -47,6 +47,10 @@ async def _scheduler_lock_is_held(session: AsyncSession) -> bool:
                 """SELECT EXISTS (
                  SELECT 1 FROM pg_locks
                  WHERE locktype='advisory' AND granted
+                   AND database=(
+                     SELECT oid FROM pg_database
+                     WHERE datname=current_database()
+                   )
                    AND classid=(((CAST(:key AS bigint) >> 32) & 4294967295)::oid)
                    AND objid=((CAST(:key AS bigint) & 4294967295)::oid)
                    AND objsubid=1)"""

@@ -200,7 +200,7 @@ def test_resolve_model_name_raises_when_no_models_configured(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match="No chat models are configured",
+        match="No chat models are available",
     ):
         lead_agent_module._resolve_model_name("missing-model")
 
@@ -532,10 +532,17 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
         "TitleMiddleware",
         lambda *, app_config: captured.setdefault("title_app_config", app_config) or "title-middleware",
     )
+
+    def _fake_memory_middleware(agent_name=None, *, memory_config, app_config):
+        del agent_name
+        captured["memory_config"] = memory_config
+        captured["memory_app_config"] = app_config
+        return "memory-middleware"
+
     monkeypatch.setattr(
         lead_agent_module,
         "MemoryMiddleware",
-        lambda agent_name=None, *, memory_config: captured.setdefault("memory_config", memory_config) or "memory-middleware",
+        _fake_memory_middleware,
     )
 
     middlewares = lead_agent_module.build_middlewares(
@@ -548,6 +555,7 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
         "app_config": app_config,
         "lazy_init": True,
         "title_app_config": app_config,
+        "memory_app_config": app_config,
         "memory_config": app_config.memory,
     }
     assert middlewares[0] == "base-middleware"
@@ -808,15 +816,11 @@ def test_create_summarization_middleware_threads_resolved_app_config_to_model(mo
     assert captured["app_config"] is fallback_app_config
 
 
-def test_memory_middleware_uses_explicit_memory_config_without_global_read(monkeypatch):
-    from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+def test_memory_middleware_uses_explicit_memory_config_without_global_read():
     from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 
-    def _raise_get_memory_config():
-        raise AssertionError("ambient get_memory_config() must not be used when memory_config is explicit")
+    config = MemoryConfig(enabled=False)
+    middleware = MemoryMiddleware(memory_config=config)
 
-    monkeypatch.setattr(memory_middleware_module, "get_memory_config", _raise_get_memory_config)
-
-    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=False))
-
+    assert middleware._memory_config is config
     assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None

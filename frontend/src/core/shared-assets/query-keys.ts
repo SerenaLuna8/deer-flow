@@ -74,6 +74,13 @@ export function projectAssetKey(
   ] as const;
 }
 
+export function projectDefaultAgentKey(accountId: string, projectId: string) {
+  return [
+    ...projectAssetKey(accountId, projectId, "agents"),
+    "default",
+  ] as const;
+}
+
 export function projectAssetMutationKey(
   accountId: string,
   projectId: string,

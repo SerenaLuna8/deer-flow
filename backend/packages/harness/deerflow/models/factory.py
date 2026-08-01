@@ -2,6 +2,7 @@ import logging
 from collections.abc import Mapping
 
 from langchain.chat_models import BaseChatModel
+from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
@@ -43,44 +44,30 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
-# OpenAI-compatible model classes whose constructor takes ``base_url`` (not ``api_base``)
-# and to which the OpenAI-specific defaults below apply.
-_OPENAI_COMPAT_USE_PATHS = (
-    "langchain_openai:ChatOpenAI",
-    "deerflow.models.patched_openai:PatchedChatOpenAI",
-)
+def _declares_api_base(model_class: type) -> bool:
+    """Return whether a provider declares ``api_base`` as its own field."""
+
+    return "api_base" in getattr(model_class, "model_fields", {})
 
 
-def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_config: dict) -> None:
-    """Enable stream usage for OpenAI-compatible models unless explicitly configured.
-
-    LangChain only auto-enables ``stream_usage`` for OpenAI models when no custom
-    base URL or client is configured. DeerFlow frequently uses OpenAI-compatible
-    gateways, so token usage tracking would otherwise stay empty and the
-    TokenUsageMiddleware would have nothing to log.
-    """
-    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
-        return
-    if "stream_usage" in model_settings_from_config:
-        return
-    if "base_url" in model_settings_from_config or "openai_api_base" in model_settings_from_config:
-        model_settings_from_config["stream_usage"] = True
-
-
-def _normalize_openai_base_url(model_use_path: str, model_settings_from_config: dict) -> None:
+def _normalize_openai_base_url(
+    model_class: type,
+    model_settings_from_config: dict,
+) -> None:
     """Map the common ``api_base`` alias to ``base_url`` for OpenAI-compatible clients.
 
-    ``langchain_openai:ChatOpenAI`` (and the ``PatchedChatOpenAI`` subclass) accept the OpenAI
-    endpoint override as ``base_url`` (with ``openai_api_base`` as a legacy alias). Several
-    providers in ``config.example.yaml`` use ``api_base`` for *other* model classes, so users
-    frequently copy ``api_base`` onto a ChatOpenAI model by mistake. Because ``ModelConfig`` is
+    ``BaseChatOpenAI`` subclasses accept the OpenAI endpoint override as
+    ``base_url`` (with ``openai_api_base`` as a legacy alias). Some provider
+    adapters use ``api_base`` for other model classes, so an administrator may
+    copy ``api_base`` into an OpenAI-compatible model setting by mistake.
+    Because ``ModelConfig`` is
     ``extra="allow"``, the bad key is not caught at config-load time — it is forwarded to the
     constructor, which does not reject it but transfers it into ``model_kwargs``; that is then
     spread into every ``Completions.create()`` call and rejected by the OpenAI SDK at *request*
     time with an opaque ``unexpected keyword argument 'api_base'`` error (and the endpoint override
     is silently dropped). Rename it here so the model works as the user intended.
     """
-    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
+    if not issubclass(model_class, BaseChatOpenAI) or _declares_api_base(model_class):
         return
     if "api_base" not in model_settings_from_config:
         return
@@ -93,7 +80,11 @@ def _normalize_openai_base_url(model_use_path: str, model_settings_from_config: 
     logger.debug("Normalized model config key 'api_base' -> 'base_url' for OpenAI-compatible client.")
 
 
-def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: str, model_settings_from_config: dict) -> None:
+def _warn_unknown_model_settings(
+    model_class,
+    model_name: str,
+    model_settings_from_config: dict,
+) -> None:
     """Warn about config keys the OpenAI client will silently divert into ``model_kwargs``.
 
     ``ModelConfig`` is ``extra="allow"``, so a typo'd key (e.g. ``maxx_tokens``) is not caught at
@@ -103,15 +94,11 @@ def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: s
     opaque ``unexpected keyword argument`` error that is very hard to trace back to a config typo.
 
     This turns that latent failure into an explicit, actionable log line at model-build time. It is
-    **scoped to the OpenAI-compatible family** (``_OPENAI_COMPAT_USE_PATHS``) — that is where the
-    ``model_kwargs`` divert-and-crash behavior occurs and where the known field/alias set is
-    accurate. Other providers (e.g. ``ChatAnthropic``) route extra kwargs differently and would
-    false-positive against this allow-list, so they are intentionally left alone. Best-effort and
-    non-fatal: it only fires when the class exposes a pydantic ``model_fields`` schema, treats both
-    field names and their aliases as valid, and allow-lists the standard passthrough kwargs the
-    factory injects and the OpenAI client accepts.
+    scoped to the ``BaseChatOpenAI`` family, where the divert-and-crash behavior
+    is implemented. Other providers route extra kwargs differently and would
+    false-positive. The warning logs key names only, never their values.
     """
-    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
+    if not issubclass(model_class, BaseChatOpenAI):
         return
     known = getattr(model_class, "model_fields", None)
     if not known:
@@ -149,24 +136,27 @@ def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: s
 # reasoning models (DeepSeek-R1, Doubao-thinking, GPT-5) whose first chunk can
 # legitimately take 90~150s. We default to 240s so the streaming layer rarely
 # trips on long thinking pauses; the LLMErrorHandlingMiddleware still retries
-# (budget=2) if a real stall happens. Users can override per-model in config.yaml.
+# (budget=2) if a real stall happens. Platform administrators can override
+# this per model in the PostgreSQL-backed System Settings catalog.
 _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS: float = 240.0
 
 
-def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from_config: dict) -> None:
+def _apply_stream_chunk_timeout_default(
+    model_class: type,
+    model_settings_from_config: dict,
+) -> None:
     """Inject a generous ``stream_chunk_timeout`` for OpenAI-compatible clients.
 
-    The ``stream_chunk_timeout`` kwarg is specific to ``langchain_openai:ChatOpenAI``
-    and is rejected by other providers' constructors as an unexpected keyword
-    argument. Behaviour:
+    The ``stream_chunk_timeout`` field is declared by ``BaseChatOpenAI`` and
+    inherited by every compatible provider. Other providers must not receive it.
 
-    * OpenAI-compatible path: an explicit value in ``config.yaml`` is preserved.
+    * ``BaseChatOpenAI`` subclass: an explicit database-backed model setting is preserved.
       An explicit ``null`` is dropped upstream by ``model_dump(exclude_none=True)``
       and therefore treated as "unset", so the default is injected.
     * Non-OpenAI path: drop the key so it is never forwarded to an incompatible
       constructor (which would raise ``TypeError: unexpected keyword argument``).
     """
-    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
+    if not issubclass(model_class, BaseChatOpenAI):
         model_settings_from_config.pop("stream_chunk_timeout", None)
         return
     if "stream_chunk_timeout" in model_settings_from_config:
@@ -299,7 +289,7 @@ def create_chat_model(
         effective_wte = {**effective_wte, "thinking": merged_thinking}
     if thinking_enabled and has_thinking_settings:
         if not model_config.supports_thinking:
-            raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
+            raise ValueError(f"Model {name} does not support thinking. A platform administrator must enable `supports_thinking` for its version in System Settings.") from None
         if effective_wte:
             model_settings_from_config.update(effective_wte)
     if not thinking_enabled:
@@ -341,9 +331,8 @@ def create_chat_model(
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
-    _normalize_openai_base_url(model_config.use, model_settings_from_config)
-    _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
-    _apply_stream_chunk_timeout_default(model_config.use, model_settings_from_config)
+    _normalize_openai_base_url(model_class, model_settings_from_config)
+    _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel
@@ -379,7 +368,7 @@ def create_chat_model(
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
 
-    _warn_unknown_model_settings(model_config.use, model_class, name, model_settings_from_config)
+    _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 

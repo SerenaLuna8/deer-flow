@@ -9,6 +9,7 @@ import {
   type CredentialVersionOption,
 } from "@/components/projects/assets/mcp-approval-dialog";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/core/i18n/hooks";
 import type {
   AssetListKind,
   AssetScope,
@@ -84,6 +85,7 @@ export function AssetVersionHistory({
   configureCredentialGrantsVersionId?: string | null;
   onRetryApprovalCredentials?: () => void;
 }) {
+  const { locale, t } = useI18n();
   const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
     null,
   );
@@ -92,7 +94,11 @@ export function AssetVersionHistory({
   >("publish");
 
   if (versions.length === 0) {
-    return <p className="text-muted-foreground text-sm">尚未创建版本。</p>;
+    return (
+      <p className="text-muted-foreground text-sm">
+        {t.adminAssets.version.none}
+      </p>
+    );
   }
 
   return (
@@ -101,7 +107,11 @@ export function AssetVersionHistory({
         {versions.map((version, index) => {
           const isMcp = "mcp_server_id" in version;
           const runtimeBlockReason = isMcp
-            ? mcpVersionRuntimeBlockReason(version, scope)
+            ? mcpVersionRuntimeBlockReason(
+                version,
+                scope,
+                t.adminAssets.runtime,
+              )
             : null;
           const actions =
             kind === "credentials" || !("workflow_status" in version)
@@ -120,11 +130,11 @@ export function AssetVersionHistory({
               <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-3">
                 <ChevronDownIcon aria-hidden className="size-4 shrink-0" />
                 <span className="font-medium">
-                  版本 {version.version_number}
+                  {t.adminAssets.version.number(version.version_number)}
                 </span>
                 <AssetStatusBadge status={versionStatus(version)} />
                 <time className="text-muted-foreground ml-auto text-xs">
-                  {new Date(version.created_at).toLocaleString("zh-CN")}
+                  {new Date(version.created_at).toLocaleString(locale)}
                 </time>
               </summary>
               <div className="border-border/70 space-y-4 border-t p-3">
@@ -138,7 +148,7 @@ export function AssetVersionHistory({
                         title={runtimeBlockReason ?? undefined}
                         onClick={() => onPublish?.(version)}
                       >
-                        发布版本
+                        {t.adminAssets.version.publish}
                       </Button>
                     )}
                     {actions.includes("submit") && isMcp && onSubmit && (
@@ -149,7 +159,7 @@ export function AssetVersionHistory({
                         title={runtimeBlockReason ?? undefined}
                         onClick={() => onSubmit?.(version)}
                       >
-                        提交审批
+                        {t.adminAssets.version.submit}
                       </Button>
                     )}
                     {actions.includes("approve") && isMcp && onApprove && (
@@ -160,7 +170,7 @@ export function AssetVersionHistory({
                         title={runtimeBlockReason ?? undefined}
                         onClick={() => setApprovalVersion(version)}
                       >
-                        批准并发布
+                        {t.adminAssets.version.approve}
                       </Button>
                     )}
                   </div>
@@ -185,7 +195,7 @@ export function AssetVersionHistory({
                         setApprovalVersion(version);
                       }}
                     >
-                      配置 Credential 授权
+                      {t.adminAssets.version.configureGrants}
                     </Button>
                   )}
                 <AssetVersionDiff

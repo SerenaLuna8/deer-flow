@@ -2,25 +2,40 @@
 
 import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { RememberLoginField } from "@/components/auth/remember-login-field";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
-import { getCsrfHeaders } from "@/core/api/fetcher";
+import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  loadRememberLoginPreference,
+  saveRememberLoginPreference,
+} from "@/core/auth/remember-login";
+import {
+  buildRememberingCredentialPayload,
+  buildSetupPasswordChangePayload,
+} from "@/core/auth/remember-payloads";
+import {
+  AUTH_SUBMIT_TIMEOUT_MS,
+  fetchAuth,
+  fetchWithAuthTimeout,
+  isAbortError,
+} from "@/core/auth/request";
 import {
   fetchSetupStatus,
   isSystemAlreadyInitializedError,
 } from "@/core/auth/setup";
-import { parseAuthError } from "@/core/auth/types";
+import { parseAuthError, userSchema } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
-type SetupMode = "loading" | "init_admin" | "change_password";
+type SetupMode = "loading" | "unavailable" | "init_admin" | "change_password";
 
 export default function SetupPage() {
   const router = useRouter();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, applyUser } = useAuth();
   const { theme, resolvedTheme } = useTheme();
   const { t } = useI18n();
   const [mode, setMode] = useState<SetupMode>("loading");
@@ -29,41 +44,56 @@ export default function SetupPage() {
   const [email, setEmail] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const probeControllerRef = useRef<AbortController | null>(null);
+  const submitControllerRef = useRef<AbortController | null>(null);
 
   // --- Change-password mode only ---
   const [currentPassword, setCurrentPassword] = useState("");
 
   useEffect(() => {
-    let cancelled = false;
+    const preference = loadRememberLoginPreference();
+    setRememberMe(preference.rememberMe);
+    if (preference.email) setEmail(preference.email);
+  }, []);
 
+  const checkSetupStatus = useCallback(async () => {
+    probeControllerRef.current?.abort();
+    const controller = new AbortController();
+    probeControllerRef.current = controller;
+    setMode("loading");
+
+    try {
+      const data = await fetchSetupStatus(controller.signal);
+      if (controller.signal.aborted) return;
+      if (data.needs_setup) {
+        setMode("init_admin");
+      } else {
+        router.replace("/login");
+      }
+    } catch (requestError) {
+      if (controller.signal.aborted || isAbortError(requestError)) return;
+      setMode("unavailable");
+    }
+  }, [router]);
+
+  useEffect(() => {
     if (isAuthenticated && user?.needs_setup) {
+      probeControllerRef.current?.abort();
       setMode("change_password");
     } else if (!isAuthenticated) {
-      // Check if the system has no users yet
-      void fetchSetupStatus()
-        .then((data: { needs_setup?: boolean }) => {
-          if (cancelled) return;
-          if (data.needs_setup) {
-            setMode("init_admin");
-          } else {
-            // System already set up and user is not logged in — go to login
-            router.replace("/login");
-          }
-        })
-        .catch(() => {
-          if (!cancelled) router.replace("/login");
-        });
+      void checkSetupStatus();
     } else {
-      // Authenticated but needs_setup is false — already set up
+      probeControllerRef.current?.abort();
       router.replace("/workspace");
     }
-
     return () => {
-      cancelled = true;
+      probeControllerRef.current?.abort();
+      submitControllerRef.current?.abort();
     };
-  }, [isAuthenticated, user, router]);
+  }, [checkSetupStatus, isAuthenticated, user, router]);
 
   // ── Init-admin handler ─────────────────────────────────────────────
   const handleInitAdmin = async (e: React.SubmitEvent) => {
@@ -76,19 +106,29 @@ export default function SetupPage() {
     }
 
     setLoading(true);
+    submitControllerRef.current?.abort();
+    const controller = new AbortController();
+    submitControllerRef.current = controller;
     try {
-      const res = await fetch("/api/v1/auth/initialize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          email,
-          password: newPassword,
-        }),
-      });
+      const res = await fetchAuth(
+        "/api/v1/auth/initialize",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify(
+            buildRememberingCredentialPayload({
+              email,
+              password: newPassword,
+              rememberMe,
+            }),
+          ),
+        },
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
-        const data = await res.json();
+        const data: unknown = await res.json();
         if (isSystemAlreadyInitializedError(data)) {
           router.replace("/login");
           return;
@@ -98,11 +138,22 @@ export default function SetupPage() {
         return;
       }
 
-      router.push("/workspace");
-    } catch {
+      const parsed = userSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        setError(t.setup.networkError);
+        return;
+      }
+      saveRememberLoginPreference({ email, rememberMe });
+      await applyUser(parsed.data);
+      window.location.replace("/workspace");
+    } catch (requestError) {
+      if (controller.signal.aborted || isAbortError(requestError)) return;
       setError(t.setup.networkError);
     } finally {
-      setLoading(false);
+      if (submitControllerRef.current === controller) {
+        submitControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -121,33 +172,61 @@ export default function SetupPage() {
     }
 
     setLoading(true);
+    submitControllerRef.current?.abort();
+    const controller = new AbortController();
+    submitControllerRef.current = controller;
     try {
-      const res = await fetch("/api/v1/auth/change-password", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getCsrfHeaders(),
+      const res = await fetchWithAuthTimeout(
+        fetchWithAuth,
+        "/api/v1/auth/change-password",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify(
+            buildSetupPasswordChangePayload({
+              currentPassword,
+              email,
+              newPassword,
+              rememberMe,
+            }),
+          ),
         },
-        credentials: "include",
-        body: JSON.stringify({
-          current_password: currentPassword,
-          new_password: newPassword,
-          new_email: email || undefined,
-        }),
-      });
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
-        const data = await res.json();
+        const data: unknown = await res.json();
         const authError = parseAuthError(data);
         setError(authError.message);
         return;
       }
 
-      router.push("/workspace");
-    } catch {
+      saveRememberLoginPreference({
+        email: email.length > 0 ? email : (user?.email ?? ""),
+        rememberMe,
+      });
+      // The mutation already rotated every old sid and installed the fresh
+      // access/CSRF cookie pair. Cross the boundary with a document navigation
+      // so a transient follow-up /me probe can never invite resubmission of the
+      // now-invalid old password.
+      window.location.replace("/workspace");
+    } catch (requestError) {
+      if (
+        controller.signal.aborted ||
+        isAbortError(requestError) ||
+        requestError instanceof AuthRequiredError
+      ) {
+        return;
+      }
       setError(t.setup.networkError);
     } finally {
-      setLoading(false);
+      if (submitControllerRef.current === controller) {
+        submitControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -157,6 +236,23 @@ export default function SetupPage() {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <p className="text-muted-foreground text-sm">{t.setup.loading}</p>
+      </div>
+    );
+  }
+
+  if (mode === "unavailable") {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+        <p className="text-muted-foreground text-sm">
+          {t.login.registrationUnavailable}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => void checkSetupStatus()}
+        >
+          {t.login.retry}
+        </Button>
       </div>
     );
   }
@@ -225,6 +321,12 @@ export default function SetupPage() {
                 minLength={8}
               />
             </div>
+            <RememberLoginField
+              checked={rememberMe}
+              disabled={loading}
+              label={t.login.rememberMe}
+              onCheckedChange={setRememberMe}
+            />
             {error && <p className="ms-1 text-sm text-red-500">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? t.setup.creatingAccount : t.setup.createAdminAccount}
@@ -286,6 +388,12 @@ export default function SetupPage() {
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
             minLength={8}
+          />
+          <RememberLoginField
+            checked={rememberMe}
+            disabled={loading}
+            label={t.login.rememberMe}
+            onCheckedChange={setRememberMe}
           />
           {error && <p className="text-sm text-red-500">{error}</p>}
           <Button type="submit" className="w-full" disabled={loading}>

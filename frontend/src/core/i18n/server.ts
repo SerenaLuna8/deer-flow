@@ -1,6 +1,11 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 
-import { DEFAULT_LOCALE, normalizeLocale, type Locale } from "./locale";
+import {
+  DEFAULT_LOCALE,
+  normalizeLocale,
+  resolveRequestLocale,
+  type Locale,
+} from "./locale";
 import { translations } from "./translations";
 
 export async function detectLocaleServer(): Promise<Locale> {
@@ -14,7 +19,8 @@ export async function detectLocaleServer(): Promise<Locale> {
     }
   }
 
-  return normalizeLocale(locale);
+  const requestHeaders = await headers();
+  return resolveRequestLocale(locale, requestHeaders.get("accept-language"));
 }
 
 export async function setLocale(locale: string | Locale): Promise<Locale> {

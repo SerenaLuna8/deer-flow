@@ -77,6 +77,31 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
   return hasUsage ? cumulative : null;
 }
 
+/** Validate one cumulative backend token snapshot into the UI shape. */
+export function normalizeTokenUsage(value: unknown): TokenUsage | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const inputTokens = nonNegativeNumber(record.input_tokens);
+  const outputTokens = nonNegativeNumber(record.output_tokens);
+  const totalTokens = nonNegativeNumber(record.total_tokens);
+  if (
+    inputTokens === undefined ||
+    outputTokens === undefined ||
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return { inputTokens, outputTokens, totalTokens };
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 export function hasNonZeroUsage(
   usage: TokenUsage | null | undefined,
 ): usage is TokenUsage {

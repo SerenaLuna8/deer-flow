@@ -2,7 +2,7 @@
 
 import { LockKeyholeIcon } from "lucide-react";
 
-import { useMainProjectChat } from "@/components/projects/private-work/use-main-project-chat";
+import { useProjectNewChat } from "@/components/projects/private-work/use-project-new-chat";
 import { Button } from "@/components/ui/button";
 import {
   projectPrivateWorkEntryEnabled,
@@ -63,7 +63,7 @@ function ProjectPrivateWorkCtaEnabled({
   readinessLoading: boolean;
   readinessError: boolean;
 }) {
-  const mainChat = useMainProjectChat(project);
+  const newChat = useProjectNewChat(project);
 
   return (
     <section className="border-border/70 bg-muted/30 rounded-2xl border p-6">
@@ -73,7 +73,11 @@ function ProjectPrivateWorkCtaEnabled({
             <LockKeyholeIcon size={18} /> 项目内私有工作
           </h2>
           <p className="text-muted-foreground mt-2 text-sm">
-            使用 Main 开始只属于你的项目对话。
+            使用
+            {newChat.defaultAgentName
+              ? ` ${newChat.defaultAgentName} `
+              : "项目默认 Agent"}
+            开始只属于你的项目对话。
           </p>
           {!entryEnabled && (
             <p role="status" className="text-muted-foreground mt-1 text-xs">
@@ -87,13 +91,13 @@ function ProjectPrivateWorkCtaEnabled({
         </div>
         <Button
           type="button"
-          disabled={!entryEnabled || mainChat.isCreating || mainChat.isLoading}
+          disabled={!entryEnabled || newChat.isCreating || newChat.isLoading}
           aria-disabled={
-            !entryEnabled || mainChat.isCreating || mainChat.isLoading
+            !entryEnabled || newChat.isCreating || newChat.isLoading
           }
-          onClick={() => void mainChat.startMainChat()}
+          onClick={() => void newChat.startNewChat()}
         >
-          {mainChat.isCreating ? "正在创建…" : "开始私有对话"}
+          {newChat.isCreating ? "正在创建…" : "开始私有对话"}
         </Button>
       </div>
     </section>

@@ -11,6 +11,7 @@ failures never bubble into the stream loop.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -56,6 +57,34 @@ class _FakeStore:
 class _BoomStore:
     async def put_batch(self, events):
         raise RuntimeError("db down")
+
+
+class _BlockingFailOnceScopedStore:
+    def __init__(self):
+        self.first_call_started = asyncio.Event()
+        self.release_first_call = asyncio.Event()
+        self.calls: list[tuple[list[dict], object]] = []
+
+    async def put_batch(self, events, *, scope):
+        self.calls.append(([dict(event) for event in events], scope))
+        if len(self.calls) == 1:
+            self.first_call_started.set()
+            await self.release_first_call.wait()
+            raise RuntimeError("transient db error")
+        return list(events)
+
+
+class _BlockingCancelOnceStore:
+    def __init__(self):
+        self.first_call_started = asyncio.Event()
+        self.calls: list[list[dict]] = []
+
+    async def put_batch(self, events):
+        self.calls.append([dict(event) for event in events])
+        if len(self.calls) == 1:
+            self.first_call_started.set()
+            await asyncio.Event().wait()
+        return list(events)
 
 
 def _running_step(task_id="call_1", message_index=1):
@@ -152,6 +181,53 @@ async def test_store_errors_do_not_propagate():
     buffer = _SubagentEventBuffer(_BoomStore(), "t", "r")
     await buffer.add(_running_step())
     await buffer.flush()  # BoomStore raises inside; must be swallowed
+
+
+@pytest.mark.asyncio
+async def test_failed_flush_prepends_old_batch_before_new_events_and_preserves_scope():
+    store = _BlockingFailOnceScopedStore()
+    scope = object()
+    buffer = _SubagentEventBuffer(store, "thread_1", "run_1", scope)
+    await buffer.add(_running_step(message_index=1))
+
+    failed_flush = asyncio.create_task(buffer.flush())
+    await store.first_call_started.wait()
+    await buffer.add(_running_step(message_index=2))
+    store.release_first_call.set()
+    await failed_flush
+
+    assert [event["metadata"]["message_index"] for event in buffer._pending] == [1, 2]
+
+    await buffer.flush()
+
+    assert [[event["metadata"]["message_index"] for event in batch] for batch, _scope in store.calls] == [[1], [1, 2]]
+    assert all(call_scope is scope for _batch, call_scope in store.calls)
+    assert buffer._pending == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_flush_rebuffers_batch_before_reraising_for_final_retry():
+    store = _BlockingCancelOnceStore()
+    buffer = _SubagentEventBuffer(store, "thread_1", "run_1")
+    await buffer.add(_running_step(message_index=1))
+
+    cancelled_flush = asyncio.create_task(buffer.flush())
+    await store.first_call_started.wait()
+    await buffer.add(_running_step(message_index=2))
+    cancelled_flush.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_flush
+
+    assert [event["metadata"]["message_index"] for event in buffer._pending] == [1, 2]
+
+    await buffer.flush()
+
+    assert [[event["metadata"]["message_index"] for event in batch] for batch in store.calls] == [
+        [1],
+        [1, 2],
+    ]
+    assert buffer._pending == []
 
 
 @pytest.mark.asyncio

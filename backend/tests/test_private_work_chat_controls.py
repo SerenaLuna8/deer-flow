@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import copy
+import inspect
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -8,14 +8,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.base import empty_checkpoint, uuid6
+from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Overwrite
 from pydantic import ValidationError
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
+from app.gateway.deps import get_current_agent_runtime_config
 from app.gateway.routers.private_work import (
     PrivateSuggestionsRequest,
     PrivateThreadCompactRequest,
+    compact_private_thread,
 )
 from app.private_work.errors import (
     PrivateWorkConflict,
@@ -24,7 +27,25 @@ from app.private_work.errors import (
 )
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import ThreadAgentRef
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, get_app_config
+
+
+def _app_config_with_models(*model_names: str) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+            "models": [
+                {
+                    "name": name,
+                    "use": "tests.fake:Model",
+                    "model": f"provider/{name}",
+                }
+                for name in model_names
+            ],
+        }
+    )
 
 
 @pytest_asyncio.fixture
@@ -45,10 +66,14 @@ def _config(thread_id: str) -> dict[str, object]:
     }
 
 
-def _message_checkpoint(messages: list[object]) -> dict[str, object]:
+def _message_checkpoint(
+    messages: list[object],
+) -> tuple[dict[str, object], dict[str, object]]:
     checkpoint = empty_checkpoint()
+    message_version = checkpoint["id"]
+    checkpoint["channel_versions"] = {"messages": message_version}
     checkpoint["channel_values"] = {"messages": messages}
-    return checkpoint
+    return checkpoint, {"messages": message_version}
 
 
 async def _create_service(
@@ -89,6 +114,80 @@ def test_chat_control_requests_reject_client_agent_and_conversation_authority() 
                 "model_name": "forged-model",
             }
         )
+
+
+def test_manual_compact_depends_on_current_database_agent_policy() -> None:
+    dependency = inspect.signature(compact_private_thread).parameters["config"].default
+    assert dependency.dependency is get_current_agent_runtime_config
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_materializes_current_dedicated_model() -> None:
+    from app.private_work.chat_controls import ProjectChatControlService
+
+    service = object.__new__(ProjectChatControlService)
+    exact_model = _app_config_with_models("summary-live").models[0]
+    materialize = AsyncMock(return_value=exact_model)
+    service._model_materializer = SimpleNamespace(
+        materialize_active=materialize,
+    )
+    service._resolve_agent_authority = AsyncMock(
+        side_effect=AssertionError("dedicated model must not read Agent authority"),
+    )
+    source = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "test"},
+            "models": [
+                {
+                    "name": "stale-yaml-model",
+                    "use": "tests.fake:Model",
+                    "model": "provider/stale",
+                }
+            ],
+            "summarization": {"model_name": "summary-live"},
+        }
+    )
+
+    runtime = await service._materialize_compaction_config(
+        SimpleNamespace(request_id="request-compact"),
+        "thread-a",
+        source,
+    )
+
+    materialize.assert_awaited_once_with("summary-live")
+    assert [model.name for model in runtime.models] == ["summary-live"]
+    assert runtime.summarization.model_name == "summary-live"
+    assert [model.name for model in source.models] == ["stale-yaml-model"]
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_falls_back_to_current_thread_agent_model() -> None:
+    from app.private_work.chat_controls import ProjectChatControlService
+
+    service = object.__new__(ProjectChatControlService)
+    exact_model = _app_config_with_models("agent-live").models[0]
+    materialize = AsyncMock(return_value=exact_model)
+    resolve_agent = AsyncMock(
+        return_value=SimpleNamespace(
+            payload=SimpleNamespace(model_ref="agent-live"),
+        )
+    )
+    service._model_materializer = SimpleNamespace(
+        materialize_active=materialize,
+    )
+    service._resolve_agent_authority = resolve_agent
+    source = _app_config_with_models("stale-yaml-model")
+
+    runtime = await service._materialize_compaction_config(
+        SimpleNamespace(request_id="request-compact"),
+        "thread-a",
+        source,
+    )
+
+    resolve_agent.assert_awaited_once()
+    materialize.assert_awaited_once_with("agent-live")
+    assert [model.name for model in runtime.models] == ["agent-live"]
+    assert runtime.summarization.model_name is None
 
 
 @pytest.mark.asyncio
@@ -160,15 +259,11 @@ async def test_compact_rechecks_head_and_refuses_stale_prepared_write(
     source_id = controls.ProjectChatControlService._checkpoint_id(source)
     assert source_id is not None
     mutated_checkpoint_id: str | None = None
-    prepared_checkpoint_id: str | None = None
     initial_items = [item async for item in raw.alist(_config(thread_id))]
 
     async def prepare_with_concurrent_head_change(reader, selected_thread_id, **_kwargs):
-        nonlocal mutated_checkpoint_id, prepared_checkpoint_id
-        captured = await reader.aget_tuple(_config(selected_thread_id))
-        prepared_checkpoint = copy.deepcopy(captured.checkpoint)
-        prepared_checkpoint_id = str(uuid6())
-        prepared_checkpoint["id"] = prepared_checkpoint_id
+        nonlocal mutated_checkpoint_id
+        captured = await reader.aget(_config(selected_thread_id))
 
         mutation = await saver.aput(
             _config(selected_thread_id),
@@ -187,10 +282,11 @@ async def test_compact_rechecks_head_and_refuses_stale_prepared_write(
                 preserved_message_count=1,
                 summary_updated=True,
             ),
-            write_config=_config(selected_thread_id),
-            checkpoint=prepared_checkpoint,
-            metadata={"source": "update", "step": 2, "parents": {}},
-            new_versions={},
+            write_config=captured.config,
+            update_values={
+                "messages": Overwrite([]),
+                "summary_text": "prepared",
+            },
         )
 
     monkeypatch.setattr(
@@ -205,14 +301,12 @@ async def test_compact_rechecks_head_and_refuses_stale_prepared_write(
             thread_id,
             force=True,
             keep=None,
-            app_config=AppConfig(),
+            app_config=_app_config_with_models("test-model"),
         )
 
     current = await saver.aget_tuple(_config(thread_id))
     assert controls.ProjectChatControlService._checkpoint_id(current) == mutated_checkpoint_id
     final_items = [item async for item in raw.alist(_config(thread_id))]
-    final_ids = {controls.ProjectChatControlService._checkpoint_id(item) for item in final_items}
-    assert prepared_checkpoint_id not in final_ids
     assert len(final_items) == len(initial_items) + 1
 
 
@@ -223,16 +317,19 @@ async def test_branch_copies_only_the_selected_scoped_turn(
 ) -> None:
     service, threads, scoped, _, thread_id = await _create_service(seed)
     saver = scoped.for_context(seed.owner_a)
+    root = await saver.aget_tuple(_config(thread_id))
+    assert root is not None
+    checkpoint, new_versions = _message_checkpoint(
+        [
+            HumanMessage(content="branch request", id="human-branch"),
+            AIMessage(content="branch response", id="ai-branch"),
+        ]
+    )
     await saver.aput(
-        _config(thread_id),
-        _message_checkpoint(
-            [
-                HumanMessage(content="branch request", id="human-branch"),
-                AIMessage(content="branch response", id="ai-branch"),
-            ]
-        ),
+        root.config,
+        checkpoint,
         {"source": "loop", "step": 1, "parents": {}},
-        {},
+        new_versions,
     )
 
     record, checkpoint_id = await service.branch(
@@ -249,9 +346,12 @@ async def test_branch_copies_only_the_selected_scoped_turn(
     target = await threads.get(seed.owner_a, record.thread_id)
     assert target is not None
     assert target.display_name == "Scoped branch"
-    target_item = await saver.aget_tuple(_config(record.thread_id))
-    assert target_item is not None
-    assert [message.id for message in service._messages(target_item)] == [
+    target_state = await service._state(
+        seed.owner_a,
+        get_app_config(),
+        as_node="branch_test",
+    ).aget(_config(record.thread_id))
+    assert [message.id for message in target_state.values["messages"]] == [
         "human-branch",
         "ai-branch",
     ]
@@ -264,6 +364,7 @@ async def test_branch_copies_only_the_selected_scoped_turn(
 async def test_regenerate_uses_latest_ai_scoped_checkpoint_and_durable_run_event(
     seed: M4ThreadSeed,
 ) -> None:
+    run_id = str(uuid.uuid4())
     events = SimpleNamespace(
         list_messages=AsyncMock(
             return_value=[
@@ -274,7 +375,7 @@ async def test_regenerate_uses_latest_ai_scoped_checkpoint_and_durable_run_event
                         "id": "ai-latest",
                         "content": "latest answer",
                     },
-                    "run_id": "run-authoritative",
+                    "run_id": run_id,
                 }
             ]
         )
@@ -283,28 +384,36 @@ async def test_regenerate_uses_latest_ai_scoped_checkpoint_and_durable_run_event
         seed,
         run_event_store=events,
     )
+    async with seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(run_id=run_id, status="success"),
+        )
     saver = scoped.for_context(seed.owner_a)
     root = await saver.aget_tuple(_config(thread_id))
     assert root is not None
     root_id = service._checkpoint_id(root)
-    await saver.aput(
-        _config(thread_id),
-        _message_checkpoint([HumanMessage(content="first question", id="human-first")]),
+    checkpoint, new_versions = _message_checkpoint([HumanMessage(content="first question", id="human-first")])
+    first_turn_config = await saver.aput(
+        root.config,
+        checkpoint,
         {"source": "loop", "step": 1, "parents": {}},
-        {},
+        new_versions,
+    )
+    checkpoint, new_versions = _message_checkpoint(
+        [
+            HumanMessage(content="first question", id="human-first"),
+            AIMessage(content="older answer", id="ai-older"),
+            HumanMessage(content="latest question", id="human-latest"),
+            AIMessage(content="latest answer", id="ai-latest"),
+        ]
     )
     await saver.aput(
-        _config(thread_id),
-        _message_checkpoint(
-            [
-                HumanMessage(content="first question", id="human-first"),
-                AIMessage(content="older answer", id="ai-older"),
-                HumanMessage(content="latest question", id="human-latest"),
-                AIMessage(content="latest answer", id="ai-latest"),
-            ]
-        ),
+        first_turn_config,
+        checkpoint,
         {"source": "loop", "step": 2, "parents": {}},
-        {},
+        new_versions,
     )
 
     with pytest.raises(PrivateWorkConflict):
@@ -320,10 +429,10 @@ async def test_regenerate_uses_latest_ai_scoped_checkpoint_and_durable_run_event
         message_id="ai-latest",
     )
 
-    assert payload["target_run_id"] == "run-authoritative"
+    assert payload["target_run_id"] == run_id
     assert payload["metadata"] == {
         "regenerate_from_message_id": "ai-latest",
-        "regenerate_from_run_id": "run-authoritative",
+        "regenerate_from_run_id": run_id,
         "regenerate_checkpoint_id": payload["checkpoint"]["checkpoint_id"],
     }
     assert payload["input"]["messages"][0]["id"] == "human-latest"
@@ -337,6 +446,294 @@ async def test_regenerate_uses_latest_ai_scoped_checkpoint_and_durable_run_event
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_regenerate_follows_the_head_parent_lineage_not_a_newer_sibling(
+    seed: M4ThreadSeed,
+) -> None:
+    run_id = str(uuid.uuid4())
+    events = SimpleNamespace(
+        list_messages=AsyncMock(
+            return_value=[
+                {
+                    "event_type": "llm.ai.response",
+                    "content": {"type": "ai", "id": "ai-target", "content": "answer"},
+                    "run_id": run_id,
+                }
+            ]
+        )
+    )
+    service, _, scoped, _, thread_id = await _create_service(seed, run_event_store=events)
+    saver = scoped.for_context(seed.owner_a)
+    root = await saver.aget_tuple(_config(thread_id))
+    assert root is not None
+    async with seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(run_id=run_id, status="success"),
+        )
+
+    base_checkpoint, base_versions = _message_checkpoint(
+        [
+            HumanMessage(content="first", id="human-first"),
+            AIMessage(content="first answer", id="ai-first"),
+        ]
+    )
+    base_config = await saver.aput(
+        _config(thread_id),
+        base_checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        base_versions,
+    )
+    sibling_checkpoint, sibling_versions = _message_checkpoint(
+        [
+            HumanMessage(content="first", id="human-first"),
+            AIMessage(content="first answer", id="ai-first"),
+            HumanMessage(content="sibling", id="human-sibling"),
+            AIMessage(content="sibling answer", id="ai-sibling"),
+        ]
+    )
+    sibling_config = await saver.aput(
+        base_config,
+        sibling_checkpoint,
+        {"source": "loop", "step": 2, "parents": {}},
+        sibling_versions,
+    )
+    head_checkpoint, head_versions = _message_checkpoint(
+        [
+            HumanMessage(content="first", id="human-first"),
+            AIMessage(content="first answer", id="ai-first"),
+            HumanMessage(content="target", id="human-target"),
+            AIMessage(content="answer", id="ai-target"),
+        ]
+    )
+    await saver.aput(
+        base_config,
+        head_checkpoint,
+        {"source": "loop", "step": 2, "parents": {}},
+        head_versions,
+    )
+
+    payload = await service.prepare_regenerate(
+        seed.owner_a,
+        thread_id,
+        message_id="ai-target",
+    )
+
+    assert payload["checkpoint"]["checkpoint_id"] == base_config["configurable"]["checkpoint_id"]
+    assert payload["checkpoint"]["checkpoint_id"] != sibling_config["configurable"]["checkpoint_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_edit_regenerate_returns_a_new_human_message_and_strict_edit_metadata(
+    seed: M4ThreadSeed,
+) -> None:
+    run_id = str(uuid.uuid4())
+    events = SimpleNamespace(
+        list_messages=AsyncMock(
+            return_value=[
+                {
+                    "event_type": "llm.ai.response",
+                    "content": {"type": "ai", "id": "ai-edit", "content": "answer"},
+                    "run_id": run_id,
+                }
+            ]
+        )
+    )
+    service, _, scoped, _, thread_id = await _create_service(seed, run_event_store=events)
+    async with seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(run_id=run_id, status="success"),
+        )
+    saver = scoped.for_context(seed.owner_a)
+    root = await saver.aget_tuple(_config(thread_id))
+    assert root is not None
+    checkpoint, versions = _message_checkpoint(
+        [
+            HumanMessage(
+                content="old question",
+                id="human-edit",
+                additional_kwargs={
+                    "run_id": run_id,
+                    "files": [{"path": "/uploads/source.txt"}],
+                    "private": "drop",
+                },
+            ),
+            AIMessage(content="answer", id="ai-edit"),
+        ]
+    )
+    await saver.aput(
+        root.config,
+        checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        versions,
+    )
+
+    payload = await service.prepare_edit_regenerate(
+        seed.owner_a,
+        thread_id,
+        human_message_id="human-edit",
+        replacement_text="  revised question  ",
+    )
+
+    replacement = payload["input"]["messages"][0]
+    assert replacement["id"] == payload["replacement_human_message_id"]
+    assert replacement["content"] == [{"type": "text", "text": "revised question"}]
+    assert replacement["additional_kwargs"] == {
+        "files": [{"path": "/uploads/source.txt"}],
+    }
+    assert payload["source_message_ids"] == ["human-edit", "ai-edit"]
+    assert payload["target_run_id"] == run_id
+    assert payload["metadata"] == {
+        "replay_kind": "edit",
+        "regenerate_from_message_id": "ai-edit",
+        "regenerate_from_run_id": run_id,
+        "regenerate_checkpoint_id": payload["checkpoint"]["checkpoint_id"],
+        "edit_from_message_id": "human-edit",
+        "edit_message_id": payload["replacement_human_message_id"],
+        "edit_version_group_id": "human-edit",
+    }
+    with pytest.raises(PrivateWorkNotFound):
+        await service.prepare_edit_regenerate(
+            seed.owner_b,
+            thread_id,
+            human_message_id="human-edit",
+            replacement_text="other owner",
+        )
+    with pytest.raises(PrivateWorkNotFound):
+        await service.prepare_edit_regenerate(
+            seed.project_b_owner_a,
+            thread_id,
+            human_message_id="human-edit",
+            replacement_text="other project",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_edit_regenerate_rejects_an_active_goal(
+    seed: M4ThreadSeed,
+) -> None:
+    run_id = str(uuid.uuid4())
+    events = SimpleNamespace(
+        list_messages=AsyncMock(
+            return_value=[
+                {
+                    "event_type": "llm.ai.response",
+                    "content": {"type": "ai", "id": "ai-goal", "content": "answer"},
+                    "run_id": run_id,
+                }
+            ]
+        )
+    )
+    service, _, scoped, _, thread_id = await _create_service(seed, run_event_store=events)
+    async with seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(run_id=run_id, status="success"),
+        )
+    saver = scoped.for_context(seed.owner_a)
+    root = await saver.aget_tuple(_config(thread_id))
+    assert root is not None
+    checkpoint, versions = _message_checkpoint(
+        [
+            HumanMessage(content="question", id="human-goal"),
+            AIMessage(content="answer", id="ai-goal"),
+        ]
+    )
+    checkpoint["channel_values"]["goal"] = {"status": "active"}
+    checkpoint["channel_versions"]["goal"] = checkpoint["id"]
+    versions["goal"] = checkpoint["id"]
+    await saver.aput(
+        root.config,
+        checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        versions,
+    )
+    with pytest.raises(PrivateWorkConflict):
+        await service.prepare_edit_regenerate(
+            seed.owner_a,
+            thread_id,
+            human_message_id="human-goal",
+            replacement_text="revised",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+@pytest.mark.parametrize("blocking_status", ["running", "error"])
+async def test_edit_regenerate_rejects_active_work_or_a_non_success_source(
+    seed: M4ThreadSeed,
+    blocking_status: str,
+) -> None:
+    source_run_id = str(uuid.uuid4())
+    events = SimpleNamespace(
+        list_messages=AsyncMock(
+            return_value=[
+                {
+                    "event_type": "llm.ai.response",
+                    "content": {
+                        "type": "ai",
+                        "id": "ai-blocked",
+                        "content": "answer",
+                    },
+                    "run_id": source_run_id,
+                }
+            ]
+        )
+    )
+    service, _, scoped, _, thread_id = await _create_service(
+        seed,
+        run_event_store=events,
+    )
+    async with seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(
+                run_id=source_run_id,
+                status="error" if blocking_status == "error" else "success",
+            ),
+        )
+        if blocking_status == "running":
+            await PrivateRunRepository(session).create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(
+                    run_id=str(uuid.uuid4()),
+                    status="running",
+                ),
+            )
+    saver = scoped.for_context(seed.owner_a)
+    root = await saver.aget_tuple(_config(thread_id))
+    assert root is not None
+    checkpoint, versions = _message_checkpoint(
+        [
+            HumanMessage(content="question", id="human-blocked"),
+            AIMessage(content="answer", id="ai-blocked"),
+        ]
+    )
+    await saver.aput(
+        root.config,
+        checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        versions,
+    )
+
+    with pytest.raises(PrivateWorkConflict):
+        await service.prepare_edit_regenerate(
+            seed.owner_a,
+            thread_id,
+            human_message_id="human-blocked",
+            replacement_text="revised",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_suggestions_use_authoritative_checkpoint_and_thread_agent_model(
     seed: M4ThreadSeed,
     monkeypatch: pytest.MonkeyPatch,
@@ -345,16 +742,17 @@ async def test_suggestions_use_authoritative_checkpoint_and_thread_agent_model(
 
     service, _, scoped, _, thread_id = await _create_service(seed)
     saver = scoped.for_context(seed.owner_a)
+    checkpoint, new_versions = _message_checkpoint(
+        [
+            HumanMessage(content="authoritative question", id="human-suggest"),
+            AIMessage(content="authoritative answer", id="ai-suggest"),
+        ]
+    )
     await saver.aput(
         _config(thread_id),
-        _message_checkpoint(
-            [
-                HumanMessage(content="authoritative question", id="human-suggest"),
-                AIMessage(content="authoritative answer", id="ai-suggest"),
-            ]
-        ),
+        checkpoint,
         {"source": "loop", "step": 1, "parents": {}},
-        {},
+        new_versions,
     )
     model_call = AsyncMock(return_value='["Continue from authoritative state?", "Verify scope?"]')
     monkeypatch.setattr(controls, "run_oneshot_llm", model_call)
@@ -363,7 +761,7 @@ async def test_suggestions_use_authoritative_checkpoint_and_thread_agent_model(
         seed.owner_a,
         thread_id,
         n=2,
-        app_config=AppConfig(),
+        app_config=_app_config_with_models("test-model"),
     )
 
     assert suggestions == [
@@ -374,3 +772,51 @@ async def test_suggestions_use_authoritative_checkpoint_and_thread_agent_model(
     assert model_call.await_args.kwargs["model_name"] == "test-model"
     assert "authoritative question" in model_call.await_args.kwargs["user_content"]
     assert "authoritative answer" in model_call.await_args.kwargs["user_content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_suggestions_resolve_default_agent_model_to_exact_configured_name(
+    seed: M4ThreadSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.private_work.chat_controls as controls
+
+    service, _, scoped, _, thread_id = await _create_service(seed)
+    saver = scoped.for_context(seed.owner_a)
+    checkpoint, new_versions = _message_checkpoint(
+        [
+            HumanMessage(content="继续验证", id="human-default-suggest"),
+            AIMessage(content="可以继续", id="ai-default-suggest"),
+        ]
+    )
+    await saver.aput(
+        _config(thread_id),
+        checkpoint,
+        {"source": "loop", "step": 1, "parents": {}},
+        new_versions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_resolve_agent_authority",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                payload=SimpleNamespace(model_ref="default"),
+            )
+        ),
+    )
+    model_call = AsyncMock(return_value='["继续下一轮？"]')
+    monkeypatch.setattr(controls, "run_oneshot_llm", model_call)
+
+    suggestions = await service.suggest(
+        seed.owner_a,
+        thread_id,
+        n=1,
+        app_config=_app_config_with_models(
+            "primary-logical",
+            "secondary-logical",
+        ),
+    )
+
+    assert suggestions == ["继续下一轮？"]
+    assert model_call.await_args.kwargs["model_name"] == "primary-logical"

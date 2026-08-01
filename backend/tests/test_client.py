@@ -6,12 +6,14 @@ import json
 import tempfile
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
+from deerflow.agents.thread_state import DeltaThreadState
 from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
@@ -38,6 +40,8 @@ def mock_app_config():
     config.skills.deferred_discovery = False
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
+    config.database.checkpoint_channel_mode = "full"
+    config.database.checkpoint_delta.snapshot_frequency = 10
     return config
 
 
@@ -100,6 +104,48 @@ class TestClientInit:
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             c = DeerFlowClient(checkpointer=cp)
         assert c._checkpointer is cp
+
+    def test_checkpoint_runtime_is_frozen_from_config(
+        self,
+        mock_app_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import deerflow.runtime.checkpoint_mode as checkpoint_mode
+
+        monkeypatch.setattr(
+            checkpoint_mode,
+            "_frozen_checkpoint_channel_mode",
+            None,
+        )
+        monkeypatch.setattr(
+            checkpoint_mode,
+            "_frozen_checkpoint_snapshot_frequency",
+            None,
+        )
+        mock_app_config.database.checkpoint_channel_mode = "delta"
+        mock_app_config.database.checkpoint_delta.snapshot_frequency = 7
+
+        with patch(
+            "deerflow.client.get_app_config",
+            return_value=mock_app_config,
+        ):
+            configured = DeerFlowClient()
+
+        assert configured._checkpoint_channel_mode == "delta"
+        assert configured._checkpoint_snapshot_frequency == 7
+
+        mock_app_config.database.checkpoint_channel_mode = "full"
+        with (
+            patch(
+                "deerflow.client.get_app_config",
+                return_value=mock_app_config,
+            ),
+            pytest.raises(
+                checkpoint_mode.CheckpointModeReconfigurationError,
+                match="restart",
+            ),
+        ):
+            DeerFlowClient()
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +362,65 @@ class TestStream:
 
         # Should not raise; end event proves it completed
         assert events[-1].type == "end"
+
+    def test_full_client_rejects_delta_thread_before_agent_invocation(
+        self,
+        client,
+    ):
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Overwrite
+
+        from deerflow.runtime.checkpoint_mode import (
+            CheckpointModeMismatchError,
+        )
+        from deerflow.runtime.checkpoint_state import (
+            CheckpointStateAccessor,
+            build_state_mutation_graph,
+        )
+
+        saver = InMemorySaver()
+        config = {
+            "configurable": {
+                "thread_id": "client-delta-rejection",
+                "checkpoint_ns": "",
+            }
+        }
+        delta = CheckpointStateAccessor.bind(
+            build_state_mutation_graph("delta_seed", "delta"),
+            saver,
+            mode="delta",
+        )
+        asyncio.run(
+            delta.aupdate(
+                config,
+                {"messages": Overwrite([HumanMessage(content="delta", id="delta-message")])},
+                as_node="delta_seed",
+            )
+        )
+        checkpoint_count = len(list(saver.list(config)))
+        client._checkpointer = saver
+        client._checkpoint_channel_mode = "full"
+
+        with (
+            patch(
+                "deerflow.client.is_trace_correlation_enabled",
+                return_value=False,
+            ),
+            patch.object(client, "_ensure_agent") as ensure_agent,
+            pytest.raises(
+                CheckpointModeMismatchError,
+                match="requires delta mode",
+            ),
+        ):
+            list(
+                client.stream(
+                    "must not run",
+                    thread_id="client-delta-rejection",
+                )
+            )
+
+        ensure_agent.assert_not_called()
+        assert len(list(saver.list(config))) == checkpoint_count
 
     def test_messages_mode_emits_token_deltas(self, client):
         """stream() forwards LangGraph ``messages`` mode chunks as delta events.
@@ -868,6 +973,29 @@ class TestEnsureAgent:
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
+    def test_delta_mode_uses_delta_state_schema(self, client):
+        client._checkpoint_channel_mode = "delta"
+        client._checkpoint_snapshot_frequency = 10
+        config = client._get_runnable_config("t-delta")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch(
+                "deerflow.client.create_agent",
+                return_value=MagicMock(),
+            ) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch(
+                "deerflow.runtime.checkpointer.get_checkpointer",
+                return_value=None,
+            ),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_create_agent.call_args.kwargs["state_schema"] is DeltaThreadState
+
     def test_uses_explicit_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
         mock_checkpointer = MagicMock()
@@ -933,7 +1061,16 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None)
+        client._agent_config_key = (
+            None,
+            True,
+            False,
+            False,
+            None,
+            None,
+            "full",
+            10,
+        )
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -1067,6 +1204,8 @@ class TestGetModel:
             "description": "A test model",
             "supports_thinking": True,
             "supports_reasoning_effort": True,
+            "supports_vision": False,
+            "is_default": True,
         }
 
     def test_not_found(self, client):
@@ -1156,6 +1295,7 @@ class TestThreadQueries:
     def test_get_thread(self, client):
         mock_checkpointer = MagicMock()
         client._checkpointer = mock_checkpointer
+        client._agent = MagicMock()
 
         msg1 = HumanMessage(content="Hello", id="m1")
         msg2 = AIMessage(content="Hi there", id="m2")
@@ -1164,12 +1304,28 @@ class TestThreadQueries:
         cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:01:00Z", parent_id="c1", messages=[msg1, msg2], pending_writes=[("task_1", "messages", {"text": "pending"})])
         cp3_no_ts = self._make_mock_checkpoint_tuple("t1", "c3", None)
 
-        # checkpointer.list yields in reverse time or random order, test sorting
+        snapshots = [
+            SimpleNamespace(
+                values=cp.checkpoint.get("channel_values", {}),
+                config=cp.config,
+                parent_config=cp.parent_config,
+                metadata=cp.metadata,
+                created_at=cp.checkpoint.get("ts"),
+            )
+            for cp in (cp2, cp1, cp3_no_ts)
+        ]
         mock_checkpointer.list.return_value = [cp2, cp1, cp3_no_ts]
+        accessor = MagicMock()
+        accessor.history.return_value = snapshots
 
-        result = client.get_thread("t1")
-
-        mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t1"}})
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch(
+                "deerflow.client.CheckpointStateAccessor.bind",
+                return_value=accessor,
+            ),
+        ):
+            result = client.get_thread("t1")
 
         assert result["thread_id"] == "t1"
         checkpoints = result["checkpoints"]
@@ -1195,6 +1351,64 @@ class TestThreadQueries:
         assert len(checkpoints[2]["pending_writes"]) == 1
         assert checkpoints[2]["pending_writes"][0]["task_id"] == "task_1"
         assert checkpoints[2]["pending_writes"][0]["channel"] == "messages"
+
+    def test_get_thread_materializes_delta_history(self, client):
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Overwrite
+
+        from deerflow.runtime.checkpoint_state import (
+            CheckpointStateAccessor,
+            build_state_mutation_graph,
+        )
+
+        saver = InMemorySaver()
+        graph = build_state_mutation_graph(
+            "client_delta",
+            "delta",
+            snapshot_frequency=10,
+        )
+        accessor = CheckpointStateAccessor.bind(
+            graph,
+            saver,
+            mode="delta",
+        )
+        config = {
+            "configurable": {
+                "thread_id": "client-delta-thread",
+                "checkpoint_ns": "",
+            }
+        }
+
+        async def seed_delta_history():
+            await accessor.aupdate(
+                config,
+                {"messages": Overwrite([HumanMessage(content="first", id="delta-h1")])},
+                as_node="client_delta",
+            )
+            await accessor.aupdate(
+                config,
+                {"messages": [AIMessage(content="second", id="delta-a1")]},
+                as_node="client_delta",
+            )
+
+        asyncio.run(seed_delta_history())
+        raw_latest = saver.get_tuple(config)
+        assert raw_latest is not None
+        assert "messages" not in raw_latest.checkpoint["channel_values"]
+
+        client._checkpointer = saver
+        client._checkpoint_channel_mode = "delta"
+        client._checkpoint_snapshot_frequency = 10
+        client._agent = graph
+        client._ensure_agent = MagicMock()
+
+        result = client.get_thread("client-delta-thread")
+
+        latest_messages = result["checkpoints"][-1]["values"]["messages"]
+        assert [(message["id"], message["content"]) for message in latest_messages] == [
+            ("delta-h1", "first"),
+            ("delta-a1", "second"),
+        ]
 
     def test_get_thread_without_explicit_checkpointer_fails_closed(self, client):
         with pytest.raises(AssetCatalogUnavailable, match="explicitly scoped checkpointer"):
@@ -1917,7 +2131,7 @@ class TestGatewayConformance:
         parsed = ModelsListResponse(**result)
         assert len(parsed.models) == 1
         assert parsed.models[0].name == "test-model"
-        assert parsed.models[0].model == "gpt-test"
+        assert parsed.models[0].model == "test-model"
         assert parsed.token_usage.enabled is True
 
     def test_get_model(self, mock_app_config):
@@ -1937,7 +2151,7 @@ class TestGatewayConformance:
         assert result is not None
         parsed = ModelResponse(**result)
         assert parsed.name == "test-model"
-        assert parsed.model == "gpt-test"
+        assert parsed.model == "test-model"
 
     def test_upload_files(self, client, tmp_path):
         uploads_dir = tmp_path / "uploads"

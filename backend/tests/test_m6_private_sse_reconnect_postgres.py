@@ -10,7 +10,7 @@ import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
-from app.gateway.deps import private_work_context
+from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
@@ -85,6 +85,7 @@ async def harness(seed: M4ThreadSeed) -> _Harness:
     app.state.private_run_service = PrivateRunService(seed.factory)
     # A newly constructed bridge models a Gateway restart over the same DB.
     app.state.private_stream_bridge = PostgresStreamBridge(seed.factory)
+    app.dependency_overrides[require_project_private_open] = lambda: None
 
     async def context_override(project_id: uuid.UUID, request: Request):
         identity = request.headers.get("x-test-private-identity", "owner-a")
@@ -187,6 +188,56 @@ async def test_empty_cursor_means_zero_and_ahead_cursor_is_rejected(
     assert [replay_all.text.count(f"id: {event_id}\n") for event_id in (first_id, second_id, terminal_id)] == [1, 1, 1]
     assert ahead.status_code == 400
     assert ahead.json()["code"] == "INVALID_STREAM_CURSOR"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_terminal_is_not_replayed_at_exact_or_later_thread_cursor(
+    harness: _Harness,
+) -> None:
+    thread_id, settled_run_id, (_, _, terminal_id) = await _seed_private_stream(
+        harness.seed,
+    )
+    assert (
+        await PostgresStreamBridge(harness.seed.factory).read_after(
+            harness.seed.owner_a.resource_scope,
+            thread_id,
+            cursor=int(terminal_id),
+            limit=100,
+            run_id=settled_run_id,
+        )
+        == ()
+    )
+    exact = await harness.get(
+        thread_id,
+        settled_run_id,
+        last_event_id=terminal_id,
+    )
+
+    later_run_id = str(uuid.uuid4())
+    async with harness.seed.factory() as session, session.begin():
+        await PrivateRunRepository(session).create(
+            scope=harness.seed.owner_a.resource_scope,
+            thread_id=thread_id,
+            request=PrivateRunCreate(run_id=later_run_id, status="running"),
+        )
+    later_frame = await PostgresStreamBridge(harness.seed.factory).publish_frame(
+        harness.seed.owner_a.resource_scope,
+        thread_id,
+        later_run_id,
+        StreamFrame(event="updates", data={"delta": "later-run"}),
+    )
+    past_old_terminal = await harness.get(
+        thread_id,
+        settled_run_id,
+        last_event_id=later_frame.id,
+    )
+
+    assert exact.status_code == 200, exact.text
+    assert exact.text == ""
+    assert int(later_frame.id) > int(terminal_id)
+    assert past_old_terminal.status_code == 200, past_old_terminal.text
+    assert past_old_terminal.text == ""
 
 
 @pytest.mark.postgres

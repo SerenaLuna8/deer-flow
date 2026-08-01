@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
 from support.memory_event_store import MemoryRunEventStore
 
 from deerflow.runtime.journal import RunJournal
@@ -56,7 +58,366 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
     return response
 
 
+def _make_chat_generation_chunk(
+    *,
+    content: str = "",
+    reasoning_content: str | None = None,
+) -> ChatGenerationChunk:
+    additional_kwargs = {"reasoning_content": reasoning_content} if reasoning_content is not None else {}
+    return ChatGenerationChunk(
+        message=AIMessageChunk(
+            content=content,
+            additional_kwargs=additional_kwargs,
+        )
+    )
+
+
 class TestLlmCallbacks:
+    @pytest.mark.anyio
+    async def test_reasoning_duration_measures_reasoning_window_not_whole_run(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 10.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="先分析"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 20.0
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="再验证"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 29.0
+        j.on_llm_new_token(
+            "最终答案",
+            chunk=_make_chat_generation_chunk(content="最终答案"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 35.0
+        response = _make_llm_response(
+            "最终答案",
+            additional_kwargs={"reasoning_content": "先分析，再验证"},
+        )
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert messages[0]["content"]["additional_kwargs"]["reasoning_duration_ms"] == 19_000
+        assert response.generations[0][0].message.additional_kwargs["reasoning_duration_ms"] == 19_000
+
+    @pytest.mark.anyio
+    async def test_reasoning_duration_closes_at_model_end_for_tool_call_only_step(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 4.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="需要调用工具"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 7.25
+        response = _make_llm_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "name": "search",
+                    "args": {"query": "DeerFlow"},
+                }
+            ],
+            additional_kwargs={"reasoning_content": "需要调用工具"},
+        )
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert messages[0]["content"]["additional_kwargs"]["reasoning_duration_ms"] == 3_250
+
+    @pytest.mark.anyio
+    async def test_reasoning_duration_ignores_subagent_model_calls(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 1.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="子任务思考"),
+            run_id=run_id,
+            tags=["subagent:research"],
+        )
+        clock["now"] = 9.0
+        response = _make_llm_response(
+            "子任务答案",
+            additional_kwargs={"reasoning_content": "子任务思考"},
+        )
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        llm_response = next(event for event in events if event["event_type"] == "llm.ai.response")
+        assert "reasoning_duration_ms" not in llm_response["content"]["additional_kwargs"]
+
+    @pytest.mark.anyio
+    async def test_reasoning_duration_is_not_invented_without_stream_observation(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 2.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+
+        j.on_llm_start({}, [], run_id=run_id, tags=["lead_agent"])
+        clock["now"] = 12.0
+        j.on_llm_end(
+            _make_llm_response(
+                "answer",
+                additional_kwargs={"reasoning_content": "complete only"},
+            ),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert "reasoning_duration_ms" not in messages[0]["content"]["additional_kwargs"]
+
+    @pytest.mark.anyio
+    async def test_duplicate_llm_end_keeps_the_observed_reasoning_duration(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 5.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="analysis"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 8.0
+        j.on_llm_new_token(
+            "answer",
+            chunk=_make_chat_generation_chunk(content="answer"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        response = _make_llm_response(
+            "answer",
+            additional_kwargs={"reasoning_content": "analysis"},
+        )
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert [message["content"]["additional_kwargs"]["reasoning_duration_ms"] for message in messages] == [3_000, 3_000]
+
+    @pytest.mark.anyio
+    async def test_only_selected_generation_enters_message_history(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 10.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="分析"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 14.0
+        j.on_llm_new_token(
+            "答案",
+            chunk=_make_chat_generation_chunk(content="答案"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+
+        selected = _make_llm_response(
+            "答案",
+            additional_kwargs={"reasoning_content": "分析"},
+        )
+        alternative = _make_llm_response(
+            "另一个答案",
+            additional_kwargs={"reasoning_content": "另一种分析"},
+        )
+        response = MagicMock()
+        response.generations = [
+            [
+                selected.generations[0][0],
+                alternative.generations[0][0],
+            ]
+        ]
+
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["additional_kwargs"]["reasoning_duration_ms"] == 4_000
+        assert alternative.generations[0][0].message.additional_kwargs == {"reasoning_content": "另一种分析"}
+
+    @pytest.mark.anyio
+    async def test_stream_observation_survives_missing_aggregated_reasoning(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 3.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+        j.on_llm_new_token(
+            "",
+            chunk=_make_chat_generation_chunk(reasoning_content="analysis"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        clock["now"] = 7.0
+        j.on_llm_new_token(
+            "answer",
+            chunk=_make_chat_generation_chunk(content="answer"),
+            run_id=run_id,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("answer"),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert messages[0]["content"]["additional_kwargs"]["reasoning_duration_ms"] == 4_000
+
+    @pytest.mark.anyio
+    async def test_inline_think_tags_split_across_chunks_do_not_end_early(
+        self,
+        journal_setup,
+        monkeypatch,
+    ):
+        j, store = journal_setup
+        run_id = uuid4()
+        clock = {"now": 1.0}
+        monkeypatch.setattr(
+            "deerflow.runtime.journal.time.monotonic",
+            lambda: clock["now"],
+        )
+
+        for observed_at, content in (
+            (1.0, "<thi"),
+            (2.0, "nk>"),
+            (4.0, "analysis text"),
+            (6.0, "</thi"),
+            (7.0, "nk>"),
+            (9.0, "answer"),
+        ):
+            clock["now"] = observed_at
+            j.on_llm_new_token(
+                content,
+                chunk=_make_chat_generation_chunk(content=content),
+                run_id=run_id,
+                tags=["lead_agent"],
+            )
+
+        response = _make_llm_response("<think>analysis text</think>answer")
+        clock["now"] = 11.0
+        j.on_llm_end(
+            response,
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert messages[0]["content"]["additional_kwargs"]["reasoning_duration_ms"] == 7_000
+
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
         j, store = journal_setup

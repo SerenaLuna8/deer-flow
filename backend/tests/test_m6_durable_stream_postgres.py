@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import BigInteger, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine
 from support.m4_private_threads import seed_m4_thread_database
 
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.reliability.execution import LeaseAuthorizedStreamBridge
+from deerflow.persistence.final_schema_contract import verify_m7_catalog
+from deerflow.persistence.models import run_event
+from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
 from deerflow.runtime.events.models import (
     StreamFrame,
     StreamLeaseProof,
@@ -82,6 +87,126 @@ async def _wait_for_advisory_wait(factory) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("stream repair did not wait on the thread advisory lock")
+
+
+def test_durable_stream_cursor_columns_cover_signed_postgres_bigint() -> None:
+    assert isinstance(RunEventRow.__table__.c.id.type, BigInteger)
+    assert isinstance(RunEventRow.__table__.c.seq.type, BigInteger)
+
+    schema = (Path(run_event.__file__).resolve().parents[1] / "full_schema.sql").read_text(
+        encoding="utf-8",
+    )
+    run_events_ddl = schema.split("CREATE TABLE run_events (", 1)[1].split(
+        "\n);",
+        1,
+    )[0]
+
+    assert "id BIGSERIAL NOT NULL" in run_events_ddl
+    assert "seq BIGINT NOT NULL" in run_events_ddl
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_durable_stream_crosses_integer_storage_boundary(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    integer_max = (1 << 31) - 1
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            await PrivateRunRepository(session).create(
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(run_id=run_id, status="running"),
+            )
+            session.add(
+                ThreadEventSequenceRow(
+                    project_id=seed.owner_a.project_id,
+                    owner_user_id=str(seed.owner_a.user_id),
+                    thread_id=thread_id,
+                    high_watermark=integer_max,
+                ),
+            )
+            await session.execute(
+                text("SELECT setval(pg_get_serial_sequence('run_events', 'id'), CAST(:value AS bigint), true)"),
+                {"value": integer_max},
+            )
+
+        stored = await PostgresStreamBridge(seed.factory).publish_frame(
+            seed.owner_a.resource_scope,
+            thread_id,
+            run_id,
+            StreamFrame(event="updates", data={"marker": "beyond-int32"}),
+        )
+
+        async with seed.factory() as session:
+            row = await session.scalar(
+                select(RunEventRow).where(
+                    RunEventRow.project_id == seed.owner_a.project_id,
+                    RunEventRow.owner_user_id == str(seed.owner_a.user_id),
+                    RunEventRow.thread_id == thread_id,
+                    RunEventRow.run_id == run_id,
+                ),
+            )
+            column_types = dict(
+                (
+                    await session.execute(
+                        text("SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'run_events' AND column_name IN ('id', 'seq')"),
+                    )
+                ).all(),
+            )
+            sequence_type, sequence_max = (
+                await session.execute(
+                    text("SELECT format_type(sequence.seqtypid, NULL), sequence.seqmax FROM pg_sequence sequence JOIN pg_class relation ON relation.oid = sequence.seqrelid WHERE relation.relname = 'run_events_id_seq'"),
+                )
+            ).one()
+
+        assert row is not None
+        assert stored.id == str(integer_max + 1)
+        assert row.id == integer_max + 1
+        assert row.seq == integer_max + 1
+        assert column_types == {"id": "bigint", "seq": "bigint"}
+        assert sequence_type == "bigint"
+        assert sequence_max == (1 << 63) - 1
+
+        replay = await PostgresStreamBridge(seed.factory).read_after(
+            seed.owner_a.resource_scope,
+            thread_id,
+            cursor=integer_max,
+            limit=100,
+            run_id=run_id,
+        )
+        assert len(replay) == 1
+        assert replay[0].id == stored.id
+        assert replay[0].event == "updates"
+        assert replay[0].data == {"marker": "beyond-int32"}
+        assert replay[0].created is False
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_catalog_rejects_narrowed_run_event_sequence(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    try:
+        async with engine.begin() as connection:
+            assert await verify_m7_catalog(connection)
+            await connection.execute(
+                text("ALTER SEQUENCE run_events_id_seq MAXVALUE 2147483647"),
+            )
+            assert not await verify_m7_catalog(connection)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.postgres

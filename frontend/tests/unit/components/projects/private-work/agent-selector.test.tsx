@@ -5,12 +5,14 @@ import {
   AgentSelectorDialog,
   agentMcpDependencyAvailability,
   createProjectChatForAgent,
+  createProjectChatWithDefaultAgent,
   enableSystemAgentAndCreateProjectChat,
   ensureMainSystemAgentBindings,
   executableProjectAgents,
   configurableSystemAgents,
   mainProjectAgent,
   projectAgentsStartChatPath,
+  resolveProjectDefaultAgent,
   systemAgentDependencyAvailability,
   projectThreadAgentSelection,
 } from "@/components/projects/private-work/agent-selector-dialog";
@@ -140,6 +142,59 @@ describe("project Agent selector", () => {
     ).toBe("Main");
   });
 
+  test("resolves an explicit project default and otherwise falls back to Main", () => {
+    const mainCatalog: ProjectAssetList = {
+      ...catalog,
+      system_items: [
+        {
+          ...catalog.system_items[0]!,
+          slug: "project-assistant",
+          display_name: "Main",
+        },
+      ],
+    };
+
+    expect(
+      resolveProjectDefaultAgent(mainCatalog, {
+        agent_asset_id: null,
+        revision: 0,
+        request_id: "req-default-main",
+      }),
+    ).toMatchObject({
+      status: "ready",
+      source: "main",
+      agent: { display_name: "Main" },
+    });
+    expect(
+      resolveProjectDefaultAgent(mainCatalog, {
+        agent_asset_id: PROJECT_AGENT_ID,
+        revision: 1,
+        request_id: "req-default-project",
+      }),
+    ).toMatchObject({
+      status: "ready",
+      source: "project",
+      agent: { id: PROJECT_AGENT_ID },
+    });
+  });
+
+  test("fails closed when a configured project default is unavailable", () => {
+    expect(
+      resolveProjectDefaultAgent(catalog, {
+        agent_asset_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        revision: 3,
+        request_id: "req-missing-default",
+      }),
+    ).toEqual({
+      status: "unavailable",
+      reason: "项目默认 Agent 当前不可用，请联系项目管理员。",
+    });
+    expect(resolveProjectDefaultAgent(undefined, undefined)).toEqual({
+      status: "unavailable",
+      reason: "无法确认项目默认 Agent，请稍后重试。",
+    });
+  });
+
   test("shows only active executable project Agents and enabled system bindings", () => {
     const agents = executableProjectAgents(catalog);
 
@@ -217,6 +272,32 @@ describe("project Agent selector", () => {
     ]);
     expect(events).toEqual(["created", "invalidated", "navigated"]);
     expect(navigated).toEqual([`/projects/alpha%20team/chats/${threadId}`]);
+  });
+
+  test("creates a normal chat without pinning an Agent in the request", async () => {
+    const created: unknown[] = [];
+    const threadId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    await createProjectChatWithDefaultAgent({
+      scope: {
+        accountId: "99999999-9999-4999-8999-999999999999",
+        projectId: PROJECT_ID,
+      },
+      projectSlug: "alpha",
+      createThreadId: () => threadId,
+      createThread: async (scope, input) => created.push({ scope, input }),
+      navigate: () => undefined,
+    });
+
+    expect(created).toEqual([
+      {
+        scope: {
+          accountId: "99999999-9999-4999-8999-999999999999",
+          projectId: PROJECT_ID,
+        },
+        input: { threadId, displayName: "新对话" },
+      },
+    ]);
   });
 
   test("keeps no-Agent guidance in context for Admin Editor and Runner capabilities", () => {
@@ -571,6 +652,11 @@ describe("project Agent selector", () => {
 
     await ensureMainSystemAgentBindings({
       agent: mainAgent,
+      agentTarget: {
+        versionId: VERSION_ID,
+        versionNumber: 1,
+        boundVersionNumber: null,
+      },
       requiredSkillVersionIds: [skillVersionId],
       requiredMcpVersionIds: [],
       skillDependencies: [
@@ -628,6 +714,11 @@ describe("project Agent selector", () => {
     const moves: unknown[] = [];
     const changed = await ensureMainSystemAgentBindings({
       agent: mainAgent,
+      agentTarget: {
+        versionId: VERSION_ID,
+        versionNumber: 1,
+        boundVersionNumber: 1,
+      },
       requiredSkillVersionIds: [targetVersionId],
       requiredMcpVersionIds: [],
       skillDependencies: [
@@ -684,6 +775,11 @@ describe("project Agent selector", () => {
     await expect(
       ensureMainSystemAgentBindings({
         agent: mainAgent,
+        agentTarget: {
+          versionId: VERSION_ID,
+          versionNumber: 1,
+          boundVersionNumber: null,
+        },
         requiredSkillVersionIds: [],
         requiredMcpVersionIds: [mcpVersionId],
         skillDependencies: [],

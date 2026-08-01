@@ -119,6 +119,43 @@ def test_handle_update_publishes_private_chat_message():
     _run(go())
 
 
+def test_handle_update_uses_only_provider_message_id_for_durable_delivery():
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        bus = MessageBus()
+        published = []
+
+        async def capture(msg):
+            published.append(msg)
+
+        bus.publish_inbound = capture  # type: ignore[method-assign]
+        channel = WechatChannel(bus=bus, config={"bot_token": "test-token"})
+
+        await channel._handle_update(
+            {
+                "message_type": 1,
+                "message_id": "provider-message-1",
+                "client_id": "client-generated-1",
+                "from_user_id": "wx-user-1",
+                "item_list": [{"type": 1, "text_item": {"text": "stable"}}],
+            }
+        )
+        await channel._handle_update(
+            {
+                "message_type": 1,
+                "client_id": "client-generated-2",
+                "from_user_id": "wx-user-1",
+                "item_list": [{"type": 1, "text_item": {"text": "unstable"}}],
+            }
+        )
+
+        assert published[0].provider_delivery_id == "provider-message-1"
+        assert published[1].provider_delivery_id is None
+
+    _run(go())
+
+
 def test_handle_update_downloads_inbound_image(monkeypatch, tmp_path: Path):
     from app.channels.wechat import WechatChannel
 

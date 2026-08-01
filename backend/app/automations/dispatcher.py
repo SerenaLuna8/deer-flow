@@ -55,6 +55,8 @@ from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord, PrivateRunRepository
 from app.private_work.runtime_context import prepare_private_run_config
 from app.private_work.snapshot_repository import (
+    RunModelSnapshotAdmissionPort,
+    RunRuntimePolicyAdmissionPort,
     RunSnapshotAssetStale,
     RunSnapshotRepository,
 )
@@ -313,6 +315,8 @@ class AutomationDispatcher:
         retry_delay: timedelta = timedelta(seconds=30),
         max_concurrent_runs: int = 3,
         model_ref_resolver: ModelRefResolver | None = None,
+        model_catalog: RunModelSnapshotAdmissionPort | None = None,
+        runtime_policy: RunRuntimePolicyAdmissionPort | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: AutomationQuotaPort | None = None,
         audit: AutomationAuditPort | None = None,
@@ -334,6 +338,8 @@ class AutomationDispatcher:
         self._snapshots = RunSnapshotRepository(
             session_factory,
             model_ref_resolver=model_ref_resolver,
+            model_catalog=model_catalog,
+            runtime_policy=runtime_policy,
             endpoint_policy=endpoint_policy,
         )
 
@@ -410,7 +416,7 @@ class AutomationDispatcher:
             run_id=occurrence.run_id,
             lock=True,
         )
-        if run is None or job is None or run.thread_id != occurrence.thread_id or run.job_id != job.job_id:
+        if run is None or job is None or run.thread_id != occurrence.thread_id or run.job_id != job.job_id or run.origin_trace_id != job.origin_trace_id:
             raise AutomationConflict(_DISPATCH_REQUEST_ID)
         return AdmittedAutomationOccurrence(
             occurrence=occurrence,
@@ -660,6 +666,7 @@ class AutomationDispatcher:
                     scope=JobScope(project.project_id, str(project.user_id)),
                     run_id=run.run_id,
                     occurrence_id=occurrence.id,
+                    origin_trace_id=run.origin_trace_id,
                 )
                 run = await PrivateRunRepository(session).attach_job(
                     scope=context.resource_scope,

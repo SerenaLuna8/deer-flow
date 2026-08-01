@@ -31,7 +31,7 @@ fi
 if [ ! -f "$CONFIG" ]; then
     echo "No config.yaml found — creating from example..."
     cp "$EXAMPLE" "$REPO_ROOT/config.yaml"
-    echo "OK config.yaml created. Please review and set your API keys."
+    echo "OK config.yaml created. Review the process settings, then configure models and Credentials at /admin/settings/models after startup."
     exit 0
 fi
 
@@ -50,6 +50,7 @@ import sys, shutil, copy, re
 from pathlib import Path
 
 import yaml
+from deerflow.config.app_config import DATABASE_RUNTIME_YAML_PATH_TOMBSTONES
 
 config_path = Path(os.environ['CONFIG_WIN_PATH'])
 example_path = Path(os.environ['EXAMPLE_WIN_PATH'])
@@ -108,6 +109,18 @@ MIGRATIONS = {
             'quotas.max_mcp_calls_daily_limit',
         ],
     },
+    32: {
+        'description': 'Reject the unsupported legacy generic authorization provider configuration',
+        'remove_keys': ['authorization'],
+    },
+    33: {
+        'description': 'Move model configuration to PostgreSQL-backed system settings',
+        'remove_keys': ['models'],
+    },
+    34: {
+        'description': 'Move live agent, registration and quota policy leaves to PostgreSQL system settings',
+        'remove_paths': sorted(DATABASE_RUNTIME_YAML_PATH_TOMBSTONES),
+    },
     # Future migrations go here:
     # 2: {
     #     'description': '...',
@@ -142,15 +155,23 @@ for key in keys_to_remove:
 for field_path in paths_to_remove:
     parts = field_path.split('.')
     parent = user
+    ancestors = []
     for part in parts[:-1]:
         if not isinstance(parent, dict) or part not in parent:
             break
+        ancestors.append((parent, part))
         parent = parent[part]
     else:
         key = parts[-1]
         if isinstance(parent, dict) and key in parent:
             parent.pop(key)
             removed.append(field_path)
+            for container, child_key in reversed(ancestors):
+                child = container.get(child_key)
+                if isinstance(child, dict) and not child:
+                    container.pop(child_key)
+                else:
+                    break
 
 if migrated:
     print(f'Applied {len(migrated)} migration(s):')

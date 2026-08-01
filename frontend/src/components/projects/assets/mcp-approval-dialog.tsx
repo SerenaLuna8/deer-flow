@@ -10,6 +10,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type { AssetVersion } from "@/core/shared-assets";
 
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
@@ -19,23 +21,33 @@ type McpApprovalHandler = (
   credentialVersions: Record<string, string>,
 ) => McpApprovalResult | Promise<McpApprovalResult>;
 
-export function mcpApprovalCopy(mode: "publish" | "configure-grants") {
+type McpApprovalCopy = Translations["adminAssets"]["dialogs"]["approval"];
+
+export function mcpApprovalCopy(
+  mode: "publish" | "configure-grants",
+  localized?: McpApprovalCopy,
+) {
   if (mode === "configure-grants") {
     return {
-      title: "配置 MCP Credential 授权",
+      title: localized?.configureTitle ?? "配置 MCP Credential 授权",
       description:
+        localized?.configureDescription ??
         "为已发布的 packaged System MCP 选择系统 Credential 当前版本。此操作只配置槽位授权，不修改或重新发布 MCP 定义。",
-      submitLabel: "保存授权",
+      submitLabel: localized?.saveGrants ?? "保存授权",
       emptyOptionalMessage:
+        localized?.configureEmptyOptional ??
         "当前没有可选 Credential；可选槽位可留空并保存，以清除既有授权。",
     } as const;
   }
   return {
-    title: "批准 MCP 版本",
+    title: localized?.publishTitle ?? "批准 MCP 版本",
     description:
+      localized?.publishDescription ??
       "为每个 Credential 槽位选择当前作用域可见的已启用 Credential 当前版本。批准成功后版本才会发布。",
-    submitLabel: "批准并发布",
-    emptyOptionalMessage: "当前没有可选 Credential；可选槽位可留空并直接批准。",
+    submitLabel: localized?.approve ?? "批准并发布",
+    emptyOptionalMessage:
+      localized?.publishEmptyOptional ??
+      "当前没有可选 Credential；可选槽位可留空并直接批准。",
   } as const;
 }
 
@@ -83,6 +95,7 @@ export function McpCredentialSelectors({
   credentials: CredentialVersionOption[];
   credentialScope: "system" | "project";
 }) {
+  const { t } = useI18n();
   const activeCredentials = credentials.filter((credential) =>
     isEligibleCredentialVersion(credential, credentialScope),
   );
@@ -97,10 +110,13 @@ export function McpCredentialSelectors({
             defaultValue=""
             className="border-input bg-background h-9 rounded-md border px-3 text-sm"
           >
-            <option value="">请选择 Credential</option>
+            <option value="">
+              {t.adminAssets.dialogs.approval.selectCredential}
+            </option>
             {activeCredentials.map((credential) => (
               <option key={credential.id} value={credential.current_version_id}>
-                {credential.display_name} · {credential.name} · 当前版本{" "}
+                {credential.display_name} · {credential.name} ·{" "}
+                {t.adminAssets.dialogs.approval.currentVersion}{" "}
                 {credential.current_version_id}
               </option>
             ))}
@@ -121,8 +137,8 @@ export function McpApprovalForm({
   approvalError,
   onRetryCredentials,
   onApprove,
-  submitLabel = "批准并发布",
-  emptyOptionalMessage = "当前没有可选 Credential；可选槽位可留空并直接批准。",
+  submitLabel,
+  emptyOptionalMessage,
 }: {
   version: McpVersion;
   pending: boolean;
@@ -136,6 +152,11 @@ export function McpApprovalForm({
   submitLabel?: string;
   emptyOptionalMessage?: string;
 }) {
+  const { t } = useI18n();
+  const localizedSubmitLabel =
+    submitLabel ?? t.adminAssets.dialogs.approval.approve;
+  const localizedEmptyOptionalMessage =
+    emptyOptionalMessage ?? t.adminAssets.dialogs.approval.publishEmptyOptional;
   const hasRequiredSlots = version.credential_slots.some(
     (slot) => slot.required,
   );
@@ -173,12 +194,12 @@ export function McpApprovalForm({
     >
       {credentialsLoading ? (
         <p role="status" className="text-muted-foreground text-sm">
-          正在加载 Credential…
+          {t.adminAssets.dialogs.approval.loadingCredentials}
         </p>
       ) : credentialsError ? (
         <div className="space-y-2">
           <p role="alert" className="text-destructive text-sm">
-            Credential 列表加载失败，请重试。
+            {t.adminAssets.dialogs.approval.credentialsFailed}
           </p>
           {onRetryCredentials && (
             <Button
@@ -187,7 +208,7 @@ export function McpApprovalForm({
               variant="outline"
               onClick={onRetryCredentials}
             >
-              重试
+              {t.adminAssets.common.retry}
             </Button>
           )}
         </div>
@@ -208,15 +229,15 @@ export function McpApprovalForm({
               }
             >
               {hasRequiredSlots
-                ? "必填槽位没有可用 Credential。"
-                : emptyOptionalMessage}
+                ? t.adminAssets.dialogs.approval.requiredUnavailable
+                : localizedEmptyOptionalMessage}
             </p>
           )}
         </>
       )}
       {Boolean(approvalError) && (
         <p role="alert" className="text-destructive text-sm">
-          {adminAssetErrorMessage(approvalError)}
+          {adminAssetErrorMessage(approvalError, t.adminAssets.errors)}
         </p>
       )}
       <DialogFooter>
@@ -229,7 +250,7 @@ export function McpApprovalForm({
             requiredCredentialsUnavailable
           }
         >
-          {submitLabel}
+          {localizedSubmitLabel}
         </Button>
       </DialogFooter>
     </form>
@@ -263,7 +284,8 @@ export function McpApprovalDialog({
   onApprove: McpApprovalHandler;
   mode?: "publish" | "configure-grants";
 }) {
-  const copy = mcpApprovalCopy(mode);
+  const { t } = useI18n();
+  const copy = mcpApprovalCopy(mode, t.adminAssets.dialogs.approval);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>

@@ -18,6 +18,7 @@ from app.worker.service import (
 )
 from deerflow.config.worker_config import WorkerConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobScope
+from deerflow.trace_context import get_current_trace_id
 
 
 class _Transaction:
@@ -251,6 +252,114 @@ async def test_worker_service_heartbeats_active_job_and_honors_late_cancel() -> 
     assert cancel_seen.is_set()
     assert backend.heartbeats >= 1
     assert len(backend.cancelled) == 1
+
+
+@pytest.mark.asyncio
+async def test_private_claim_trace_wraps_mark_running_heartbeat_handler_and_settlement() -> None:
+    backend = _FakeBackend(job_count=0)
+    trace_id = "worker-service-private-trace"
+    claim = JobClaim(
+        job_id=uuid.uuid4(),
+        attempt_id=uuid.uuid4(),
+        lease_token="private-trace-lease",
+        job_type="private_run",
+        scope=JobScope(uuid.uuid4(), str(uuid.uuid4())),
+        run_id=str(uuid.uuid4()),
+        occurrence_id=None,
+        retry_safety="safe",
+        cancel_requested=False,
+        origin_trace_id=trace_id,
+    )
+    observations: list[tuple[str, str | None]] = []
+
+    class ObservingRepository(_FakeRepository):
+        async def mark_running(self, job_id, **kwargs):
+            observations.append(("mark_running", get_current_trace_id()))
+            return await super().mark_running(job_id, **kwargs)
+
+        async def heartbeat(self, job_id, **kwargs):
+            observations.append(("heartbeat", get_current_trace_id()))
+            return await super().heartbeat(job_id, **kwargs)
+
+        async def settle_success(self, job_id, **kwargs):
+            observations.append(("settle_success", get_current_trace_id()))
+            return await super().settle_success(job_id, **kwargs)
+
+    async def handler(_claim, _authority):
+        observations.append(("handler", get_current_trace_id()))
+        while backend.heartbeats == 0:
+            await asyncio.sleep(0)
+        return JobOutcome.succeeded()
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"private_run": handler},
+        _config(heartbeat_seconds=0.001),
+        repository_builder=ObservingRepository,
+    )
+
+    assert get_current_trace_id() is None
+    await service._execute_claim(claim)
+    assert get_current_trace_id() is None
+    assert {name for name, _trace in observations} == {
+        "mark_running",
+        "heartbeat",
+        "handler",
+        "settle_success",
+    }
+    assert {trace for _name, trace in observations} == {trace_id}
+
+
+@pytest.mark.asyncio
+async def test_private_claim_with_invalid_trace_fails_before_mark_running() -> None:
+    backend = _FakeBackend(job_count=0)
+    claim = JobClaim(
+        job_id=uuid.uuid4(),
+        attempt_id=uuid.uuid4(),
+        lease_token="missing-trace-lease",
+        job_type="private_run",
+        scope=JobScope(uuid.uuid4(), str(uuid.uuid4())),
+        run_id=str(uuid.uuid4()),
+        occurrence_id=None,
+        retry_safety="safe",
+        cancel_requested=False,
+        origin_trace_id=None,
+    )
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"private_run": lambda _claim, _authority: JobOutcome.succeeded()},
+        _config(),
+        repository_builder=_FakeRepository,
+    )
+
+    with pytest.raises(LeaseLost):
+        await service._execute_claim(claim)
+
+    assert backend.marked_running == []
+
+
+@pytest.mark.asyncio
+async def test_retention_claim_without_trace_keeps_existing_worker_path() -> None:
+    backend = _FakeBackend(job_count=0)
+    observations: list[str | None] = []
+
+    async def handler(_claim, _authority):
+        observations.append(get_current_trace_id())
+        return JobOutcome.succeeded()
+
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {"retention_purge": handler},
+        _config(),
+        repository_builder=_FakeRepository,
+    )
+    await service._execute_claim(_claim(1))
+
+    assert observations == [None]
+    assert len(backend.succeeded) == 1
 
 
 @pytest.mark.asyncio
@@ -515,6 +624,123 @@ async def test_graceful_drain_allows_inflight_job_to_settle() -> None:
 
     assert len(backend.succeeded) == 1
     assert registry.calls[-2:] == ["mark_draining", "remove"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flushes_initialized_project_memory_after_inflight_and_before_registry_remove(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.agents.memory import queue as memory_queue_module
+
+    backend = _FakeBackend(job_count=0)
+    registry = _FakeRegistry()
+    inflight_finished = asyncio.Event()
+
+    async def finish_inflight() -> None:
+        await asyncio.sleep(0)
+        registry.calls.append("inflight_finished")
+        inflight_finished.set()
+
+    class MemoryQueue:
+        async def flush_all(self) -> list[bool]:
+            assert inflight_finished.is_set()
+            registry.calls.append("memory_flush")
+            return [True]
+
+    monkeypatch.setattr(memory_queue_module, "_project_memory_queue", MemoryQueue())
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(shutdown_grace_seconds=1),
+        repository_builder=_FakeRepository,
+    )
+    service._inflight.add(asyncio.create_task(finish_inflight()))
+
+    await service._shutdown()
+
+    assert registry.calls == [
+        "mark_draining",
+        "inflight_finished",
+        "memory_flush",
+        "remove",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_bounds_project_memory_flush_that_suppresses_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from deerflow.agents.memory import queue as memory_queue_module
+
+    backend = _FakeBackend(job_count=0)
+    registry = _FakeRegistry()
+    started = asyncio.Event()
+    cancel_suppressed = asyncio.Event()
+    release = asyncio.Event()
+
+    class MemoryQueue:
+        async def flush_all(self) -> list[bool]:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_suppressed.set()
+                await release.wait()
+            return [False]
+
+    monkeypatch.setattr(memory_queue_module, "_project_memory_queue", MemoryQueue())
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(shutdown_grace_seconds=0.01),
+        repository_builder=_FakeRepository,
+    )
+
+    try:
+        with caplog.at_level("WARNING", logger="app.worker.service"):
+            await asyncio.wait_for(service._shutdown(), timeout=0.2)
+        assert started.is_set()
+        assert cancel_suppressed.is_set()
+        assert registry.calls[-1] == "remove"
+        assert "project memory queue shutdown flush timed out" in caplog.text.lower()
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_observes_project_memory_flush_failure_and_still_removes_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from deerflow.agents.memory import queue as memory_queue_module
+
+    backend = _FakeBackend(job_count=0)
+    registry = _FakeRegistry()
+
+    class MemoryQueue:
+        async def flush_all(self) -> list[bool]:
+            registry.calls.append("memory_flush")
+            raise RuntimeError("private memory backend detail")
+
+    monkeypatch.setattr(memory_queue_module, "_project_memory_queue", MemoryQueue())
+    service = WorkerService(
+        _Factory(backend),
+        registry,
+        {},
+        _config(shutdown_grace_seconds=1),
+        repository_builder=_FakeRepository,
+    )
+
+    with caplog.at_level("WARNING", logger="app.worker.service"):
+        await service._shutdown()
+
+    assert registry.calls == ["mark_draining", "memory_flush", "remove"]
+    assert "project memory queue shutdown flush failed: runtimeerror" in caplog.text.lower()
+    assert "private memory backend detail" not in caplog.text
 
 
 @pytest.mark.asyncio

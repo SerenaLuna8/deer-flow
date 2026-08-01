@@ -1,18 +1,35 @@
-export interface Model {
-  id: string;
-  name: string;
-  model: string;
-  display_name: string;
-  description?: string | null;
-  supports_thinking?: boolean;
-  supports_reasoning_effort?: boolean;
-}
+import { z } from "zod";
 
-export interface TokenUsageSettings {
-  enabled: boolean;
-}
+export const modelSchema = z
+  .object({
+    name: z.string().min(1),
+    model: z.string().min(1),
+    display_name: z.string().min(1),
+    description: z.string(),
+    supports_thinking: z.boolean(),
+    supports_reasoning_effort: z.boolean(),
+    supports_vision: z.boolean(),
+    is_default: z.boolean(),
+  })
+  .strict()
+  .refine((model) => model.model === model.name, {
+    path: ["model"],
+    message: "Public model alias must equal its logical name",
+  });
 
-export interface ModelsResponse {
-  models: Model[];
-  token_usage: TokenUsageSettings;
-}
+export const tokenUsageSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+  })
+  .strict();
+
+export const modelsResponseSchema = z
+  .object({
+    models: z.array(modelSchema),
+    token_usage: tokenUsageSettingsSchema,
+  })
+  .strict();
+
+export type Model = z.infer<typeof modelSchema>;
+export type TokenUsageSettings = z.infer<typeof tokenUsageSettingsSchema>;
+export type ModelsResponse = z.infer<typeof modelsResponseSchema>;

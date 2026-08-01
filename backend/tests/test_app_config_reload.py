@@ -13,11 +13,11 @@ import deerflow.config.app_config as app_config_module
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
-from deerflow.config.memory_config import get_memory_config, load_memory_config_from_dict
+from deerflow.config.memory_config import load_memory_config_from_dict
 from deerflow.config.subagents_config import get_subagents_app_config, load_subagents_config_from_dict
 from deerflow.config.summarization_config import get_summarization_config, load_summarization_config_from_dict
 from deerflow.config.title_config import get_title_config, load_title_config_from_dict
-from deerflow.config.tool_search_config import get_tool_search_config, load_tool_search_config_from_dict
+from deerflow.config.tool_search_config import load_tool_search_config_from_dict
 from deerflow.runtime.checkpointer import reset_checkpointer
 from deerflow.runtime.store import reset_store
 
@@ -49,19 +49,12 @@ def _reset_config_singletons() -> None:
     reset_app_config()
 
 
-def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> None:
+def _write_config(path: Path, *, log_level: str) -> None:
     path.write_text(
         yaml.safe_dump(
             {
                 "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-                "models": [
-                    {
-                        "name": model_name,
-                        "use": "langchain_openai:ChatOpenAI",
-                        "model": "gpt-test",
-                        "supports_thinking": supports_thinking,
-                    }
-                ],
+                "log_level": log_level,
             }
         ),
         encoding="utf-8",
@@ -71,13 +64,6 @@ def _write_config(path: Path, *, model_name: str, supports_thinking: bool) -> No
 def _write_config_with_sections(path: Path, sections: dict | None = None) -> None:
     config = {
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-        "models": [
-            {
-                "name": "first-model",
-                "use": "langchain_openai:ChatOpenAI",
-                "model": "gpt-test",
-            }
-        ],
     }
     if sections:
         config.update(sections)
@@ -101,7 +87,7 @@ def test_app_config_rejects_checkpointer_from_any_mapping(mapping_type):
 
 def test_app_config_defaults_missing_database_url_from_environment(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    _write_config(config_path, model_name="first-model", supports_thinking=False)
+    _write_config(config_path, log_level="info")
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/deerflow")
 
@@ -141,7 +127,6 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
         yaml.safe_dump(
             {
                 "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-                "models": None,
                 "tools": None,
                 "tool_groups": None,
             }
@@ -151,7 +136,6 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
 
     config = AppConfig.from_file(str(config_path))
 
-    assert config.models == []
     assert config.tools == []
     assert config.tool_groups == []
 
@@ -160,7 +144,7 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
     """Commenting out every entry under an object key makes PyYAML parse it as None.
 
     Same documented ``cp config.example.yaml config.yaml`` flow as the list
-    sections: object sections (memory, summarization, ...) must fall back to
+    sections: deployment-owned object sections must fall back to
     their defaults instead of raising ``Input should be a valid dictionary``.
     """
     config_path = tmp_path / "config.yaml"
@@ -168,10 +152,9 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
         yaml.safe_dump(
             {
                 "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-                "memory": None,
-                "summarization": None,
                 "guardrails": None,
-                "tool_output": None,
+                "logging": None,
+                "circuit_breaker": None,
             }
         ),
         encoding="utf-8",
@@ -181,10 +164,9 @@ def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch)
 
     # Each present-but-null object section falls back to a real default config
     # object of the expected type (not merely non-None).
-    assert type(config.memory).__name__ == "MemoryConfig"
-    assert type(config.summarization).__name__ == "SummarizationConfig"
     assert type(config.guardrails).__name__ == "GuardrailsConfig"
-    assert type(config.tool_output).__name__ == "ToolOutputConfig"
+    assert type(config.logging).__name__ == "LoggingConfig"
+    assert type(config.circuit_breaker).__name__ == "CircuitBreakerConfig"
 
 
 def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
@@ -201,41 +183,39 @@ def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
         AppConfig.from_file(str(config_path))
 
 
-def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):
+def test_app_config_loads_without_yaml_models(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
             {
                 "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-                "models": None,
             }
         ),
         encoding="utf-8",
     )
 
-    with caplog.at_level("WARNING", logger="deerflow.config.app_config"):
-        AppConfig.from_file(str(config_path))
+    config = AppConfig.from_file(str(config_path))
 
-    assert "No models are configured" in caplog.text
+    assert config.models == []
 
 
 def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    _write_config(config_path, model_name="first-model", supports_thinking=False)
+    _write_config(config_path, log_level="info")
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     reset_app_config()
 
     try:
         initial = get_app_config()
-        assert initial.models[0].supports_thinking is False
+        assert initial.log_level == "info"
 
-        _write_config(config_path, model_name="first-model", supports_thinking=True)
+        _write_config(config_path, log_level="warning")
         next_mtime = config_path.stat().st_mtime + 5
         os.utime(config_path, (next_mtime, next_mtime))
 
         reloaded = get_app_config()
-        assert reloaded.models[0].supports_thinking is True
+        assert reloaded.log_level == "warning"
         assert reloaded is not initial
     finally:
         reset_app_config()
@@ -243,7 +223,7 @@ def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
 
 def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
-    _write_config(config_path, model_name="model-a", supports_thinking=False)
+    _write_config(config_path, log_level="info")
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     _reset_config_singletons()
@@ -252,10 +232,10 @@ def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp
         initial = get_app_config()
         initial_mtime = app_config_module._app_config_mtime
         initial_signature = app_config_module._app_config_signature
-        assert initial.models[0].name == "model-a"
+        assert initial.log_level == "info"
         assert initial_signature is not None
 
-        _write_config(config_path, model_name="model-b", supports_thinking=False)
+        _write_config(config_path, log_level="warning")
 
         real_get_config_signature = app_config_module._get_config_signature
 
@@ -268,7 +248,7 @@ def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp
         monkeypatch.setattr(app_config_module, "_get_config_signature", stale_metadata_signature)
 
         reloaded = get_app_config()
-        assert reloaded.models[0].name == "model-b"
+        assert reloaded.log_level == "warning"
         assert reloaded is not initial
         assert app_config_module._app_config_signature is not None
         assert app_config_module._app_config_signature[:2] == initial_signature[:2]
@@ -280,19 +260,19 @@ def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp
 def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
     config_a = tmp_path / "config-a.yaml"
     config_b = tmp_path / "config-b.yaml"
-    _write_config(config_a, model_name="model-a", supports_thinking=False)
-    _write_config(config_b, model_name="model-b", supports_thinking=True)
+    _write_config(config_a, log_level="info")
+    _write_config(config_b, log_level="warning")
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_a))
     reset_app_config()
 
     try:
         first = get_app_config()
-        assert first.models[0].name == "model-a"
+        assert first.log_level == "info"
 
         monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_b))
         second = get_app_config()
-        assert second.models[0].name == "model-b"
+        assert second.log_level == "warning"
         assert second is not first
     finally:
         reset_app_config()
@@ -303,11 +283,9 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
     _write_config_with_sections(
         config_path,
         {
-            "title": {"enabled": False, "max_words": 3},
-            "summarization": {"enabled": True},
-            "memory": {"enabled": False, "max_facts": 50},
+            "title": {"prompt_template": "Custom title: {conversation}"},
+            "summarization": {"summary_prompt": "Custom summary"},
             "subagents": {"timeout_seconds": 42, "agents": {"reviewer": {"max_turns": 2}}},
-            "tool_search": {"enabled": True},
             "guardrails": {"enabled": True, "fail_closed": False},
         },
     )
@@ -317,11 +295,9 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
 
     try:
         get_app_config()
-        assert get_title_config().enabled is False
-        assert get_summarization_config().enabled is True
-        assert get_memory_config().enabled is False
+        assert get_title_config().prompt_template == "Custom title: {conversation}"
+        assert get_summarization_config().summary_prompt == "Custom summary"
         assert get_subagents_app_config().timeout_seconds == 42
-        assert get_tool_search_config().enabled is True
         assert get_guardrails_config().enabled is True
 
         _write_config_with_sections(config_path)
@@ -331,9 +307,7 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         get_app_config()
         assert get_title_config().enabled is True
         assert get_summarization_config().enabled is False
-        assert get_memory_config().enabled is True
         assert get_subagents_app_config().timeout_seconds == 1800
-        assert get_tool_search_config().enabled is False
         assert get_guardrails_config().enabled is False
     finally:
         _reset_config_singletons()
@@ -361,8 +335,8 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
     _write_config_with_sections(
         config_path,
         {
-            "title": {"enabled": False},
-            "tool_search": {"enabled": True},
+            "title": {"prompt_template": "Custom title: {conversation}"},
+            "guardrails": {"enabled": True},
         },
     )
 
@@ -376,7 +350,7 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
             config_path,
             {
                 "title": False,
-                "tool_search": False,
+                "guardrails": False,
             },
         )
         next_mtime = config_path.stat().st_mtime + 5
@@ -386,7 +360,7 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
             get_app_config()
 
         assert app_config_module._app_config is previous_app_config
-        assert get_title_config().enabled is False
-        assert get_tool_search_config().enabled is True
+        assert get_title_config().prompt_template == "Custom title: {conversation}"
+        assert get_guardrails_config().enabled is True
     finally:
         _reset_config_singletons()

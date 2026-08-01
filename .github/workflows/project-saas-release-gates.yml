@@ -2,7 +2,7 @@ name: M1-M7 Project Foundation Release Gates
 
 on:
   push:
-    branches: [main, 2.0.x-dev]
+    branches: [main, dev, 2.0.x-dev]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 

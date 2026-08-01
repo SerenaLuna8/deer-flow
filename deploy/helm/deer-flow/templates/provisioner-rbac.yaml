@@ -18,14 +18,12 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: provisioner
 rules:
-  # Verbs mirror docker/provisioner/app.py, which only calls get/create/delete
-  # on pods and get/list/create/delete on services. update/patch, pods/exec,
-  # and events were unused and dropped (least privilege). These verbs still
-  # apply to *all* Pods in the namespace - scoping to sandbox Pods is deferred
-  # (see README "Not yet enforced").
+  # docker/provisioner/app.py reads, creates and deletes dynamically named
+  # sandbox Pods and Services; the list endpoint also lists labeled Services.
+  # watch, pod logs, exec, update and patch are intentionally absent.
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -56,7 +54,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

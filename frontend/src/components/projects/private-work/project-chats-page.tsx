@@ -11,10 +11,10 @@ import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-import { useMainProjectChat } from "./use-main-project-chat";
+import { useProjectNewChat } from "./use-project-new-chat";
 
 export function ProjectChatsPage({ project }: { project: Project }) {
-  const mainChat = useMainProjectChat(project);
+  const newChat = useProjectNewChat(project);
   const canCreate =
     project.capabilities.includes("private_work.create") &&
     project.capabilities.includes("shared_assets.execute");
@@ -37,24 +37,26 @@ export function ProjectChatsPage({ project }: { project: Project }) {
         </div>
         <h1 className="mt-5 text-2xl font-semibold">开始项目会话</h1>
         <p className="text-muted-foreground mt-2 text-sm leading-6">
-          从会话列表选择已有会话，或使用 Main 开始新的对话。
+          从会话列表选择已有会话，或使用
+          {newChat.defaultAgentName
+            ? ` ${newChat.defaultAgentName} `
+            : "项目默认 Agent"}
+          开始新的对话。
         </p>
         {canCreate ? (
           <Button
             type="button"
             className="mt-6"
-            disabled={
-              !entryEnabled || mainChat.isCreating || mainChat.isLoading
-            }
+            disabled={!entryEnabled || newChat.isCreating || newChat.isLoading}
             aria-disabled={
-              !entryEnabled || mainChat.isCreating || mainChat.isLoading
+              !entryEnabled || newChat.isCreating || newChat.isLoading
             }
-            onClick={() => void mainChat.startMainChat()}
+            onClick={() => void newChat.startNewChat()}
           >
             <MessageSquarePlusIcon aria-hidden className="size-4" />
-            {mainChat.isLoading
+            {newChat.isLoading
               ? "正在准备…"
-              : mainChat.isCreating
+              : newChat.isCreating
                 ? "正在创建…"
                 : "新建对话"}
           </Button>

@@ -15,6 +15,7 @@ the real implementation in isolation.
 
 import asyncio
 import importlib
+import logging
 import sys
 import threading
 from datetime import datetime
@@ -912,6 +913,164 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_aexecute_publishes_cumulative_token_usage_while_running(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+    ):
+        """The task poller can observe collector usage before terminal completion."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        chunk_processed = asyncio.Event()
+        release_stream = asyncio.Event()
+        final_state = {
+            "messages": [
+                msg.human("Do something"),
+                msg.ai("Working", "msg-1"),
+            ]
+        }
+
+        async def usage_reporting_stream(*args, config, **kwargs):
+            collector = config["callbacks"][0]
+            collector.on_llm_end(
+                SimpleNamespace(
+                    generations=[
+                        [
+                            SimpleNamespace(
+                                message=SimpleNamespace(
+                                    usage_metadata={
+                                        "input_tokens": 17,
+                                        "output_tokens": 5,
+                                        "total_tokens": 22,
+                                    },
+                                    response_metadata={"model_name": "worker-model"},
+                                )
+                            )
+                        ]
+                    ]
+                ),
+                run_id="subagent-llm-run-1",
+            )
+            yield final_state
+            chunk_processed.set()
+            await release_stream.wait()
+
+        mock_agent.astream = usage_reporting_stream
+        result_holder = SubagentResult(
+            task_id="task-live-usage",
+            trace_id="trace-live-usage",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(executor._aexecute("Do something", result_holder=result_holder))
+            await asyncio.wait_for(chunk_processed.wait(), timeout=3)
+
+            assert not execution.done()
+            assert result_holder.status == SubagentStatus.RUNNING
+            assert result_holder.token_usage_records == [
+                {
+                    "source_run_id": "subagent-llm-run-1",
+                    "caller": "subagent:test-agent",
+                    "model_name": "worker-model",
+                    "input_tokens": 17,
+                    "output_tokens": 5,
+                    "total_tokens": 22,
+                }
+            ]
+
+            release_stream.set()
+            result = await asyncio.wait_for(execution, timeout=3)
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.token_usage_records == result_holder.token_usage_records
+
+    @pytest.mark.anyio
+    async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):
+        """A handled provider fallback is still a failed delegated task."""
+        AIMessage = classes["AIMessage"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        fallback_text = "LLM request failed: provider rejected the request"
+        fallback_message = AIMessage(
+            content=fallback_text,
+            additional_kwargs={
+                "deerflow_error_fallback": True,
+                "error_detail": "Error code: 400 - InvalidParameter",
+            },
+        )
+        final_state = {"messages": [msg.human("Do something"), fallback_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "LLM_REQUEST_FAILED"
+        assert fallback_text not in result.error
+        assert result.result is None
+        assert result.stop_reason is None
+
+    @pytest.mark.anyio
+    async def test_aexecute_does_not_infer_llm_failure_from_message_text(self, classes, base_config, mock_agent, msg):
+        """Error-looking prose without the structured marker is valid output."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_text = "The previous LLM request failed, and this explains why."
+        final_state = {"messages": [msg.human("Explain the error"), msg.ai(final_text)]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Explain the error")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == final_text
+        assert result.error is None
+
+    @pytest.mark.anyio
+    async def test_aexecute_checks_only_the_last_ai_message_for_fallback(self, classes, base_config, mock_agent, msg):
+        """A stale fallback marker before this task's final AI output is ignored."""
+        AIMessage = classes["AIMessage"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        stale_fallback = AIMessage(
+            content="LLM request failed in earlier history",
+            additional_kwargs={"deerflow_error_fallback": True},
+        )
+        final_state = {
+            "messages": [
+                stale_fallback,
+                msg.human("Do something"),
+                msg.ai("Current task completed"),
+            ]
+        }
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "Current task completed"
+        assert result.error is None
+
+    @pytest.mark.anyio
     async def test_general_purpose_command_request_without_bash_fails_before_agent_start(
         self,
         classes,
@@ -1134,12 +1293,13 @@ class TestAsyncExecutionPath:
         assert "Part 2" in result.result
 
     @pytest.mark.anyio
-    async def test_aexecute_handles_agent_exception(self, classes, base_config, mock_agent):
-        """Test that exceptions during execution are caught and returned as FAILED."""
+    async def test_aexecute_handles_agent_exception(self, classes, base_config, mock_agent, caplog):
+        """Agent exception details must not escape through results or logs."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
+        sentinel = "SUBAGENT-ASYNC-SECRET-6NQ3"
 
-        mock_agent.astream.side_effect = Exception("Agent error")
+        mock_agent.astream.side_effect = Exception(f"Authorization: Bearer {sentinel}")
 
         executor = SubagentExecutor(
             config=base_config,
@@ -1147,12 +1307,14 @@ class TestAsyncExecutionPath:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            result = await executor._aexecute("Task")
+        with caplog.at_level(logging.ERROR, logger="deerflow.subagents.executor"):
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                result = await executor._aexecute("Task")
 
         assert result.status == SubagentStatus.FAILED
-        assert "Agent error" in result.error
+        assert result.error
         assert result.completed_at is not None
+        assert sentinel not in f"{result.error!r}\n{caplog.text}"
 
     @pytest.mark.anyio
     async def test_aexecute_recursion_error_with_partial_surfaces_completed_turn_capped(self, classes, base_config, mock_agent, msg):
@@ -1315,6 +1477,39 @@ class TestAsyncExecutionPath:
         assert result.stop_reason == "turn_capped"
         assert str(base_config.max_turns) in (result.error or "")
         assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_recursion_error_with_llm_fallback_is_failed_and_keeps_stop_reason(self, classes, base_config, mock_agent, msg):
+        """A marked fallback cannot become a successful partial recursion result."""
+        from langgraph.errors import GraphRecursionError
+
+        AIMessage = classes["AIMessage"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        fallback_text = "LLM request failed: provider rejected the request"
+        fallback_message = AIMessage(
+            content=fallback_text,
+            additional_kwargs={"deerflow_error_fallback": True},
+        )
+        fallback_state = {"messages": [msg.human("Task"), fallback_message]}
+
+        async def mock_astream(*args, **kwargs):
+            yield fallback_state
+            raise GraphRecursionError("Recursion limit reached after fallback")
+
+        mock_agent.astream = mock_astream
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor._stop_reason_middlewares = [SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")]
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "LLM_REQUEST_FAILED"
+        assert fallback_text not in result.error
+        assert result.result is None
+        assert result.stop_reason == "token_capped"
 
     @pytest.mark.anyio
     async def test_aexecute_token_capped_surfaces_completed_token_capped(self, classes, base_config, mock_agent, msg):
@@ -1604,7 +1799,8 @@ class TestSkillAllowedTools:
             result = await executor._aexecute("Task")
 
         assert result.status == classes["SubagentStatus"].FAILED
-        assert result.error == "skill storage unavailable"
+        assert result.error == "SUBAGENT_EXECUTION_FAILED"
+        assert "skill storage unavailable" not in result.error
         create_agent_mock.assert_not_called()
 
 
@@ -1827,10 +2023,11 @@ class TestSyncExecutionPath:
         assert execution_loops[0] is execution_loops[1]
         assert execution_loops[0].is_running()
 
-    def test_execute_handles_asyncio_run_failure(self, classes, base_config):
-        """Test handling when asyncio.run() itself fails."""
+    def test_execute_handles_asyncio_run_failure(self, classes, base_config, caplog):
+        """Sync wrapper exception details must not escape through results or logs."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
+        sentinel = "SUBAGENT-SYNC-SECRET-2WFP"
 
         executor = SubagentExecutor(
             config=base_config,
@@ -1839,13 +2036,15 @@ class TestSyncExecutionPath:
         )
 
         with patch.object(executor, "_aexecute") as mock_aexecute:
-            mock_aexecute.side_effect = Exception("Asyncio run error")
+            mock_aexecute.side_effect = Exception(f"Authorization: Bearer {sentinel}")
 
-            result = executor.execute("Task")
+            with caplog.at_level(logging.ERROR, logger="deerflow.subagents.executor"):
+                result = executor.execute("Task")
 
         assert result.status == SubagentStatus.FAILED
-        assert "Asyncio run error" in result.error
+        assert result.error
         assert result.completed_at is not None
+        assert sentinel not in f"{result.error!r}\n{caplog.text}"
 
     def test_execute_with_result_holder(self, classes, base_config, mock_agent, msg):
         """Test execute() updates provided result_holder in real-time."""
@@ -2728,7 +2927,16 @@ class TestSubagentTracingWiring:
         yield
         reset_tracing_config()
 
-    def _make_executor(self, classes, *, user_id=None, name="general-purpose", parent_model="test-model", deerflow_trace_id=None):
+    def _make_executor(
+        self,
+        classes,
+        *,
+        user_id=None,
+        name="general-purpose",
+        parent_model="test-model",
+        deerflow_trace_id=None,
+        enhance_enabled=True,
+    ):
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentConfig = classes["SubagentConfig"]
         config = SubagentConfig(
@@ -2746,6 +2954,11 @@ class TestSubagentTracingWiring:
             trace_id="trace-1",
             user_id=user_id,
             deerflow_trace_id=deerflow_trace_id,
+            app_config=SimpleNamespace(
+                logging=SimpleNamespace(
+                    enhance=SimpleNamespace(enabled=enhance_enabled),
+                ),
+            ),
         )
 
     @pytest.mark.anyio
@@ -2820,6 +3033,38 @@ class TestSubagentTracingWiring:
         assert fake_agent.captured_context.get("deerflow_trace_id") == "gateway-trace-sub"
         tags = metadata.get("langfuse_tags") or []
         assert any(t.startswith("model:") for t in tags), "model tag must be emitted for cost attribution"
+
+    @pytest.mark.anyio
+    async def test_aexecute_keeps_internal_trace_but_omits_langfuse_correlation_when_enhance_disabled(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("LANGFUSE_TRACING", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        reset_tracing_config()
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+
+        executor = self._make_executor(
+            classes,
+            user_id="alice",
+            deerflow_trace_id="trusted-subagent-origin",
+            enhance_enabled=False,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        metadata = (fake_agent.captured_config or {}).get("metadata") or {}
+        assert metadata.get("langfuse_session_id") == "thread-trace-1"
+        assert "deerflow_trace_id" not in metadata
+        assert fake_agent.captured_context.get("deerflow_trace_id") == "trusted-subagent-origin"
 
     @pytest.mark.anyio
     async def test_aexecute_skips_langfuse_metadata_when_disabled(
@@ -2977,6 +3222,7 @@ class TestSubagentGuardrailAttribution:
         oauth_provider=None,
         oauth_id=None,
         run_id=None,
+        guardrail_attribution=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3000,6 +3246,7 @@ class TestSubagentGuardrailAttribution:
             oauth_provider=oauth_provider,
             oauth_id=oauth_id,
             run_id=run_id,
+            guardrail_attribution=guardrail_attribution,
         )
 
     @pytest.mark.anyio
@@ -3035,6 +3282,54 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_private_subagent_uses_copied_worker_attribution_carrier(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        issued = {
+            "user_id": "trusted-user",
+            "user_role": "runner",
+            "thread_id": "thread-attrib-1",
+            "run_id": "run-private",
+            "is_subagent": False,
+            "authz_attributes": {"project_role": "runner"},
+        }
+        executor = self._make_executor(
+            classes,
+            user_id="forged-legacy-user",
+            user_role="forged-legacy-role",
+            run_id="forged-legacy-run",
+            guardrail_attribution=issued,
+        )
+        executor.private_scope = object()
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(
+            executor,
+            "_build_initial_state",
+            self._noop_build_initial_state,
+        )
+        monkeypatch.setattr(
+            executor,
+            "_create_agent",
+            lambda *a, **kw: fake_agent,
+        )
+
+        await executor._aexecute("do private work")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        carrier = context["__guardrail_attribution"]
+        assert carrier == {
+            **issued,
+            "is_subagent": True,
+        }
+        assert carrier is not issued
+        assert carrier["authz_attributes"] is not issued["authz_attributes"]
+        assert issued["is_subagent"] is False
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(

@@ -14,7 +14,7 @@ from langchain_core.runnables import Runnable
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState, merge_sandbox
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
@@ -245,6 +245,37 @@ async def test_aafter_agent_releases_sandbox_off_thread(
     assert result is None
     assert provider.released_ids == [expected_sandbox_id]
     assert to_thread_calls == [(provider.release, (expected_sandbox_id,))]
+
+
+def test_after_agent_does_not_release_fork_restored_sandbox() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        result = SandboxMiddleware().after_agent(
+            {"sandbox": Overwrite({"sandbox_id": "fork-restored"})},
+            Runtime(context={}),
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == []
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_does_not_release_fork_restored_sandbox() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        result = await SandboxMiddleware().aafter_agent(
+            {"sandbox": Overwrite({"sandbox_id": "fork-restored"})},
+            Runtime(context={}),
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == []
 
 
 @pytest.mark.anyio

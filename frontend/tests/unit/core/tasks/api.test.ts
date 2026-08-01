@@ -20,9 +20,12 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-function stepEvent(seq: number, messageIndex: number, toolName: string) {
+function stepEvent(seq: string, messageIndex: number, toolName: string) {
   return {
+    thread_id: "thread-1",
+    run_id: "run-1",
     event_type: "subagent.step",
+    category: "trace",
     seq,
     content: {
       task_id: "A",
@@ -32,6 +35,7 @@ function stepEvent(seq: number, messageIndex: number, toolName: string) {
       tool_name: toolName,
     },
     metadata: { task_id: "A", message_index: messageIndex },
+    created_at: "2026-07-30T00:00:00Z",
   };
 }
 
@@ -59,11 +63,13 @@ describe("fetchSubtaskSteps", () => {
     mockedFetch
       .mockResolvedValueOnce(
         jsonResponse(200, [
-          stepEvent(10, 0, "web_search"),
-          stepEvent(11, 1, "read_file"),
+          stepEvent("9007199254740992", 0, "web_search"),
+          stepEvent("9007199254740993", 1, "read_file"),
         ]),
       )
-      .mockResolvedValueOnce(jsonResponse(200, [stepEvent(12, 2, "bash")]));
+      .mockResolvedValueOnce(
+        jsonResponse(200, [stepEvent("9007199254740994", 2, "bash")]),
+      );
 
     const steps = await fetchSubtaskSteps(privateWork, "t", "r", "A", 2);
 
@@ -75,12 +81,14 @@ describe("fetchSubtaskSteps", () => {
     ]);
     expect(mockedFetch).toHaveBeenCalledTimes(2);
     expect(mockedFetch.mock.calls[0]![0] as string).not.toContain("after_seq");
-    expect(mockedFetch.mock.calls[1]![0] as string).toContain("after_seq=11");
+    expect(mockedFetch.mock.calls[1]![0] as string).toContain(
+      "after_seq=9007199254740993",
+    );
   });
 
   test("stops after a single page when it is shorter than the page size", async () => {
     mockedFetch.mockResolvedValueOnce(
-      jsonResponse(200, [stepEvent(10, 0, "web_search")]),
+      jsonResponse(200, [stepEvent("10", 0, "web_search")]),
     );
 
     const steps = await fetchSubtaskSteps(privateWork, "t", "r", "A", 500);
@@ -91,6 +99,21 @@ describe("fetchSubtaskSteps", () => {
 
   test("throws when a page request fails", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, { detail: "boom" }));
+
+    await expect(
+      fetchSubtaskSteps(privateWork, "t", "r", "A"),
+    ).rejects.toThrow();
+  });
+
+  test("rejects numeric event sequences before they become pagination cursors", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, [
+        {
+          ...stepEvent("9007199254740993", 0, "web_search"),
+          seq: 9_007_199_254_740_993,
+        },
+      ]),
+    );
 
     await expect(
       fetchSubtaskSteps(privateWork, "t", "r", "A"),

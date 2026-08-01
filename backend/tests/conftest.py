@@ -16,6 +16,15 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
+# Pytest imports conftest before collecting test modules. Install a deliberately
+# non-sensitive unit-test default here so modules that construct
+# Gateway state at import time never rely on an implicit repository dotenv
+# load. Explicit caller-provided values (including release-gate databases) win.
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql://test-role@localhost/deerflow_test_unit",
+)
+
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
@@ -56,6 +65,23 @@ def m6_audit_hmac_environment(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_frozen_checkpoint_runtime(monkeypatch):
+    """Each test process instance starts with unfrozen checkpoint settings."""
+    import deerflow.runtime.checkpoint_mode as checkpoint_mode
+
+    monkeypatch.setattr(
+        checkpoint_mode,
+        "_frozen_checkpoint_channel_mode",
+        None,
+    )
+    monkeypatch.setattr(
+        checkpoint_mode,
+        "_frozen_checkpoint_snapshot_frequency",
+        None,
+    )
+
+
 @pytest.fixture(scope="session")
 def postgres_admin_url() -> str:
     """Return a maintenance URL without ever logging credentials."""
@@ -73,13 +99,19 @@ async def postgres_database_url(postgres_admin_url: str):
 
 @pytest_asyncio.fixture()
 async def migrated_postgres_database_url(postgres_database_url: str):
-    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from app.system_runtime_settings.bootstrap import (
+        bootstrap_system_runtime_policies,
+    )
     from deerflow.persistence.bootstrap import bootstrap_schema
 
     engine = create_async_engine(postgres_database_url)
     try:
         await bootstrap_schema(engine)
+        await bootstrap_system_runtime_policies(
+            async_sessionmaker(engine, expire_on_commit=False),
+        )
         yield postgres_database_url
     finally:
         await engine.dispose()

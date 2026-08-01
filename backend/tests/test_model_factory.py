@@ -10,6 +10,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 from deerflow.models import openai_codex_provider as codex_provider_module
+from deerflow.reflection import resolve_class
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,6 +77,17 @@ def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel
     monkeypatch.setattr(factory_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: model_class)
     monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+
+def _capturing_class(base_cls: type, captured: dict) -> type:
+    """Build a kwargs-capturing subclass of a real provider class."""
+
+    class _Capturing(base_cls):  # type: ignore[valid-type,misc]
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    return _Capturing
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +210,11 @@ def test_thinking_disabled_openai_gateway_format(monkeypatch):
             captured.update(kwargs)
             BaseChatModel.__init__(self, **kwargs)
 
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    monkeypatch.setattr(
+        factory_module,
+        "resolve_class",
+        lambda path, base: CapturingModel,
+    )
 
     factory_module.create_chat_model(name="openai-gw", thinking_enabled=False)
 
@@ -231,7 +247,11 @@ def test_thinking_disabled_langchain_anthropic_format(monkeypatch):
             captured.update(kwargs)
             BaseChatModel.__init__(self, **kwargs)
 
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    monkeypatch.setattr(
+        factory_module,
+        "resolve_class",
+        lambda path, base: CapturingModel,
+    )
 
     factory_module.create_chat_model(name="anthropic-native", thinking_enabled=False)
 
@@ -612,13 +632,13 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
     _patch_factory(monkeypatch, cfg)
 
     captured: dict = {}
+    from langchain_openai import ChatOpenAI
 
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    monkeypatch.setattr(
+        factory_module,
+        "resolve_class",
+        lambda path, base: _capturing_class(ChatOpenAI, captured),
+    )
 
     factory_module.create_chat_model(name="minimax-m3")
 
@@ -678,13 +698,13 @@ def test_openai_compatible_provider_enables_stream_usage_for_openai_api_base(mon
     _patch_factory(monkeypatch, cfg)
 
     captured: dict = {}
+    from langchain_openai import ChatOpenAI
 
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    monkeypatch.setattr(
+        factory_module,
+        "resolve_class",
+        lambda path, base: _capturing_class(ChatOpenAI, captured),
+    )
 
     factory_module.create_chat_model(name="openai-compatible")
 
@@ -1111,17 +1131,13 @@ def test_stream_chunk_timeout_defaults_to_240_for_openai_compatible_model(monkey
     default, so reasoning models with long thinking pauses don't trip
     langchain-openai's aggressive 60s built-in default.
     """
+    from langchain_openai import ChatOpenAI
+
     model = _make_model(use="langchain_openai:ChatOpenAI")
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="test-model")
 
     assert captured.get("stream_chunk_timeout") == 240.0
@@ -1132,6 +1148,8 @@ def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
     factory must not overwrite it with the default — even if the value is
     smaller (60s) or larger (600s) than the default.
     """
+    from langchain_openai import ChatOpenAI
+
     model = ModelConfig(
         name="custom-timeout-model",
         display_name="Custom Timeout",
@@ -1143,13 +1161,7 @@ def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="custom-timeout-model")
 
     assert captured.get("stream_chunk_timeout") == 60.0
@@ -1159,17 +1171,13 @@ def test_stream_chunk_timeout_not_injected_for_non_openai_provider(monkeypatch):
     """Only langchain_openai:ChatOpenAI receives the default. Anthropic / Vertex /
     other clients that don't understand this kwarg must not be polluted with it.
     """
+    from langchain_anthropic import ChatAnthropic
+
     model = _make_model(use="langchain_anthropic:ChatAnthropic")
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
     factory_module.create_chat_model(name="test-model")
 
     assert "stream_chunk_timeout" not in captured
@@ -1191,6 +1199,8 @@ def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(mo
     'stream_chunk_timeout'`` because the parameter is specific to
     ``langchain_openai:ChatOpenAI``.
     """
+    from langchain_anthropic import ChatAnthropic
+
     model = ModelConfig(
         name="anthropic-with-stray-timeout",
         display_name="Anthropic With Stray Timeout",
@@ -1202,16 +1212,75 @@ def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(mo
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
     factory_module.create_chat_model(name="anthropic-with-stray-timeout")
 
     assert "stream_chunk_timeout" not in captured
+
+
+_STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS = [
+    "deerflow.models.vllm_provider:VllmChatModel",
+    "deerflow.models.mindie_provider:MindIEChatModel",
+    "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    "deerflow.models.patched_mimo:PatchedChatMiMo",
+    "deerflow.models.patched_stepfun:PatchedChatStepFun",
+    "deerflow.models.patched_minimax:PatchedChatMiniMax",
+]
+
+
+@pytest.mark.parametrize("use_path", _STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS)
+def test_stream_chunk_timeout_defaults_to_240_for_all_openai_subclasses(
+    monkeypatch,
+    use_path,
+):
+    real_cls = resolve_class(use_path, BaseChatModel)
+    model = _make_model(use=use_path)
+    cfg = _make_app_config([model])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+@pytest.mark.parametrize("use_path", _STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS)
+def test_stream_chunk_timeout_user_override_honored_for_all_openai_subclasses(
+    monkeypatch,
+    use_path,
+):
+    real_cls = resolve_class(use_path, BaseChatModel)
+    model = ModelConfig(
+        name="override-model",
+        display_name="Override",
+        description=None,
+        use=use_path,
+        model="reasoning-model",
+        stream_chunk_timeout=300.0,
+    )
+    cfg = _make_app_config([model])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+
+    factory_module.create_chat_model(name="override-model")
+
+    assert captured.get("stream_chunk_timeout") == 300.0
+
+
+def test_stream_chunk_timeout_240_reaches_real_mimo_constructor(monkeypatch):
+    model = _make_model_with_extras(
+        "mimo",
+        use="deerflow.models.patched_mimo:PatchedChatMiMo",
+        api_key="sk-dummy",
+        base_url="http://localhost:8000/v1",
+    )
+    cfg = _make_app_config([model])
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    instance = factory_module.create_chat_model(name="mimo")
+
+    assert instance.stream_chunk_timeout == 240.0
 
 
 # ---------------------------------------------------------------------------
@@ -1237,39 +1306,45 @@ def _make_model_with_extras(name="extra-model", *, use="langchain_openai:ChatOpe
 
 def test_api_base_normalized_to_base_url_for_chatopenai(monkeypatch):
     """A config that sets api_base on a ChatOpenAI model should reach the constructor as base_url."""
-    cfg = _make_app_config([_make_model_with_extras("oai", api_base="http://localhost:4001/v1")])
-    _patch_factory(monkeypatch, cfg)
+    from langchain_openai import ChatOpenAI
 
-    FakeChatModel.captured_kwargs = {}
+    cfg = _make_app_config([_make_model_with_extras("oai", api_base="http://localhost:4001/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="oai")
 
-    assert FakeChatModel.captured_kwargs.get("base_url") == "http://localhost:4001/v1"
-    assert "api_base" not in FakeChatModel.captured_kwargs
+    assert captured.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in captured
 
 
 def test_base_url_takes_precedence_when_both_set(monkeypatch):
     """When both base_url and api_base are present, base_url wins and api_base is dropped."""
-    cfg = _make_app_config([_make_model_with_extras("oai", base_url="http://canonical/v1", api_base="http://alias/v1")])
-    _patch_factory(monkeypatch, cfg)
+    from langchain_openai import ChatOpenAI
 
-    FakeChatModel.captured_kwargs = {}
+    cfg = _make_app_config([_make_model_with_extras("oai", base_url="http://canonical/v1", api_base="http://alias/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="oai")
 
-    assert FakeChatModel.captured_kwargs.get("base_url") == "http://canonical/v1"
-    assert "api_base" not in FakeChatModel.captured_kwargs
+    assert captured.get("base_url") == "http://canonical/v1"
+    assert "api_base" not in captured
 
 
-def test_api_base_not_normalized_for_non_openai_class(monkeypatch):
-    """api_base must be left untouched for model classes that are not the OpenAI-compatible family."""
+def test_api_base_preserved_for_provider_that_declares_it(monkeypatch):
+    """A BaseChatOpenAI provider with its own api_base field keeps that key."""
+    from deerflow.models.patched_deepseek import PatchedChatDeepSeek
+
     cfg = _make_app_config([_make_model_with_extras("ds", use="deerflow.models.patched_deepseek:PatchedChatDeepSeek", api_base="http://ds/v3")])
-    _patch_factory(monkeypatch, cfg)
-
-    FakeChatModel.captured_kwargs = {}
+    captured: dict = {}
+    _patch_factory(
+        monkeypatch,
+        cfg,
+        model_class=_capturing_class(PatchedChatDeepSeek, captured),
+    )
     factory_module.create_chat_model(name="ds")
 
-    # PatchedChatDeepSeek legitimately takes api_base — it must pass through unchanged.
-    assert FakeChatModel.captured_kwargs.get("api_base") == "http://ds/v3"
-    assert "base_url" not in FakeChatModel.captured_kwargs
+    assert captured.get("api_base") == "http://ds/v3"
+    assert "base_url" not in captured
 
 
 def test_no_op_when_neither_base_url_nor_api_base(monkeypatch):
@@ -1320,27 +1395,33 @@ def test_known_config_keys_emit_no_warning(monkeypatch, caplog):
 
 def test_api_base_normalized_for_patched_chatopenai(monkeypatch):
     """The PatchedChatOpenAI subclass is in the OpenAI-compatible family and must normalize too."""
-    cfg = _make_app_config([_make_model_with_extras("patched", use="deerflow.models.patched_openai:PatchedChatOpenAI", api_base="http://localhost:4001/v1")])
-    _patch_factory(monkeypatch, cfg)
+    from deerflow.models.patched_openai import PatchedChatOpenAI
 
-    FakeChatModel.captured_kwargs = {}
+    cfg = _make_app_config([_make_model_with_extras("patched", use="deerflow.models.patched_openai:PatchedChatOpenAI", api_base="http://localhost:4001/v1")])
+    captured: dict = {}
+    _patch_factory(
+        monkeypatch,
+        cfg,
+        model_class=_capturing_class(PatchedChatOpenAI, captured),
+    )
     factory_module.create_chat_model(name="patched")
 
-    assert FakeChatModel.captured_kwargs.get("base_url") == "http://localhost:4001/v1"
-    assert "api_base" not in FakeChatModel.captured_kwargs
+    assert captured.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in captured
 
 
 def test_api_base_dropped_when_openai_api_base_field_name_set(monkeypatch):
     """If the field-name openai_api_base is set alongside api_base, the alias is dropped (no dup)."""
-    cfg = _make_app_config([_make_model_with_extras("oai", openai_api_base="http://canonical/v1", api_base="http://alias/v1")])
-    _patch_factory(monkeypatch, cfg)
+    from langchain_openai import ChatOpenAI
 
-    FakeChatModel.captured_kwargs = {}
+    cfg = _make_app_config([_make_model_with_extras("oai", openai_api_base="http://canonical/v1", api_base="http://alias/v1")])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="oai")
 
-    assert FakeChatModel.captured_kwargs.get("openai_api_base") == "http://canonical/v1"
-    assert "api_base" not in FakeChatModel.captured_kwargs
-    assert "base_url" not in FakeChatModel.captured_kwargs
+    assert captured.get("openai_api_base") == "http://canonical/v1"
+    assert "api_base" not in captured
+    assert "base_url" not in captured
 
 
 def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
@@ -1359,3 +1440,88 @@ def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
         factory_module.create_chat_model(name="anthropic")
 
     assert not any("not recognized parameters" in rec.message for rec in caplog.records)
+
+
+_OPENAI_SUBCLASS_USE_PATHS_WITHOUT_API_BASE = [
+    "deerflow.models.vllm_provider:VllmChatModel",
+    "deerflow.models.mindie_provider:MindIEChatModel",
+    "deerflow.models.patched_mimo:PatchedChatMiMo",
+    "deerflow.models.patched_stepfun:PatchedChatStepFun",
+    "deerflow.models.patched_minimax:PatchedChatMiniMax",
+]
+
+
+@pytest.mark.parametrize(
+    "use_path",
+    _OPENAI_SUBCLASS_USE_PATHS_WITHOUT_API_BASE,
+)
+def test_api_base_normalized_for_all_openai_subclasses(monkeypatch, use_path):
+    real_cls = resolve_class(use_path, BaseChatModel)
+    cfg = _make_app_config(
+        [
+            _make_model_with_extras(
+                "m",
+                use=use_path,
+                api_base="http://gw.example/v1",
+            )
+        ]
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+
+    factory_module.create_chat_model(name="m")
+
+    assert captured.get("base_url") == "http://gw.example/v1"
+    assert "api_base" not in captured
+
+
+@pytest.mark.parametrize(
+    "use_path",
+    _OPENAI_SUBCLASS_USE_PATHS_WITHOUT_API_BASE,
+)
+def test_unknown_config_key_warns_for_all_openai_subclasses(
+    monkeypatch,
+    use_path,
+    caplog,
+):
+    import logging
+
+    secret_value = "do-not-log-this-value"
+    real_cls = resolve_class(use_path, BaseChatModel)
+    cfg = _make_app_config(
+        [
+            _make_model_with_extras(
+                "m",
+                use=use_path,
+                definitely_not_a_real_kwarg=secret_value,
+            )
+        ]
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="m")
+
+    assert any("definitely_not_a_real_kwarg" in record.message for record in caplog.records)
+    assert secret_value not in caplog.text
+
+
+def test_api_base_reaches_real_minimax_constructor_as_base_url(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model_with_extras(
+                "minimax",
+                use="deerflow.models.patched_minimax:PatchedChatMiniMax",
+                api_key="sk-dummy",
+                api_base="https://api.minimax.io/v1",
+            )
+        ]
+    )
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    instance = factory_module.create_chat_model(name="minimax")
+
+    assert instance.openai_api_base == "https://api.minimax.io/v1"
+    assert "api_base" not in (instance.model_kwargs or {})

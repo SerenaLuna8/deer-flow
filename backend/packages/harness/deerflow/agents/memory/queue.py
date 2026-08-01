@@ -3,13 +3,14 @@
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.config.memory_config import get_memory_config
+from deerflow.config.app_config import AppConfig
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.private_scope import PrivateResourceScope
 
@@ -29,9 +30,12 @@ class MemoryQueueItem:
     namespace: str
     membership_version: int
     messages: tuple[Any, ...]
+    memory_config: MemoryConfig
+    app_config: AppConfig = field(repr=False)
     correction_detected: bool = False
     reinforcement_detected: bool = False
     deerflow_trace_id: str | None = None
+    langfuse_trace_correlation_enabled: bool = False
 
     @property
     def key(self) -> ProjectMemoryQueueKey:
@@ -112,6 +116,7 @@ class ProjectMemoryUpdateQueue:
         self._debounce_seconds = debounce_seconds
         self._pending: dict[ProjectMemoryQueueKey, MemoryQueueItem] = {}
         self._tasks: dict[ProjectMemoryQueueKey, asyncio.Task[None]] = {}
+        self._active: dict[ProjectMemoryQueueKey, tuple[MemoryQueueItem, asyncio.Task[Any]]] = {}
 
     def enqueue(
         self,
@@ -121,14 +126,21 @@ class ProjectMemoryUpdateQueue:
         run_id: str,
         namespace: str,
         messages: list[Any] | tuple[Any, ...],
+        memory_config: MemoryConfig,
+        app_config: AppConfig,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         deerflow_trace_id: str | None = None,
+        langfuse_trace_correlation_enabled: bool = False,
     ) -> MemoryQueueItem:
         if type(scope) is not PrivateResourceScope:
             raise TypeError("project memory queue requires PrivateResourceScope")
         if not thread_id or not run_id or not namespace:
             raise ValueError("project memory queue coordinates must be non-empty")
+        if type(memory_config) is not MemoryConfig:
+            raise TypeError("project memory queue requires exact MemoryConfig")
+        if type(app_config) is not AppConfig:
+            raise TypeError("project memory queue requires exact AppConfig")
         item = MemoryQueueItem(
             scope=scope,
             thread_id=thread_id,
@@ -136,9 +148,12 @@ class ProjectMemoryUpdateQueue:
             namespace=namespace,
             membership_version=scope.membership_version,
             messages=tuple(messages),
+            memory_config=memory_config.model_copy(deep=True),
+            app_config=app_config.model_copy(deep=True),
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             deerflow_trace_id=deerflow_trace_id,
+            langfuse_trace_correlation_enabled=langfuse_trace_correlation_enabled,
         )
         existing = self._tasks.pop(item.key, None)
         if existing is not None:
@@ -147,54 +162,150 @@ class ProjectMemoryUpdateQueue:
         self._tasks[item.key] = asyncio.create_task(self._debounced_flush(item.key))
         return item
 
+    def enqueue_immediate(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        namespace: str,
+        messages: list[Any] | tuple[Any, ...],
+        memory_config: MemoryConfig,
+        app_config: AppConfig,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        deerflow_trace_id: str | None = None,
+        langfuse_trace_correlation_enabled: bool = False,
+    ) -> MemoryQueueItem:
+        """Flush one key promptly without replacing its complete pending snapshot.
+
+        A normal after-agent enqueue contains the newest complete conversation
+        snapshot for the key. A pre-summarization rescue is narrower, so when
+        both exist the normal item remains authoritative and is merely flushed
+        early. With no pending item, the rescue itself becomes the one item to
+        process. Either path produces one update rather than two overlapping
+        writes.
+        """
+
+        if type(scope) is not PrivateResourceScope:
+            raise TypeError("project memory queue requires PrivateResourceScope")
+        if not thread_id or not run_id or not namespace:
+            raise ValueError("project memory queue coordinates must be non-empty")
+        if type(memory_config) is not MemoryConfig:
+            raise TypeError("project memory queue requires exact MemoryConfig")
+        if type(app_config) is not AppConfig:
+            raise TypeError("project memory queue requires exact AppConfig")
+        immediate = MemoryQueueItem(
+            scope=scope,
+            thread_id=thread_id,
+            run_id=run_id,
+            namespace=namespace,
+            membership_version=scope.membership_version,
+            messages=tuple(messages),
+            memory_config=memory_config.model_copy(deep=True),
+            app_config=app_config.model_copy(deep=True),
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            deerflow_trace_id=deerflow_trace_id,
+            langfuse_trace_correlation_enabled=langfuse_trace_correlation_enabled,
+        )
+        selected = self._pending.get(immediate.key)
+        active = self._active.get(immediate.key)
+        if selected is None and active is not None and active[0].run_id == immediate.run_id:
+            return active[0]
+        if selected is None or selected.run_id != immediate.run_id:
+            selected = immediate
+            self._pending[immediate.key] = immediate
+
+        existing = self._tasks.pop(immediate.key, None)
+        if existing is not None:
+            existing.cancel()
+        self._tasks[immediate.key] = asyncio.create_task(self._immediate_flush(immediate.key))
+        return selected
+
+    async def _immediate_flush(self, key: ProjectMemoryQueueKey) -> None:
+        try:
+            await self._process(key)
+        except asyncio.CancelledError:
+            return
+
     async def _debounced_flush(self, key: ProjectMemoryQueueKey) -> None:
         try:
             delay = self._debounce_seconds
             if delay is None:
-                delay = get_memory_config().debounce_seconds
+                item = self._pending.get(key)
+                if item is None:
+                    return
+                delay = item.memory_config.debounce_seconds
             await asyncio.sleep(delay)
             await self._process(key)
         except asyncio.CancelledError:
             return
 
+    async def _wait_for_active(self, key: ProjectMemoryQueueKey, *, shield: bool) -> None:
+        active = self._active.get(key)
+        if active is None or active[1] is asyncio.current_task():
+            return
+        waiting = asyncio.gather(active[1], return_exceptions=True)
+        if shield:
+            await asyncio.shield(waiting)
+        else:
+            await waiting
+
     async def _process(self, key: ProjectMemoryQueueKey) -> bool:
+        await self._wait_for_active(key, shield=True)
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("project memory processing requires an asyncio task")
         item = self._pending.pop(key, None)
-        self._tasks.pop(key, None)
+        if self._tasks.get(key) is current_task:
+            self._tasks.pop(key, None)
         if item is None:
             return False
-        if item.membership_version != item.scope.membership_version:
-            return False
-        if not await self._revalidator.is_active(item.scope):
-            logger.info(
-                "Dropped project memory update for inactive membership: project=%s owner=%s",
-                item.scope.project_id,
-                item.scope.owner_user_id,
+        self._active[key] = (item, current_task)
+        try:
+            if item.membership_version != item.scope.membership_version:
+                return False
+            if not await self._revalidator.is_active(item.scope):
+                logger.info(
+                    "Dropped project memory update for inactive membership: project=%s owner=%s",
+                    item.scope.project_id,
+                    item.scope.owner_user_id,
+                )
+                return False
+            return await self._updater.aupdate_project_memory(
+                storage=self._storage,
+                scope=item.scope,
+                namespace=item.namespace,
+                messages=item.messages,
+                memory_config=item.memory_config,
+                app_config=item.app_config,
+                thread_id=item.thread_id,
+                run_id=item.run_id,
+                correction_detected=item.correction_detected,
+                reinforcement_detected=item.reinforcement_detected,
+                deerflow_trace_id=item.deerflow_trace_id,
+                langfuse_trace_correlation_enabled=item.langfuse_trace_correlation_enabled,
             )
-            return False
-        return await self._updater.aupdate_project_memory(
-            storage=self._storage,
-            scope=item.scope,
-            namespace=item.namespace,
-            messages=item.messages,
-            thread_id=item.thread_id,
-            run_id=item.run_id,
-            correction_detected=item.correction_detected,
-            reinforcement_detected=item.reinforcement_detected,
-            deerflow_trace_id=item.deerflow_trace_id,
-        )
+        finally:
+            active = self._active.get(key)
+            if active is not None and active[1] is current_task:
+                self._active.pop(key, None)
 
     async def flush(self, key: ProjectMemoryQueueKey) -> bool:
         task = self._tasks.pop(key, None)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._wait_for_active(key, shield=False)
         return await self._process(key)
 
     async def flush_all(self) -> list[bool]:
-        return [await self.flush(key) for key in tuple(self._pending)]
+        keys = tuple(dict.fromkeys((*self._pending, *self._active)))
+        return [await self.flush(key) for key in keys]
 
     async def clear(self) -> None:
-        tasks = tuple(self._tasks.values())
+        tasks = tuple({*self._tasks.values(), *(active[1] for active in self._active.values())})
         self._tasks.clear()
         self._pending.clear()
         for task in tasks:
@@ -223,6 +334,12 @@ def get_project_memory_queue() -> ProjectMemoryUpdateQueue:
             ProjectMemoryStorage(session_factory),
             revalidator=ProjectMemoryMembershipRevalidator(session_factory),
         )
+    return _project_memory_queue
+
+
+def get_initialized_project_memory_queue() -> ProjectMemoryUpdateQueue | None:
+    """Return the live queue without initializing persistence during shutdown."""
+
     return _project_memory_queue
 
 

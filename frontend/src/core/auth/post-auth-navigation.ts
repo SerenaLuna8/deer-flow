@@ -1,11 +1,11 @@
-import type { User } from "./types";
+import type { AuthMeResult } from "./auth-response";
 
 export async function restoreSessionThenNavigate(
-  restoreUser: () => Promise<User | null>,
+  restoreUser: () => Promise<AuthMeResult | null>,
   navigate: () => void,
 ): Promise<boolean> {
-  const user = await restoreUser();
-  if (!user) return false;
+  const result = await restoreUser();
+  if (result?.type !== "authenticated") return false;
   navigate();
   return true;
 }

@@ -32,11 +32,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 
 import urllib3
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
@@ -65,7 +66,7 @@ SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
 SKILLS_PVC_SUBPATH_TEMPLATE = os.environ.get("SKILLS_PVC_SUBPATH_TEMPLATE", "")
 SANDBOX_CONTAINER_PORT_RAW = os.environ.get("SANDBOX_CONTAINER_PORT", "8080")
-SANDBOX_SERVICE_TYPE = os.environ.get("SANDBOX_SERVICE_TYPE", "NodePort")
+SANDBOX_SERVICE_TYPE = os.environ.get("SANDBOX_SERVICE_TYPE", "ClusterIP")
 try:
     SANDBOX_CONTAINER_PORT = int(SANDBOX_CONTAINER_PORT_RAW)
 except ValueError as exc:
@@ -81,6 +82,7 @@ DEFAULT_USER_ID = "default"
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
 KUBECONFIG_PATH = os.environ.get("KUBECONFIG_PATH", "/root/.kube/config")
+PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 
 # The hostname / IP that the backend uses to reach NodePort services. On Docker
 # Desktop for macOS this is ``host.docker.internal``; on Linux it may be the
@@ -202,6 +204,17 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def verify_api_key(request: Request, call_next):
+    """Require service authentication for every Provisioner control API."""
+    if request.url.path.startswith("/api/"):
+        request_key = request.headers.get("X-API-Key", "")
+        if not PROVISIONER_API_KEY or not secrets.compare_digest(request_key, PROVISIONER_API_KEY):
+            logger.warning("Provisioner auth rejected: %s %s", request.method, request.url.path)
+            return Response(status_code=401, content="Unauthorized")
+    return await call_next(request)
 
 
 # ── Request / Response models ───────────────────────────────────────────

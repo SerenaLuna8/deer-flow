@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 import pytest_asyncio
+import sqlalchemy as sa
 from fastapi import FastAPI, HTTPException, Request
 from support.m4_private_threads import M4ThreadSeed, seed_m4_thread_database
 
@@ -15,8 +16,23 @@ from app.private_work.feedback_service import PrivateFeedbackService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from deerflow.persistence.models.run_event import ThreadEventSequenceRow
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime.events.store.db import DbRunEventStore
+
+_INVALID_REST_FEED_CURSORS = (
+    pytest.param("01", id="leading-zero"),
+    pytest.param("+1", id="explicit-plus"),
+    pytest.param("1.0", id="decimal"),
+    pytest.param(" 1", id="leading-space"),
+    pytest.param("1 ", id="trailing-space"),
+    pytest.param("-0", id="negative-zero"),
+    pytest.param("-1", id="negative"),
+    pytest.param("١", id="unicode-digit"),
+    pytest.param("", id="empty"),
+    pytest.param("9223372036854775808", id="above-postgres-bigint"),
+    pytest.param("9" * 5_000, id="overlong"),
+)
 
 
 def test_private_work_router_exposes_project_chat_feed_matrix() -> None:
@@ -32,6 +48,40 @@ def test_private_work_router_exposes_project_chat_feed_matrix() -> None:
     assert (f"{prefix}/runs/{{run_id}}/feedback", "PUT") in routes
     assert (f"{prefix}/runs/{{run_id}}/feedback", "DELETE") in routes
     assert (f"{prefix}/runs/{{run_id}}/feedback", "POST") in routes
+
+
+@pytest.mark.parametrize(
+    ("path", "cursor_names"),
+    (
+        (
+            "/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/messages",
+            ("before_seq", "after_seq"),
+        ),
+        (
+            "/api/projects/{project_id}/private-work/threads/{thread_id}/messages",
+            ("before_seq", "after_seq"),
+        ),
+        (
+            "/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/events",
+            ("after_seq",),
+        ),
+        (
+            "/api/projects/{project_id}/private-work/threads/{thread_id}/events",
+            ("after_seq",),
+        ),
+    ),
+)
+def test_private_work_rest_feed_cursors_are_openapi_strings(
+    path: str,
+    cursor_names: tuple[str, ...],
+) -> None:
+    app = FastAPI()
+    app.include_router(private_work_router.router)
+    parameters = {parameter["name"]: parameter for parameter in app.openapi()["paths"][path]["get"]["parameters"]}
+
+    for cursor_name in cursor_names:
+        variants = parameters[cursor_name]["schema"]["anyOf"]
+        assert {variant["type"] for variant in variants} == {"string", "null"}
 
 
 @pytest_asyncio.fixture()
@@ -159,7 +209,15 @@ async def test_project_chat_feed_happy_path_and_cross_owner_404(
 
     messages = await harness.request("GET", f"/threads/{thread_id}/messages")
     assert messages.status_code == 200
-    assert [item["content"] for item in messages.json()] == [{"type": "ai", "content": "hello"}]
+    turn_duration = messages.json()[0]["content"]["additional_kwargs"]["turn_duration"]
+    assert type(turn_duration) is int and turn_duration >= 0
+    assert [item["content"] for item in messages.json()] == [
+        {
+            "type": "ai",
+            "content": "hello",
+            "additional_kwargs": {"turn_duration": turn_duration},
+        }
+    ]
 
     run_messages_path = f"/threads/{thread_id}/runs/{run_id}/messages"
     run_messages = await harness.request("GET", run_messages_path)
@@ -168,8 +226,12 @@ async def test_project_chat_feed_happy_path_and_cross_owner_404(
         "data": [
             {
                 "run_id": run_id,
-                "seq": 1,
-                "content": {"type": "ai", "content": "hello"},
+                "seq": "1",
+                "content": {
+                    "type": "ai",
+                    "content": "hello",
+                    "additional_kwargs": {"turn_duration": turn_duration},
+                },
                 "metadata": {"content_is_dict": True, "content_is_json": True},
                 "created_at": run_messages.json()["data"][0]["created_at"],
             }
@@ -277,6 +339,41 @@ async def test_project_chat_feed_happy_path_and_cross_owner_404(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_project_message_feeds_stamp_duration_only_on_each_run_final_ai(
+    harness: _Harness,
+) -> None:
+    thread_id, run_id = await _seed_thread_and_run(harness)
+    await harness.event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="llm.ai.response",
+        category="message",
+        content={"type": "ai", "content": "final answer"},
+        scope=harness.seed.owner_a.resource_scope,
+    )
+
+    thread_response = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/messages",
+    )
+    run_response = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/runs/{run_id}/messages",
+    )
+
+    assert thread_response.status_code == 200
+    assert run_response.status_code == 200
+    for messages in (
+        thread_response.json(),
+        run_response.json()["data"],
+    ):
+        assert "additional_kwargs" not in messages[0]["content"]
+        duration = messages[-1]["content"]["additional_kwargs"]["turn_duration"]
+        assert type(duration) is int and duration >= 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_failed_run_messages_recover_visible_admitted_prompt_before_graph_execution(
     harness: _Harness,
 ) -> None:
@@ -335,7 +432,7 @@ async def test_failed_run_messages_recover_visible_admitted_prompt_before_graph_
         "data": [
             {
                 "run_id": run_id,
-                "seq": 0,
+                "seq": "0",
                 "content": {
                     "type": "human",
                     "id": f"run-admission-{run_id}",
@@ -434,7 +531,7 @@ async def test_project_run_messages_paginate_without_crossing_run_or_owner_bound
     )
     assert latest.status_code == 200
     assert latest.json()["has_more"] is True
-    assert [item["seq"] for item in latest.json()["data"]] == [5, 6]
+    assert [item["seq"] for item in latest.json()["data"]] == ["5", "6"]
 
     older = await harness.request(
         "GET",
@@ -442,7 +539,7 @@ async def test_project_run_messages_paginate_without_crossing_run_or_owner_bound
     )
     assert older.status_code == 200
     assert older.json()["has_more"] is True
-    assert [item["seq"] for item in older.json()["data"]] == [3, 4]
+    assert [item["seq"] for item in older.json()["data"]] == ["3", "4"]
 
     newer = await harness.request(
         "GET",
@@ -450,7 +547,7 @@ async def test_project_run_messages_paginate_without_crossing_run_or_owner_bound
     )
     assert newer.status_code == 200
     assert newer.json()["has_more"] is True
-    assert [item["seq"] for item in newer.json()["data"]] == [4, 5]
+    assert [item["seq"] for item in newer.json()["data"]] == ["4", "5"]
 
     both_cursors = await harness.request(
         "GET",
@@ -458,6 +555,13 @@ async def test_project_run_messages_paginate_without_crossing_run_or_owner_bound
     )
     assert both_cursors.status_code == 422
     assert both_cursors.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
+
+    thread_both_cursors = await harness.request(
+        "GET",
+        f"/threads/{thread_id}/messages?before_seq=5&after_seq=3",
+    )
+    assert thread_both_cursors.status_code == 422
+    assert thread_both_cursors.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
 
     other_thread_id, other_run_id = await _seed_thread_and_run(harness)
     mismatched = await harness.request(
@@ -474,3 +578,138 @@ async def test_project_run_messages_paginate_without_crossing_run_or_owner_bound
     )
     assert other_owner.status_code == 404
     assert other_owner.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_run_event_rest_cursor_preserves_values_above_javascript_safe_integer(
+    harness: _Harness,
+) -> None:
+    thread_id, run_id = await _seed_thread_and_run(harness)
+    previous_sequence = 9_007_199_254_740_992
+    async with harness.seed.factory() as session, session.begin():
+        await session.execute(
+            sa.update(ThreadEventSequenceRow)
+            .where(
+                ThreadEventSequenceRow.project_id == harness.seed.owner_a_scope.project_id,
+                ThreadEventSequenceRow.owner_user_id == harness.seed.owner_a_scope.owner_user_id,
+                ThreadEventSequenceRow.thread_id == thread_id,
+            )
+            .values(high_watermark=previous_sequence)
+        )
+    written = await harness.event_store.put(
+        thread_id=thread_id,
+        run_id=run_id,
+        event_type="subagent.step",
+        category="trace",
+        content={"task_id": "task-a", "message_index": 0},
+        metadata={"task_id": "task-a"},
+        scope=harness.seed.owner_a_scope,
+    )
+    assert written["seq"] == previous_sequence + 1
+
+    response = await harness.request(
+        "GET",
+        (f"/threads/{thread_id}/runs/{run_id}/events?after_seq={previous_sequence}"),
+    )
+
+    assert response.status_code == 200
+    assert [event["seq"] for event in response.json()] == ["9007199254740993"]
+
+    out_of_range = await harness.request(
+        "GET",
+        (f"/threads/{thread_id}/runs/{run_id}/events?after_seq=9223372036854775808"),
+    )
+    assert out_of_range.status_code == 422
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_cursor", _INVALID_REST_FEED_CURSORS)
+async def test_private_work_rest_feed_cursors_reject_noncanonical_decimal_strings(
+    harness: _Harness,
+    raw_cursor: str,
+) -> None:
+    thread_id, run_id = await _seed_thread_and_run(harness)
+    feed_cursors = (
+        (
+            f"/threads/{thread_id}/runs/{run_id}/messages",
+            "before_seq",
+            {},
+        ),
+        (
+            f"/threads/{thread_id}/runs/{run_id}/messages",
+            "after_seq",
+            {},
+        ),
+        (
+            f"/threads/{thread_id}/messages",
+            "before_seq",
+            {},
+        ),
+        (
+            f"/threads/{thread_id}/messages",
+            "after_seq",
+            {},
+        ),
+        (
+            f"/threads/{thread_id}/runs/{run_id}/events",
+            "after_seq",
+            {},
+        ),
+        (
+            f"/threads/{thread_id}/events",
+            "after_seq",
+            {"run_id": run_id},
+        ),
+    )
+
+    for suffix, cursor_name, base_params in feed_cursors:
+        response = await harness.request(
+            "GET",
+            suffix,
+            params={
+                **base_params,
+                cursor_name: raw_cursor,
+            },
+        )
+        assert response.status_code == 422, (
+            suffix,
+            cursor_name,
+            raw_cursor,
+            response.text,
+        )
+        assert response.json()["detail"]["code"] == "PRIVATE_WORK_INVALID"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_private_work_rest_feed_cursors_accept_canonical_bigint_strings(
+    harness: _Harness,
+) -> None:
+    thread_id, run_id = await _seed_thread_and_run(harness)
+    feeds = (
+        (f"/threads/{thread_id}/runs/{run_id}/messages", "before_seq", {}),
+        (f"/threads/{thread_id}/runs/{run_id}/messages", "after_seq", {}),
+        (f"/threads/{thread_id}/messages", "before_seq", {}),
+        (f"/threads/{thread_id}/messages", "after_seq", {}),
+        (f"/threads/{thread_id}/runs/{run_id}/events", "after_seq", {}),
+        (f"/threads/{thread_id}/events", "after_seq", {"run_id": run_id}),
+    )
+
+    for raw_cursor in ("0", "9007199254740993", "9223372036854775807"):
+        for suffix, cursor_name, base_params in feeds:
+            response = await harness.request(
+                "GET",
+                suffix,
+                params={
+                    **base_params,
+                    cursor_name: raw_cursor,
+                },
+            )
+            assert response.status_code == 200, (
+                suffix,
+                cursor_name,
+                raw_cursor,
+                response.text,
+            )

@@ -79,6 +79,7 @@ def _make_e2e_config() -> AppConfig:
                 "use": "deerflow.sandbox.local:LocalSandboxProvider",
                 "allow_host_bash": True,
             },
+            "memory": {"enabled": False},
         }
     )
 
@@ -124,13 +125,8 @@ def e2e_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr("deerflow.config.title_config._title_config", TitleConfig(enabled=False))
 
-    # 4. Disable memory queueing (avoids background threads & file writes)
-    from deerflow.config.memory_config import MemoryConfig
-
-    monkeypatch.setattr(
-        "deerflow.agents.middlewares.memory_middleware.get_memory_config",
-        lambda: MemoryConfig(enabled=False),
-    )
+    # 4. Memory is disabled in the admitted AppConfig above so middleware never
+    # queues background writes.
 
     # 5. Ensure summarization is off (default, but be explicit)
     from deerflow.config.summarization_config import SummarizationConfig

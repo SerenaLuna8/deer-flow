@@ -1493,7 +1493,11 @@ class TestBashToolInjectsActiveSecrets:
                 ),
             )
 
-        assert sorted(results) == ["first", "second"]
+        remote_workspace_prefix = f"cd -- {tools_mod.VIRTUAL_PATH_PREFIX}/workspace && "
+        assert sorted(results) == [
+            f"{remote_workspace_prefix}first",
+            f"{remote_workspace_prefix}second",
+        ]
         assert {env["TOKEN"] for env in captured.values() if env is not None} == {"value-1", "value-2"}
         assert "__active_skill_secrets" not in context
         assert "__skill_secret_exec_ready" not in context

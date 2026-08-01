@@ -39,6 +39,7 @@ class JobRow(Base):
     run_id: Mapped[str | None] = mapped_column(String(64))
     automation_occurrence_id: Mapped[str | None] = mapped_column(String(64))
     predecessor_dead_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    origin_trace_id: Mapped[str | None] = mapped_column(String(512))
     idempotency_key: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", server_default="queued")
     priority: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default=text("0"))
@@ -67,8 +68,18 @@ class JobRow(Base):
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_jobs_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["lease_owner_id"], ["worker_nodes.id"], name="fk_jobs_lease_worker", ondelete="SET NULL"),
         ForeignKeyConstraint(
-            ["project_id", "owner_user_id", "run_id"],
-            ["runs.project_id", "runs.owner_user_id", "runs.run_id"],
+            [
+                "project_id",
+                "owner_user_id",
+                "run_id",
+                "origin_trace_id",
+            ],
+            [
+                "runs.project_id",
+                "runs.owner_user_id",
+                "runs.run_id",
+                "runs.origin_trace_id",
+            ],
             name="fk_jobs_private_run",
             ondelete="RESTRICT",
         ),
@@ -95,9 +106,9 @@ class JobRow(Base):
         CheckConstraint("retry_safety IN ('safe', 'unknown', 'unsafe')", name="ck_jobs_retry_safety"),
         CheckConstraint("attempt_count >= 0 AND max_attempts >= 1", name="ck_jobs_attempts"),
         CheckConstraint(
-            "(job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL) "
-            "OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL) "
-            "OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL)",
+            "(job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) "
+            "OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) "
+            "OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)",
             name="ck_jobs_authority_shape",
         ),
         Index("ix_jobs_claim", "status", "available_at", priority.desc(), "created_at"),

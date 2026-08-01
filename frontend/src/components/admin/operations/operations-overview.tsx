@@ -1,11 +1,24 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
+import {
+  AdminMetric,
+  AdminMetricGrid,
+  AdminPage,
+  AdminPageHeader,
+  AdminSection,
+} from "@/components/admin/ui/admin-page";
 import { useOperationsOverview } from "@/core/admin-operations/api";
 import type { OperationsOverviewData } from "@/core/admin-operations/types";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
+import { cn } from "@/lib/utils";
+
+import {
+  AdminEmptyState,
+  AdminErrorState,
+  AdminLoadingState,
+  AdminStatus,
+} from "./admin-operations-ui";
 
 export type OperationsOverviewState =
   | { status: "loading" }
@@ -19,38 +32,19 @@ export function OperationsOverviewStateView({
   state: OperationsOverviewState;
   onRetry?: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const labels = t.adminOperations.overview;
   if (state.status === "loading") {
-    return (
-      <section
-        aria-busy="true"
-        aria-label={labels.loading}
-        className="space-y-4"
-      >
-        <p>{labels.loading}</p>
-        <Skeleton className="h-32 w-full rounded-xl" />
-      </section>
-    );
+    return <AdminLoadingState label={labels.loading} />;
   }
   if (state.status === "error") {
     return (
-      <section role="alert" className="rounded-xl border p-6">
-        <h2 className="font-semibold">{labels.unavailableTitle}</h2>
-        <p className="text-muted-foreground mt-2 text-sm">
-          {labels.unavailableDescription}
-        </p>
-        {onRetry ? (
-          <Button
-            className="mt-4"
-            type="button"
-            variant="outline"
-            onClick={onRetry}
-          >
-            {t.adminOperations.retry}
-          </Button>
-        ) : null}
-      </section>
+      <AdminErrorState
+        title={labels.unavailableTitle}
+        description={labels.unavailableDescription}
+        retryLabel={t.adminOperations.retry}
+        onRetry={onRetry}
+      />
     );
   }
 
@@ -71,41 +65,59 @@ export function OperationsOverviewStateView({
       : states.unknown;
   };
   const readinessView = (
-    <section className="bg-card space-y-4 rounded-xl border p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-medium">{labels.readiness.title}</h2>
-        <span className="text-sm font-medium">
+    <AdminSection
+      title={labels.readiness.title}
+      actions={
+        <AdminStatus status={readiness.status}>
           {readinessState(readiness.status)}
-        </span>
-      </div>
-      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-        {readinessComponents.map(([component, value]) => (
-          <div key={component}>
-            <dt className="text-muted-foreground">
+        </AdminStatus>
+      }
+      contentClassName="p-0"
+    >
+      <dl
+        data-slot="admin-readiness-grid"
+        className="bg-border grid gap-px text-sm sm:grid-cols-2 xl:grid-cols-7"
+      >
+        {readinessComponents.map(([component, value], index) => (
+          <div
+            key={component}
+            className={
+              index === readinessComponents.length - 1
+                ? "bg-card flex min-w-0 items-center justify-between gap-3 px-4 py-3 sm:col-span-2 sm:block xl:col-span-1"
+                : "bg-card flex min-w-0 items-center justify-between gap-3 px-4 py-3 sm:block"
+            }
+          >
+            <dt className="text-muted-foreground text-xs font-medium">
               {labels.readiness.components[component]}
             </dt>
-            <dd>{readinessState(value)}</dd>
+            <dd className="mt-0 sm:mt-2">
+              <AdminStatus status={value}>{readinessState(value)}</AdminStatus>
+            </dd>
           </div>
         ))}
       </dl>
-      <dl className="grid gap-3 border-t pt-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
-        <div>
-          <dt className="text-muted-foreground">
+      <dl className="border-border bg-muted/30 grid border-t text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div className="border-border/70 px-4 py-3 sm:border-r">
+          <dt className="text-muted-foreground text-xs">
             {labels.readiness.workerCount}
           </dt>
-          <dd className="tabular-nums">{readiness.worker_count}</dd>
+          <dd className="mt-1 font-medium tabular-nums">
+            {readiness.worker_count}
+          </dd>
         </div>
-        <div>
-          <dt className="text-muted-foreground">
+        <div className="border-border/70 px-4 py-3 lg:border-r">
+          <dt className="text-muted-foreground text-xs">
             {labels.readiness.workerCapacity}
           </dt>
-          <dd className="tabular-nums">{readiness.worker_capacity}</dd>
+          <dd className="mt-1 font-medium tabular-nums">
+            {readiness.worker_capacity}
+          </dd>
         </div>
-        <div>
-          <dt className="text-muted-foreground">
+        <div className="border-border/70 px-4 py-3 sm:border-r">
+          <dt className="text-muted-foreground text-xs">
             {labels.readiness.oldestHeartbeat}
           </dt>
-          <dd>
+          <dd className="mt-1 font-medium">
             {readiness.worker_oldest_heartbeat_age_seconds === null
               ? labels.readiness.notReported
               : labels.readiness.secondsAgo.replace(
@@ -114,25 +126,27 @@ export function OperationsOverviewStateView({
                 )}
           </dd>
         </div>
-        <div>
-          <dt className="text-muted-foreground">
+        <div className="px-4 py-3">
+          <dt className="text-muted-foreground text-xs">
             {labels.readiness.schedulerOwnership}
           </dt>
-          <dd>{readinessState(readiness.scheduler_ownership)}</dd>
+          <dd className="mt-1 font-medium">
+            {readinessState(readiness.scheduler_ownership)}
+          </dd>
         </div>
       </dl>
-    </section>
+    </AdminSection>
   );
   if (state.data.data_status === "unavailable") {
     return (
-      <div className="space-y-6">
+      <div className="space-y-5">
         {readinessView}
-        <section role="alert" className="rounded-xl border p-6">
-          <h2 className="font-semibold">{labels.unavailableTitle}</h2>
-          <p className="text-muted-foreground mt-2 text-sm">
-            {labels.unavailableDescription}
-          </p>
-        </section>
+        <AdminErrorState
+          title={labels.unavailableTitle}
+          description={labels.unavailableDescription}
+          retryLabel={t.adminOperations.retry}
+          onRetry={onRetry}
+        />
       </div>
     );
   }
@@ -145,74 +159,113 @@ export function OperationsOverviewStateView({
     [labels.counts.deadJobs, state.data.counts.dead_jobs],
   ] as const;
   return (
-    <div className="space-y-6">
-      {readinessView}
-      <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        {counts.map(([label, value]) => (
-          <div key={label} className="bg-card rounded-xl border p-4">
-            <dt className="text-muted-foreground text-sm">{label}</dt>
-            <dd className="mt-2 text-2xl font-semibold tabular-nums">
-              {value}
-            </dd>
-          </div>
+    <div className="space-y-5">
+      <AdminMetricGrid aria-label={labels.title} className="xl:grid-cols-5">
+        {counts.map(([label, value], index) => (
+          <AdminMetric
+            key={label}
+            className={
+              index === counts.length - 1
+                ? "sm:col-span-2 xl:col-span-1"
+                : undefined
+            }
+            label={label}
+            value={value}
+          />
         ))}
-      </dl>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      </AdminMetricGrid>
+      {readinessView}
+      <AdminSection
+        title={labels.usage.title}
+        aria-label={labels.usage.title}
+        contentClassName="grid gap-px bg-border p-0 sm:grid-cols-2"
+      >
         {state.data.usage.map((item) => (
-          <section
+          <div
             key={item.dimension}
-            className="bg-card rounded-xl border p-4"
+            className="bg-card grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-5 px-4 py-4 text-sm"
           >
-            <h2 className="font-medium">{labels.usage[item.dimension]}</h2>
-            <dl className="mt-3 grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">{labels.usage.used}</dt>
-                <dd className="tabular-nums">{item.used}</dd>
+            <p className="font-medium">{labels.usage[item.dimension]}</p>
+            <dl className="contents">
+              <div className="text-right">
+                <dt className="text-muted-foreground text-xs">
+                  {labels.usage.used}
+                </dt>
+                <dd className="mt-1 font-semibold tabular-nums">
+                  {formatUsageValue(item.dimension, item.used, locale)}
+                </dd>
               </div>
-              <div>
-                <dt className="text-muted-foreground">
+              <div className="text-right">
+                <dt className="text-muted-foreground text-xs">
                   {labels.usage.reserved}
                 </dt>
-                <dd className="tabular-nums">{item.reserved}</dd>
+                <dd className="mt-1 font-semibold tabular-nums">
+                  {formatUsageValue(item.dimension, item.reserved, locale)}
+                </dd>
               </div>
             </dl>
-          </section>
+          </div>
         ))}
-      </div>
-      <section className="bg-card rounded-xl border p-4">
-        <h2 className="font-medium">{labels.channels.title}</h2>
+      </AdminSection>
+      <AdminSection
+        title={labels.channels.title}
+        contentClassName={
+          state.data.channel_providers.length === 0 ? "p-4" : "p-0"
+        }
+      >
         {state.data.channel_providers.length === 0 ? (
-          <p className="text-muted-foreground mt-2 text-sm">
-            {labels.channels.empty}
-          </p>
+          <AdminEmptyState
+            title={labels.channels.emptyTitle}
+            description={labels.channels.empty}
+            variant="inline"
+          />
         ) : (
-          <ul className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {state.data.channel_providers.map((provider) => (
-              <li key={provider.provider} className="rounded-lg border p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-medium">{provider.provider}</span>
-                  <span className="text-sm">
-                    {readinessState(provider.status)}
-                  </span>
+          <ul
+            data-slot="admin-channel-grid"
+            className="bg-border grid gap-px sm:grid-cols-2 lg:grid-cols-3"
+          >
+            {state.data.channel_providers.map((provider, index) => (
+              <li
+                key={provider.provider}
+                className={cn(
+                  "bg-card flex min-w-0 items-start justify-between gap-3 px-4 py-3",
+                  index === state.data.channel_providers.length - 1 &&
+                    state.data.channel_providers.length % 2 === 1 &&
+                    "sm:col-span-2",
+                  index === state.data.channel_providers.length - 1 &&
+                    state.data.channel_providers.length % 3 === 1 &&
+                    "lg:col-span-3",
+                  index === state.data.channel_providers.length - 1 &&
+                    state.data.channel_providers.length % 3 === 2 &&
+                    "lg:col-span-2",
+                )}
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">
+                    {provider.provider}
+                  </p>
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    {labels.channels.checkedAt.replace(
+                      "{time}",
+                      new Date(provider.checked_at).toLocaleString(locale),
+                    )}
+                  </p>
                 </div>
-                <p className="text-muted-foreground mt-1 text-xs">
-                  {labels.channels.checkedAt.replace(
-                    "{time}",
-                    new Date(provider.checked_at).toLocaleString(),
-                  )}
-                </p>
+                <AdminStatus status={provider.status}>
+                  {readinessState(provider.status)}
+                </AdminStatus>
               </li>
             ))}
           </ul>
         )}
-      </section>
+      </AdminSection>
     </div>
   );
 }
 
 export function OperationsOverview() {
   const { user } = useAuth();
-  if (!user || user.system_role !== "system_admin") return null;
+  if (user?.system_role !== "system_admin") return null;
   return <AuthorizedOperationsOverview accountId={user.id} />;
 }
 
@@ -225,19 +278,37 @@ function AuthorizedOperationsOverview({ accountId }: { accountId: string }) {
       ? { status: "error" }
       : { status: "ready", data: overview.data };
   return (
-    <main className="mx-auto max-w-7xl space-y-6 px-4 py-8 lg:px-6">
-      <div>
-        <h1 className="font-serif text-2xl">
-          {t.adminOperations.overview.title}
-        </h1>
-        <p className="text-muted-foreground mt-1 text-sm">
-          {t.adminOperations.overview.description}
-        </p>
-      </div>
+    <AdminPage>
+      <AdminPageHeader
+        title={t.adminOperations.overview.title}
+        description={t.adminOperations.overview.description}
+      />
       <OperationsOverviewStateView
         state={state}
         onRetry={() => void overview.refetch()}
       />
-    </main>
+    </AdminPage>
   );
+}
+
+function formatUsageValue(
+  dimension: NonNullable<OperationsOverviewData["usage"]>[number]["dimension"],
+  value: number,
+  locale: string,
+) {
+  if (dimension !== "storage_bytes") {
+    return new Intl.NumberFormat(locale).format(value);
+  }
+  if (value < 1024) return `${value} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"] as const;
+  let scaled = value;
+  let unit: (typeof units)[number] = units[0];
+  for (const candidate of units) {
+    scaled /= 1024;
+    unit = candidate;
+    if (scaled < 1024 || candidate === units.at(-1)) break;
+  }
+  return `${new Intl.NumberFormat(locale, {
+    maximumFractionDigits: scaled < 10 ? 1 : 0,
+  }).format(scaled)} ${unit}`;
 }

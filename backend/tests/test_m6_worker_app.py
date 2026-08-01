@@ -24,7 +24,10 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
 ) -> None:
     config = SimpleNamespace(
         worker=WorkerConfig(enabled=True),
-        database=object(),
+        database=SimpleNamespace(
+            checkpoint_channel_mode="delta",
+            checkpoint_delta=SimpleNamespace(snapshot_frequency=7),
+        ),
         run_events=SimpleNamespace(max_trace_content=1024),
         quotas=QuotaConfig(),
     )
@@ -59,8 +62,9 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
             )
 
     class TerminalPort:
-        def __init__(self, **_kwargs) -> None:
+        def __init__(self, **kwargs) -> None:
             self.pending = True
+            self._kwargs = kwargs
             captured["terminal_port"] = self
 
         def take_automation_reconciliation_pending(self) -> bool:
@@ -74,6 +78,15 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     class Executor:
         def __init__(self, factory, **kwargs) -> None:
             captured["executor"] = (factory, kwargs)
+
+    class RuntimePolicyMaterializer:
+        def __init__(self, factory) -> None:
+            assert factory is session_factory
+            captured["runtime_policy_materializer"] = self
+
+    class QuotaPolicyReader:
+        def __init__(self) -> None:
+            captured["quota_policy_reader"] = self
 
     class DurableBridge:
         def __init__(self, factory) -> None:
@@ -115,6 +128,11 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         captured["closed"] = True
 
     monkeypatch.setattr(worker_app, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        worker_app,
+        "configure_logging",
+        lambda value: captured.setdefault("logging_config", value),
+    )
     monkeypatch.setattr(worker_app, "init_engine", init_engine)
     monkeypatch.setattr(worker_app, "close_engine", close_engine)
     monkeypatch.setattr(
@@ -133,6 +151,16 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     monkeypatch.setattr(worker_app, "RunAgentPrivateExecutor", Executor)
     monkeypatch.setattr(
         worker_app,
+        "SystemRuntimePolicyMaterializer",
+        RuntimePolicyMaterializer,
+    )
+    monkeypatch.setattr(
+        worker_app,
+        "SystemQuotaPolicyReader",
+        QuotaPolicyReader,
+    )
+    monkeypatch.setattr(
+        worker_app,
         "PostgresStreamBridge",
         DurableBridge,
         raising=False,
@@ -140,6 +168,17 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     monkeypatch.setattr(worker_app, "PrivateRunJobHandler", Handler)
     monkeypatch.setattr(worker_app, "PrivateRunJobTerminalPort", TerminalPort)
     monkeypatch.setattr(worker_app, "WorkerService", Service)
+    checkpoint_freeze: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        worker_app,
+        "freeze_checkpoint_channel_mode",
+        lambda value: checkpoint_freeze.append(("mode", value)),
+    )
+    monkeypatch.setattr(
+        worker_app,
+        "freeze_checkpoint_snapshot_frequency",
+        lambda value: checkpoint_freeze.append(("frequency", value)),
+    )
 
     class Keyring:
         @classmethod
@@ -191,5 +230,11 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     assert captured["automation_reconciled"] == 2
     assert captured["terminal_port"].pending is False
     assert captured["audit_keyring"] is True
+    quota_service = captured["terminal_port"]._kwargs["quota"]._quotas
+    assert quota_service._current_policy_reader is captured["quota_policy_reader"]
     assert captured["executor"][1]["bridge"] is captured["durable_bridge"]
+    assert captured["executor"][1]["audit"] is captured["handler"][1]["audit"]
+    assert captured["executor"][1]["runtime_policy_materializer"] is captured["runtime_policy_materializer"]
+    assert captured["logging_config"] is config
     assert captured["closed"] is True
+    assert checkpoint_freeze == [("mode", "delta"), ("frequency", 7)]

@@ -182,6 +182,7 @@ async def _seed_token_run(
                 project_id=project_id,
                 owner_user_id=owner_user_id,
                 run_id=run_id,
+                origin_trace_id=run.origin_trace_id,
                 idempotency_key=uuid.uuid4().hex + uuid.uuid4().hex,
                 status=job_status,
                 max_attempts=1,

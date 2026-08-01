@@ -21,6 +21,9 @@ NOW = datetime(2026, 7, 12, 9, 0, tzinfo=UTC)
 class _NoopQuotaService:
     config = QuotaConfig()
 
+    def __init__(self) -> None:
+        self.current_config = AsyncMock(return_value=self.config)
+
 
 def _quota_summary() -> ProjectQuotaSummary:
     return ProjectQuotaSummary(
@@ -57,12 +60,13 @@ def _view(*, status: str) -> ProjectView:
 
 def _client() -> TestClient:
     app = FastAPI()
+    app.state.project_session = object()
     app.state.operational_audit_sink = AsyncMock()
     app.state.project_quota_service = _NoopQuotaService()
     app.include_router(project_lifecycle.router)
 
     async def fake_session():
-        yield object()
+        yield app.state.project_session
 
     app.dependency_overrides[project_session] = fake_session
     app.dependency_overrides[project_lifecycle.authenticated_project_identity] = lambda: (
@@ -74,22 +78,39 @@ def _client() -> TestClient:
 
 def test_deletion_resolves_active_project_context(monkeypatch) -> None:
     context = object()
+    captured: dict[str, object] = {}
     resolve = AsyncMock(return_value=context)
     request_deletion = AsyncMock(return_value=_view(status="pending_deletion"))
     monkeypatch.setattr(project_lifecycle, "resolve_project_context", resolve)
+    monkeypatch.setattr(
+        project_lifecycle,
+        "ProjectLifecycleRepository",
+        lambda session, *, quota_policy: (
+            captured.update(
+                session=session,
+                quota_policy=quota_policy,
+            )
+            or object()
+        ),
+    )
     monkeypatch.setattr(
         project_lifecycle.ProjectLifecycleService,
         "request_deletion",
         request_deletion,
     )
 
-    response = _client().post(f"/api/projects/{PROJECT_ID}/deletion")
+    client = _client()
+    response = client.post(f"/api/projects/{PROJECT_ID}/deletion")
 
     assert response.status_code == 200
     assert response.json()["status"] == "pending_deletion"
     assert response.json()["deletion_effective_at"] is not None
     assert resolve.await_args.args[1:] == (USER_ID, PROJECT_ID, "req-lifecycle")
     assert request_deletion.await_args.args[0] is context
+    assert captured == {
+        "session": client.app.state.project_session,
+        "quota_policy": client.app.state.project_quota_service,
+    }
 
 
 def test_restore_uses_authenticated_user_without_active_context(monkeypatch) -> None:

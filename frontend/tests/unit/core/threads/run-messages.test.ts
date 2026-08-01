@@ -17,7 +17,7 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function runMessage(seq = 1) {
+function runMessage(seq: unknown = "1") {
   return {
     run_id: "run-1",
     seq,
@@ -39,7 +39,7 @@ beforeEach(() => {
 describe("project run message history API", () => {
   test("builds only the encoded project-scoped per-run route", () => {
     expect(
-      buildRunMessagesUrl(projectBaseURL, "thread/with space", "run?one", 18),
+      buildRunMessagesUrl(projectBaseURL, "thread/with space", "run?one", "18"),
     ).toBe(
       `${projectBaseURL}/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18`,
     );
@@ -50,14 +50,25 @@ describe("project run message history API", () => {
 
   test("loads and strictly parses the snake-case page contract", async () => {
     mockedFetch.mockResolvedValueOnce(
-      jsonResponse({ data: [runMessage(8)], has_more: false }),
+      jsonResponse({
+        data: [runMessage("9007199254740993")],
+        has_more: false,
+      }),
     );
 
     await expect(
-      fetchRunMessagesPage(projectBaseURL, "thread-1", "run-1", 9),
-    ).resolves.toEqual({ data: [runMessage(8)], has_more: false });
+      fetchRunMessagesPage(
+        projectBaseURL,
+        "thread-1",
+        "run-1",
+        "9007199254740994",
+      ),
+    ).resolves.toEqual({
+      data: [runMessage("9007199254740993")],
+      has_more: false,
+    });
     expect(mockedFetch).toHaveBeenCalledWith(
-      `${projectBaseURL}/threads/thread-1/runs/run-1/messages?before_seq=9`,
+      `${projectBaseURL}/threads/thread-1/runs/run-1/messages?before_seq=9007199254740994`,
       expect.objectContaining({ method: "GET" }),
     );
   });
@@ -73,7 +84,22 @@ describe("project run message history API", () => {
           has_more: false,
         }),
       )
-      .mockResolvedValueOnce(jsonResponse({ data: [], has_more: true }));
+      .mockResolvedValueOnce(jsonResponse({ data: [], has_more: true }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [runMessage(9_007_199_254_740_993)],
+          has_more: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ data: [runMessage("01")], has_more: false }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: [runMessage("9223372036854775808")],
+          has_more: false,
+        }),
+      );
 
     await expect(
       fetchRunMessagesPage(projectBaseURL, "thread-1", "run-1"),
@@ -84,6 +110,15 @@ describe("project run message history API", () => {
     await expect(
       fetchRunMessagesPage(projectBaseURL, "thread-1", "run-1"),
     ).rejects.toThrow("cannot advance without data");
+    await expect(
+      fetchRunMessagesPage(projectBaseURL, "thread-1", "run-1"),
+    ).rejects.toThrow();
+    await expect(
+      fetchRunMessagesPage(projectBaseURL, "thread-1", "run-1"),
+    ).rejects.toThrow();
+    await expect(
+      fetchRunMessagesPage(projectBaseURL, "thread-1", "run-1"),
+    ).rejects.toThrow("exceeds PostgreSQL BIGINT");
   });
 
   test("throws one typed HTTP error and leaves retry to the user", async () => {

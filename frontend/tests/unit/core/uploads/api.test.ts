@@ -48,6 +48,15 @@ function privateFile(displayName: string) {
   };
 }
 
+function pagedPrivateFile(index: number) {
+  const suffix = String(index).padStart(12, "0");
+  const displayName = `page-${String(index).padStart(3, "0")}.txt`;
+  return {
+    ...privateFile(displayName),
+    id: `00000000-0000-4000-8000-${suffix}`,
+  };
+}
+
 describe("project upload adapter", () => {
   test("uploads one multipart file at a time and aggregates mapped files", async () => {
     fetchWithAuth
@@ -89,6 +98,31 @@ describe("project upload adapter", () => {
     });
   });
 
+  test("rejects a malformed POST upload response before it can be submitted", async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => uploadLimits(),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ...privateFile("a.txt"),
+          id: "not-an-opaque-uuid",
+        }),
+      });
+    const { uploadFiles } = await import("@/core/uploads/api");
+
+    await expect(
+      uploadFiles(
+        threadId,
+        [new File(["aaaa"], "a.txt", { type: "text/plain" })],
+        projectOptions,
+      ),
+    ).rejects.toThrow();
+    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+  });
+
   test("maps GET uploads and deletes by file_id query", async () => {
     fetchWithAuth
       .mockResolvedValueOnce({
@@ -118,7 +152,7 @@ describe("project upload adapter", () => {
     await deleteUploadedFile(threadId, fileId, projectOptions, deleteSignal);
 
     expect(fetchWithAuth.mock.calls[0]![0]).toBe(
-      `${projectOptions.apiBaseURL}/threads/${threadId}/uploads`,
+      `${projectOptions.apiBaseURL}/threads/${threadId}/uploads?limit=100&offset=0`,
     );
     expect(fetchWithAuth.mock.calls[0]![1]).toEqual({ signal: listSignal });
     expect(fetchWithAuth.mock.calls[1]![0]).toBe(
@@ -128,6 +162,61 @@ describe("project upload adapter", () => {
       method: "DELETE",
       signal: deleteSignal,
     });
+  });
+
+  test("pages the complete ready-file catalog without omissions", async () => {
+    fetchWithAuth
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "x-next-offset": "100" }),
+        json: async () =>
+          Array.from({ length: 100 }, (_, index) => pagedPrivateFile(index)),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers(),
+        json: async () => [pagedPrivateFile(100)],
+      });
+    const { listUploadedFiles } = await import("@/core/uploads/api");
+    const signal = new AbortController().signal;
+
+    const result = await listUploadedFiles(threadId, projectOptions, signal);
+
+    expect(result.count).toBe(101);
+    expect(new Set(result.files.map((file) => file.id)).size).toBe(101);
+    expect(result.files.at(0)?.filename).toBe("page-000.txt");
+    expect(result.files.at(-1)?.filename).toBe("page-100.txt");
+    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+    expect(fetchWithAuth.mock.calls[0]).toEqual([
+      `${projectOptions.apiBaseURL}/threads/${threadId}/uploads?limit=100&offset=0`,
+      { signal },
+    ]);
+    expect(fetchWithAuth.mock.calls[1]).toEqual([
+      `${projectOptions.apiBaseURL}/threads/${threadId}/uploads?limit=100&offset=100`,
+      { signal },
+    ]);
+  });
+
+  test("fails closed when a full upload page does not advance", async () => {
+    const page = Array.from({ length: 100 }, (_, index) =>
+      pagedPrivateFile(index),
+    );
+    fetchWithAuth
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "x-next-offset": "100" }),
+        json: async () => page,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "x-next-offset": "200" }),
+        json: async () => page,
+      });
+    const { listUploadedFiles } = await import("@/core/uploads/api");
+
+    await expect(
+      listUploadedFiles(threadId, projectOptions),
+    ).rejects.toThrow("Uploaded file pagination did not advance");
   });
 
   test("does not start list or delete after the project scope is aborted", async () => {

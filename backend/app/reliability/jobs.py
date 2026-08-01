@@ -37,6 +37,7 @@ class AdmittedJobRecord:
     run_id: str
     idempotency_key: str
     status: str
+    origin_trace_id: str
 
 
 def private_run_idempotency_key(run_id: str) -> str:
@@ -62,7 +63,7 @@ class PrivateRunJobRepository:
 
     @staticmethod
     def _record(row: JobRow) -> AdmittedJobRecord:
-        if row.owner_user_id is None or row.run_id is None:
+        if row.owner_user_id is None or row.run_id is None or row.origin_trace_id is None:
             raise RuntimeError("private job authority is incomplete")
         return AdmittedJobRecord(
             job_id=row.id,
@@ -72,6 +73,7 @@ class PrivateRunJobRepository:
             run_id=row.run_id,
             idempotency_key=row.idempotency_key,
             status=row.status,
+            origin_trace_id=row.origin_trace_id,
         )
 
     async def enqueue(
@@ -79,6 +81,7 @@ class PrivateRunJobRepository:
         *,
         scope: JobScope,
         run_id: str,
+        origin_trace_id: str,
         max_attempts: int = 3,
     ) -> AdmittedJobRecord:
         key = private_run_idempotency_key(run_id)
@@ -90,6 +93,7 @@ class PrivateRunJobRepository:
                 run_id=run_id,
                 occurrence_id=None,
                 max_attempts=max_attempts,
+                origin_trace_id=origin_trace_id,
                 retry_safety="safe",
             )
         )
@@ -144,6 +148,7 @@ class AutomationRunJobRepository:
         scope: JobScope,
         run_id: str,
         occurrence_id: str,
+        origin_trace_id: str,
         max_attempts: int = 3,
     ) -> AdmittedJobRecord:
         key = automation_run_idempotency_key(occurrence_id)
@@ -155,6 +160,7 @@ class AutomationRunJobRepository:
                 run_id=run_id,
                 occurrence_id=occurrence_id,
                 max_attempts=max_attempts,
+                origin_trace_id=origin_trace_id,
                 retry_safety="safe",
             )
         )

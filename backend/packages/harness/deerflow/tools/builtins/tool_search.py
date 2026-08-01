@@ -17,6 +17,7 @@ when it carries the ``deerflow_mcp`` metadata tag.
 """
 
 import hashlib
+import html
 import json
 import logging
 import re
@@ -156,6 +157,14 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
         else:
             content = json.dumps([convert_to_openai_function(t) for t in matched], indent=2, ensure_ascii=False)
             names = [t.name for t in matched]
+        # MCP descriptions and JSON-schema field descriptions are authored by
+        # a remote server. Keep the JSON shape intact while neutralizing any
+        # framework authority blocks or boundary markers embedded in them.
+        from deerflow.agents.middlewares.input_sanitization_middleware import (
+            neutralize_untrusted_tags,
+        )
+
+        content = neutralize_untrusted_tags(content)
         return Command(
             update={
                 "promoted": {"catalog_hash": catalog_hash, "names": names},
@@ -283,11 +292,12 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
     """
     if not deferred_names:
         return ""
-    names = "\n".join(sorted(deferred_names))
+    names = "\n".join(html.escape(name, quote=False) for name in sorted(deferred_names))
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
 def _format_keyword_list(keywords: list[str]) -> str:
+    keywords = [html.escape(keyword, quote=False) for keyword in keywords]
     if len(keywords) == 1:
         return keywords[0]
     return f"{', '.join(keywords[:-1])}, or {keywords[-1]}"
@@ -316,9 +326,10 @@ def get_mcp_routing_hints_prompt_section(tools: Iterable[BaseTool], *, deferred_
     lines = ["<mcp_routing_hints>"]
     for priority, tool_name, keywords in sorted(hints, key=lambda item: (-item[0], item[1])):
         lines.append(f"When the user's request involves {_format_keyword_list(keywords)}:")
+        escaped_tool_name = html.escape(tool_name, quote=False)
         if tool_name in deferred_names:
-            lines.append(f"  use `tool_search` to fetch `{tool_name}`, then prefer that MCP tool.")
+            lines.append(f"  use `tool_search` to fetch `{escaped_tool_name}`, then prefer that MCP tool.")
         else:
-            lines.append(f"  prefer the `{tool_name}` tool.")
+            lines.append(f"  prefer the `{escaped_tool_name}` tool.")
     lines.append("</mcp_routing_hints>")
     return "\n".join(lines)

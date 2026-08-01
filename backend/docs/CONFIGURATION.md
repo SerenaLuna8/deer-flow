@@ -14,6 +14,11 @@ Run `make config-upgrade` to merge new fields into your config.
 - **Missing `config_version`** in your config is treated as version 0.
 - Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
+- The current example schema is **version 34**. Version 34 moves the allowlisted Agent runtime
+  leaves, local self-registration switch, and project-quota defaults to PostgreSQL system policy.
+  These leaves are rejected in YAML and removed by `make config-upgrade`; deployment-owned
+  siblings such as custom prompt text and storage paths remain. Version 33 removed the legacy
+  top-level `models:` section, and version 32 removed `authorization:`.
 
 ## Configuration Sections
 
@@ -22,6 +27,89 @@ Run `make config-upgrade` to merge new fields into your config.
 Agent, Skill and MCP definitions are versioned PostgreSQL assets. System admins
 只读治理 packaged bootstrap system catalog；项目成员在经过认证的 UI/API 中管理
 project assets。`config.yaml` 只管理进程和运行时设置。
+
+### Project Memory
+
+项目 Memory 的数据与运行策略都以 PostgreSQL 为权威；system admin 在
+`/admin/settings/system` 的 Agent runtime 区域调整 `memory` 开关、召回、debounce、模型与
+注入预算。新 Run 准入时会冻结完整策略，延迟队列继续使用该 Run 的精确配置，不能切换
+owner、namespace 或存储后端。
+
+- `enabled` 关闭 Memory 注入、被动提取和只读召回。
+- `search_enabled` 只控制私有 Lead Agent 是否获得 async `memory_search`。模型只能提交
+  query、可选 category 和 top-k，scope 与 Run/lease authority 始终由 Worker 签发。
+- `search_enabled: false` 不关闭项目 Memory 管理 API，也不改变已有被动写入策略。
+- `debounce_seconds` 控制进程内被动更新队列；它不是 durable job 或跨 Worker
+  exactly-once 保证。
+
+### Checkpoint 表示
+
+LangGraph checkpoint 支持完整值与增量消息两种表示。默认保持兼容模式：
+
+```yaml
+database:
+  checkpoint_channel_mode: full
+  checkpoint_delta:
+    snapshot_frequency: 10
+```
+
+- `full` 在每次 checkpoint 中保存完整消息状态；`delta` 保存消息增量，并按
+  `snapshot_frequency` 周期写入完整 seed。
+- 两个字段都在 graph 编译时生效，属于 restart-required 配置。Gateway 与所有 Worker
+  必须使用完全相同的 mode 和 frequency；修改后应同时重启，不能热切换。
+- 支持从既有 `full` Thread 迁移到 `delta`。写入第一个 delta checkpoint 后，不支持直接
+  切回 `full`；full 进程会在读取或写入前 fail closed，避免把局部增量误当成完整状态。
+- 私有项目 Thread 的读取、历史、Goal、分支、重新生成、上下文压缩与 Worker 恢复都必须经
+  `ProjectScopedCheckpointer` 和 materialized state accessor。不要直接读取 raw
+  `checkpoint.channel_values.messages`。
+- `snapshot_frequency` 只影响写入放大与读取重放上界，不改变 reducer 的最终语义；数值越大，
+  完整 seed 越少，但一次读取最多需要重放更多增量。
+
+旧字段 `database.checkpoint_delta_snapshot_frequency` 会迁移到 nested 配置并记录弃用警告；
+新旧字段同时存在时以 `database.checkpoint_delta.snapshot_frequency` 为准。
+
+### 本地账号、注册和保持登录
+
+本地邮箱/密码认证的部署设置仍位于 `auth.local`，但访客自助注册开关已迁到 PostgreSQL：
+
+```yaml
+auth:
+  local:
+    # 默认必须保持 false；仅在运维明确接受公网明文 HTTP 风险时使用。
+    allow_insecure_persistent_cookie: false
+```
+
+- system admin 在 `/admin/settings/system` 修改 `auth.allow_registration`；`false` 只关闭普通
+  local self-registration。Gateway 会在 rate-limit
+  和写账号之前返回结构化 `403 registration_disabled`，`/api/v1/auth/setup-status` 同时返回
+  `registration_enabled: false`，前端不会显示可用的普通注册入口。
+- setup-status 只缓存数据库初始化状态，`registration_enabled` 每次响应都重新读取，因此配置
+  收紧不会被旧 setup cache 暂时遮蔽。
+- `auth`、`auth.local`、`auth.oidc` 与每个 OIDC provider 都拒绝未知字段。类似
+  `allow_registraton`、`auto_create_user` 的拼写错误会让配置加载失败，不会静默使用默认允许值。
+- 首次 system-admin 的 `/api/v1/auth/initialize` 不受这个开关影响；OIDC 的受控用户
+  provisioning 也不是 local self-registration。
+- 邮箱作为一个大小写不敏感的账号标识保存和查询。register、login、change-email 与 OIDC
+  最终经过规范化的 PostgreSQL user repository，完整 schema 以唯一
+  `lower(users.email)` index 封闭并发大小写碰撞。
+- “保持登录”由每次 local login、register、initialize、change-password 或 OIDC state 的
+  `remember_me` 选择控制。浏览器只能保存 preference 和可选邮箱；密码、access token、CSRF
+  token 与 session ID 不得进入 Web Storage。
+- `remember_me=false` 时 access、CSRF 和 preference cookie 都没有 `Max-Age`。
+  `remember_me=true` 时，HTTPS 与 localhost HTTP 可持久到 `auth` token lifetime；普通公网
+  HTTP 默认仍是 session cookie。只有显式设置
+  `allow_insecure_persistent_cookie: true` 才放宽最后一条。
+- 这个选项不改变认证 authority：JWT 仍包含随机 `sid`，PostgreSQL 只保存其 hash，每次请求仍
+  验证 user、token-version、session expiry 和 revoke 状态。logout 删除全部三个浏览器 cookie
+  并撤销当前 durable session；密码变更撤销全部旧 session。
+
+DeerFlow 当前没有启用 generic `AuthorizationProvider` 配置。旧顶层 `authorization:` 不会被
+静默忽略：version 32 把它列为 tombstone，直接加载会失败，`make config-upgrade` 会删除它。
+项目权限继续来自 server-issued ProjectContext、当前 membership/capability、owner scope 和
+side-effect revalidation。
+
+`lower(email)` 是完整数据库 schema 的一部分，不提供旧库在线升级。已有数据库需要换成空目标并
+运行 `make setup-db`；不要自行创建增量 migration、运行时 `ALTER` 或手工 stamp。
 
 ### 认证反向代理
 
@@ -46,196 +134,44 @@ auth:
 
 ### Models
 
-Configure the LLM models available to the agent:
+Model configuration is no longer part of `config.yaml`. Since schema version 33,
+top-level `models:` is a rejected tombstone and `make config-upgrade` removes it.
+The setup wizard does not write model definitions to `config.yaml`.
 
-```yaml
-models:
-  - name: gpt-4                    # Internal identifier
-    display_name: GPT-4            # Human-readable name
-    use: langchain_openai:ChatOpenAI  # LangChain class path
-    model: gpt-4                   # Model identifier for API
-    api_key: $OPENAI_API_KEY       # API key (use env var)
-    max_tokens: 4096               # Max tokens per request
-    temperature: 0.7               # Sampling temperature
-```
+For a new local database, place `DEEPSEEK_API_KEY`,
+`DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID`, and
+`DEER_FLOW_CREDENTIAL_KEYRING_JSON` in the root `.env` (an explicitly exported
+value has precedence), then run `make setup-db`. Before it creates the target
+database, setup validates the key and keyring and pre-encrypts the key. It then
+writes one system `model_api_key` Credential/envelope and the former example
+DeepSeek V4 Pro configuration in one transaction, with the model active and
+selected as default. Missing or invalid bootstrap secret material fails without
+leaving a newly created half-initialized database.
 
-**Supported Providers**:
-- OpenAI (`langchain_openai:ChatOpenAI`)
-- Anthropic (`langchain_anthropic:ChatAnthropic`)
-- DeepSeek (`langchain_deepseek:ChatDeepSeek`)
-- Xiaomi MiMo (`deerflow.models.patched_mimo:PatchedChatMiMo`)
-- Claude Code OAuth (`deerflow.models.claude_provider:ClaudeChatModel`)
-- Codex CLI (`deerflow.models.openai_codex_provider:CodexChatModel`)
-- Any LangChain-compatible provider
+After application startup, sign in as a system admin and use
+`/admin/settings/models` to inspect or change the catalog:
 
-CLI-backed provider examples:
+1. create a logical model and immutable provider version;
+2. choose an allowlisted provider adapter and provider model identifier;
+3. add bounded, secret-free JSON settings such as `base_url`, `temperature`, or
+   provider-specific request options;
+4. bind the exact encrypted Credential version and its environment key when the
+   adapter requires authentication;
+5. activate the model and choose the catalog default.
 
-```yaml
-models:
-  - name: gpt-5.4
-    display_name: GPT-5.4 (Codex CLI)
-    use: deerflow.models.openai_codex_provider:CodexChatModel
-    model: gpt-5.4
-    supports_thinking: true
-    supports_reasoning_effort: true
+The adapter allowlist includes OpenAI, Anthropic, DeepSeek, MindIE, vLLM,
+patched OpenAI-compatible adapters, Xiaomi MiMo, Claude Code, and Codex CLI.
+Arbitrary Python class paths are not accepted. Secret-bearing keys, headers,
+tokens, passwords, and Credential material are rejected from model settings.
+Provider secrets are stored only as encrypted Credential envelopes and are
+decrypted for the exact admitted model version at the execution boundary.
 
-  - name: claude-sonnet-4.6
-    display_name: Claude Sonnet 4.6 (Claude Code OAuth)
-    use: deerflow.models.claude_provider:ClaudeChatModel
-    model: claude-sonnet-4-6
-    max_tokens: 4096
-    supports_thinking: true
-```
-
-**Auth behavior for CLI-backed providers**:
-- `CodexChatModel` loads Codex CLI auth from `~/.codex/auth.json`
-- The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
-- `ClaudeChatModel` accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
-- On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
-
-To use OpenAI's `/v1/responses` endpoint with LangChain, keep using `langchain_openai:ChatOpenAI` and set:
-
-```yaml
-models:
-  - name: gpt-5-responses
-    display_name: GPT-5 (Responses API)
-    use: langchain_openai:ChatOpenAI
-    model: gpt-5
-    api_key: $OPENAI_API_KEY
-    use_responses_api: true
-    output_version: responses/v1
-```
-
-For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
-
-> **Note:** for `langchain_openai:ChatOpenAI` the endpoint override key is `base_url` (not `api_base`). If you write `api_base` it is automatically normalized to `base_url`, and unrecognized keys are logged with a warning at model-build time. Some other model classes (e.g. `PatchedChatDeepSeek`) do use `api_base` — match the key to the class you configured.
-
-```yaml
-models:
-  - name: novita-deepseek-v3.2
-    display_name: Novita DeepSeek V3.2
-    use: langchain_openai:ChatOpenAI
-    model: deepseek/deepseek-v3.2
-    api_key: $NOVITA_API_KEY
-    base_url: https://api.novita.ai/openai
-    supports_thinking: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-
-  - name: minimax-m3
-    display_name: MiniMax M3
-    use: langchain_openai:ChatOpenAI
-    model: MiniMax-M3
-    api_key: $MINIMAX_API_KEY
-    base_url: https://api.minimax.io/v1
-    max_tokens: 4096
-    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-    supports_vision: true
-
-  - name: minimax-m2.7
-    display_name: MiniMax M2.7
-    use: langchain_openai:ChatOpenAI
-    model: MiniMax-M2.7
-    api_key: $MINIMAX_API_KEY
-    base_url: https://api.minimax.io/v1
-    max_tokens: 4096
-    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-    supports_vision: false  # M2.7 is text-only; M3 supports vision
-
-  - name: minimax-m2.7-highspeed
-    display_name: MiniMax M2.7 Highspeed
-    use: langchain_openai:ChatOpenAI
-    model: MiniMax-M2.7-highspeed
-    api_key: $MINIMAX_API_KEY
-    base_url: https://api.minimax.io/v1
-    max_tokens: 4096
-    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-    supports_vision: false  # M2.7 is text-only; M3 supports vision
-  - name: openrouter-gemini-2.5-flash
-    display_name: Gemini 2.5 Flash (OpenRouter)
-    use: langchain_openai:ChatOpenAI
-    model: google/gemini-2.5-flash-preview
-    api_key: $OPENAI_API_KEY
-    base_url: https://openrouter.ai/api/v1
-```
-
-If your OpenRouter key lives in a different environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
-
-**Thinking Models**:
-Some models support "thinking" mode for complex reasoning:
-
-```yaml
-models:
-  - name: deepseek-v3
-    supports_thinking: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-```
-
-**Gemini with thinking via OpenAI-compatible gateway**:
-
-When routing Gemini through an OpenAI-compatible proxy (Vertex AI OpenAI compat endpoint, AI Studio, or third-party gateways) with thinking enabled, the API attaches a `thought_signature` to each tool-call object returned in the response.  Every subsequent request that replays those assistant messages **must** echo those signatures back on the tool-call entries or the API returns:
-
-```
-HTTP 400 INVALID_ARGUMENT: function call `<tool>` in the N. content block is
-missing a `thought_signature`.
-```
-
-Standard `langchain_openai:ChatOpenAI` silently drops `thought_signature` when serialising messages.  Use `deerflow.models.patched_openai:PatchedChatOpenAI` instead — it re-injects the tool-call signatures (sourced from `AIMessage.additional_kwargs["tool_calls"]`) into every outgoing payload:
-
-```yaml
-models:
-  - name: gemini-2.5-pro-thinking
-    display_name: Gemini 2.5 Pro (Thinking)
-    use: deerflow.models.patched_openai:PatchedChatOpenAI
-    model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
-    api_key: $GEMINI_API_KEY
-    base_url: https://<your-openai-compat-gateway>/v1
-    max_tokens: 16384
-    supports_thinking: true
-    supports_vision: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-```
-
-For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
-
-**MiMo with thinking via OpenAI-compatible API**:
-
-MiMo returns `reasoning_content` on assistant messages in thinking mode. In multi-turn agent conversations with tool calls, subsequent requests must preserve that historical `reasoning_content` on assistant messages or the MiMo API can return HTTP 400. Standard `langchain_openai:ChatOpenAI` drops this provider-specific field, so use `deerflow.models.patched_mimo:PatchedChatMiMo`:
-
-For pay-as-you-go API keys (`sk-...`), use `https://api.xiaomimimo.com/v1`. For Token Plan keys (`tp-...`), use the regional Token Plan Base URL shown in the MiMo console, such as `https://token-plan-cn.xiaomimimo.com/v1`. MiMo documents these key types as separate and non-interchangeable.
-
-`PatchedChatMiMo` is model-id agnostic. Use it for every MiMo thinking model entry you configure, including model entries referenced by `subagents.*.model` overrides (for example `mimo-v2.5-pro`, `mimo-v2.5`, `mimo-v2-pro`, `mimo-v2-omni`, or `mimo-v2-flash`).
-
-```yaml
-models:
-  - name: mimo-v2.5-pro
-    display_name: MiMo V2.5 Pro
-    use: deerflow.models.patched_mimo:PatchedChatMiMo
-    model: mimo-v2.5-pro
-    api_key: $MIMO_API_KEY
-    base_url: https://api.xiaomimimo.com/v1
-    max_tokens: 8192
-    supports_thinking: true
-    supports_vision: false
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
-    when_thinking_disabled:
-      extra_body:
-        thinking:
-          type: disabled
-```
-
-`PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
+Gateway, Worker, Scheduler, Docker Compose, and Helm do not receive the local
+bootstrap provider key as a process-wide environment block. Each Run records a secret-free,
+immutable model-version snapshot so later catalog changes do not silently alter
+already admitted work. `make doctor` reports whether the PostgreSQL catalog has
+an active current model; it never inspects YAML model entries or tests a
+provider key.
 
 ### Tool Groups
 
@@ -403,7 +339,15 @@ This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider
    provisioner_url: http://provisioner:8002
+   provisioner_api_key: $PROVISIONER_API_KEY
 ```
+
+`PROVISIONER_API_KEY` is required in this mode and must have the same value in
+the Worker and Provisioner processes. The Provisioner leaves `/health` public,
+but fails closed with `401` for every `/api/*` request when the configured key
+is empty, missing, or does not match the `X-API-Key` header. The public Nginx
+entry does not route Provisioner endpoints directly; lifecycle calls originate
+from the backend Worker.
 
 When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
@@ -425,7 +369,7 @@ sandbox:
        container_path: /home/user/shared
        read_only: false
    environment:                     # forwarded to the sandbox at create time
-     OPENAI_API_KEY: $OPENAI_API_KEY
+     WORKLOAD_PROFILE: batch
 ```
 
 `e2b-code-interpreter` is bundled as a core dependency of `deerflow-harness`,
@@ -598,19 +542,22 @@ The default GitHub API rate limits are quite restrictive. For frequent project r
 
 ## Environment Variables
 
-DeerFlow supports environment variable substitution using the `$` prefix:
+Process configuration supports environment-variable substitution using the `$`
+prefix for fields that remain in `config.yaml`:
 
 ```yaml
-models:
-  - api_key: $OPENAI_API_KEY  # Reads from environment
+sandbox:
+  provisioner_api_key: $PROVISIONER_API_KEY
 ```
 
-**Common Environment Variables**:
-- `OPENAI_API_KEY` - OpenAI API key
-- `ANTHROPIC_API_KEY` - Anthropic API key
-- `DEEPSEEK_API_KEY` - DeepSeek API key
-- `MIMO_API_KEY` - Xiaomi MiMo API key
-- `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
+Model-provider keys are intentionally excluded from runtime configuration
+substitution. The local `make setup-db` command consumes `DEEPSEEK_API_KEY` once
+to create the encrypted default-model Credential; later keys and rotations are
+managed in `/admin/settings/models`. Do not broadcast `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, or similar provider keys to backend runtime processes.
+
+**Common process and tool environment variables**:
+
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
@@ -671,9 +618,10 @@ To keep this off the default attack surface:
   boundary: run it on a dedicated host, and consider a scoped Docker API proxy
   instead of the raw socket.
 
-> Note: the gateway bind-mounts `$HOME/.claude` and `$HOME/.codex` (read-only)
-> for CLI auto-auth in **all** modes. These hold long-lived CLI credentials;
-> scope or omit them when the gateway runs untrusted workloads.
+> Note: the base Compose stacks do not bind-mount `$HOME/.claude` or
+> `$HOME/.codex`. The opt-in CLI overlay mounts them read-only into Worker only.
+> These directories hold long-lived CLI credentials; do not enable the overlay
+> for an untrusted Worker.
 
 ### CLI Credential Mounts (Claude Code / Codex)
 
@@ -690,26 +638,22 @@ with the least exposure that fits your setup:
 
 | Need | How | Exposure |
 |------|-----|----------|
-| Claude model provider | env `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` (via `.env`), or `CLAUDE_CODE_CREDENTIALS_PATH` → a single mounted `.credentials.json` | none / one file |
-| Codex model provider | env `CODEX_AUTH_PATH` pointing at a single mounted `auth.json` | one file |
-| ACP agent | the adapter's own auth — many ACP adapters take an env API key (e.g. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and need no mount; use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only if your adapter reads the full CLI config dir | none / full dir |
+| API-key model adapter | Bind an encrypted, exact Credential version in `/admin/settings/models` | Execution-boundary value only |
+| Claude Code / Codex CLI model adapter | Use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only when local subscription auth is required | Full CLI directory in Worker |
+| ACP agent | Follow the adapter's isolated auth contract; use the CLI overlay only if it genuinely reads the full CLI directory | Adapter-specific / full directory |
 
-The Gateway credential loader checks environment variables **before** the
-default credential files, so the env-token paths need no bind mount at all. ACP
-adapters authenticate independently of DeerFlow via their own documented env —
-for example the common `claude-code-acp` adapter starts as
-`ANTHROPIC_API_KEY=… claude-code-acp` and honors `CLAUDE_CONFIG_DIR` to redirect
-its config directory, so it needs no `~/.claude` mount at all. Prefer the
-adapter's documented env auth, and reach for the
-`docker-compose.cli-auth.yaml` overlay only as a fallback for an adapter that
-genuinely reads the full CLI config directory.
+The base Compose stack never forwards root `.env` wholesale to Gateway, Worker,
+Scheduler, or Provisioner. CLI-backed model adapters are the explicit local
+subscription exception: they do not accept a model Credential binding and may
+read the opt-in Worker mount. API-key model adapters must use the PostgreSQL
+Credential binding instead.
 
 
 ## Best Practices
 
 1. **Place `config.yaml` in project root** - Set `DEER_FLOW_PROJECT_ROOT` if the runtime starts elsewhere
 2. **Never commit `config.yaml`** - It's already in `.gitignore`
-3. **Use environment variables for secrets** - Don't hardcode API keys
+3. **Keep secret domains explicit** - Use environment variables only for documented process/tool secrets; use encrypted Credentials for model-provider keys
 4. **Keep `config.example.yaml` updated** - Document all new options
 5. **Test configuration changes locally** - Before deploying
 6. **Use Docker sandbox for production** - Better isolation and security

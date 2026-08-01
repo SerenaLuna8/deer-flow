@@ -466,6 +466,48 @@ async def test_private_authority_failed_release_preserves_state_for_retry() -> N
 
 
 @pytest.mark.anyio
+async def test_private_authority_internal_cancelled_release_preserves_state_for_retry() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.private_work.sandbox_files import PrivateRunFileAuthority
+    from deerflow.file_authority import AuthorityManifest
+
+    run_scope = _private_file_run_scope()
+    manifest = AuthorityManifest(entries=(), run_id=run_scope.run_id)
+    sandbox = object()
+    lease = SimpleNamespace(sandbox_id="private-release-internal-cancel")
+    provider = SimpleNamespace(
+        acquire_private_async=AsyncMock(return_value=lease),
+        get=lambda sandbox_id: sandbox if sandbox_id == lease.sandbox_id else None,
+        release_private_async=AsyncMock(
+            side_effect=[asyncio.CancelledError, None],
+        ),
+    )
+    authority = PrivateRunFileAuthority(
+        run_scope,
+        SimpleNamespace(restore=AsyncMock(return_value=manifest)),
+        SimpleNamespace(finalize=AsyncMock()),
+        provider=provider,
+    )
+    await authority.restore()
+
+    with pytest.raises(asyncio.CancelledError):
+        await authority.release()
+
+    assert authority.sandbox_id == lease.sandbox_id
+    assert authority.manifest is manifest
+
+    await authority.release()
+
+    assert authority.sandbox_id is None
+    assert authority.manifest is None
+    assert provider.release_private_async.await_args_list == [
+        ((lease,),),
+        ((lease,),),
+    ]
+
+
+@pytest.mark.anyio
 async def test_private_authority_concurrent_release_destroys_lease_once() -> None:
     from unittest.mock import AsyncMock
 
@@ -508,6 +550,81 @@ async def test_private_authority_concurrent_release_destroys_lease_once() -> Non
     provider.release_private_async.assert_awaited_once_with(lease)
     assert authority.sandbox_id is None
     assert authority.manifest is None
+
+
+@pytest.mark.anyio
+async def test_private_authority_cancelled_release_clears_completed_lease() -> None:
+    from unittest.mock import AsyncMock
+
+    from app.private_work.sandbox_files import PrivateRunFileAuthority
+    from deerflow.file_authority import AuthorityManifest
+    from deerflow.sandbox.sandbox_provider import (
+        PrivateSandboxLease,
+        SandboxProvider,
+    )
+
+    run_scope = _private_file_run_scope()
+    manifest = AuthorityManifest(entries=(), run_id=run_scope.run_id)
+    sandbox = object()
+    lease = PrivateSandboxLease(
+        sandbox_id="private-release-cancelled",
+        run_id=run_scope.run_id,
+        relative_root="projects/project/users/owner/threads/thread",
+    )
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    release_calls: list[PrivateSandboxLease] = []
+
+    class CancellationJoiningProvider(SandboxProvider):
+        async def acquire_private_async(self, *_args, **_kwargs) -> PrivateSandboxLease:
+            return lease
+
+        def acquire(
+            self,
+            thread_id: str | None = None,
+            *,
+            user_id: str | None = None,
+        ) -> str:
+            del thread_id, user_id
+            return lease.sandbox_id
+
+        def get(self, sandbox_id: str):
+            return sandbox if sandbox_id == lease.sandbox_id else None
+
+        def release(self, sandbox_id: str) -> None:
+            del sandbox_id
+
+        def release_private(self, released: PrivateSandboxLease) -> None:
+            release_started.set()
+            assert allow_release.wait(2)
+            release_calls.append(released)
+
+    provider = CancellationJoiningProvider()
+    authority = PrivateRunFileAuthority(
+        run_scope,
+        SimpleNamespace(restore=AsyncMock(return_value=manifest)),
+        SimpleNamespace(finalize=AsyncMock()),
+        provider=provider,
+    )
+    await authority.restore()
+
+    task = asyncio.create_task(authority.release())
+    try:
+        assert await asyncio.to_thread(release_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        allow_release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert release_calls == [lease]
+    assert authority.sandbox_id is None
+    assert authority.manifest is None
+    await authority.release()
+    assert release_calls == [lease]
 
 
 @pytest.mark.anyio
@@ -590,7 +707,16 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
     }
     authority = SimpleNamespace(
         restore=AsyncMock(),
-        finalize=AsyncMock(return_value=SimpleNamespace(workspace_changes=workspace_changes)),
+        finalize=AsyncMock(
+            return_value=SimpleNamespace(
+                workspace_changes=workspace_changes,
+                artifacts=(
+                    SimpleNamespace(
+                        metadata={"logical_path": "outputs/report.txt"},
+                    ),
+                ),
+            )
+        ),
         mark_failed=AsyncMock(),
         release=AsyncMock(),
     )
@@ -623,6 +749,7 @@ async def test_worker_private_recorder_uses_committed_result_without_host_scan(
 
     capture.assert_not_awaited()
     legacy_record.assert_not_awaited()
+    assert record.status.value == "success"
     events = await event_store.list_events(record.thread_id, record.run_id)
     workspace_event = next(event for event in events if event["event_type"] == WORKSPACE_CHANGES_EVENT_TYPE)
     payload = workspace_event["metadata"][WORKSPACE_CHANGES_METADATA_KEY]
@@ -1787,6 +1914,114 @@ async def test_worker_finalizer_failure_prevents_success_and_records_failed() ->
     authority.release.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    ("workspace_changes", "presented_paths", "expected_status"),
+    [
+        pytest.param(
+            {
+                "created": ["outputs/report.txt"],
+                "modified": [],
+                "deleted": [],
+            },
+            (),
+            "error",
+            id="new-output-not-presented",
+        ),
+        pytest.param(
+            {
+                "created": ["outputs/a.txt", "outputs/b.txt"],
+                "modified": [],
+                "deleted": [],
+            },
+            ("outputs/b.txt",),
+            "success",
+            id="one-current-output-presented",
+        ),
+        pytest.param(
+            {
+                "created": ["outputs/current.txt"],
+                "modified": [],
+                "deleted": [],
+            },
+            ("outputs/old.txt",),
+            "error",
+            id="only-old-output-presented",
+        ),
+        pytest.param(
+            {
+                "created": [],
+                "modified": ["workspace/draft.txt"],
+                "deleted": [],
+            },
+            (),
+            "success",
+            id="workspace-only-change",
+        ),
+        pytest.param(
+            {
+                "created": [],
+                "modified": [],
+                "deleted": ["outputs/old.txt"],
+            },
+            (),
+            "success",
+            id="output-deletion-only",
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_worker_requires_one_current_output_to_be_presented(
+    workspace_changes,
+    presented_paths,
+    expected_status,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    result = SimpleNamespace(
+        workspace_changes=workspace_changes,
+        artifacts=tuple(SimpleNamespace(metadata={"logical_path": path}) for path in presented_paths),
+    )
+    authority = SimpleNamespace(
+        restore=AsyncMock(),
+        finalize=AsyncMock(return_value=result),
+        mark_failed=AsyncMock(),
+        release=AsyncMock(),
+    )
+    manager = RunManager()
+    record = await manager.create(f"thread-delivery-{uuid.uuid4()}")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=authority),
+        agent_factory=lambda **_kwargs: Agent(),
+        graph_input={},
+        config={},
+    )
+
+    persisted = await manager.get(record.run_id)
+    assert persisted is not None
+    assert persisted.status is RunStatus(expected_status)
+    if expected_status == "error":
+        assert persisted.error == ("Run produced output files but did not present a current-run output")
+    authority.mark_failed.assert_not_awaited()
+    authority.release.assert_awaited_once()
+
+
 @pytest.mark.anyio
 async def test_worker_cancel_during_private_finalize_joins_then_rethrows() -> None:
     from unittest.mock import AsyncMock
@@ -1960,7 +2195,8 @@ async def test_worker_private_marker_failure_preserves_original_terminal_error_a
 
     persisted = await manager.get(record.run_id)
     assert persisted is not None
-    expected_error = AUTHORIZATION_REVOKED_REASON if terminal_action == "authorization_revoked" else "original agent failure"
+    expected_error = AUTHORIZATION_REVOKED_REASON if terminal_action == "authorization_revoked" else "RUN_EXECUTION_FAILED"
+    expected_message = AUTHORIZATION_REVOKED_REASON if terminal_action == "authorization_revoked" else "Run execution failed"
     expected_status = RunStatus.interrupted if terminal_action == "authorization_revoked" else RunStatus.error
     assert persisted.status is expected_status
     assert persisted.error == expected_error
@@ -1970,7 +2206,7 @@ async def test_worker_private_marker_failure_preserves_original_terminal_error_a
         record.run_id,
         "error",
         {
-            "message": expected_error,
-            "name": (AUTHORIZATION_REVOKED_REASON if terminal_action == "authorization_revoked" else "RuntimeError"),
+            "message": expected_message,
+            "name": expected_error,
         },
     )

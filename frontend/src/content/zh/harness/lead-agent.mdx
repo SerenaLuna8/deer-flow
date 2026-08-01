@@ -77,27 +77,11 @@ Lead Agent 在运行时使用以下优先级顺序解析要使用的模型：
 
 1. 每次请求配置中的 `model_name`（或 `model`），如果提供且有效。
 2. 活跃自定义 Agent 配置中的 `model` 字段，如果指定了 Agent。
-3. `config.yaml` 中 `models:` 列表的第一个模型（全局默认值）。
+3. PostgreSQL 系统模型目录中处于启用状态的默认模型。
 
-如果请求的模型名称在配置中找不到，系统回退到默认模型并记录警告。
-
-```yaml
-models:
-  - name: my-primary-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-    supports_vision: true
-
-  - name: my-fast-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o-mini
-    api_key: $OPENAI_API_KEY
-```
-
-第一个条目（`my-primary-model`）成为默认值。任何不指定模型或指定未知模型名称的请求都将使用它。
+平台管理员在 **系统管理 → 系统设置 → 模型配置** 中管理逻辑名称、供应商参数、
+能力标记、版本化系统凭据、启停状态和默认模型。Run 准入时会冻结准确的模型版本
+与凭据版本，后续修改不会悄悄改变已排队的任务。
 
 ## 思考模式
 

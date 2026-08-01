@@ -31,7 +31,7 @@ from app.gateway.github.identity import extract_target, resolve_thread_id
 from app.gateway.github.prompts import build_prompt
 from app.gateway.github.registry import build_github_agent_registry, lookup_agents
 from app.gateway.github.triggers import event_should_fire
-from deerflow.config.agents_config import GitHubAgentConfig
+from deerflow.config.agents_config import GitHubAgentConfig, GitHubTriggerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,15 @@ def _is_self_event(
     return sender_login.lower() in {s.lower() for s in self_logins}
 
 
+def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
+    """Recognize a non-reply inline comment emitted with a PR review."""
+
+    comment = payload.get("comment")
+    if not isinstance(comment, dict):
+        return False
+    return comment.get("pull_request_review_id") is not None and comment.get("in_reply_to_id") is None
+
+
 async def fanout_event(
     bus: MessageBus,
     event: str,
@@ -153,6 +162,19 @@ async def fanout_event(
     skipped: list[dict[str, str]] = []
 
     sender_login = (payload.get("sender") or {}).get("login")
+    redundant_review_comment = event == "pull_request_review_comment" and _is_redundant_review_comment(payload)
+    paired_review_triggers: dict[tuple[str, str], GitHubTriggerConfig] = (
+        {
+            (review_match.user_id, review_match.agent.name): review_match.trigger
+            for review_match in lookup_agents(
+                registry,
+                repo,
+                "pull_request_review",
+            )
+        }
+        if redundant_review_comment
+        else {}
+    )
 
     for match in matches:
         agent = match.agent
@@ -201,6 +223,21 @@ async def fanout_event(
         operator_default = (operator_default_mention_login or "").strip() or None
         default_mention_login = github.bot_login or operator_default or agent.name
         fire, reason = event_should_fire(event, payload, trigger, default_mention_login)
+        paired_review_trigger = paired_review_triggers.get((match.user_id, agent.name))
+        paired_review_actions = paired_review_trigger.actions if paired_review_trigger is not None else None
+        paired_review_covers_submitted = paired_review_trigger is not None and not paired_review_trigger.require_mention and (paired_review_actions is None or "submitted" in paired_review_actions)
+        if fire and redundant_review_comment and paired_review_covers_submitted:
+            logger.info(
+                "github_fanout: agent=%s skipped (reason=redundant_review_comment)",
+                agent.name,
+            )
+            skipped.append(
+                {
+                    "agent": agent.name,
+                    "reason": "redundant_review_comment",
+                }
+            )
+            continue
         if not fire:
             logger.info(
                 "github_fanout: agent=%s skipped (reason=%s)",
@@ -231,6 +268,7 @@ async def fanout_event(
             text=prompt,
             msg_type=InboundMessageType.CHAT,
             topic_id=topic_id,
+            provider_delivery_id=delivery_id,
             # The repository coordinate is resolved again by the project
             # inbound dispatcher. Agent config ownership is routing metadata,
             # never project authority.

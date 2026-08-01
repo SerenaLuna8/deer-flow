@@ -110,6 +110,23 @@ class PrivateFileFinalizationQuotaPort(Protocol):
     ) -> None: ...
 
 
+class PrivateFileFinalizationAuditPort(Protocol):
+    async def run_files_finalized(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        request_id: str,
+        created_count: int,
+        modified_count: int,
+        deleted_count: int,
+        artifact_count: int,
+        committed_bytes: int,
+    ) -> None: ...
+
+
 class _NoopPrivateFileFinalizationQuota:
     async def reserve_file(
         self,
@@ -142,10 +159,12 @@ class PrivateFileFinalizer:
         *,
         limits: PrivateFileFinalizationLimits | None = None,
         quota: PrivateFileFinalizationQuotaPort | None = None,
+        audit: PrivateFileFinalizationAuditPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._limits = limits or PrivateFileFinalizationLimits()
         self._quota = quota or _NoopPrivateFileFinalizationQuota()
+        self._audit = audit
         self._revalidator = PrivateWorkRevalidator()
 
     @staticmethod
@@ -597,6 +616,25 @@ class PrivateFileFinalizer:
 
             run.finalization_status = "complete"
             run.updated_at = now
+            if self._audit is not None:
+                try:
+                    job_id = uuid.UUID(str(run.job_id))
+                except (AttributeError, TypeError, ValueError):
+                    raise PrivateWorkUnavailable(run_scope.context.request_id) from None
+                if type(run.origin_trace_id) is not str or not run.origin_trace_id:
+                    raise PrivateWorkUnavailable(run_scope.context.request_id)
+                await self._audit.run_files_finalized(
+                    session,
+                    run_scope.resource_scope,
+                    run_id=run.run_id,
+                    job_id=job_id,
+                    request_id=run.origin_trace_id,
+                    created_count=sum(path not in before for path in changed_by_path),
+                    modified_count=sum(path in before for path in changed_by_path),
+                    deleted_count=len(deleted_paths),
+                    artifact_count=len(artifacts),
+                    committed_bytes=sum(item.size for item in staged),
+                )
             await session.flush()
             file_records = tuple(PrivateFileRepository._file_record(row) for row in promoted)
             artifact_records = tuple(

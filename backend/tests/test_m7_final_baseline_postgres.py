@@ -67,6 +67,7 @@ LEGACY_RELATIONS = {
 }
 REQUIRED_FUNCTIONS = {
     "bump_asset_catalog_generation",
+    "enforce_run_model_snapshot_credential_closure",
     "enforce_scheduled_task_agent_project",
     "enforce_shared_asset_version_state_transition",
     "enforce_stream_terminal_invariant",
@@ -75,6 +76,8 @@ REQUIRED_FUNCTIONS = {
     "prevent_published_version_child_mutation",
     "prevent_shared_asset_version_payload_update",
     "reject_m7_append_only_mutation",
+    "reject_direct_run_model_snapshot_mutation",
+    "reject_direct_run_runtime_policy_snapshot_mutation",
     "set_m7_updated_at",
 }
 REQUIRED_TRIGGERS = {
@@ -83,14 +86,83 @@ REQUIRED_TRIGGERS = {
     "trg_audit_logs_append_only",
     "trg_dead_jobs_append_only",
     "trg_project_usage_ledger_append_only",
+    "trg_run_model_config_snapshots_credential_closure",
+    "trg_run_model_config_snapshots_immutable",
+    "trg_run_runtime_policy_snapshots_immutable",
+    "trg_system_runtime_policies_updated_at",
+    "trg_system_runtime_policy_catalog_state_updated_at",
+    "trg_system_runtime_policy_versions_immutable",
     "trg_run_events_stream_terminal",
     "trg_scheduled_tasks_updated_at",
     "trg_skill_design_draft_files_updated_at",
     "trg_skill_design_operations_updated_at",
     "trg_skill_design_sessions_updated_at",
 }
+
+
+@pytest.mark.asyncio
+async def test_user_email_identity_is_case_insensitive_under_concurrency(
+    migrated_postgres_database_url: str,
+) -> None:
+    """The full schema admits only one case variant, even in a write race."""
+
+    engine = create_async_engine(migrated_postgres_database_url)
+
+    async def insert_user(user_id: str, email: str) -> bool:
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """INSERT INTO users
+                           (id,email,system_role,created_at,needs_setup,token_version)
+                           VALUES (:id,:email,'user',now(),false,0)"""
+                    ),
+                    {"id": user_id, "email": email},
+                )
+        except IntegrityError:
+            return False
+        return True
+
+    try:
+        async with engine.connect() as connection:
+            index_definition = await connection.scalar(
+                text(
+                    """SELECT pg_get_indexdef(indexrelid)
+                         FROM pg_index
+                        WHERE indexrelid = 'ix_users_email'::regclass"""
+                )
+            )
+        assert index_definition is not None
+        assert "lower((email)::text)" in index_definition
+
+        admitted = await asyncio.gather(
+            insert_user(
+                "11111111-1111-1111-1111-111111111111",
+                "RaceCase@Example.com",
+            ),
+            insert_user(
+                "22222222-2222-2222-2222-222222222222",
+                "racecase@example.com",
+            ),
+        )
+        assert sorted(admitted) == [False, True]
+
+        async with engine.connect() as connection:
+            count = await connection.scalar(
+                text(
+                    """SELECT count(*)
+                         FROM users
+                        WHERE lower(email) = 'racecase@example.com'"""
+                )
+            )
+        assert count == 1
+    finally:
+        await engine.dispose()
+
+
 EXPECTED_FUNCTION_FRAGMENTS = {
     "bump_asset_catalog_generation": "generation = asset_catalog_state.generation + 1",
+    "enforce_run_model_snapshot_credential_closure": "run model snapshot credential closure mismatch",
     "enforce_scheduled_task_agent_project": "project Agent must belong to the scheduled task project",
     "enforce_shared_asset_version_state_transition": "invalid shared asset version workflow transition",
     "enforce_stream_terminal_invariant": "stream event cannot follow terminal event",
@@ -99,6 +171,8 @@ EXPECTED_FUNCTION_FRAGMENTS = {
     "prevent_published_version_child_mutation": "deerflow.skill_hard_delete_asset_id",
     "prevent_shared_asset_version_payload_update": "shared asset version payload is immutable",
     "reject_m7_append_only_mutation": "M7 append-only rows cannot be updated or deleted",
+    "reject_direct_run_model_snapshot_mutation": "run model snapshots cannot be updated or directly deleted",
+    "reject_direct_run_runtime_policy_snapshot_mutation": "run runtime policy snapshots cannot be updated or directly deleted",
     "set_m7_updated_at": "NEW.updated_at := now()",
 }
 EXPECTED_TRIGGER_IDENTITIES = {
@@ -115,6 +189,36 @@ EXPECTED_TRIGGER_IDENTITIES = {
     "trg_audit_logs_append_only": ("audit_logs", "reject_m7_append_only_mutation", 27),
     "trg_dead_jobs_append_only": ("dead_jobs", "reject_m7_append_only_mutation", 27),
     "trg_project_usage_ledger_append_only": ("project_usage_ledger", "reject_m7_append_only_mutation", 27),
+    "trg_run_model_config_snapshots_credential_closure": (
+        "run_model_config_snapshots",
+        "enforce_run_model_snapshot_credential_closure",
+        7,
+    ),
+    "trg_run_model_config_snapshots_immutable": (
+        "run_model_config_snapshots",
+        "reject_direct_run_model_snapshot_mutation",
+        27,
+    ),
+    "trg_run_runtime_policy_snapshots_immutable": (
+        "run_runtime_policy_snapshots",
+        "reject_direct_run_runtime_policy_snapshot_mutation",
+        27,
+    ),
+    "trg_system_runtime_policies_updated_at": (
+        "system_runtime_policies",
+        "set_m7_updated_at",
+        19,
+    ),
+    "trg_system_runtime_policy_catalog_state_updated_at": (
+        "system_runtime_policy_catalog_state",
+        "set_m7_updated_at",
+        19,
+    ),
+    "trg_system_runtime_policy_versions_immutable": (
+        "system_runtime_policy_versions",
+        "reject_m7_append_only_mutation",
+        27,
+    ),
     "trg_run_events_stream_terminal": ("run_events", "enforce_stream_terminal_invariant", 7),
     "trg_scheduled_tasks_updated_at": ("scheduled_tasks", "set_m7_updated_at", 19),
     "trg_skill_design_draft_files_updated_at": (

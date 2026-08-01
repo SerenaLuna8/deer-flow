@@ -19,6 +19,7 @@ from app.projects.invitation_models import (
     ProjectInvitationConflict,
     ProjectInvitationInvalid,
 )
+from app.quotas.models import QuotaUnavailable
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 GOVERNANCE_DOMAIN_ERRORS = (
@@ -33,6 +34,7 @@ GOVERNANCE_DOMAIN_ERRORS = (
     ProjectDeletionStateConflict,
     ProjectValidationFailed,
     ProjectDatabaseUnavailable,
+    QuotaUnavailable,
 )
 
 
@@ -119,6 +121,12 @@ def governance_error(exc: Exception, request_id: str) -> tuple[int, dict[str, st
             503,
             "DATABASE_UNAVAILABLE",
             "Project storage unavailable",
+        ),
+        (
+            QuotaUnavailable,
+            503,
+            "QUOTA_POLICY_UNAVAILABLE",
+            "Quota policy unavailable",
         ),
     )
     for error_type, status_code, code, message in mapping:

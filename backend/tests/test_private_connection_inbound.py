@@ -101,7 +101,11 @@ def _connection(context, *, connection_id: str, agent_id: uuid.UUID | None) -> d
     }
 
 
-def _identity(*, account: str = "external-a", conversation: str = "chat-a"):
+def _identity(
+    *,
+    account: str = "external-a",
+    conversation: str = "chat-a",
+):
     from app.private_work.connection_inbound import ProviderIdentity
 
     return ProviderIdentity(
@@ -488,6 +492,7 @@ async def test_project_inbound_dispatcher_uses_only_resolved_context_and_thread(
         topic_id="topic-a",
         owner_user_id=str(seed.owner_b.user_id),
         project_id=str(seed.project_b_owner_a.project_id),
+        metadata={"message_id": "delivery-a"},
     )
 
     result = await ProjectInboundDispatcher(resolver, launcher).dispatch(message)
@@ -513,9 +518,17 @@ async def test_project_inbound_dispatcher_uses_only_resolved_context_and_thread(
 async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_state(
     seed: M4ThreadSeed,
 ) -> None:
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.private_work.checkpointer import ProjectScopedCheckpointer
     from app.private_work.connection_inbound import build_gateway_project_run_launcher
     from app.private_work.run_admission import PrivateRunInboundAuthority
     from app.private_work.run_service import PrivateRunService
+    from app.private_work.thread_repository import (
+        PrivateThreadRepository,
+        ThreadAgentRef,
+    )
 
     channel_values = {
         "messages": [
@@ -524,20 +537,29 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
         ]
     }
 
-    class FakeCheckpointer:
-        async def aget_tuple(self, config):
-            assert config == {
-                "configurable": {
-                    "thread_id": "private-thread",
-                    "checkpoint_ns": "",
-                }
+    async with seed.factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=seed.owner_a.resource_scope,
+            thread_id="private-thread",
+            agent=ThreadAgentRef(seed.project_agent_id, "project"),
+        )
+    raw = InMemorySaver()
+    project_checkpointer = ProjectScopedCheckpointer(raw, seed.factory)
+    checkpoint = empty_checkpoint()
+    messages_version = checkpoint["id"]
+    checkpoint["channel_versions"] = {"messages": messages_version}
+    checkpoint["channel_values"] = channel_values
+    await project_checkpointer.for_context(seed.owner_a).aput(
+        {
+            "configurable": {
+                "thread_id": "private-thread",
+                "checkpoint_ns": "",
             }
-            return SimpleNamespace(checkpoint={"channel_values": channel_values})
-
-    class FakeProjectScopedCheckpointer:
-        def for_context(self, context):
-            assert context is seed.owner_a
-            return FakeCheckpointer()
+        },
+        checkpoint,
+        {"source": "loop", "step": 0, "parents": {}},
+        {"messages": messages_version},
+    )
 
     durable_reads: list[tuple[object, str, str]] = []
 
@@ -552,7 +574,7 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
     app = SimpleNamespace(
         state=SimpleNamespace(
             private_run_service=FakePrivateRunService(),
-            project_scoped_checkpointer=FakeProjectScopedCheckpointer(),
+            project_scoped_checkpointer=project_checkpointer,
         )
     )
     record = SimpleNamespace(run_id="run-a", thread_id="private-thread")
@@ -567,6 +589,7 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
         user_id="external-a",
         text="hello",
         topic_id="topic-a",
+        provider_delivery_id="delivery-a",
     )
     authority = PrivateRunInboundAuthority(
         connection_id="connection-a",
@@ -584,12 +607,21 @@ async def test_gateway_project_run_launcher_calls_private_start_wait_and_scoped_
     assert thread_id == "private-thread"
     assert context is seed.owner_a
     assert body.input == {"messages": [{"role": "user", "content": "hello"}]}
-    assert private_start.await_args.kwargs["server_context"].inbound_authority == authority
+    server_context = private_start.await_args.kwargs["server_context"]
+    assert server_context.inbound_authority == authority
+    assert server_context.inbound_delivery.provider_delivery_id == "delivery-a"
     assert durable_reads == [
         (seed.owner_a, "private-thread", "run-a"),
         (seed.owner_a, "private-thread", "run-a"),
     ]
-    assert result == channel_values
+    assert result.state == {
+        **channel_values,
+        "artifacts": [],
+        "delegations": [],
+        "skill_context": [],
+        "viewed_images": {},
+    }
+    assert result.disposition == "admitted"
 
 
 def test_channel_service_builds_project_dispatcher_from_gateway_runtime() -> None:

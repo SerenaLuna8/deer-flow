@@ -182,7 +182,7 @@ def event_should_fire(
     # owner can talk to the bot without typing the handle every time.
     if trigger.allow_authors:
         author = _author_login(event, payload)
-        if author and author in trigger.allow_authors:
+        if author and author.lower() in {allowed_author.lower() for allowed_author in trigger.allow_authors}:
             return True, f"allow_authors:{author}"
 
     if trigger.require_mention:

@@ -5,16 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 DEFAULT_RECURSION_LIMIT = 100
-DEFAULT_MAX_RECURSION_LIMIT = 1000
-
-
-def resolve_max_recursion_limit() -> int:
-    try:
-        from deerflow.config.app_config import get_app_config
-
-        return get_app_config().max_recursion_limit
-    except Exception:
-        return DEFAULT_MAX_RECURSION_LIMIT
+# This is an authority-free parser bound, not the operator policy. Private Run
+# admission applies the current database-backed agent_runtime limit in the same
+# transaction that persists the exact policy snapshot.
+ABSOLUTE_MAX_RECURSION_LIMIT = 100_000
 
 
 def clamp_recursion_limit(value: Any, max_limit: int) -> int:

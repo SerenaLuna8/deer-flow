@@ -25,6 +25,8 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from deerflow.utils.messages import message_content_to_text
 
+from .status_contract import normalize_token_usage
+
 #: Default per-step character cap for the ``text`` field. Tool outputs (web
 #: search results, file contents) can be large; this cap bounds the persisted
 #: run-event row and the streamed frame. It only affects display/storage — the
@@ -97,6 +99,8 @@ def capture_new_step_messages(
     dedup makes an unchanged re-yield a no-op. Returns the new cursor.
     """
     total = len(messages)
+    if total < processed_count:
+        processed_count = total
     if total > processed_count:
         for message in messages[processed_count:total]:
             capture_step_message(message, captured, seen_ids)
@@ -183,27 +187,43 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         return None
 
     task_id = chunk.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
 
     if event == "task_started":
+        description = chunk.get("description")
+        if description is not None and not isinstance(description, str):
+            return None
         return {
             "event_type": "subagent.start",
             "category": SUBAGENT_EVENT_CATEGORY,
-            "content": {"task_id": task_id, "description": chunk.get("description")},
+            "content": {"task_id": task_id, "description": description},
             "metadata": {"task_id": task_id},
         }
 
     if event == "task_running":
         message_index = chunk.get("message_index")
+        message = chunk.get("message")
+        if isinstance(message_index, bool) or not isinstance(message_index, int) or message_index < 0:
+            return None
+        if not isinstance(message, dict):
+            return None
         return {
             "event_type": "subagent.step",
             "category": SUBAGENT_EVENT_CATEGORY,
-            "content": build_subagent_step(chunk.get("message") or {}, task_id=task_id, message_index=message_index),
+            "content": build_subagent_step(message, task_id=task_id, message_index=message_index),
             "metadata": {"task_id": task_id, "message_index": message_index},
         }
 
     status = _TERMINAL_EVENT_STATUS.get(event)
     if status is not None:
         content: dict[str, Any] = {"task_id": task_id, "status": status}
+        model_name = chunk.get("model_name")
+        if isinstance(model_name, str) and model_name.strip():
+            content["model_name"] = model_name.strip()
+        usage = normalize_token_usage(chunk.get("usage"))
+        if usage is not None:
+            content["usage"] = usage
         # The final result/error can be a multi-page report; cap it so the
         # persisted run-event row stays bounded (it is also kept verbatim on the
         # terminal ToolMessage, which the card reads separately).

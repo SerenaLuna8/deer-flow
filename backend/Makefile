@@ -1,19 +1,21 @@
 GATEWAY_WORKERS ?= 1
+SETUP_ENV_FILE := $(wildcard ../.env)
+RUNTIME_ENV_RUNNER = uv run python scripts/run_runtime.py --
 
 install:
 	uv sync
 
 dev:
-	GATEWAY_WORKERS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	GATEWAY_WORKERS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
 
 gateway:
-	GATEWAY_WORKERS=$(GATEWAY_WORKERS) PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers $(GATEWAY_WORKERS)
+	GATEWAY_WORKERS=$(GATEWAY_WORKERS) PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers $(GATEWAY_WORKERS)
 
 worker:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python -m app.worker.app
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m app.worker.app
 
 scheduler:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python -m app.scheduler.app
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m app.scheduler.app
 
 test:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/ -v
@@ -29,19 +31,19 @@ format:
 	uvx ruff check . --fix && uvx ruff format .
 
 setup-db:
-	PYTHONPATH=. uv run python scripts/setup_postgres.py
+	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py
 
 check-db:
-	PYTHONPATH=. uv run python scripts/check_postgres.py
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
 
 reconcile-usage:
-	PYTHONPATH=. uv run python scripts/reconcile_usage.py $(ARGS)
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/reconcile_usage.py $(ARGS)
 
 rotate-credentials:
-	PYTHONPATH=. uv run python scripts/rotate_credentials.py $(ARGS)
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/rotate_credentials.py $(ARGS)
 
 import-project-skills:
-	PYTHONPATH=. uv run python scripts/import_project_skills.py $(ARGS)
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/import_project_skills.py $(ARGS)
 
 detect-blocking-io:
 	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.deer-flow/blocking-io-findings.json

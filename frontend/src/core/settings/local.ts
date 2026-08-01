@@ -1,5 +1,9 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
-import type { AgentThreadContext } from "../threads";
+import {
+  isAgentMode,
+  type AgentMode,
+  type AgentThreadContext,
+} from "../threads";
 
 export const CHAT_CONTENT_WIDTH_OPTIONS = [
   "narrow",
@@ -31,7 +35,6 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   context: {
     model_name: undefined,
     mode: undefined,
-    reasoning_effort: undefined,
   },
 };
 
@@ -63,8 +66,7 @@ export interface LocalSettings {
     | "reasoning_effort"
   > & {
     model_name?: string | undefined;
-    mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
-    reasoning_effort?: "minimal" | "low" | "medium" | "high";
+    mode: AgentMode | undefined;
   };
 }
 
@@ -76,6 +78,14 @@ export function normalizeLocalSettings(
   settings?: Partial<LocalSettings>,
 ): LocalSettings {
   const storedChatContentWidth = settings?.appearance?.chatContentWidth;
+  const normalizedContext = {
+    ...DEFAULT_LOCAL_SETTINGS.context,
+    ...settings?.context,
+  };
+  Reflect.deleteProperty(normalizedContext, "reasoning_effort");
+  normalizedContext.mode = isAgentMode(normalizedContext.mode)
+    ? normalizedContext.mode
+    : undefined;
   return {
     ...DEFAULT_LOCAL_SETTINGS,
     ...settings,
@@ -86,10 +96,7 @@ export function normalizeLocalSettings(
         ? storedChatContentWidth
         : DEFAULT_LOCAL_SETTINGS.appearance.chatContentWidth,
     },
-    context: {
-      ...DEFAULT_LOCAL_SETTINGS.context,
-      ...settings?.context,
-    },
+    context: normalizedContext,
     tokenUsage: {
       ...DEFAULT_LOCAL_SETTINGS.tokenUsage,
       ...settings?.tokenUsage,
@@ -151,7 +158,12 @@ export function getLocalSettings(): LocalSettings {
   try {
     if (json) {
       const settings = JSON.parse(json) as Partial<LocalSettings>;
-      return normalizeLocalSettings(settings);
+      const normalized = normalizeLocalSettings(settings);
+      const normalizedJson = JSON.stringify(normalized);
+      if (json !== normalizedJson) {
+        localStorage.setItem(LOCAL_SETTINGS_KEY, normalizedJson);
+      }
+      return normalized;
     }
   } catch {}
   return DEFAULT_LOCAL_SETTINGS;
@@ -161,5 +173,8 @@ export function saveLocalSettings(settings: LocalSettings) {
   if (!isBrowser()) {
     return;
   }
-  localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+  localStorage.setItem(
+    LOCAL_SETTINGS_KEY,
+    JSON.stringify(normalizeLocalSettings(settings)),
+  );
 }

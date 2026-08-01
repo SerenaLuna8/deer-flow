@@ -5,13 +5,16 @@ from __future__ import annotations
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
     SUBAGENT_METADATA_TEXT_MAX_CHARS,
+    SUBAGENT_MODEL_NAME_KEY,
     SUBAGENT_RESULT_BRIEF_KEY,
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STOP_REASON_KEY,
+    SUBAGENT_TOKEN_USAGE_KEY,
     _bound_metadata_text,
     format_subagent_result_message,
     make_subagent_additional_kwargs,
+    normalize_token_usage,
     read_subagent_result_metadata,
 )
 
@@ -19,6 +22,33 @@ from deerflow.subagents.status_contract import (
 def test_make_subagent_additional_kwargs_includes_status():
     kwargs = make_subagent_additional_kwargs("completed")
     assert kwargs == {SUBAGENT_STATUS_KEY: "completed"}
+
+
+def test_make_subagent_additional_kwargs_carries_terminal_runtime_metadata():
+    kwargs = make_subagent_additional_kwargs(
+        "completed",
+        result="done",
+        model_name="  claude-3-7-sonnet  ",
+        token_usage={
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+        },
+    )
+
+    assert kwargs[SUBAGENT_MODEL_NAME_KEY] == "claude-3-7-sonnet"
+    assert kwargs[SUBAGENT_TOKEN_USAGE_KEY] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
+
+
+def test_normalize_token_usage_rejects_partial_negative_boolean_or_non_mapping_values():
+    assert normalize_token_usage({"input_tokens": 1, "output_tokens": 2}) is None
+    assert normalize_token_usage({"input_tokens": -1, "output_tokens": 2, "total_tokens": 1}) is None
+    assert normalize_token_usage({"input_tokens": True, "output_tokens": 2, "total_tokens": 3}) is None
+    assert normalize_token_usage("1/2/3") is None
 
 
 def test_make_subagent_additional_kwargs_includes_error_when_present():

@@ -21,11 +21,17 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.inbound_dedupe import (
+    PrivateRunInboundDelivery,
+    ProjectInboundDeliveryRepository,
+)
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunConflict, PrivateRunCreate, PrivateRunRecord, PrivateRunRepository
 from app.private_work.snapshot_repository import (
     RunAssetSnapshot,
     RunMcpGrantSnapshot,
+    RunModelSnapshotAdmissionPort,
+    RunRuntimePolicyAdmissionPort,
     RunSnapshotAssetStale,
     RunSnapshotRepository,
 )
@@ -52,6 +58,7 @@ from deerflow.persistence.channel_connections import (
     ChannelConversationRow,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.trace_context import generate_trace_id, normalize_trace_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +89,10 @@ class PrivateRunInboundAuthority:
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise TypeError(f"{name} must be a non-empty string")
-        for name in ("workspace_id", "external_topic_id"):
+        for name in (
+            "workspace_id",
+            "external_topic_id",
+        ):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"{name} must be a string or None")
@@ -94,12 +104,27 @@ class PrivateRunAdmissionServerContext:
 
     non_interactive: bool = False
     inbound_authority: PrivateRunInboundAuthority | None = None
+    inbound_delivery: PrivateRunInboundDelivery | None = None
+    origin_trace_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.non_interactive) is not bool:
             raise TypeError("non_interactive must be a boolean")
         if self.inbound_authority is not None and type(self.inbound_authority) is not PrivateRunInboundAuthority:
             raise TypeError("inbound_authority must be PrivateRunInboundAuthority")
+        if self.inbound_delivery is not None and type(self.inbound_delivery) is not PrivateRunInboundDelivery:
+            raise TypeError(
+                "inbound_delivery must be PrivateRunInboundDelivery",
+            )
+        if (self.inbound_authority is None) != (self.inbound_delivery is None):
+            raise TypeError(
+                "inbound_authority and inbound_delivery must be supplied together",
+            )
+        if self.origin_trace_id is not None:
+            normalized = normalize_trace_id(self.origin_trace_id)
+            if normalized is None:
+                raise ValueError("origin_trace_id is invalid")
+            object.__setattr__(self, "origin_trace_id", normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +133,7 @@ class AdmittedPrivateRun:
     job: AdmittedJobRecord
     snapshot: PersistedRunSnapshot
     opaque_runtime_scope: PrivateResourceScope
+    inbound_delivery_replay: bool = False
 
     @property
     def thread_id(self) -> str:
@@ -165,6 +191,8 @@ class PrivateRunAdmissionService:
         revalidator: PrivateWorkRevalidator | None = None,
         snapshots: RunSnapshotRepository | None = None,
         model_ref_resolver: ModelRefResolver | None = None,
+        model_catalog: RunModelSnapshotAdmissionPort | None = None,
+        runtime_policy: RunRuntimePolicyAdmissionPort | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunAdmissionQuotaPort | None = None,
         audit: PrivateRunAdmissionAuditPort | None = None,
@@ -175,6 +203,8 @@ class PrivateRunAdmissionService:
         self._snapshots = snapshots or RunSnapshotRepository(
             session_factory,
             model_ref_resolver=model_ref_resolver,
+            model_catalog=model_catalog,
+            runtime_policy=runtime_policy,
             endpoint_policy=endpoint_policy,
         )
         self._quota = quota or _NoopPrivateRunAdmissionQuota()
@@ -318,6 +348,7 @@ class PrivateRunAdmissionService:
             metadata=strip_private_client_fields(request.metadata),
             kwargs=self._server_kwargs(safe_kwargs, server_context),
             model_name=None,
+            origin_trace_id=(server_context.origin_trace_id if server_context is not None and server_context.origin_trace_id is not None else normalize_trace_id(context.request_id) or generate_trace_id()),
         )
         try:
             async with self._session_factory() as session, session.begin():
@@ -346,10 +377,50 @@ class PrivateRunAdmissionService:
 
                 runs = PrivateRunRepository(session)
                 jobs = PrivateRunJobRepository(session)
+                inbound_deliveries = ProjectInboundDeliveryRepository(session)
                 job_scope = JobScope(
                     project_id=context.project_id,
                     owner_user_id=str(context.user_id),
                 )
+                inbound_authority = server_context.inbound_authority if server_context is not None else None
+                inbound_delivery = server_context.inbound_delivery if server_context is not None else None
+                if inbound_authority is not None and inbound_delivery is not None:
+                    replay = await inbound_deliveries.get(
+                        scope=context.resource_scope,
+                        connection_id=inbound_authority.connection_id,
+                        provider=inbound_authority.provider,
+                        external_conversation_id=(inbound_authority.external_conversation_id),
+                        external_topic_id=(inbound_authority.external_topic_id),
+                        delivery=inbound_delivery,
+                        lock=True,
+                    )
+                    if replay is not None:
+                        replay_run = await runs.get(
+                            scope=context.resource_scope,
+                            run_id=replay.run_id,
+                            lock=True,
+                        )
+                        if replay_run is None or replay_run.job_id is None:
+                            raise PrivateWorkConflict(context.request_id)
+                        replay_job = await jobs.get(
+                            scope=job_scope,
+                            run_id=replay_run.run_id,
+                            job_id=replay_run.job_id,
+                            lock=True,
+                        )
+                        if replay_job is None or replay_run.origin_trace_id != replay_job.origin_trace_id:
+                            raise PrivateWorkConflict(context.request_id)
+                        return AdmittedPrivateRun(
+                            run=replay_run,
+                            snapshot=await self._persisted_snapshot(
+                                session,
+                                context,
+                                replay_run.run_id,
+                            ),
+                            opaque_runtime_scope=context.resource_scope,
+                            job=replay_job,
+                            inbound_delivery_replay=True,
+                        )
                 existing = await runs.get(
                     scope=context.resource_scope,
                     run_id=server_request.run_id,
@@ -379,6 +450,7 @@ class PrivateRunAdmissionService:
                         existing_job is None
                         or locked_existing is None
                         or locked_existing.job_id != existing_job.job_id
+                        or locked_existing.origin_trace_id != existing_job.origin_trace_id
                         or not self._is_same_request(
                             locked_existing,
                             thread_id=thread_id,
@@ -386,6 +458,17 @@ class PrivateRunAdmissionService:
                         )
                     ):
                         raise PrivateWorkConflict(context.request_id)
+                    if inbound_authority is not None and inbound_delivery is not None:
+                        await inbound_deliveries.bind(
+                            scope=context.resource_scope,
+                            connection_id=inbound_authority.connection_id,
+                            provider=inbound_authority.provider,
+                            external_conversation_id=(inbound_authority.external_conversation_id),
+                            external_topic_id=(inbound_authority.external_topic_id),
+                            thread_id=thread_id,
+                            delivery=inbound_delivery,
+                            run_id=locked_existing.run_id,
+                        )
                     return AdmittedPrivateRun(
                         run=locked_existing,
                         snapshot=await self._persisted_snapshot(
@@ -417,12 +500,27 @@ class PrivateRunAdmissionService:
                     server_request,
                     resolved,
                 )
-                job = await jobs.enqueue(scope=job_scope, run_id=run.run_id)
+                job = await jobs.enqueue(
+                    scope=job_scope,
+                    run_id=run.run_id,
+                    origin_trace_id=run.origin_trace_id,
+                )
                 run = await runs.attach_job(
                     scope=context.resource_scope,
                     run_id=run.run_id,
                     job_id=job.job_id,
                 )
+                if inbound_authority is not None and inbound_delivery is not None:
+                    await inbound_deliveries.bind(
+                        scope=context.resource_scope,
+                        connection_id=inbound_authority.connection_id,
+                        provider=inbound_authority.provider,
+                        external_conversation_id=(inbound_authority.external_conversation_id),
+                        external_topic_id=(inbound_authority.external_topic_id),
+                        thread_id=thread_id,
+                        delivery=inbound_delivery,
+                        run_id=run.run_id,
+                    )
                 await self._quota.reserve_concurrent_run(session, context, run)
                 await self._audit.run_admitted(session, context, run, job)
                 snapshot = await self._persisted_snapshot(

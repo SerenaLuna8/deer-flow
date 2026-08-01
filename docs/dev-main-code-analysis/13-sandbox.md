@@ -347,7 +347,9 @@ verify_api_key
 - Kubernetes volume/subPath 分开构造；
 - Service 类型由部署配置决定，`main` 的 Helm 默认已收紧为 `ClusterIP`。
 
-`dev` 当前 Git 树不跟踪 `docker/`；工作区里的 `docker/` 是用户恢复的未跟踪目录，不能把它当成 `dev` 已正式采用的实现证据。
+`dev@8a91e957` 的历史基线没有纳入当前这套 `docker/` 实现；本轮开始前用户已恢复
+并重新纳管该目录。因此本轮可以修改和验证 Docker/Nginx/Provisioner 文件，但不能把
+当前工作树倒推成旧基线本来就具备这些边界。
 
 ## 10. `dev` 的私有 Sandbox 权限模型
 
@@ -512,3 +514,128 @@ project_id + owner_user_id + thread_id + run_id
 - `9c7cd4ca`：thread data mount。
 
 提交号只能解释演进；是否可用仍以 `main@e317f7b8` 的最终源码和测试为准。
+
+## 15. 本轮移植计划与执行顺序
+
+本轮没有整体覆盖 Provider，而是严格按可移植落点执行：
+
+1. 先固定 `dev` 的 Project/Owner/Run/Worker authority，不允许 `main` 的
+   user/thread 或 Gateway owner 语义覆盖它；
+2. 先写红测，再移植不改变授权模型的路径、文本、搜索和中间件修复；
+3. 再处理 Provider 生命周期、取消安全和 blocking-I/O；
+4. 然后处理 AIO/E2B/BoxLite 的局部正确性，不移植私有暖池和旧 Host 同步；
+5. 最后收紧 Provisioner/Nginx 边界；
+6. 聚焦测试、完整后端、真实 PostgreSQL 门禁全部通过后，才进行三轮真实浏览器模型调用；
+7. 将不能安全落入 Worker-only 边界的 Helm、ownership、reconcile 和同步 manifest
+   单独列为 deferred，不混入“已完成”。
+
+## 16. 实际落点
+
+### 16.1 已完成或确认已存在
+
+| 落点 | 状态 | 实际实现 |
+| --- | --- | --- |
+| Provider singleton 竞态 | 已存在，未重复改 | `sandbox_provider.py` 已具备锁外构造、winner 安装、loser shutdown 与锁外 teardown |
+| blocking-I/O | 完成 | 新增严格测试，确认 AIO `get()` 是纯内存、异步 release 在线程执行，并用 Blockbuster 验证探针有效 |
+| 路径遮罩与边界 | 完成 | 新增共享 `path_patterns.py`；Local 输出与工具错误共用缓存规则；Windows 反向 containment 和 prefix sibling 不再误匹配 |
+| 命令虚拟路径 | 完成 | `/mnt/user-data-backup`、`.bak`、`_old`、数字后缀不再被当成合法根；根路径、子路径与标点边界有直接回归 |
+| 单边行读取 | 完成 | `start_line` 单独表示读到 EOF，`end_line` 单独表示从首行读取，并保留越界/逆序错误 |
+| 空 `str_replace` | 完成 | 空 `old_str` 明确 no-op，不会在字符间插入新内容；空文件与非空旧值仍报告未找到 |
+| grep 普通文件 | 完成 | Local/AIO/E2B/BoxLite 均支持单文件 path；模型 schema 明确“文件或目录”，错误文案不再假定目录 |
+| AIO grep 分页 | 完成 | 使用 SDK `offset` 有界翻页，过滤 `.git`/`node_modules`/glob 后不会静默漏掉下一页有效结果；空结果但预算截断时不再声称无匹配 |
+| 远端 cwd | 完成 | 非 Local 命令以 `cd -- /mnt/user-data/workspace &&` fail closed 前缀执行；身份 export/unset 和请求级 Skill secret 仍保持隔离 |
+| Overwrite 解包 | 完成 | 初始化、local 判断和 middleware release 都先解包 Overwrite；fork 恢复的父 Sandbox 不会被本次运行错误释放 |
+| 环境变量策略 | 完成 | 扩展 `*PASS*` 与 `PGSERVICEFILE` 过滤；保留 `PWD`/`OLDPWD` 与精确请求级 secret 注入 |
+| 私有 release 取消安全 | 完成 | 外部 task 取消后等待 destroy 线程结束并清空已释放状态；内部 `CancelledError` 保留状态供重试 |
+| AIO 私有 orphan | 完成 fail closed | 启动 reconcile 跳过 `private-*`，既不销毁也不吸入 warm pool，等待 lease-aware Worker reaper |
+| E2B 同大小变化 | 部分完成 | 列表加入 remote mtime；size 相同但 mtime 变化会下载并更新 host mtime |
+| Provisioner 控制 API | 本地/Docker 完成 | `/api/*` 要求 `X-API-Key`，未配置/缺失/错误均 401；Worker 侧 Remote client 的 list/create/get/delete/确认请求携带同一 key |
+| Nginx 公网边界 | 完成 | 删除 `/api/sandboxes` 到 Provisioner 的公网直通；公网 `/api/*` 只进入 Gateway |
+
+主要生产落点包括：
+
+- `backend/packages/harness/deerflow/sandbox/{path_patterns.py,overwrite.py,search.py,tools.py,middleware.py,env_policy.py}`；
+- `backend/packages/harness/deerflow/sandbox/local/local_sandbox.py`；
+- `backend/packages/harness/deerflow/community/{aio_sandbox,boxlite,e2b_sandbox}/`；
+- `backend/app/private_work/sandbox_files.py`；
+- `docker/provisioner/app.py`、`docker/nginx/nginx.conf`；
+- `backend/packages/harness/deerflow/config/sandbox_config.py`。
+
+### 16.2 明确未移植
+
+以下内容没有被包装成“完成”：
+
+1. **Helm Provisioner**：当前 Chart 没有 Worker Deployment。Provisioner 已 fail closed，
+   但 Chart 无法把密钥只交给 Worker 与 Provisioner；把密钥交给 Gateway 会违反 M7
+   Worker-only 边界。因此当前 Helm Provisioner 必然不可作为发布通过项，需在 Module 16
+   补 Worker 和最小权限 Secret 注入。
+2. **私有 capacity/wait/reject/burst、Redis ownership、warm pool 和 orphan destroy**：
+   必须与 PostgreSQL Job/Run lease、capability revalidation 组合后重写。
+3. **E2B sandbox-scoped sync manifest**：本轮只有 size + mtime 局部检测，没有
+   `main` 的 sandbox-ID 绑定 manifest，也没有把旧 Host tree 同步当成私有文件 authority。
+4. **远端私有文件回写**：仍须进入 `PrivateSandboxFileProjection`、quota 和 audit，
+   不能直接回写旧用户/线程 Host 目录。
+5. **Provisioner 通用代理 hardening**：默认 Docker 配置已用 `NO_PROXY` 覆盖
+   `provisioner`；通用部署仍应改为不继承环境代理的专用 HTTP Session，避免 operator
+   漏配时把控制密钥交给代理。
+6. **Provisioner extra mount 整体回移**：没有移植会扩大 HostPath 面的旧 mount
+   规范化；必须先有 Project/Owner/Run mount authority。
+
+## 17. TDD 与自动化证据
+
+本轮按红绿顺序覆盖了：
+
+- 路径共享模块缺失、Windows 反向路径、prefix sibling；
+- 单边读取和空字符串替换；
+- Local/AIO/BoxLite/E2B 单文件 grep；
+- 远端 cwd；
+- Overwrite 解包；
+- 环境变量过滤；
+- E2B 同大小变化；
+- 私有 release 取消清理；
+- 私有 orphan 不进入暖池；
+- Provisioner API key、Remote client header 与 Nginx 边界；
+- AIO grep 跨过滤页和“空但截断”结果；
+- 模型可见的单文件 grep 契约。
+
+收口结果：
+
+- Module 13 聚焦 Sandbox/Provider 套件：`664 passed, 7 skipped`；
+- blocking-I/O 完整门禁：`26 passed`；
+- Provisioner 六文件组合：`110 passed`；
+- 完整后端：`7675 passed, 1014 skipped, 0 failed`；
+- M1–M7 真实 PostgreSQL 门禁：`270 passed, 0 skipped`；
+- Helm `lint`/`template` 只能证明语法可渲染，**不**证明缺 Worker 的 Provisioner
+  运行边界可用。
+
+完整后端首次运行曾有 5 个失败，全部是远端 cwd 新前缀已经生效、旧测试仍断言原命令；
+更新测试后完整后端归零失败。真实 PostgreSQL 门禁只创建随机
+`deerflow_test_*` 数据库。
+
+## 18. 三轮真实浏览器验收
+
+验收使用同一项目、同一 Thread、系统 `Main` Agent 和 DeepSeek V4 Pro；没有模拟模型，
+也没有临时打开 Host bash。页面最终显示累计 `136.9K` Tokens。
+
+1. **R1**：真实调用 `write_file` 创建五行文件，再调用只带 `start_line=3` 的
+   `read_file`，准确返回第 3–5 行。
+2. **R2**：先完整读取满足 read-before-write；空 `old_str` 调用不注入内容；实际替换
+   `target-old` 为 `target-new`；对精确单文件 path 调用 grep，返回虚拟路径和第 3 行。
+3. **R3**：刷新页面后仍在同一 Thread；重新读取和两次单文件 grep 证明替换持久、
+   `SHOULD-NOT-APPEAR-M13` 不存在；`bash pwd` 被
+   `LocalSandboxProvider + allow_host_bash=false` 明确拒绝，命令未执行。
+
+截图和逐轮说明：
+
+- [R1：写入与单边读取](evidence/13-sandbox/01-write-one-sided-read.png)
+- [R2：替换与单文件 grep](evidence/13-sandbox/02-empty-replace-single-file-grep.png)
+- [R3：刷新持久性与空字符串保护](evidence/13-sandbox/03-refresh-persistence-empty-guard.png)
+- [R3：Host bash fail closed](evidence/13-sandbox/04-bash-fail-closed.png)
+- [完整验收记录](evidence/13-sandbox/README.md)
+
+## 19. 本轮结论
+
+Module 13 的本地 Sandbox、工具正确性、异步阻塞隔离、私有取消安全和 Docker
+Provisioner 公网边界已经落地并完成真实浏览器验收。Kubernetes Helm Provisioner、
+lease-aware 私有 reconcile、私有 capacity/ownership/warm pool 与远端私有文件同步
+仍属于明确 deferred；在这些边界补齐前，不宣称 Module 13 的所有目标环境已经完成。

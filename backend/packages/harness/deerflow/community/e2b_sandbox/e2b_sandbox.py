@@ -574,6 +574,8 @@ class E2BSandbox(Sandbox):
                 logger.error("Failed to grep in e2b sandbox: %s", e)
                 return [], False
 
+        root = resolved.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         truncated = False
         for raw in output.splitlines():
@@ -586,6 +588,14 @@ class E2BSandbox(Sandbox):
             except ValueError:
                 continue
             if should_ignore_path(file_path):
+                continue
+            if file_path == root:
+                rel_path = posixpath.basename(file_path)
+            elif file_path.startswith(root_prefix):
+                rel_path = file_path[len(root_prefix) :]
+            else:
+                continue
+            if glob is not None and not path_matches(glob, rel_path):
                 continue
             matches.append(
                 GrepMatch(

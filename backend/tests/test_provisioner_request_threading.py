@@ -144,14 +144,16 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
         ready_after_service_reads={"sandbox-new": 3},
     )
     monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
 
     with _detect_provisioner_blocking_io(provisioner_module):
         transport = httpx.ASGITransport(app=provisioner_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            headers = {"X-API-Key": "test-secret"}
             if json_body is None:
-                response = await client.request(method, path)
+                response = await client.request(method, path, headers=headers)
             else:
-                response = await client.request(method, path, json=json_body)
+                response = await client.request(method, path, json=json_body, headers=headers)
 
     assert response.status_code == 200
     assert fake_core_v1.thread_ids
@@ -250,3 +252,58 @@ def test_sandbox_service_supports_cluster_ip_with_dns_url(provisioner_module) ->
     assert service.spec.ports[0].port == 8080
     assert service.spec.ports[0].target_port == 8080
     assert provisioner_module._sandbox_url("abc123") == ("http://sandbox-abc123-svc.mdv-sit.svc.cluster.local:8080")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("GET", "/api/sandboxes", None),
+        (
+            "POST",
+            "/api/sandboxes",
+            {
+                "sandbox_id": "sandbox-create",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            },
+        ),
+        ("GET", "/api/sandboxes/sandbox-existing", None),
+        ("DELETE", "/api/sandboxes/sandbox-existing", None),
+    ],
+    ids=["list", "create", "get", "delete"],
+)
+async def test_sandbox_business_routes_fail_closed_without_correct_api_key(
+    method: str,
+    path: str,
+    json_body: dict[str, str] | None,
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        for headers in ({}, {"X-API-Key": "wrong-key"}):
+            response = await client.request(method, path, json=json_body, headers=headers)
+            assert response.status_code == 401
+
+    assert fake_core_v1.thread_ids == []
+
+
+@pytest.mark.asyncio
+async def test_provisioner_health_stays_public_when_api_key_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "")
+
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        health_response = await client.get("/health")
+        api_response = await client.get("/api/sandboxes", headers={"X-API-Key": "anything"})
+
+    assert health_response.status_code == 200
+    assert api_response.status_code == 401

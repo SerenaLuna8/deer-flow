@@ -198,6 +198,33 @@ class PrivateRunService:
         except PrivateRunConflict:
             raise PrivateWorkConflict(context.request_id) from None
 
+    async def get_many(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        run_ids: set[str],
+    ) -> dict[str, PrivateRunRecord]:
+        context = require_issued_private_work_context(context)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                )
+                await self._require_thread(session, context, thread_id)
+                return await PrivateRunRepository(session).get_many_by_thread(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    run_ids=run_ids,
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except PrivateRunConflict:
+            raise PrivateWorkConflict(context.request_id) from None
+
     async def delete(
         self,
         context: PrivateWorkContext,

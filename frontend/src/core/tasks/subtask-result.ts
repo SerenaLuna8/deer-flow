@@ -1,5 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+import { normalizeTokenUsage } from "../messages/usage";
+
 import type { Subtask } from "./types";
 
 export type SubtaskStatus = Subtask["status"];
@@ -8,6 +10,8 @@ export interface SubtaskResultUpdate {
   status: SubtaskStatus;
   result?: string;
   error?: string;
+  modelName?: string;
+  usage?: Subtask["usage"];
   /**
    * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``
    * / ``loop_capped``), when the backend stamps ``subagent_stop_reason``. A
@@ -36,6 +40,8 @@ export const SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason";
 export const SUBAGENT_ERROR_KEY = "subagent_error";
 export const SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief";
 export const SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256";
+export const SUBAGENT_MODEL_NAME_KEY = "subagent_model_name";
+export const SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage";
 /**
  * Why a guardrail cap ended a subagent run early (#3875 Phase 2). Mirrors the
  * Python ``SUBAGENT_STOP_REASON_VALUES``. The field is optional/additive —
@@ -52,6 +58,8 @@ const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_ERROR_KEY,
   SUBAGENT_RESULT_BRIEF_KEY,
   SUBAGENT_RESULT_SHA256_KEY,
+  SUBAGENT_MODEL_NAME_KEY,
+  SUBAGENT_TOKEN_USAGE_KEY,
 ];
 
 const SUCCESS_PREFIX = "Task Succeeded. Result:";
@@ -126,6 +134,14 @@ export function parseSubtaskResult(
   const stopReason = readStructuredStopReason(additionalKwargs);
   if (stopReason) {
     update.stopReason = stopReason;
+  }
+  const modelName = readStructuredModelName(additionalKwargs);
+  if (modelName) {
+    update.modelName = modelName;
+  }
+  const usage = readStructuredTokenUsage(additionalKwargs);
+  if (usage) {
+    update.usage = usage;
   }
   return update;
 }
@@ -224,9 +240,7 @@ export function isSubtaskRunActive(
     return false;
   }
 
-  return groupMessages.some(
-    (message) => messageRunId(message) === activeRunId,
-  );
+  return groupMessages.some((message) => messageRunId(message) === activeRunId);
 }
 
 export type SubtaskTerminalEventUpdate = SubtaskResultUpdate & {
@@ -258,6 +272,7 @@ export function parseSubtaskTerminalEvent(
       id: taskId,
       status: "completed",
       ...(typeof result === "string" && result.length > 0 ? { result } : {}),
+      ...readEventRuntimeMetadata(event),
     };
   }
 
@@ -271,6 +286,7 @@ export function parseSubtaskTerminalEvent(
       id: taskId,
       status: "failed",
       ...(typeof error === "string" && error.length > 0 ? { error } : {}),
+      ...readEventRuntimeMetadata(event),
     };
   }
 
@@ -326,4 +342,30 @@ function readStructuredStopReason(
   )
     ? value
     : undefined;
+}
+
+function readStructuredModelName(
+  additionalKwargs: Record<string, unknown> | null | undefined,
+): string | undefined {
+  const value = additionalKwargs?.[SUBAGENT_MODEL_NAME_KEY];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readStructuredTokenUsage(
+  additionalKwargs: Record<string, unknown> | null | undefined,
+): Subtask["usage"] | undefined {
+  return normalizeTokenUsage(additionalKwargs?.[SUBAGENT_TOKEN_USAGE_KEY]);
+}
+
+function readEventRuntimeMetadata(
+  event: object,
+): Pick<Subtask, "modelName" | "usage"> {
+  const modelName = Reflect.get(event, "model_name");
+  const usage = normalizeTokenUsage(Reflect.get(event, "usage"));
+  return {
+    ...(typeof modelName === "string" && modelName.trim()
+      ? { modelName: modelName.trim() }
+      : {}),
+    ...(usage ? { usage } : {}),
+  };
 }

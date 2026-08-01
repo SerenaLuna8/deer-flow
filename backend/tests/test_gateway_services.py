@@ -4,18 +4,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from app.private_work.http_runtime import format_sse
 from app.private_work.runtime_context import prepare_private_run_config
-from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
-
-
-@pytest.fixture
-def _stub_app_config():
-    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
-    yield
-    reset_app_config()
 
 
 def test_format_sse_basic() -> None:
@@ -46,9 +36,7 @@ def test_sanitize_log_param_strips_control_characters() -> None:
     assert sanitize_log_param("thread\nid\rwith\x00controls") == "threadidwithcontrols"
 
 
-def test_private_run_config_clamps_recursion_and_strips_client_authority(
-    _stub_app_config,
-) -> None:
+def test_private_run_config_clamps_recursion_and_strips_client_authority() -> None:
     scope = object()
     config = prepare_private_run_config(
         thread_id="thread-safe",
@@ -70,7 +58,7 @@ def test_private_run_config_clamps_recursion_and_strips_client_authority(
         body_context={"user_id": "forged-user", "mode_hint": "keep"},
     )
 
-    assert config["recursion_limit"] == 1000
+    assert config["recursion_limit"] == 100_000
     assert config["configurable"] == {
         "safe_value": 1,
         "thread_id": "thread-safe",

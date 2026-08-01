@@ -3,10 +3,32 @@
 ## 1. 分析基线与范围
 
 - `main`：`e317f7b8d9b2afb4c3925812d4774da602c9f8f3`
-- `dev`：`8a91e95799c9b345d9540c7e201b33c603e7870c`
+- `dev` 本轮迁移前：`785be51341c1c3ddaa073b76aaa4421bee0ac136`
 - main 演进区间：`3be3969f..e317f7b8`
 - 范围：Run admission、执行归属、取消、lease、恢复、Worker 服务拓扑、settlement 与测试。
 - Checkpoint 的表示和 Stream 的存储协议分别在独立文档分析；本篇只说明 Run/Worker 如何调用它们。
+
+## 本轮先说清楚移植什么（2026-07-30）
+
+本轮只迁移能落在 dev 独立 Worker + PostgreSQL Job lease 权威内的执行语义，按下列顺序实施：
+
+| 顺序 | 移植能力 | dev 落点 | 验收 |
+| --- | --- | --- | --- |
+| 1 | Goal continuation 并发计数从锁内最新状态递增；用户消息竞态 stand-down 不重复计数 | `runtime/runs/worker.py` | 两个定向并发回归 |
+| 2 | 子图 namespaced custom frame 不再写成父 Run 的 subagent 事件 | `runtime/runs/worker.py` | SSE 仍保留 namespace，数据库只记录 root task |
+| 3 | RunJournal、subagent、workspace 内部事件写入绑定 exact scope + raw Job lease | `runtime/events/store/db.py`、`app/reliability/execution.py` | 真实 PostgreSQL 篡改 lease 后写入失败且无脏事件 |
+| 4 | 本轮产生 output 时，至少一个本轮 output 必须由可信 `present_files` artifact 呈现 | `runtime/runs/worker.py` | 新/改 output、旧 artifact、workspace-only、delete-only 矩阵 |
+| 5 | 确定性的 admitted snapshot/model stale 错误保持 permanent，不被通用异常转换成 retry | `app/reliability/execution.py` | 真实 PostgreSQL Run error、Job dead、无 retry |
+| 6 | 真实浏览器连续多轮模型调用、刷新恢复、Worker 审计与截图 | `http://localhost:2026` | 至少三轮真实模型调用；截图写入本模块 evidence 目录 |
+
+明确不迁移：
+
+- main 的 Gateway `asyncio.create_task(run_agent())`、RunStore ownership/heartbeat/orphan 链；
+- main 的 `run.delivery` receipt 持久化顺序；dev 继续以文件终结器、durable stream 和 Job settlement 为权威；
+- delta checkpoint resume 与 edit replay rollback；它们属于 06 Checkpoint；
+- stream 存储/回放协议改造；它属于 07 Streaming。
+
+执行门槛：本模块后端与真实 PostgreSQL 门禁通过，并完成浏览器截图前，不读取或开始 06。
 
 ## 2. 首要结论：两条分支不是同一种 Worker
 
@@ -471,3 +493,133 @@ main 的纯执行改进应落到：
 | process boundary | Worker module 不 import Gateway；Gateway/Scheduler 不 import graph executor |
 | isolation | account/project/owner 交叉矩阵，外部得到 404/403，内部不泄露资源存在性 |
 | release gate | 固定真实 PostgreSQL gate 0 skip，覆盖 Gateway restart、Worker takeover、quota/audit |
+
+## 17. 本轮实际移植结果
+
+### 17.1 Goal continuation 的两个并发修复
+
+`_persist_goal_evaluation()` 在 `goal_thread_lock` 内重读当前 Goal 后，用
+`max(调用方旧值, 当前 continuation_count + 1)` 得到新计数。这样较早开始、较晚取得锁的 evaluator
+不会把已提交的次数覆盖回旧值。
+
+首次 continuation 已提交后若检测到用户消息插入，第二次持久化只写
+`thread_changed_before_continuation`，不再传同一个 `continuation_count`，避免新鲜值保护逻辑把同一
+尝试再加一次。
+
+### 17.2 root / subgraph 事件边界
+
+namespaced child custom frame 仍按 `custom|<namespace>` 实时发布给 SSE 消费者，但只有 root namespace
+的 task lifecycle custom frame 才进入 `_SubagentEventBuffer`。这避免 child graph 自己产生的 custom
+frame 被重复解释为父 Run 的 `subagent.start/step/end`。
+
+### 17.3 内部事件使用原始 Job lease 原子授权
+
+新增 `LeaseAuthorizedRunEventStore`，由 `RunAgentPrivateExecutor` 注入 `RunContext`。它覆盖调用方传入的
+scope，固定使用 admitted `PrivateResourceScope`，并把内存中的 `StreamLeaseProof` 传给
+`DbRunEventStore.put/put_batch`。
+
+数据库写事务内依次锁定并检查：
+
+1. exact project、owner、thread、Run、Job；
+2. project active/suspension 与 exact membership version/role；
+3. Job 与 Run 都为 running；
+4. Job hash 与 Run execution hash 都匹配 raw token；
+5. 两个 lease 均未过期；
+6. Job/Run/authorization 均未请求取消。
+
+任何 lease loss、授权撤销或取消都会先更新 Worker boundary 状态，再拒绝事件；事件行和 sequence
+预留随事务一起回滚。该链覆盖 RunJournal、subagent batch 与 private workspace-change event。
+
+### 17.4 dev-native delivery verdict
+
+判定只消费 `PrivateFileFinalizer` 的可信 `FinalizationResult`：
+
+- produced outputs：`workspace_changes.created/modified` 中的 `outputs/*`；
+- presented outputs：当前 Run 创建的 artifact metadata 中的 `logical_path`；
+- 没有 produced output：可成功；
+- 有 produced output 且两个集合有交集：可成功；
+- 有 produced output 但无交集，包括只展示旧 output：Run 为 error。
+
+终结器已经提交的 ready 文件不会因为 delivery error 被删除。这里没有引入 main 的
+`put_if_absent(run.delivery)`、staged terminal 或 Gateway RunStore authority。
+
+### 17.5 permanent failure 保持 terminal
+
+`RunAgentPrivateExecutor.execute()` 现在让 `PermanentExecutionError` 原样到达
+`PrivateRunJobHandler`。缺失 exact admitted model 等确定性 drift 会终结 Job，而不会被通用异常包装成
+`PRIVATE_RUN_EXECUTION_FAILED` 后进入 retry。
+
+### 17.6 follow-up suggestion 解析 stable model ref
+
+真实浏览器回归发现：Agent snapshot 使用稳定别名 `default` 时，主 Run 已正确解析为配置中的精确模型，
+但 follow-up suggestion 辅助调用仍把字符串 `default` 直接交给 `run_oneshot_llm()`，因此每轮主 Run
+成功后会记录一次 `Model default not found in config`。
+
+`ProjectChatControlService.suggest()` 现在同样通过 `ConfiguredModelRefResolver` 解析 admitted Agent 的
+`model_ref`；`default` 精确落到当前配置的第一个逻辑模型名，无法解析时安全返回空建议且不泄露模型配置。
+这不改变 Run/Worker 的主执行权威，只修复浏览器验收中实际触发的同会话辅助模型调用。
+
+## 18. 后端验证结果
+
+本轮按红灯到绿灯执行：
+
+- Goal 并发 stale writer：修复前得到 `1`，期望 `3`；修复后通过。
+- user-message race double count：修复前得到 `2`，期望 `1`；修复后通过。
+- namespaced child custom persistence：修复前同时落入 `child-task` 与 `root-task`；修复后只落
+  `root-task`。
+- stale internal event：修复前 `DbRunEventStore.put()` 不接受 lease；实现后真实 PostgreSQL 上 live
+  write 成功、篡改 lease hash 后抛 `StreamWriteLeaseLost`，且 stale event 不存在。
+- delivery：修复前“新 output 未展示”仍为 success；修复后为 error，其余矩阵保持预期。
+
+当前结果：
+
+```text
+05 相关单元/非 PostgreSQL：314 passed
+RunEventStore（包含真实 PostgreSQL 用例）：17 passed
+Run/Worker + file finalizer + authorization 真实 PostgreSQL：95 passed
+Project chat controls（真实 PostgreSQL）：7 passed
+Ruff format/check：passed
+```
+
+## 19. 真实浏览器与外部模型门禁
+
+测试入口为 `http://localhost:2026` 的默认项目，实际登录用户为本地验收账号，实际模型为
+`DeepSeek V4 Pro`。同一 Thread
+`5a24cadc-3963-4578-ae40-dce2a9414bcc` 连续执行四轮，不使用 mock：
+
+| 轮次 | 验证内容 | 最终结果 | Token |
+| --- | --- | --- | --- |
+| 1 | `314 + 95`，不调用工具 | `409` | 输入 8,939 / 输出 38 / 总计 8,977 |
+| 2 | 依赖上一轮结果再加 1 | `410` | 输入 8,970 / 输出 125 / 总计 9,095 |
+| 3 | 写入新 output，并强制 `present_files` | `文件已展示` | 输入 18.3K / 输出 244 / 总计 18.6K |
+| 4 | 依赖前三轮上下文汇总 | `409,410,文件已展示` | 输入 9,346 / 输出 185 / 总计 9,531 |
+
+第 3 轮创建并展示
+`/mnt/user-data/outputs/run-worker-05-e2e.txt`，浏览器 artifact 面板读取到精确内容
+`RUN-WORKER-05-DELIVERY`。刷新页面后四轮消息、token、artifact 均从 durable state 恢复。
+
+第 4 轮 Run `9f056503-28a1-452b-bcef-62bf5a8dddd4` 的数据库只读核验结果为：
+
+```text
+Run.status=success
+Run.finalization_status=complete
+Job.status=succeeded
+Job.attempt_count=1
+LLM calls=1
+Input/Output/Total=9346/185/9531
+```
+
+同轮结束后，follow-up suggestion 对 DeepSeek 的外部 HTTP 调用返回 `200 OK`，Gateway 新增日志中没有
+`Project suggestion model call failed`、traceback 或 error。项目审计页存在对应的
+`Run admitted / Run finished` 成对成功记录。
+
+截图证据：
+
+- [前三轮上下文结果](evidence/05-run-worker/02-first-two-context-turns.png)
+- [文件交付与 artifact 内容](evidence/05-run-worker/01-multi-turn-terminal-and-artifact.png)
+- [刷新后持久化结果](evidence/05-run-worker/03-after-refresh-persisted-turns.png)
+- [第 4 轮跨轮上下文与 token](evidence/05-run-worker/06-fourth-context-and-model-resolution.png)
+- [第 4 轮审计记录](evidence/05-run-worker/07-fourth-run-audit.png)
+
+结论：05 Run/Worker 的后端、真实 PostgreSQL、四轮真实外部模型、工具文件交付、刷新恢复和审计门禁均已
+通过，可以按顺序开始 06 Checkpoint。

@@ -109,7 +109,7 @@ sandbox:
   # Optional: environment variables forwarded to the sandbox on create.
   # Values starting with "$" are resolved from the host environment.
   environment:
-    OPENAI_API_KEY: $OPENAI_API_KEY
+    WORKLOAD_PROFILE: batch
 ```
 
 Install: `e2b-code-interpreter` is already a core dependency of `deerflow-harness`, so no extra install step is needed — just provide your API key and switch the provider in `config.yaml`.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.gateway.github.triggers import (
     DEFAULT_TRIGGERS,
     _resolved_trigger,
@@ -160,6 +162,38 @@ def test_allow_authors_does_not_help_other_users() -> None:
         BOT,
     )
     assert fire is False
+
+
+@pytest.mark.parametrize(
+    ("allow_authors", "author"),
+    [
+        (["Alice"], "alice"),
+        (["alice"], "Alice"),
+        (["ALICE"], "alice"),
+        (["Alice"], "Alice"),
+    ],
+)
+def test_allow_authors_match_is_case_insensitive(
+    allow_authors: list[str],
+    author: str,
+) -> None:
+    trigger = _resolve(
+        "issue_comment",
+        GitHubTriggerConfig(
+            require_mention=True,
+            allow_authors=allow_authors,
+        ),
+    )
+
+    fire, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload("no handle here", author=author),
+        trigger,
+        BOT,
+    )
+
+    assert fire is True
+    assert "allow_authors" in reason
 
 
 # ---------------------------------------------------------------------------

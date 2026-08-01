@@ -8,7 +8,38 @@ DeerFlow 是一个面向多账户、多项目协作的开源 super agent 系统�
 
 当前实现是 project-first SaaS 架构：浏览器和外部渠道先进入 Gateway，Gateway 完成认证、项目授权和 Run 准入，Worker 独占 Agent graph 执行，Scheduler 只负责 Automation 到期准入。应用数据、运行状态和资产版本统一存储在 PostgreSQL。
 
+本地账号邮箱按 `strip + lowercase` 作为唯一身份，登录、注册、密码/邮箱变更和 OIDC 归并都受
+PostgreSQL `lower(email)` 唯一索引保护。`auth.local.allow_registration` 可关闭普通访客
+自助注册，但不会封死首次管理员初始化；登录页的“保持登录”只调整浏览器 cookie 生命周期，
+不会削弱 PostgreSQL durable `sid` 的验证和撤销。HTTPS 与 localhost 可按 token lifetime
+持久化，普通公网 HTTP 默认仍使用 session cookie，access 与 CSRF cookie 始终采用同一次策略。
+
 项目 Memory 保存在 PostgreSQL，并始终受 account、project 与 owner 作用域约束。
+私有 Run 默认可使用只读 `memory_search` 按需召回事实；模型只能提供查询、分类和数量，
+不能选择项目、账号或 namespace，也不能通过该工具修改 Memory。可在
+`memory.search_enabled` 中关闭检索；会话事实的被动更新和项目 Memory 管理 API 不受该开关影响。
+
+Checkpoint 默认使用兼容的 `full` 表示，也可将全部 Gateway/Worker 同步配置为 `delta`
+以减少长会话的重复消息写入。Delta 状态始终通过项目作用域内的物化读取恢复；配置切换需要
+同时重启所有进程，并且只支持 `full → delta`，不能直接降回 `full`。
+
+Sub-Agent 委派按单次响应 `1–4` 个、单个 Run 默认总计 6 个进行限制；项目私有运行还按
+`project + owner + run` 隔离计数。子任务卡片会显示实际使用的模型，并在全局 Token
+用量展示开启时显示该子任务最新的累计 Token；刷新历史会从结构化 ToolMessage 恢复这些信息。
+
+私有 Run 的流式事件先提交 PostgreSQL 再通知浏览器，页面刷新、路由切换或 Gateway 重启后可从
+持久化事件恢复。Thread 游标使用 PostgreSQL BIGINT 语义且终态只保存一次；大文件工具参数会有界
+批量发送，普通回答仍保持逐步流式展示。
+
+Gateway 会从请求追踪上下文继承或生成私有 Run 的可信关联；业务 metadata、config 和 context
+不能覆盖它。同一标识贯穿 Run、Job、Worker 与审计终态，公开 API 和浏览器缓存不会返回该内部
+字段。会话创建和重命名使用明确的并发冲突语义，竞争请求返回 `409`，不会静默覆盖。前端会完整
+分页读取 Run 与就绪文件目录，不受 SDK 默认 10 条或单页 100 条限制；异常分页会安全失败而不是
+截断或无限循环。
+
+用户明确要求生成的源码、脚本、配置或文档会作为最终文件写入 `outputs`，并通过
+`present_files` 在对话中提供可下载文件卡。运行中的 `write_file` 预览会在收尾完成后切换为
+UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次打开，不依赖临时流式消息。
 
 > DeerFlow 2 是一次重写，与最初的 Deep Research 实现不共用代码。原始版本见上游 [`main-1.x`](https://github.com/bytedance/deer-flow/tree/main-1.x) 分支。
 
@@ -18,7 +49,9 @@ DeerFlow 是一个面向多账户、多项目协作的开源 super agent 系统�
 - 项目用量：具备用量权限的项目管理员可在概览查看全项目最近 24 个小时的 Token 消耗趋势。
 - 系统通知：工作区顶部铃铛集中展示账号级通知和未读数量；已注册用户收到项目邀请后可直接在通知中接受，未注册邮箱仍使用一次性邀请链接。
 - Agent 运行：持久化 Thread/Run、durable SSE、断线重连、取消、重试和 Worker lease。
-- 会话管理：新会话固定使用系统 Main Agent，不再弹出 Agent 选择框；会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
+- 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
+- 会话模式：输入区只保留一个模式选择器；闪速、思考、Pro、Ultra 分别固定使用最低、低、中、高推理强度，不再提供可与模式冲突的独立推理深度设置。
+- 思考时长：完成态显示 Worker 从模型流中观测到的实际思考区间；任务总耗时继续单独展示，包含模型等待、工具和子任务时间，不会冒充思考时长。
 - 资产治理：System/Project Agent、Skill、MCP 和 Credential 的版本化发布、绑定与准入快照。
 - Agent harness：Sub-Agent、Plan Mode、上下文压缩、长期 Memory、Guardrail、Tool Search 和循环检测。
 - Sandbox：支持 Local、容器和 Provisioner/Kubernetes provider；具体隔离能力取决于所选 provider。
@@ -27,14 +60,14 @@ DeerFlow 是一个面向多账户、多项目协作的开源 super agent 系统�
 
 ## 运行架构
 
-| 组件 | 默认端口 | 职责 |
-| --- | ---: | --- |
-| Nginx | `2026` | 唯一对外入口，代理前端和 `/api/*` |
-| Frontend | `3000` | Next.js Web UI |
-| Gateway | `8001` | 认证、项目 API、Run 准入、查询和 SSE replay |
-| Worker | 无公开端口 | 唯一 Agent graph 执行进程 |
-| Scheduler | 无公开端口 | 可选 Automation 轮询与准入进程 |
-| Provisioner | `8002` | 仅特定 Sandbox/集群模式需要 |
+| 组件        |   默认端口 | 职责                                        |
+| ----------- | ---------: | ------------------------------------------- |
+| Nginx       |     `2026` | 唯一对外入口，代理前端和 `/api/*`           |
+| Frontend    |     `3000` | Next.js Web UI                              |
+| Gateway     |     `8001` | 认证、项目 API、Run 准入、查询和 SSE replay |
+| Worker      | 无公开端口 | 唯一 Agent graph 执行进程                   |
+| Scheduler   | 无公开端口 | 可选 Automation 轮询与准入进程              |
+| Provisioner |     `8002` | 仅特定 Sandbox/集群模式需要                 |
 
 ```text
 Browser / IM
@@ -82,16 +115,23 @@ make setup
 make config
 ```
 
-运行配置位于仓库根目录 `config.yaml`，密钥通过根目录 `.env` 或进程环境变量提供；两者都不应提交。完整字段见 [`config.example.yaml`](./config.example.yaml) 和[后端配置说明](./backend/docs/CONFIGURATION.md)。
+进程运行配置位于仓库根目录 `config.yaml`；平台密钥通过根目录 `.env` 或进程环境变量提供，
+两者都不应提交。模型定义及其 provider Credential 不再属于 YAML 运行配置，而是保存在
+PostgreSQL；system admin 可在 `/admin/settings/models` 管理。完整进程字段见
+[`config.example.yaml`](./config.example.yaml) 和[后端配置说明](./backend/docs/CONFIGURATION.md)。
+当前示例配置 schema 为 version 34；已有本地配置应运行 `make config-upgrade`。升级器会删除
+已迁入 PostgreSQL 的 Agent runtime、注册开关和配额默认值叶子，以及旧顶层 `models:` 与
+`authorization:`。system admin 在 `/admin/settings/system` 修改这些策略后，新请求/新 Run
+立即按各自生效边界读取，无需重启进程。
 
 ### 3. 初始化 PostgreSQL
 
-`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v1`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v1`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY` 与 Credential keyring，把原示例中的 DeepSeek V4 Pro 配置及加密 `model_api_key` Credential 写入 PostgreSQL，并将模型设为 active/default；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
-# 全新数据库
-export POSTGRES_ADMIN_URL='<连接 postgres maintenance database 的管理员 URL>'
-export DATABASE_URL='<DeerFlow 目标库 URL>'
+# 在根目录 .env 中配置 DATABASE_URL、POSTGRES_ADMIN_URL、
+# DEEPSEEK_API_KEY、DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID 和
+# DEER_FLOW_CREDENTIAL_KEYRING_JSON；也可用显式环境变量覆盖
 make setup-db
 make check-db
 ```
@@ -112,7 +152,16 @@ make dev
 make start
 ```
 
-访问 <http://localhost:2026>。本地全栈默认把运行状态写入 `backend/.deer-flow`，日志写入 `logs/`；停止服务使用：
+访问 <http://localhost:2026>。首次空库初始化已提供 active/default 的 DeepSeek V4 Pro；
+system admin 可在 `/admin/settings/models` 检查、替换 Credential 或调整模型目录。provider
+key 只在 `make setup-db` 时由 `.env`/显式环境导入加密 envelope，Gateway、Worker 与 Scheduler
+启动时不会接收该 key。本地全栈默认把运行状态写入
+`backend/.deer-flow`，日志写入 `logs/`；停止服务使用：
+
+平台管理员可从 `/admin/operations` 进入统一管理界面，在同一导航中查看运行状态、项目、
+任务、审计、系统资产和模型设置。桌面导航可在图标栏与完整菜单间展开/折叠，折叠后悬停仍显示
+菜单名称；侧栏底部可返回 `/workspace` 项目工作区。资产目录使用按需详情面板：桌面与目录并排、
+窄屏占满视口，只有选中条目后才加载版本历史。
 
 ```bash
 make stop
@@ -185,17 +234,17 @@ deer-flow/
 
 ## 常用命令
 
-| 命令 | 用途 |
-| --- | --- |
-| `make setup` | 运行交互式初始化向导 |
-| `make doctor` | 检查配置、数据库和运行环境 |
-| `make support-bundle` | 生成脱敏诊断材料 |
-| `make dev` / `make start` | 启动本地全栈 |
-| `make gateway` / `make worker` / `make scheduler` | 单独启动后端进程 |
-| `make setup-db` | 在空库执行完整 schema 并初始化 PostgreSQL |
-| `make check-db` | 只读检查 PostgreSQL marker 与必需对象 |
-| `cd backend && make lint && make test` | 后端格式、静态检查与测试 |
-| `cd frontend && pnpm check && pnpm test` | 前端 lint、类型检查与单元测试 |
+| 命令                                                          | 用途                                                    |
+| ------------------------------------------------------------- | ------------------------------------------------------- |
+| `make setup`                                                  | 运行交互式初始化向导                                    |
+| `make doctor`                                                 | 检查配置、数据库和运行环境                              |
+| `make support-bundle`                                         | 生成脱敏诊断材料                                        |
+| `make dev` / `make start`                                     | 启动本地全栈                                            |
+| `make gateway` / `make worker` / `make scheduler`             | 单独启动后端进程                                        |
+| `make setup-db`                                               | 在空库执行完整 schema 并初始化 PostgreSQL               |
+| `make check-db`                                               | 只读检查 PostgreSQL marker 与必需对象                   |
+| `cd backend && make lint && make test`                        | 后端格式、静态检查与测试                                |
+| `cd frontend && pnpm check && pnpm test`                      | 前端 lint、类型检查与单元测试                           |
 | `POSTGRES_TEST_URL=... make test-project-foundation-postgres` | 运行 M1-M7 真实 PostgreSQL 门禁；只能使用可丢弃测试实例 |
 
 完整命令列表运行 `make help`。

@@ -13,7 +13,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, String, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -25,7 +33,7 @@ class UserRow(Base):
     # Preserve the existing UUID-string storage used by persisted data and APIs.
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
 
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # "system_admin" | "user" — kept as plain string to avoid enum migrations
@@ -50,6 +58,7 @@ class UserRow(Base):
 
     __table_args__ = (
         CheckConstraint("system_role IN ('system_admin', 'user')", name="ck_users_system_role"),
+        Index("ix_users_email", func.lower(email), unique=True),
         Index(
             "idx_users_oauth_identity",
             "oauth_provider",

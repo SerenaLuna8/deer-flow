@@ -28,6 +28,7 @@ from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
+from app.quotas.system_policy import SystemQuotaPolicyReader
 from app.reliability.owner_refs import AuditHmacKeyring, AuditHmacKeyringInvalid
 from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.errors import (
@@ -48,7 +49,6 @@ from app.shared_assets.skill_service import (
     ProjectSkillArchiveImport,
     SkillService,
 )
-from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.user.model import UserRow
@@ -340,8 +340,6 @@ async def _run_import(
             request_id=request_id,
         )
         if execute:
-            if quota_config is None:
-                raise ProjectSkillImportError("project Skill quota configuration is unavailable")
             try:
                 keyring = AuditHmacKeyring.from_environment()
             except AuditHmacKeyringInvalid:
@@ -354,8 +352,9 @@ async def _run_import(
                 quota=ProjectQuotaEnforcer(
                     QuotaService(
                         factory,
-                        quota_config,
+                        quota_config or QuotaConfig(),
                         source_ref_hasher=keyring,
+                        current_policy_reader=SystemQuotaPolicyReader(),
                     )
                 ),
             )
@@ -443,13 +442,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_configured_quota() -> QuotaConfig:
-    try:
-        return get_app_config().quotas
-    except Exception:
-        raise ProjectSkillImportError("project Skill quota configuration is unavailable") from None
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     database_url = os.environ.get("DATABASE_URL")
@@ -460,7 +452,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.disable(logging.CRITICAL)
     try:
         try:
-            quota_config = _load_configured_quota() if args.execute else None
             summary = asyncio.run(
                 import_project_skills(
                     database_url,
@@ -469,7 +460,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     project_slug=args.project_slug,
                     execute=args.execute,
                     replace=args.replace,
-                    quota_config=quota_config,
+                    # Compatibility-only constructor shape. Authoritative
+                    # execute checks read the current DB policy in-transaction.
+                    quota_config=QuotaConfig() if args.execute else None,
                 )
             )
         except ProjectSkillImportError as error:

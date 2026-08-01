@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -49,6 +52,25 @@ def _checkpoint_with_messages(*messages, version: str = "messages-v1"):
     checkpoint["channel_values"]["messages"] = list(messages)
     checkpoint["channel_versions"]["messages"] = version
     return checkpoint
+
+
+async def _root_checkpoint_id(raw, thread_id: str) -> str:
+    items = [
+        item
+        async for item in raw.alist(
+            {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "",
+                }
+            }
+        )
+    ]
+    assert items
+    configurable = items[-1].config["configurable"]
+    checkpoint_id = configurable.get("checkpoint_id")
+    assert isinstance(checkpoint_id, str) and checkpoint_id
+    return checkpoint_id
 
 
 @pytest.mark.asyncio
@@ -168,6 +190,239 @@ async def test_private_thread_service_create_requires_capability_and_executable_
     assert system_thread.agent_scope == "system"
 
 
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_create_without_explicit_agent_uses_builtin_main(
+    seed: M4ThreadSeed,
+) -> None:
+    service, _raw, _scoped = _service(seed)
+
+    created = await service.create(
+        seed.owner_a,
+        thread_id="default-main-thread",
+        agent=None,
+    )
+
+    assert created.agent_asset_id == seed.system_agent_id
+    assert created.agent_scope == "system"
+
+
+@pytest.mark.asyncio
+async def test_private_thread_service_builtin_main_fallback_resolves_complete_dependency_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.private_work.context import PrivateWorkContext
+    from app.private_work.thread_service import PrivateThreadService
+    from app.projects.capabilities import capabilities_for
+    from app.projects.context import ProjectContext
+    from app.projects.models import ProjectRole
+    from app.shared_assets.models import (
+        AgentPayload,
+        AssetKind,
+        AssetScope,
+        AssetSelection,
+        ResolvedAgentSnapshot,
+    )
+
+    main_id = uuid.uuid4()
+    actor = ProjectContext(
+        user_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.RUNNER,
+        capabilities=capabilities_for(ProjectRole.RUNNER),
+        membership_version=1,
+        request_id="req-main-closure",
+    )
+    context = PrivateWorkContext.from_project(actor)
+    resolved = ResolvedAgentSnapshot(
+        kind=AssetKind.AGENT,
+        scope=AssetScope.SYSTEM,
+        asset_id=main_id,
+        version_id=uuid.uuid4(),
+        checksum="a" * 64,
+        catalog_generation=1,
+        dependency_version_ids=(uuid.uuid4(),),
+        payload=AgentPayload(
+            description="Main",
+            soul="Main",
+            model_ref="test-model",
+            tool_groups=(),
+            skill_version_ids=(),
+            mcp_version_ids=(),
+        ),
+    )
+    session = AsyncMock(spec=AsyncSession)
+    query_result = Mock()
+    query_result.scalar_one_or_none.return_value = main_id
+    session.execute.return_value = query_result
+    asset_resolver = SimpleNamespace(
+        resolve_project_asset_snapshot_in_session=AsyncMock(
+            return_value=resolved,
+        )
+    )
+    default_agent_service = SimpleNamespace(resolve_configured_agent_in_session=AsyncMock(return_value=None))
+    service = object.__new__(PrivateThreadService)
+    service._asset_resolver = asset_resolver
+    service._default_agent_service = default_agent_service
+    executable_check = AsyncMock()
+    monkeypatch.setattr(
+        "app.private_work.thread_service.require_executable_agent",
+        executable_check,
+    )
+
+    selected = await service._resolve_default_agent(session, context, actor)
+
+    assert selected.asset_id == main_id
+    assert selected.scope == "system"
+    asset_resolver.resolve_project_asset_snapshot_in_session.assert_awaited_once_with(
+        session,
+        actor,
+        AssetSelection(AssetKind.AGENT, main_id),
+    )
+    executable_check.assert_awaited_once_with(session, context, selected)
+
+
+@pytest.mark.asyncio
+async def test_private_thread_service_builtin_main_resolution_failure_is_stable_conflict() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.private_work.context import PrivateWorkContext
+    from app.private_work.errors import PrivateWorkDefaultAgentUnavailable
+    from app.private_work.thread_service import PrivateThreadService
+    from app.projects.capabilities import capabilities_for
+    from app.projects.context import ProjectContext
+    from app.projects.models import ProjectRole
+    from app.shared_assets.errors import AssetResolutionUnavailable
+
+    main_id = uuid.uuid4()
+    actor = ProjectContext(
+        user_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.RUNNER,
+        capabilities=capabilities_for(ProjectRole.RUNNER),
+        membership_version=1,
+        request_id="req-main-unavailable",
+    )
+    context = PrivateWorkContext.from_project(actor)
+    session = AsyncMock(spec=AsyncSession)
+    query_result = Mock()
+    query_result.scalar_one_or_none.return_value = main_id
+    session.execute.return_value = query_result
+    service = object.__new__(PrivateThreadService)
+    service._default_agent_service = SimpleNamespace(resolve_configured_agent_in_session=AsyncMock(return_value=None))
+    service._asset_resolver = SimpleNamespace(
+        resolve_project_asset_snapshot_in_session=AsyncMock(
+            side_effect=AssetResolutionUnavailable(actor.request_id),
+        )
+    )
+
+    with pytest.raises(PrivateWorkDefaultAgentUnavailable) as captured:
+        await service._resolve_default_agent(session, context, actor)
+
+    assert captured.value.code == "DEFAULT_AGENT_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_create_uses_configured_project_default_and_explicit_override(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.thread_repository import ThreadAgentRef
+    from deerflow.persistence.projects import ProjectDefaultAgentRow
+
+    async with seed.factory() as session:
+        async with session.begin():
+            session.add(
+                ProjectDefaultAgentRow(
+                    project_id=seed.owner_a.project_id,
+                    agent_asset_id=seed.project_agent_id,
+                    revision=1,
+                    created_by_user_id=str(seed.owner_a.user_id),
+                    updated_by_user_id=str(seed.owner_a.user_id),
+                )
+            )
+
+    service, _raw, _scoped = _service(seed)
+    default_thread = await service.create(
+        seed.owner_a,
+        thread_id="configured-default-thread",
+        agent=None,
+    )
+    explicit_thread = await service.create(
+        seed.owner_a,
+        thread_id="explicit-override-thread",
+        agent=ThreadAgentRef(seed.system_agent_id, "system"),
+    )
+
+    assert default_thread.agent_asset_id == seed.project_agent_id
+    assert default_thread.agent_scope == "project"
+    assert explicit_thread.agent_asset_id == seed.system_agent_id
+    assert explicit_thread.agent_scope == "system"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_configured_default_fails_closed_when_agent_becomes_unavailable(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.errors import PrivateWorkDefaultAgentUnavailable
+    from deerflow.persistence.projects import ProjectDefaultAgentRow
+    from deerflow.persistence.shared_assets import AgentRow
+
+    async with seed.factory() as session:
+        async with session.begin():
+            session.add(
+                ProjectDefaultAgentRow(
+                    project_id=seed.owner_a.project_id,
+                    agent_asset_id=seed.project_agent_id,
+                    revision=1,
+                    created_by_user_id=str(seed.owner_a.user_id),
+                    updated_by_user_id=str(seed.owner_a.user_id),
+                )
+            )
+            agent = await session.get(AgentRow, seed.project_agent_id)
+            assert agent is not None
+            agent.status = "suspended"
+
+    service, _raw, _scoped = _service(seed)
+    with pytest.raises(PrivateWorkDefaultAgentUnavailable):
+        await service.create(
+            seed.owner_a,
+            thread_id="unavailable-default-thread",
+            agent=None,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_private_thread_service_builtin_main_fallback_fails_closed_without_binding(
+    seed: M4ThreadSeed,
+) -> None:
+    from app.private_work.errors import PrivateWorkDefaultAgentUnavailable
+    from deerflow.persistence.shared_assets import ProjectSystemAgentBindingRow
+
+    async with seed.factory() as session:
+        async with session.begin():
+            binding = await session.get(
+                ProjectSystemAgentBindingRow,
+                (seed.owner_a.project_id, seed.system_agent_id),
+            )
+            assert binding is not None
+            binding.enabled = False
+
+    service, _raw, _scoped = _service(seed)
+    with pytest.raises(PrivateWorkDefaultAgentUnavailable):
+        await service.create(
+            seed.owner_a,
+            thread_id="unavailable-main-thread",
+            agent=None,
+        )
+
+
 class _FailingRootSaver(InMemorySaver):
     async def aput(self, *_args, **_kwargs):
         raise RuntimeError("root checkpoint unavailable")
@@ -189,9 +444,11 @@ class _WriteThenRaiseSaver(InMemorySaver):
 
 
 class _FailingLatestHeadSaver(InMemorySaver):
+    failing_thread_id: str | None = None
+
     async def aget_tuple(self, config):
         configurable = config.get("configurable", {})
-        if not configurable.get("checkpoint_id"):
+        if configurable.get("thread_id") == self.failing_thread_id and not configurable.get("checkpoint_id"):
             raise RuntimeError("latest checkpoint lookup unavailable")
         return await super().aget_tuple(config)
 
@@ -304,14 +561,17 @@ class _BranchCopyHook:
 class _NoRecursiveScopedRead:
     """Require both branch selections to use the caller's locked DB session."""
 
-    def __init__(self, delegate) -> None:
+    def __init__(self, delegate, source_thread_id: str) -> None:
         self._delegate = delegate
+        self._source_thread_id = source_thread_id
         self.public_get_calls = 0
         self.locked_get_configs: list[dict[str, object]] = []
 
     async def aget_tuple(self, config):
-        self.public_get_calls += 1
-        raise AssertionError("branch checkpoint selection escaped the source Thread lock")
+        if config.get("configurable", {}).get("thread_id") == self._source_thread_id:
+            self.public_get_calls += 1
+            raise AssertionError("branch checkpoint selection escaped the source Thread lock")
+        return await self._delegate.aget_tuple(config)
 
     async def aget_tuple_already_authorized(self, config, *, session):
         self.locked_get_configs.append(config)
@@ -375,7 +635,14 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
     )
     checkpoint_id = source_config["configurable"]["checkpoint_id"]
 
-    branch_saver = _NoRecursiveScopedRead(scoped.for_context(seed.owner_a))
+    replay_base_checkpoint_id = await _root_checkpoint_id(
+        _raw,
+        source.thread_id,
+    )
+    branch_saver = _NoRecursiveScopedRead(
+        scoped.for_context(seed.owner_a),
+        source.thread_id,
+    )
     scoped.for_context = lambda _context: branch_saver
 
     branch = await service.branch(
@@ -384,6 +651,7 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
         target_thread_id="branch-target",
         checkpoint_id=checkpoint_id,
         expected_source_version=source.version,
+        replay_base_checkpoint_id=replay_base_checkpoint_id,
         display_name="Branch",
     )
 
@@ -396,7 +664,7 @@ async def test_private_thread_service_branch_uses_database_authority_copy_hook_o
     assert branch_saver.public_get_calls == 0
     assert len(branch_saver.locked_get_configs) == 2
     assert branch_saver.locked_get_configs[0]["configurable"]["checkpoint_id"] == checkpoint_id
-    assert "checkpoint_id" not in branch_saver.locked_get_configs[1]["configurable"]
+    assert branch_saver.locked_get_configs[1]["configurable"]["checkpoint_id"] == replay_base_checkpoint_id
     assert await service.get(seed.owner_a, branch.thread_id) == branch
     target_item = await _raw.aget_tuple({"configurable": {"thread_id": branch.thread_id, "checkpoint_ns": ""}})
     assert [message.id for message in target_item.checkpoint["channel_values"]["messages"]] == ["assistant-tail"]
@@ -446,6 +714,10 @@ async def test_private_thread_service_historical_branch_never_copies_current_aut
         target_thread_id="historical-branch-target",
         checkpoint_id=historical["configurable"]["checkpoint_id"],
         expected_source_version=source.version,
+        replay_base_checkpoint_id=await _root_checkpoint_id(
+            _raw,
+            source.thread_id,
+        ),
     )
 
     assert hook.calls == []
@@ -498,6 +770,10 @@ async def test_private_thread_metadata_only_head_keeps_visible_assistant_turn_cu
         target_thread_id="metadata-head-branch-target",
         checkpoint_id=selected["configurable"]["checkpoint_id"],
         expected_source_version=source.version,
+        replay_base_checkpoint_id=await _root_checkpoint_id(
+            _raw,
+            source.thread_id,
+        ),
     )
 
     assert hook.calls == [(seed.owner_a, source.thread_id, branch.thread_id)]
@@ -558,6 +834,10 @@ async def test_private_thread_branch_rejects_active_or_finalizing_source_run(
             target_thread_id=target_thread_id,
             checkpoint_id=selected["configurable"]["checkpoint_id"],
             expected_source_version=source.version,
+            replay_base_checkpoint_id=await _root_checkpoint_id(
+                _raw,
+                source.thread_id,
+            ),
         )
 
     assert hook.calls == []
@@ -572,9 +852,10 @@ async def test_private_thread_latest_lookup_failure_fails_closed_to_historical_s
     from app.private_work.thread_repository import ThreadAgentRef
 
     hook = _BranchCopyHook()
+    failing_saver = _FailingLatestHeadSaver()
     service, _raw, scoped = _service(
         seed,
-        raw=_FailingLatestHeadSaver(),
+        raw=failing_saver,
         branch_copy_hook=hook,
     )
     source = await service.create(
@@ -582,6 +863,7 @@ async def test_private_thread_latest_lookup_failure_fails_closed_to_historical_s
         thread_id="head-lookup-failure-source",
         agent=ThreadAgentRef(seed.project_agent_id, "project"),
     )
+    failing_saver.failing_thread_id = source.thread_id
     checkpoint = await scoped.for_context(seed.owner_a).aput(
         {"configurable": {"thread_id": source.thread_id, "checkpoint_ns": ""}},
         _checkpoint_with_messages(AIMessage(content="done", id="assistant-tail")),
@@ -595,6 +877,10 @@ async def test_private_thread_latest_lookup_failure_fails_closed_to_historical_s
         target_thread_id="head-lookup-failure-target",
         checkpoint_id=checkpoint["configurable"]["checkpoint_id"],
         expected_source_version=source.version,
+        replay_base_checkpoint_id=await _root_checkpoint_id(
+            _raw,
+            source.thread_id,
+        ),
     )
 
     assert branch.metadata["workspace_clone_mode"] == "historical_skip"
@@ -663,6 +949,10 @@ async def test_private_thread_latest_selection_and_copy_share_source_thread_lock
         target_thread_id="locked-branch-target",
         checkpoint_id=latest["configurable"]["checkpoint_id"],
         expected_source_version=source.version,
+        replay_base_checkpoint_id=await _root_checkpoint_id(
+            _raw,
+            source.thread_id,
+        ),
     )
 
     assert len(hook.calls) == 1
@@ -696,6 +986,10 @@ async def test_private_thread_service_branch_rolls_back_checkpoint_and_authority
             target_thread_id="failed-branch-target",
             checkpoint_id=source_config["configurable"]["checkpoint_id"],
             expected_source_version=source.version,
+            replay_base_checkpoint_id=await _root_checkpoint_id(
+                raw,
+                source.thread_id,
+            ),
         )
 
     assert hook.rollback_calls == []
@@ -756,6 +1050,10 @@ async def test_private_thread_branch_db_failure_does_not_delete_existing_target_
             target_thread_id="db-failure-existing-target",
             checkpoint_id=selected["configurable"]["checkpoint_id"],
             expected_source_version=source.version,
+            replay_base_checkpoint_id=await _root_checkpoint_id(
+                _raw,
+                source.thread_id,
+            ),
         )
 
     ready = await file_service.list_ready(
@@ -810,6 +1108,10 @@ async def test_private_thread_branch_target_collision_hides_cross_scope_existenc
             target_thread_id=target_id,
             checkpoint_id=selected["configurable"]["checkpoint_id"],
             expected_source_version=source.version,
+            replay_base_checkpoint_id=await _root_checkpoint_id(
+                _raw,
+                source.thread_id,
+            ),
         )
 
 
@@ -884,6 +1186,10 @@ async def test_private_thread_branch_savepoint_loser_rechecks_collision_scope(
                 target_thread_id=target_id,
                 checkpoint_id=selected["configurable"]["checkpoint_id"],
                 expected_source_version=source.version,
+                replay_base_checkpoint_id=await _root_checkpoint_id(
+                    _raw,
+                    source.thread_id,
+                ),
             )
     finally:
         event.remove(seed.engine.sync_engine, "handle_error", capture_integrity_error)

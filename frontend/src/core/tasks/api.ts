@@ -1,4 +1,7 @@
+import { z } from "zod";
+
 import { fetch } from "../api/fetcher";
+import { eventSequenceSchema } from "../private-work/event-sequence";
 import type { ProjectPrivateWorkScope } from "../private-work/types";
 
 import { eventsToSteps, type SubtaskStep } from "./steps";
@@ -8,9 +11,20 @@ const SUBTASK_STEPS_PAGE_SIZE = 500;
 /** Safety bound on pagination so a misbehaving cursor can't loop forever. */
 const SUBTASK_STEPS_MAX_PAGES = 100;
 
-type FetchedEvent = Parameters<typeof eventsToSteps>[0][number] & {
-  seq?: number;
-};
+const fetchedEventSchema = z
+  .object({
+    thread_id: z.string().min(1),
+    run_id: z.string().min(1),
+    event_type: z.string().min(1),
+    category: z.string().min(1),
+    content: z.unknown(),
+    metadata: z.object({ task_id: z.string().optional() }).passthrough(),
+    seq: eventSequenceSchema,
+    created_at: z.string().min(1),
+  })
+  .strict();
+
+type FetchedEvent = z.infer<typeof fetchedEventSchema>;
 
 /**
  * Fetch a subtask's persisted step history for a historical run (#3779).
@@ -33,7 +47,7 @@ export async function fetchSubtaskSteps(
   )}/runs/${encodeURIComponent(runId)}/events`;
 
   const events: FetchedEvent[] = [];
-  let afterSeq: number | undefined;
+  let afterSeq: string | undefined;
 
   for (let page = 0; page < SUBTASK_STEPS_MAX_PAGES; page++) {
     const params = new URLSearchParams({
@@ -49,7 +63,7 @@ export async function fetchSubtaskSteps(
     if (!res.ok) {
       throw new Error(`Failed to fetch subtask steps: ${res.status}`);
     }
-    const batch = (await res.json()) as FetchedEvent[];
+    const batch = z.array(fetchedEventSchema).parse(await res.json());
     events.push(...batch);
 
     if (batch.length < pageSize) {

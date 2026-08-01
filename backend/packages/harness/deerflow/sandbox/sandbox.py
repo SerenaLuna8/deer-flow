@@ -57,6 +57,8 @@ class AuthorizationBoundary(Protocol):
 
     async def before_tool_call(self) -> None: ...
 
+    async def before_read_only_tool_call(self) -> None: ...
+
     async def before_mcp_call(self) -> None: ...
 
     async def before_mcp_tool_dispatch(self) -> None: ...
@@ -82,6 +84,8 @@ async def check_authorization_boundary(
         return
     boundary = runtime_context.get("__authorization_boundary")
     method = getattr(boundary, operation, None)
+    if not callable(method) and operation == "before_read_only_tool_call":
+        method = getattr(boundary, "before_tool_call", None)
     if callable(method):
         await method()
         return
@@ -335,7 +339,7 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside text files under a directory."""
+        """Search for matches inside a text file or files under a directory."""
         pass
 
     @abstractmethod

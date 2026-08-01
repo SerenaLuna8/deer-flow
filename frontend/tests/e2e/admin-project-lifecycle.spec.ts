@@ -58,32 +58,32 @@ test("system admin suspends and resumes one project through exact lifecycle APIs
   await expect(
     page.getByRole("heading", { name: "Projects", exact: true }),
   ).toBeVisible();
-  const projectCard = page.getByRole("listitem").filter({
+  const projectRow = page.getByRole("row").filter({
     has: page.getByRole("heading", { name: "Research Lab" }),
   });
-  await expect(projectCard).toContainText("Active");
+  await expect(projectRow).toContainText("Active");
 
-  await projectCard.getByRole("button", { name: "Platform suspend" }).click();
+  await projectRow.getByRole("button", { name: "Platform suspend" }).click();
   const suspendDialog = page.getByRole("dialog", {
     name: "Suspend this project?",
   });
   await expect(suspendDialog).toContainText("freezes member private work");
   await suspendDialog.getByRole("button", { name: "Confirm" }).click();
-  await expect(projectCard).toContainText("Suspended");
+  await expect(projectRow).toContainText("Suspended");
   await expect(
-    projectCard.getByRole("button", { name: "Resume" }),
+    projectRow.getByRole("button", { name: "Resume" }),
   ).toBeVisible();
 
-  await projectCard.getByRole("button", { name: "Resume" }).click();
+  await projectRow.getByRole("button", { name: "Resume" }).click();
   const resumeDialog = page.getByRole("dialog", {
     name: "Resume this project?",
   });
   await expect(resumeDialog).toContainText("regain private-work access");
   await resumeDialog.getByRole("button", { name: "Confirm" }).click();
   await expect(
-    projectCard.getByRole("button", { name: "Platform suspend" }),
+    projectRow.getByRole("button", { name: "Platform suspend" }),
   ).toBeVisible();
-  await expect(projectCard).not.toContainText("Suspended");
+  await expect(projectRow).not.toContainText("Suspended");
 
   expect(lifecycleRequests).toEqual([
     `POST /api/admin/projects/${PROJECT_ID}/suspend`,

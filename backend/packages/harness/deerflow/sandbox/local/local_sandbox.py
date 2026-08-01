@@ -18,6 +18,7 @@ from typing import NamedTuple
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
+from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import (
     PRIVATE_FILE_IO_CHUNK_SIZE,
     Sandbox,
@@ -666,7 +667,7 @@ class LocalSandbox(Sandbox):
     @cached_property
     def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
         """Compiled matchers for local paths in command output (longest local path first)."""
-        return [re.compile(re.escape(self._resolved_local_paths[m]) + r"(?:[/\\][^\s\"';&|<>()]*)?") for m in self._mappings_by_local_specificity]
+        return [build_output_mask_pattern(self._resolved_local_paths[m]) for m in self._mappings_by_local_specificity]
 
     @cached_property
     def _resolved_local_paths(self) -> dict[PathMapping, str]:
@@ -1062,9 +1063,9 @@ class LocalSandbox(Sandbox):
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
             local_path_resolved = self._resolved_local_paths[mapping]
-            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + "/"):
+            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + os.sep):
                 # Replace the local path prefix with container path
-                relative = path_str[len(local_path_resolved) :].lstrip("/")
+                relative = path_str[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
                 resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
                 return resolved
 

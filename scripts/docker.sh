@@ -255,7 +255,7 @@ start() {
             echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
             exit 1
         fi
-        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent).${NC}"
+        echo -e "${YELLOW}Mounting host Docker socket into Worker (DooD = host root-equivalent).${NC}"
         COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
     fi
 
@@ -282,13 +282,12 @@ start() {
             echo ""
             echo -e "${YELLOW}============================================================${NC}"
             echo -e "${YELLOW}  config.yaml has been created from config.example.yaml.${NC}"
-            echo -e "${YELLOW}  Please edit config.yaml to set your API keys and model   ${NC}"
-            echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
+            echo -e "${YELLOW}  The process configuration is ready.                      ${NC}"
             echo -e "${YELLOW}============================================================${NC}"
             echo ""
-            echo -e "${YELLOW}  Recommended: run 'make setup' before starting Docker.    ${NC}"
-            echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
-            echo -e "${YELLOW}  Then run:        make docker-start${NC}"
+            echo -e "${YELLOW}  Next: run make docker-start, sign in as system admin,    ${NC}"
+            echo -e "${YELLOW}  then configure models and encrypted Credentials at       ${NC}"
+            echo -e "${YELLOW}  /admin/settings/models.                                  ${NC}"
             echo ""
             exit 0
         else

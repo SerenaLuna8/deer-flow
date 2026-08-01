@@ -340,6 +340,11 @@ class ReplayChatModel(BaseChatModel):
                 key = legacy_key
         if not bucket:
             _replay_misses.append(key)
+            if os.environ.get("DEERFLOW_REPLAY_DEBUG_EXCEPTIONS") == "1":
+                print(
+                    f"[replay-provider] miss caller={caller!r} input_hash={key} conversation_hash={legacy_key}",
+                    flush=True,
+                )
             preview = _canonical_messages(messages)
             raise KeyError(
                 f"replay miss: no recorded output for input hash {key} in {self._fixture_path!r}. "

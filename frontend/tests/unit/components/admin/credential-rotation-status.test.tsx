@@ -1,5 +1,4 @@
 import { describe, expect, test, rs } from "@rstest/core";
-import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 rs.mock("@/core/api/fetcher", () => ({
@@ -10,6 +9,7 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "/backend" }));
 
 import { CredentialRotationStatusCard } from "@/components/admin/assets/credential-rotation-status";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+import { I18nProvider } from "@/core/i18n/context";
 import {
   credentialRotationStatusSchema,
   getAdminCredentialRotationStatus,
@@ -63,26 +63,26 @@ describe("credential rotation status", () => {
   });
 
   test("UI distinguishes current and pending rotation without key details", () => {
-    const pending = renderToStaticMarkup(
-      createElement(CredentialRotationStatusCard, {
-        status: {
-          eligible_total: 7,
-          current: 5,
-          pending: 2,
-          status: "pending",
-        },
-      }),
-    );
-    const current = renderToStaticMarkup(
-      createElement(CredentialRotationStatusCard, {
-        status: {
-          eligible_total: 7,
-          current: 7,
-          pending: 0,
-          status: "current",
-        },
-      }),
-    );
+    const renderStatus = (
+      status: Parameters<typeof CredentialRotationStatusCard>[0]["status"],
+    ) =>
+      renderToStaticMarkup(
+        <I18nProvider initialLocale="zh-CN">
+          <CredentialRotationStatusCard status={status} />
+        </I18nProvider>,
+      );
+    const pending = renderStatus({
+      eligible_total: 7,
+      current: 5,
+      pending: 2,
+      status: "pending",
+    });
+    const current = renderStatus({
+      eligible_total: 7,
+      current: 7,
+      pending: 0,
+      status: "current",
+    });
 
     expect(pending).toContain("待轮换 2 项");
     expect(current).toContain("轮换正常");

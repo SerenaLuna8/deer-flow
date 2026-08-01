@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto";
+
 import { expect, test } from "@playwright/test";
+
+import { registerReplayProject } from "./project-fixture";
 
 /**
  * Layer 2 (cross-stack contract): reproduces upstream issue #3352 — after the
@@ -33,53 +37,47 @@ test.describe("multi-run thread renders chronologically (replay, no API key)", (
     page,
     context,
   }) => {
-    const uniq = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    const threadId = `e2e-multi-run-${uniq}`;
-    const email = `e2e-${uniq}@example.com`;
-
-    // Register through the frontend origin (same-origin proxy) so the auth
-    // cookies are stored for localhost and forwarded to the gateway via the
-    // next.config rewrite — never cross-origin from the browser.
-    const reg = await context.request.post(`${APP}/api/v1/auth/register`, {
-      data: { email, password: "very-strong-password-123" },
-    });
-    expect(reg.status(), await reg.text()).toBe(201);
-
-    const cookies = await context.cookies();
-    const csrf = cookies.find((c) => c.name === "csrf_token")?.value;
-    expect(csrf, "register must set csrf_token cookie").toBeTruthy();
+    const project = await registerReplayProject(context, APP);
+    const threadId = randomUUID();
 
     // Seed two runs in one thread: run-1 (ALPHA) older, run-2 (OMEGA) newer, so
     // the real backend's list_by_thread returns them newest-first. No checkpoint
     // is seeded — that is the #3352 precondition.
-    const seed = await context.request.post(`${APP}/api/test-only/seed-runs`, {
-      headers: { "X-CSRF-Token": csrf! },
-      data: {
-        thread_id: threadId,
-        runs: [
-          {
-            run_id: `${threadId}-r1`,
-            created_at: "2026-01-01T00:00:00+00:00",
-            messages: [
-              { role: "human", content: ALPHA, id: `${threadId}-a-h` },
-              { role: "ai", content: "ALPHA reply", id: `${threadId}-a-a` },
-            ],
-          },
-          {
-            run_id: `${threadId}-r2`,
-            created_at: "2026-01-01T00:01:00+00:00",
-            messages: [
-              { role: "human", content: OMEGA, id: `${threadId}-o-h` },
-              { role: "ai", content: "OMEGA reply", id: `${threadId}-o-a` },
-            ],
-          },
-        ],
+    const seed = await context.request.post(
+      `${APP}/api/projects/${project.id}/test-only/seed-runs`,
+      {
+        headers: { "X-CSRF-Token": project.csrf },
+        data: {
+          thread_id: threadId,
+          agent_asset_id: project.agent.id,
+          agent_scope: project.agent.scope,
+          runs: [
+            {
+              run_id: randomUUID(),
+              created_at: "2026-01-01T00:00:00+00:00",
+              messages: [
+                { role: "human", content: ALPHA, id: `${threadId}-a-h` },
+                { role: "ai", content: "ALPHA reply", id: `${threadId}-a-a` },
+              ],
+            },
+            {
+              run_id: randomUUID(),
+              created_at: "2026-01-01T00:01:00+00:00",
+              messages: [
+                { role: "human", content: OMEGA, id: `${threadId}-o-h` },
+                { role: "ai", content: "OMEGA reply", id: `${threadId}-o-a` },
+              ],
+            },
+          ],
+        },
       },
-    });
+    );
     expect(seed.status(), await seed.text()).toBe(200);
 
     // Load the thread fresh — triggers useThreadHistory's per-run reload path.
-    await page.goto(`/workspace/chats/${threadId}`);
+    await page.goto(
+      `/projects/${encodeURIComponent(project.slug)}/chats/${threadId}`,
+    );
 
     const alpha = page.getByText(ALPHA, { exact: false });
     const omega = page.getByText(OMEGA, { exact: false });

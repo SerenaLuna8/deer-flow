@@ -23,7 +23,7 @@
     "format:write": "prettier --write .",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
-    "preview": "pnpm build && next start",
+    "preview": "next build --webpack && next start",
     "start": "next start",
     "test": "rstest",
     "test:e2e": "playwright test",

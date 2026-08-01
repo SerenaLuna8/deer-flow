@@ -15,6 +15,7 @@ import {
   disableProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
+  getProjectDefaultAgent,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
   listAdminAssetVersions,
@@ -24,6 +25,7 @@ import {
   publishProjectAssetVersion,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
+  setProjectDefaultAgent,
   submitProjectMcpVersion,
   updateProjectAgentInstructions,
   upgradeProjectSystemBinding,
@@ -40,6 +42,7 @@ import {
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
   useForkProjectSkillVersion,
+  useProjectDefaultAgent,
   useProjectAssetVersions,
   useProjectSkillVersionFile,
   useImportProjectSkillArchive,
@@ -48,6 +51,7 @@ import {
   useRevokeAdminCredential,
   useRevokeProjectCredential,
   useRollbackProjectSystemBinding,
+  useSetProjectDefaultAgent,
   useSubmitProjectMcpVersion,
   useUpdateProjectAgentInstructions,
   useUpgradeProjectSystemBinding,
@@ -72,6 +76,7 @@ rs.mock("@/core/shared-assets/api", () => ({
   disableProjectSystemBinding: rs.fn(),
   enableProjectSystemBinding: rs.fn(),
   forkProjectSkillVersion: rs.fn(),
+  getProjectDefaultAgent: rs.fn(),
   getProjectSkillVersionFile: rs.fn(),
   importProjectSkillArchive: rs.fn(),
   listAdminAssetVersions: rs.fn(),
@@ -84,6 +89,7 @@ rs.mock("@/core/shared-assets/api", () => ({
   revokeAdminCredential: rs.fn(),
   revokeProjectCredential: rs.fn(),
   rollbackProjectSystemBinding: rs.fn(),
+  setProjectDefaultAgent: rs.fn(),
   submitProjectMcpVersion: rs.fn(),
   updateProjectAgentInstructions: rs.fn(),
   upgradeProjectSystemBinding: rs.fn(),
@@ -137,6 +143,7 @@ beforeEach(() => {
     disableProjectSystemBinding,
     enableProjectSystemBinding,
     forkProjectSkillVersion,
+    getProjectDefaultAgent,
     getProjectSkillVersionFile,
     importProjectSkillArchive,
     listAdminAssetVersions,
@@ -146,6 +153,7 @@ beforeEach(() => {
     publishProjectAssetVersion,
     revokeProjectCredential,
     rollbackProjectSystemBinding,
+    setProjectDefaultAgent,
     submitProjectMcpVersion,
     updateProjectAgentInstructions,
     upgradeProjectSystemBinding,
@@ -155,6 +163,65 @@ beforeEach(() => {
 });
 
 describe("shared asset hooks", () => {
+  test("loads and updates the default Agent under the exact account and project scope", async () => {
+    const signal = new AbortController().signal;
+    const query = useProjectDefaultAgent(
+      accountId,
+      projectId,
+    ) as unknown as QueryConfig;
+
+    await query.queryFn({ signal });
+    expect(query.queryKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "agents",
+      "default",
+    ]);
+    expect(getProjectDefaultAgent).toHaveBeenCalledWith(projectId, signal);
+
+    const update = mutation(useSetProjectDefaultAgent(accountId, projectId));
+    const input = { agent_asset_id: assetId, expected_revision: 0 };
+    const response = {
+      agent_asset_id: assetId,
+      revision: 1,
+      request_id: "req-default-agent",
+    };
+    rs.mocked(setProjectDefaultAgent).mockResolvedValueOnce(response);
+    const result = await update.mutationFn(input as never);
+    await update.onSuccess(result, input as never);
+
+    expect(setProjectDefaultAgent).toHaveBeenCalledWith(
+      projectId,
+      input,
+      mutationController.signal,
+    );
+    expect(update.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "agents",
+      "default",
+      "mutation",
+    ]);
+    expect(client.setQueryData).toHaveBeenCalledWith(
+      [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "agents",
+        "default",
+      ],
+      response,
+    );
+  });
+
   test("never exposes secret-bearing Credential create or replace TanStack hooks", () => {
     const source = readFileSync(
       resolve(process.cwd(), "src/core/shared-assets/hooks.ts"),

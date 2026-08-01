@@ -32,12 +32,15 @@ async function mockAdminProjectAssets(page: Page) {
         {
           name: "default-model",
           display_name: "Default model",
-          use: "default-model",
-          model: "model",
+          model: "default-model",
+          description: "",
           supports_thinking: false,
+          supports_reasoning_effort: false,
           supports_vision: false,
+          is_default: true,
         },
       ],
+      token_usage: { enabled: false },
     }),
   );
 
@@ -257,32 +260,50 @@ test("system admin selects one project and governs only its shared assets", asyn
   const projectCard = page.getByRole("listitem").filter({
     has: page.getByRole("heading", { name: "Alpha Project" }),
   });
-  await projectCard.getByRole("link", { name: "治理共享资产" }).click();
+  await projectCard.getByRole("link", { name: "Govern shared assets" }).click();
 
   await expect(page).toHaveURL(`/admin/projects/${PROJECT_ID}/assets/agents`);
-  await expect(page.getByRole("link", { name: "返回项目选择" })).toBeVisible();
+  await expect(page.getByTestId("admin-project-assets-context")).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Back to projects" }),
+  ).toBeVisible();
   await expect(page.getByText(PROJECT_ID, { exact: true })).toBeVisible();
   await expect(
-    page.getByText(/不会读取成员、聊天、运行、记忆、文件/),
+    page.getByText(/never reads members, chats, runs, Memory, files/u),
   ).toBeVisible();
   await expect(
-    page.getByRole("navigation", { name: "项目资产代管导航" }),
-  ).toBeVisible();
+    page.getByRole("navigation", {
+      name: "Project asset governance navigation",
+    }),
+  ).toHaveAttribute("data-variant", "line");
+  await expect(
+    page.getByTestId("admin-project-asset-directory"),
+  ).toHaveAttribute("data-density", "dense-directory");
   for (const name of ["Agent", "Skill", "MCP", "Credential"]) {
     await expect(
       page
-        .getByRole("navigation", { name: "项目资产代管导航" })
+        .getByRole("navigation", {
+          name: "Project asset governance navigation",
+        })
         .getByRole("link", { name }),
     ).toBeVisible();
   }
 
-  const systemAgent = page.getByTestId(`system-asset-${SYSTEM_AGENT_ID}`);
+  const systemAgent = page.getByTestId(
+    `admin-project-asset-row-${SYSTEM_AGENT_ID}`,
+  );
   await expect(systemAgent.getByText("Packaged Research Agent")).toBeVisible();
-  await systemAgent.getByRole("button", { name: "管理绑定" }).click();
-  const bindingDialog = page.getByRole("dialog", { name: "启用系统资产" });
-  await expect(bindingDialog).toContainText("不修改 packaged 系统定义或版本");
-  await bindingDialog.getByRole("button", { name: "启用到当前项目" }).click();
-  await expect(systemAgent.getByText("已启用", { exact: true })).toBeVisible();
+  await systemAgent.getByRole("button", { name: "Manage binding" }).click();
+  const bindingDialog = page.getByRole("dialog", {
+    name: "Enable system asset",
+  });
+  await expect(bindingDialog).toContainText(
+    "never modifies the packaged system definition or version",
+  );
+  await bindingDialog
+    .getByRole("button", { name: "Enable for this project" })
+    .click();
+  await expect(systemAgent.getByText("Enabled", { exact: true })).toBeVisible();
   expect(state.bindingRequest()).toEqual({
     asset_id: SYSTEM_AGENT_ID,
     version_id: SYSTEM_AGENT_VERSION_ID,
@@ -290,44 +311,63 @@ test("system admin selects one project and governs only its shared assets", asyn
   await page.keyboard.press("Escape");
 
   await page
-    .getByRole("navigation", { name: "项目资产代管导航" })
+    .getByRole("navigation", {
+      name: "Project asset governance navigation",
+    })
     .getByRole("link", { name: "Skill" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "项目 Skill 代管" }),
+    page.getByRole("heading", { name: "Project Skill governance" }),
   ).toBeVisible();
   await page
-    .getByRole("navigation", { name: "项目资产代管导航" })
+    .getByRole("navigation", {
+      name: "Project asset governance navigation",
+    })
     .getByRole("link", { name: "MCP" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "项目 MCP 代管" }),
+    page.getByRole("heading", { name: "Project MCP governance" }),
   ).toBeVisible();
   await page
-    .getByRole("navigation", { name: "项目资产代管导航" })
+    .getByRole("navigation", {
+      name: "Project asset governance navigation",
+    })
     .getByRole("link", { name: "Credential" })
     .click();
   await expect(
-    page.getByRole("heading", { name: "项目 Credential 代管" }),
+    page.getByRole("heading", { name: "Project Credential governance" }),
   ).toBeVisible();
   await expect(
     page.getByText("Project GitHub Token", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("显示明文")).toHaveCount(0);
-  await expect(page.getByText("复制密钥")).toHaveCount(0);
-  await page.getByRole("button", { name: "删除", exact: true }).click();
+  await expect(
+    page.getByTestId("admin-project-credential-directory"),
+  ).toHaveAttribute("data-density", "dense-directory");
+  await expect(
+    page.getByRole("button", { name: "Show plaintext" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Copy secret" })).toHaveCount(
+    0,
+  );
+  const credentialRow = page.getByTestId(
+    `admin-project-credential-row-${PROJECT_CREDENTIAL_ID}`,
+  );
+  await credentialRow.getByRole("button", { name: "View details" }).click();
+  const credentialDetail = page.getByTestId("admin-project-credential-detail");
+  await credentialDetail
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
   const deleteDialog = page.getByRole("dialog", {
-    name: "删除 Credential？",
+    name: "Delete Credential?",
   });
   const confirmDelete = deleteDialog.getByRole("button", {
-    name: /确认删除/u,
+    name: /Confirm delete/u,
   });
   await expect(confirmDelete).toBeDisabled();
   await expect(confirmDelete).toBeEnabled({ timeout: 6_000 });
   await confirmDelete.click();
-  await expect(
-    page.getByText("Project GitHub Token", { exact: true }),
-  ).toHaveCount(0);
+  await expect(credentialDetail).toHaveCount(0);
+  await expect(credentialRow).toHaveCount(0);
   expect(state.credentialDeleteRequest()).toEqual({
     expected_credential_version: 1,
   });

@@ -28,7 +28,7 @@ export function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
 export function computeNextSubtask(
   previous: Subtask | undefined,
   task: Partial<Subtask> & { id: string },
-): { next: Subtask; becameTerminal: boolean } {
+): { next: Subtask; becameTerminal: boolean; changed: boolean } {
   const previousStatus = previous?.status;
   const previousSource = previous?.statusSource;
   const incomingSource = task.statusSource;
@@ -65,8 +65,52 @@ export function computeNextSubtask(
     next.steps = mergeSteps(previous?.steps ?? [], task.steps);
   }
 
+  // Usage events are cumulative snapshots. A delayed older frame must not
+  // make the card appear to have spent fewer tokens than it already reported.
+  if (
+    task.usage &&
+    previous?.usage &&
+    task.usage.totalTokens < previous.usage.totalTokens
+  ) {
+    next.usage = previous.usage;
+  }
+
   const becameTerminal =
     isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
 
-  return { next, becameTerminal };
+  return { next, becameTerminal, changed: subtaskChanged(previous, next) };
+}
+
+function subtaskChanged(previous: Subtask | undefined, next: Subtask): boolean {
+  if (!previous) {
+    return true;
+  }
+  return (
+    previous.status !== next.status ||
+    previous.statusSource !== next.statusSource ||
+    previous.modelName !== next.modelName ||
+    previous.result !== next.result ||
+    previous.error !== next.error ||
+    previous.stopReason !== next.stopReason ||
+    previous.subagent_type !== next.subagent_type ||
+    previous.description !== next.description ||
+    previous.prompt !== next.prompt ||
+    previous.latestMessage !== next.latestMessage ||
+    previous.steps !== next.steps ||
+    !usageEquals(previous.usage, next.usage)
+  );
+}
+
+function usageEquals(a: Subtask["usage"], b: Subtask["usage"]): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  return (
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.totalTokens === b.totalTokens
+  );
 }

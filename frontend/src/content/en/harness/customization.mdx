@@ -107,18 +107,15 @@ See [Skills](/docs/harness/skills) for the full directory structure and `SKILL.m
 
 ## Custom models
 
-Any LangChain-compatible chat model can be used by specifying it in the `use:` field:
+The application does not import arbitrary model class paths from
+`config.yaml`. A new adapter is a code-level extension: implement the
+LangChain `BaseChatModel` interface, review and add its fixed class path to the
+server's provider-adapter allowlist, and deploy the code.
 
-```yaml
-models:
-  - name: my-custom-model
-    use: mypackage.models:MyCustomChatModel
-    # Any extra fields are passed as kwargs to the constructor
-    base_url: http://my-model-server:8080
-    api_key: $MY_MODEL_API_KEY
-```
-
-The model class must implement the LangChain `BaseChatModel` interface.
+After deployment, a system administrator creates a version in
+`/admin/settings/models`, stores only bounded secret-free provider settings,
+and binds the exact encrypted System Credential version. The browser never
+accepts a Python class path or a plaintext provider key.
 
 ## Custom checkpointer
 

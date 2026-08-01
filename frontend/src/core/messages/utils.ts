@@ -1,5 +1,7 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import { extractHumanInputRequest } from "@/core/messages/human-input";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string;
@@ -69,11 +71,13 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
     message: Message,
     index: number,
     type: MessageGroup["type"],
+    preferredId?: string,
   ) {
     const messageId =
-      typeof message.id === "string" && message.id.length > 0
+      preferredId ??
+      (typeof message.id === "string" && message.id.length > 0
         ? message.id
-        : `${type}-${index}`;
+        : `${type}-${index}`);
     let groupId = messageId;
     let suffix = 1;
     while (usedGroupIds.has(groupId)) {
@@ -153,8 +157,14 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       if (isClarificationToolMessage(message)) {
         // The exact issuing AI group receives the result through
         // associateToolMessage. Keep the standalone card for prominent input.
+        const requestId = extractHumanInputRequest(message)?.request_id;
         groups.push({
-          id: createGroupId(message, messageIndex, "assistant:clarification"),
+          id: createGroupId(
+            message,
+            messageIndex,
+            "assistant:clarification",
+            requestId ? `clarification-request:${requestId}` : undefined,
+          ),
           type: "assistant:clarification",
           messages: [message],
         });
@@ -228,6 +238,171 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   // are intentionally omitted: guessing a nearby group can leak raw tool
   // output into a terminal assistant answer and scramble the conversation.
   return groups;
+}
+
+export type AssistantTurnDisplay = {
+  finalGroupIndex: number;
+  hiddenGroupIndexes: number[];
+  processStepCount: number;
+  processGroupIndexes: number[];
+  presentFilesGroupIndexes: number[];
+  presentedFiles: string[];
+};
+
+export type AssistantTurnDisplayOptions = {
+  isCurrentTurnLoading?: boolean;
+};
+
+/**
+ * Projects safe semantic message groups into a calmer visual turn without
+ * mutating their tool-result associations.
+ *
+ * Only contiguous processing, subagent, and present-files groups immediately
+ * preceding a terminal assistant answer are moved. In-flight and
+ * present-files-only turns remain in their original position so progress and
+ * delivered files never disappear while a Run is still settling. The current
+ * final-looking answer is not terminal until its Run has stopped loading.
+ */
+export function getAssistantTurnDisplays(
+  groups: MessageGroup[],
+  { isCurrentTurnLoading = false }: AssistantTurnDisplayOptions = {},
+): AssistantTurnDisplay[] {
+  const displays: AssistantTurnDisplay[] = [];
+
+  for (const [finalGroupIndex, group] of groups.entries()) {
+    if (group.type !== "assistant") {
+      continue;
+    }
+    if (
+      isCurrentTurnLoading &&
+      finalGroupIndex === groups.length - 1
+    ) {
+      continue;
+    }
+
+    const hiddenGroupIndexes: number[] = [];
+    for (
+      let groupIndex = finalGroupIndex - 1;
+      groupIndex >= 0;
+      groupIndex -= 1
+    ) {
+      const candidate = groups[groupIndex];
+      if (
+        candidate?.type !== "assistant:processing" &&
+        candidate?.type !== "assistant:subagent" &&
+        candidate?.type !== "assistant:present-files"
+      ) {
+        break;
+      }
+      hiddenGroupIndexes.unshift(groupIndex);
+    }
+
+    if (hiddenGroupIndexes.length === 0) {
+      continue;
+    }
+
+    const presentFilesGroupIndexes = hiddenGroupIndexes.filter(
+      (groupIndex) =>
+        groups[groupIndex]?.type === "assistant:present-files",
+    );
+    const presentedFiles = Array.from(
+      new Set(
+        presentFilesGroupIndexes.flatMap((groupIndex) =>
+          (groups[groupIndex]?.messages ?? []).flatMap(
+            extractPresentFilesFromMessage,
+          ),
+        ),
+      ),
+    );
+    const processStepCount = [
+      ...hiddenGroupIndexes.flatMap(
+        (groupIndex) => groups[groupIndex]?.messages ?? [],
+      ),
+      ...group.messages,
+    ].reduce((count, message) => {
+      if (message.type !== "ai") {
+        return count;
+      }
+      const visibleToolCalls = (message.tool_calls ?? []).filter(
+        (toolCall) =>
+          toolCall.name !== "task" && toolCall.name !== "ask_clarification",
+      );
+      return count + visibleToolCalls.length + (hasReasoning(message) ? 1 : 0);
+    }, 0);
+
+    displays.push({
+      finalGroupIndex,
+      hiddenGroupIndexes,
+      processStepCount,
+      processGroupIndexes: [...hiddenGroupIndexes],
+      presentFilesGroupIndexes,
+      presentedFiles,
+    });
+  }
+
+  return displays;
+}
+
+export type EditableTurn = {
+  humanMessage: Message;
+};
+
+function isTerminalAssistantTextMessage(message: Message | undefined): boolean {
+  return (
+    message?.type === "ai" &&
+    Boolean(extractTextFromMessage(message).trim()) &&
+    !hasToolCalls(message)
+  );
+}
+
+export function getLatestEditableTurn(
+  groups: MessageGroup[],
+  isCurrentTurnLoading: boolean,
+): EditableTurn | null {
+  if (isCurrentTurnLoading) {
+    return null;
+  }
+
+  let candidate: EditableTurn | null = null;
+  let currentHumanGroup: MessageGroup | null = null;
+  let lastAIGroup: MessageGroup | null = null;
+
+  const completeTurn = () => {
+    if (!currentHumanGroup) {
+      lastAIGroup = null;
+      return;
+    }
+
+    const humanMessage = currentHumanGroup.messages.find(
+      (message) => message.type === "human" && message.id,
+    );
+    const assistantMessage = [...(lastAIGroup?.messages ?? [])]
+      .reverse()
+      .find((message) => message.type === "ai" && message.id);
+
+    candidate =
+      lastAIGroup?.type === "assistant" &&
+      humanMessage &&
+      isTerminalAssistantTextMessage(assistantMessage)
+        ? { humanMessage }
+        : null;
+    currentHumanGroup = null;
+    lastAIGroup = null;
+  };
+
+  for (const group of groups) {
+    if (group.type === "human") {
+      completeTurn();
+      currentHumanGroup = group;
+      continue;
+    }
+    if (group.messages.some((message) => message.type === "ai")) {
+      lastAIGroup = group;
+    }
+  }
+
+  completeTurn();
+  return candidate;
 }
 
 export function groupMessages<T>(
@@ -512,6 +687,30 @@ export function extractReasoningContentFromMessage(message: Message) {
   return null;
 }
 
+const MAX_REASONING_DURATION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Read the Worker-observed lead-Agent reasoning interval.
+ *
+ * This value is deliberately independent from ``turn_duration``: it covers
+ * only the model's reasoning-output window for this message, never tool,
+ * subagent, queue, or whole-Run time.
+ */
+export function getReasoningDurationSeconds(
+  message: Message,
+): number | undefined {
+  const value = message.additional_kwargs?.reasoning_duration_ms;
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_REASONING_DURATION_MS
+  ) {
+    return undefined;
+  }
+  return Math.floor(value / 1000);
+}
+
 export function removeReasoningContentFromMessage(message: Message) {
   if (message.type !== "ai" || !message.additional_kwargs) {
     return;
@@ -665,6 +864,7 @@ export function isHiddenFromUIMessage(message: Message) {
  * Used for optimistic UI (uploading state) and structured file metadata.
  */
 export interface FileInMessage {
+  file_id?: string; // opaque private file-version id; required once uploaded
   filename: string;
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload

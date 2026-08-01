@@ -180,11 +180,9 @@ def test_cli_success_output_is_summary_only(monkeypatch, capsys) -> None:
     assert project_slug not in captured.out
 
 
-def test_cli_execute_uses_deployment_quota_config(monkeypatch, capsys) -> None:
-    configured_quota = QuotaConfig(default_storage_bytes_limit=1234)
+def test_cli_execute_uses_only_compatibility_quota_shape(monkeypatch, capsys) -> None:
     observed: dict[str, object] = {}
     monkeypatch.setenv("DATABASE_URL", "postgresql://private.invalid/private_database")
-    monkeypatch.setattr(importer, "_load_configured_quota", lambda: configured_quota)
 
     async def fake_import_project_skills(
         database_url: str,
@@ -219,7 +217,7 @@ def test_cli_execute_uses_deployment_quota_config(monkeypatch, capsys) -> None:
 
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert observed["quota_config"] is configured_quota
+    assert type(observed["quota_config"]) is QuotaConfig
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
+import { AdminGatewayUnavailable } from "@/components/admin/operations/admin-gateway-unavailable";
 import { AdminOperationsShell } from "@/components/admin/operations/admin-operations-shell";
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { adminReturnPathFromHeaders } from "@/core/auth/admin-return-path";
@@ -33,13 +34,7 @@ export default async function AdminLayout({
     case "unauthenticated":
       redirect(buildLoginUrl(adminReturnPathFromHeaders(await headers())));
     case "gateway_unavailable":
-      return (
-        <main className="flex min-h-screen items-center justify-center px-6 text-center">
-          <p className="text-muted-foreground">
-            平台管理服务暂时不可用，请稍后重试。
-          </p>
-        </main>
-      );
+      return <AdminGatewayUnavailable />;
     case "config_error":
       throw new Error(result.message);
     default:

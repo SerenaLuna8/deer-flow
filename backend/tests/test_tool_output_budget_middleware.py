@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest
@@ -61,6 +62,31 @@ def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1"
     return SimpleNamespace(
         tool_call={"name": tool_name, "id": tool_call_id},
         runtime=runtime,
+    )
+
+
+def _make_private_request(
+    authority: object,
+    *,
+    tool_name: str = "remote_executor",
+    tool_call_id: str = "tc-private",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        tool_call={"name": tool_name, "id": tool_call_id},
+        runtime=SimpleNamespace(
+            state={
+                "thread_data": {
+                    "outputs_path": "/mnt/user-data/outputs",
+                }
+            },
+            context={
+                "private_scope": {
+                    "project_id": "project-a",
+                    "owner_user_id": "owner-a",
+                },
+                "__file_authority": authority,
+            },
+        ),
     )
 
 
@@ -263,7 +289,7 @@ class TestNeedsBudget:
 
 
 class TestBuildPreview:
-    def test_contains_head_and_tail_and_reference(self):
+    def test_contains_typed_summary_raw_head_tail_and_reference(self):
         content = "HEAD_" + "x" * 5000 + "_TAIL"
         preview = _build_preview(
             content,
@@ -272,7 +298,11 @@ class TestBuildPreview:
             head_chars=100,
             tail_chars=50,
         )
-        assert preview.startswith("HEAD_")
+        assert preview.startswith("[Full bash output saved to /mnt/test/bash-abc.log")
+        assert "Preview kind: text" in preview
+        assert "Text output:" in preview
+        assert "Raw sample (head + tail" in preview
+        assert "HEAD_" in preview
         assert "_TAIL" in preview
         assert "/mnt/test/bash-abc.log" in preview
         assert "read_file" in preview
@@ -288,6 +318,41 @@ class TestBuildPreview:
             tail_chars=100,
         )
         assert "10000 chars" in preview
+
+    def test_json_preview_contains_structure_and_raw_sample(self):
+        content = '{"meta":{"source":"unit"},"items":[{"id":1},{"id":2}],"payload":"' + "x" * 5000 + '","tail_marker":"TAIL"}'
+
+        preview = _build_preview(
+            content,
+            tool_name="mcp_json",
+            virtual_path="/mnt/test/result.json",
+            head_chars=100,
+            tail_chars=60,
+        )
+
+        assert preview.startswith("[Full mcp_json output saved to /mnt/test/result.json")
+        assert "Preview kind: json" in preview
+        assert "JSON object with 4 top-level keys." in preview
+        assert "Top-level keys: meta, items, payload, tail_marker" in preview
+        assert "$.items: array length 2; first item object" in preview
+        assert "Raw sample (head + tail" in preview
+        assert "TAIL" in preview
+
+    def test_csv_preview_contains_column_synopsis(self):
+        content = "name,score\n" + "\n".join(f"Ada{index},{90 + index}" for index in range(10)) + "\n"
+
+        preview = _build_preview(
+            content,
+            tool_name="csv_tool",
+            virtual_path="/mnt/test/table.csv",
+            head_chars=80,
+            tail_chars=40,
+        )
+
+        assert "Preview kind: csv" in preview
+        assert "CSV table with 10 data rows and 2 columns." in preview
+        assert "columns: name, score" in preview
+        assert "first data row: name=Ada0 | score=90" in preview
 
 
 class TestBuildFallback:
@@ -404,7 +469,10 @@ class TestWrapToolCallExternalize:
 
             result = mw.wrap_tool_call(req, lambda _: msg)
 
-            assert result.content.startswith("HEADPART_")
+            assert result.content.startswith("[Full web_search output saved to")
+            assert "Preview kind: text" in result.content
+            assert "Raw sample (head + tail" in result.content
+            assert "HEADPART_" in result.content
             assert "_TAILPART" in result.content
 
 
@@ -723,6 +791,126 @@ class TestAsyncPaths:
             assert isinstance(result, ToolMessage)
             assert result is not msg
             assert "Full async_tool output saved to" in result.content
+
+    @pytest.mark.anyio
+    async def test_private_async_output_uses_file_authority_not_host(
+        self,
+        monkeypatch,
+    ):
+        from deerflow.agents.middlewares import (
+            tool_output_budget_middleware as mod,
+        )
+
+        virtual_path = "/mnt/user-data/workspace/.tool-results/async_tool-0123456789ab.txt"
+        authority = SimpleNamespace(
+            write_internal=AsyncMock(return_value=virtual_path),
+        )
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            preview_head_chars=20,
+            preview_tail_chars=10,
+        )
+        middleware = ToolOutputBudgetMiddleware(config=config)
+        content = "PRIVATE_HEAD_" + "x" * 500 + "_PRIVATE_TAIL"
+        message = _tm(content, name="async_tool")
+        request = _make_private_request(
+            authority,
+            tool_name="async_tool",
+        )
+        host_write = MagicMock()
+        monkeypatch.setattr(mod, "_externalize", host_write)
+
+        async def handler(_):
+            return message
+
+        result = await middleware.awrap_tool_call(request, handler)
+
+        authority.write_internal.assert_awaited_once()
+        relative_path, persisted = authority.write_internal.await_args.args
+        assert relative_path.startswith(".tool-results/async_tool-")
+        assert relative_path.endswith(".txt")
+        assert persisted == content.encode("utf-8")
+        host_write.assert_not_called()
+        assert virtual_path in result.content
+        assert "Preview kind: text" in result.content
+
+    def test_private_sync_path_fails_closed_before_handler(
+        self,
+        monkeypatch,
+    ):
+        from deerflow.agents.middlewares import (
+            tool_output_budget_middleware as mod,
+        )
+
+        authority = SimpleNamespace(write_internal=AsyncMock())
+        middleware = ToolOutputBudgetMiddleware(
+            config=ToolOutputConfig(
+                externalize_min_chars=50,
+                fallback_max_chars=200,
+                fallback_head_chars=80,
+                fallback_tail_chars=40,
+            )
+        )
+        request = _make_private_request(authority)
+        host_write = MagicMock()
+        monkeypatch.setattr(mod, "_externalize", host_write)
+        handler = MagicMock(
+            return_value=_tm(
+                "x" * 500,
+                name="remote_executor",
+            )
+        )
+        from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+        with pytest.raises(AuthorizationRevoked):
+            middleware.wrap_tool_call(request, handler)
+
+        handler.assert_not_called()
+        host_write.assert_not_called()
+        authority.write_internal.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_private_async_authorization_revocation_propagates(
+        self,
+    ):
+        from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+        authority = SimpleNamespace(
+            write_internal=AsyncMock(side_effect=AuthorizationRevoked),
+        )
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=10))
+        request = _make_private_request(authority)
+
+        async def handler(_):
+            return _tm("x" * 100, name="remote_executor")
+
+        with pytest.raises(AuthorizationRevoked):
+            await middleware.awrap_tool_call(request, handler)
+
+    @pytest.mark.anyio
+    async def test_private_async_missing_authority_fails_before_handler(
+        self,
+    ):
+        middleware = ToolOutputBudgetMiddleware(
+            config=ToolOutputConfig(externalize_min_chars=10),
+        )
+        request = _make_private_request(
+            SimpleNamespace(),
+        )
+        handler = AsyncMock(
+            return_value=_tm(
+                "x" * 100,
+                name="remote_executor",
+            )
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="Private file authority is unavailable",
+        ):
+            await middleware.awrap_tool_call(request, handler)
+
+        handler.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_async_model_call_patches_history(self):

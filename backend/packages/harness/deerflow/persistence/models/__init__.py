@@ -20,6 +20,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
     ChannelCredentialRow,
+    ChannelInboundDeliveryRow,
     ChannelOAuthStateRow,
 )
 from deerflow.persistence.feedback.model import FeedbackRow
@@ -40,7 +41,11 @@ from deerflow.persistence.projects.invitation_model import ProjectInvitationRow
 from deerflow.persistence.projects.invitation_rate_limit_model import (
     ProjectInvitationRateLimitRow,
 )
-from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.projects.model import (
+    ProjectDefaultAgentRow,
+    ProjectMembershipRow,
+    ProjectRow,
+)
 from deerflow.persistence.quotas import ProjectQuotaRow, ProjectUsageCounterRow, ProjectUsageLedgerRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
@@ -72,6 +77,18 @@ from deerflow.persistence.shared_assets import (
     SkillVersionFileRow,
     SkillVersionRow,
 )
+from deerflow.persistence.system_runtime_settings import (
+    RunRuntimePolicySnapshotRow,
+    SystemRuntimePolicyCatalogStateRow,
+    SystemRuntimePolicyRow,
+    SystemRuntimePolicyVersionRow,
+)
+from deerflow.persistence.system_settings import (
+    RunModelConfigSnapshotRow,
+    SystemModelCatalogStateRow,
+    SystemModelConfigRow,
+    SystemModelConfigVersionRow,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 
@@ -81,6 +98,7 @@ __all__ = [
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
+    "ChannelInboundDeliveryRow",
     "ChannelOAuthStateRow",
     "AgentRow",
     "AgentDesignOperationRow",
@@ -102,6 +120,7 @@ __all__ = [
     "McpServerVersionRow",
     "ProjectInvitationRow",
     "ProjectInvitationRateLimitRow",
+    "ProjectDefaultAgentRow",
     "ProjectMembershipRow",
     "ProjectRow",
     "ProjectQuotaRow",
@@ -119,6 +138,8 @@ __all__ = [
     "ThreadEventSequenceRow",
     "RunAssetVersionRow",
     "RunMcpGrantSnapshotRow",
+    "RunModelConfigSnapshotRow",
+    "RunRuntimePolicySnapshotRow",
     "RunSkillCredentialSnapshotRow",
     "RunRow",
     "ScheduledTaskRow",
@@ -129,6 +150,12 @@ __all__ = [
     "SkillDesignSessionRow",
     "SkillVersionFileRow",
     "SkillVersionRow",
+    "SystemModelCatalogStateRow",
+    "SystemModelConfigRow",
+    "SystemModelConfigVersionRow",
+    "SystemRuntimePolicyCatalogStateRow",
+    "SystemRuntimePolicyRow",
+    "SystemRuntimePolicyVersionRow",
     "ThreadMetaRow",
     "UserNotificationRow",
     "UserRow",

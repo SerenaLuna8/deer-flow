@@ -4,7 +4,7 @@ import uuid
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
-from threading import Lock
+from threading import RLock
 from typing import TypeGuard
 
 from app.private_work.errors import PrivateWorkNotFound
@@ -17,23 +17,29 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
     {
         "capability",
         "capabilities",
+        "deerflow_trace_id",
         "agent",
         "agent_asset_id",
         "agent_id",
         "agent_name",
         "assistant_id",
         "asset_context",
+        "authz_attributes",
         "available_skills",
+        "is_internal",
+        "is_subagent",
         "membership_id",
         "membership_version",
         "mcp_servers",
         "mcps",
         "model",
         "model_name",
+        "memory_authority",
         "non_interactive",
         "owner",
         "owner_id",
         "owner_user_id",
+        "origin_trace_id",
         "private_scope",
         "private_resource_scope",
         "private_work_context",
@@ -47,6 +53,7 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
         "skills",
         "system_role",
         "tool_groups",
+        "trace_id",
         "trusted_asset_context",
         "user_id",
         "user_role",
@@ -163,7 +170,10 @@ _ContextSnapshot = tuple[
     str,
 ]
 _ISSUED_CONTEXTS: dict[int, tuple[weakref.ReferenceType[PrivateWorkContext], _ContextSnapshot]] = {}
-_ISSUED_CONTEXTS_LOCK = Lock()
+# A weakref discard callback can run synchronously during registry mutation if
+# that mutation triggers cyclic GC. The callback then re-enters this lock on
+# the same thread, so a non-reentrant Lock can deadlock the whole process.
+_ISSUED_CONTEXTS_LOCK = RLock()
 
 
 def _context_snapshot(context: PrivateWorkContext) -> _ContextSnapshot:

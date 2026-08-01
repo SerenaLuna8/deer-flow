@@ -35,6 +35,7 @@ import {
   AdminAuditStateView,
   type AdminAuditState,
 } from "@/components/admin/operations/admin-audit";
+import { AdminGatewayUnavailable } from "@/components/admin/operations/admin-gateway-unavailable";
 import {
   AdminJobsStateView,
   parseAdminJobFilters,
@@ -43,6 +44,7 @@ import {
 import {
   AdminOperationsNavigation,
   AdminOperationsShell,
+  AdminWorkspaceLink,
 } from "@/components/admin/operations/admin-operations-shell";
 import {
   parseAdminProjectFilters,
@@ -54,6 +56,7 @@ import {
   OperationsOverviewStateView,
   type OperationsOverviewState,
 } from "@/components/admin/operations/operations-overview";
+import { Dialog } from "@/components/ui/dialog";
 import * as adminOperationsApi from "@/core/admin-operations/api";
 import {
   adminAuditQueryOptions,
@@ -216,6 +219,34 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("M6 system operations console", () => {
+  test("localizes the admin gateway-unavailable fallback without changing the server gate", () => {
+    const render = (locale: "en-US" | "zh-CN") =>
+      renderToStaticMarkup(
+        <I18nProvider initialLocale={locale}>
+          <AdminGatewayUnavailable />
+        </I18nProvider>,
+      );
+
+    const english = render("en-US");
+    const chinese = render("zh-CN");
+
+    expect(english).toContain('role="alert"');
+    expect(english).toContain(
+      'aria-labelledby="admin-gateway-unavailable-title"',
+    );
+    expect(english).toContain(
+      'aria-describedby="admin-gateway-unavailable-description"',
+    );
+    expect(english).toContain("Platform administration is unavailable");
+    expect(english).toContain(
+      "The Gateway could not be reached, so your administrator session could not be verified.",
+    );
+    expect(english).toContain(">Reload page<");
+    expect(chinese).toContain("平台管理暂不可用");
+    expect(chinese).toContain("无法连接网关，因此暂时无法验证管理员会话。");
+    expect(chinese).toContain(">重新加载页面<");
+  });
+
   test("strictly rejects the retired reliability cutover error", () => {
     expect(
       operationsServerErrorSchema.safeParse({
@@ -387,6 +418,41 @@ describe("M6 system operations console", () => {
         ],
       }),
     ).toThrow();
+  });
+
+  test("accepts and renders the exact system-setting update audit response", () => {
+    const parsed = adminAuditPageSchema.parse({
+      items: [
+        {
+          id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          occurred_at: "2026-07-31T08:20:00Z",
+          actor: "system_admin",
+          action: "system_setting.updated",
+          target_kind: "system_setting",
+          outcome: "success",
+          public_error_code: null,
+          metadata: {
+            section: "agent_runtime",
+            revision: 2,
+            schema_version: 1,
+            payload_checksum: "a".repeat(64),
+            effect_scope: "new_requests_and_runs",
+          },
+        },
+      ],
+      next_cursor: null,
+    });
+
+    const html = renderWithProviders(
+      <AdminAuditStateView state={{ status: "ready", data: parsed }} />,
+    );
+
+    expect(html).toContain("System setting updated");
+    expect(html).toContain("System setting");
+    expect(html).toContain("Agent runtime");
+    expect(html).toContain("New requests and runs");
+    expect(html).toContain("a".repeat(64));
+    expect(html).not.toContain("Operations data is unavailable");
   });
 
   test("accepts closed readiness only with an explicit unavailable aggregate state", () => {
@@ -622,6 +688,8 @@ describe("M6 system operations console", () => {
       jobs: "Jobs",
       audit: "Audit",
       assets: "Assets",
+      systemSettings: "System settings",
+      settings: "Model settings",
     };
     const navigation = renderToStaticMarkup(
       <AdminOperationsNavigation
@@ -637,6 +705,8 @@ describe("M6 system operations console", () => {
       ["/admin/jobs", "Jobs"],
       ["/admin/audit", "Audit"],
       ["/admin/assets", "Assets"],
+      ["/admin/settings/system", "System settings"],
+      ["/admin/settings/models", "Model settings"],
     ]) {
       expect(navigation).toContain(`href="${href}"`);
       expect(navigation).toContain(label);
@@ -695,7 +765,7 @@ describe("M6 system operations console", () => {
     expect(html).toContain("Channel providers");
     expect(html).toContain("Alpha Project");
     expect(html).toContain(`href="/admin/projects/${PROJECT_A}/assets/agents"`);
-    expect(html).toContain("治理共享资产");
+    expect(html).toContain("Govern shared assets");
     expect(html).toContain("Governance details");
     expect(html).toContain("Operations data is unavailable");
     expect(html).toContain("PURGE_FAILED");
@@ -703,6 +773,55 @@ describe("M6 system operations console", () => {
     expect(html).toContain("Job requeued");
     expect(html).not.toContain("job.requeued");
     expect(html).not.toContain("owner_user_id");
+  });
+
+  test("uses a persistent desktop control rail and an accessible mobile navigation trigger", () => {
+    const html = renderWithProviders(
+      <AdminOperationsShell>
+        <main>Control room content</main>
+      </AdminOperationsShell>,
+    );
+
+    expect(html).toContain('data-testid="admin-desktop-rail"');
+    expect(html).toContain('data-expanded="false"');
+    expect(html).toContain("w-16");
+    expect(html).toContain('data-testid="admin-shell-topbar"');
+    expect(html).not.toContain("Systems operational");
+    expect(html).toContain("admin@example.com");
+    expect(html).toContain('data-testid="admin-mobile-navigation-trigger"');
+    expect(html).toContain('aria-label="Platform administration navigation"');
+    expect(html).toContain('data-testid="admin-shell-content"');
+    expect(html).toContain("lg:pl-16");
+    expect(html).toContain('data-testid="admin-desktop-navigation-toggle"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Expand navigation"');
+    expect(html).toContain('title="Expand navigation"');
+    expect(html).toContain("transition-[width]");
+    expect(html).toContain("transition-[padding-left]");
+    expect(html).toContain('href="#admin-main"');
+    expect(html.match(/href="\/workspace"/g)).toHaveLength(1);
+    expect(html).toContain('data-testid="admin-desktop-workspace-link"');
+    expect(html).toContain('aria-label="Back to project workspace"');
+    expect(html).toContain('title="Back to project workspace"');
+    expect(html).toContain("Control room content");
+    expect(html).toContain('aria-current="page"');
+  });
+
+  test("closes the mobile administration drawer when returning to the workspace", () => {
+    const html = renderToStaticMarkup(
+      <Dialog>
+        <AdminWorkspaceLink
+          label="Back to project workspace"
+          mobile
+          testId="admin-mobile-workspace-link"
+        />
+      </Dialog>,
+    );
+
+    expect(html).toContain('data-slot="dialog-close"');
+    expect(html).toContain('data-testid="admin-mobile-workspace-link"');
+    expect(html).toContain('href="/workspace"');
+    expect(html).toContain("Back to project workspace");
   });
 
   test("disables the clicked dead-job coordinate while its requeue mutation is pending", () => {
@@ -718,5 +837,31 @@ describe("M6 system operations console", () => {
 
     expect(html).toContain("disabled");
     expect(html).toContain("Requeueing");
+  });
+
+  test("renders every scheduler ownership state without falling back to unknown", () => {
+    for (const [ownership, label] of [
+      ["owned", "Owned"],
+      ["unowned", "Unowned"],
+      ["ownership_lost", "Ownership lost"],
+    ] as const) {
+      const html = renderWithProviders(
+        <OperationsOverviewStateView
+          state={{
+            status: "ready",
+            data: {
+              ...overview,
+              readiness: {
+                ...overview.readiness,
+                scheduler_ownership: ownership,
+              },
+            },
+          }}
+        />,
+      );
+
+      expect(html).toContain(label);
+      expect(html).not.toContain(">Unknown<");
+    }
   });
 });

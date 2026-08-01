@@ -43,6 +43,72 @@ def test_postgres_marker_fixture_requires_explicit_test_url(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_migrated_fixture_bootstraps_runtime_policies_after_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import conftest
+
+    from app.system_runtime_settings import bootstrap as runtime_bootstrap
+    from deerflow.persistence import bootstrap as schema_bootstrap
+
+    events: list[object] = []
+    engine = MagicMock()
+    engine.dispose = AsyncMock(side_effect=lambda: events.append("dispose"))
+    factory = object()
+
+    def create_engine(url):
+        events.append(("engine", url))
+        return engine
+
+    async def bootstrap_schema(selected_engine):
+        assert selected_engine is engine
+        events.append("schema")
+
+    def create_factory(selected_engine, *, expire_on_commit):
+        assert selected_engine is engine
+        assert expire_on_commit is False
+        events.append("factory")
+        return factory
+
+    async def bootstrap_policies(selected_factory):
+        assert selected_factory is factory
+        events.append("runtime-policies")
+        return 1
+
+    monkeypatch.setattr(
+        "sqlalchemy.ext.asyncio.create_async_engine",
+        create_engine,
+    )
+    monkeypatch.setattr(
+        "sqlalchemy.ext.asyncio.async_sessionmaker",
+        create_factory,
+    )
+    monkeypatch.setattr(schema_bootstrap, "bootstrap_schema", bootstrap_schema)
+    monkeypatch.setattr(
+        runtime_bootstrap,
+        "bootstrap_system_runtime_policies",
+        bootstrap_policies,
+    )
+
+    fixture = conftest.migrated_postgres_database_url.__wrapped__(
+        "postgresql://test-role@localhost/deerflow_test_fixture",
+    )
+    assert await fixture.__anext__() == ("postgresql://test-role@localhost/deerflow_test_fixture")
+    assert events == [
+        (
+            "engine",
+            "postgresql://test-role@localhost/deerflow_test_fixture",
+        ),
+        "schema",
+        "factory",
+        "runtime-policies",
+    ]
+
+    await fixture.aclose()
+    assert events[-1] == "dispose"
+
+
+@pytest.mark.asyncio
 async def test_create_failure_does_not_attempt_drop_and_disposes_admin_engine() -> None:
     sensitive_url = "postgresql://user:secret@localhost/postgres"
     connection = MagicMock()

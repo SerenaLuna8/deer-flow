@@ -695,10 +695,8 @@ test("project home omits private-work overview sections in dark mobile layout", 
     mobileNavigation.getByRole("link", { name: "项目成员" }),
   ).toBeVisible();
   await expect(
-    mobileNavigation
-      .getByRole("region", { name: "能力" })
-      .getByRole("link", { name: "Memory" }),
-  ).toBeVisible();
+    mobileNavigation.getByRole("region", { name: "能力" }).getByRole("link"),
+  ).toHaveText(["Agent", "Skill", "MCP", "Memory"]);
   await expect(
     mobileNavigation
       .getByRole("region")

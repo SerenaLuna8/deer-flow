@@ -62,9 +62,6 @@ def get_auth_config() -> AuthConfig:
     """Get the global AuthConfig instance. Parses from env on first call."""
     global _auth_config
     if _auth_config is None:
-        from dotenv import load_dotenv
-
-        load_dotenv()
         jwt_secret = os.environ.get("AUTH_JWT_SECRET")
         if not jwt_secret:
             jwt_secret = _load_or_create_secret()

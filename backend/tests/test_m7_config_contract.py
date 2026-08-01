@@ -7,10 +7,15 @@ import pytest
 from pydantic import ValidationError
 
 import deerflow.config.app_config as app_config_module
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import (
+    DATABASE_RUNTIME_YAML_PATH_TOMBSTONES,
+    AppConfig,
+)
+from deerflow.config.auth_config import AuthAppConfig
 
 LEGACY_CONFIG_TOMBSTONES = (
     "agents_api",
+    "authorization",
     "run_events",
     "stream_bridge",
     "extensions",
@@ -75,6 +80,150 @@ def test_tombstones_are_exact_and_unknown_final_keys_remain_available() -> None:
     assert config.model_extra == {
         "project_run_events_policy": {"retention_days": 30},
     }
+
+
+def test_models_are_rejected_when_loaded_from_yaml(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            (
+                "config_version: 34",
+                "sandbox:",
+                "  use: deerflow.sandbox.local:LocalSandboxProvider",
+                "models:",
+                "- name: legacy-model",
+                "  use: pkg:Model",
+                "  model: provider/model",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="LEGACY_CONFIG_REMOVED: models",
+    ):
+        AppConfig.from_file(str(config_path))
+
+
+def _nested_path(field_path: str, value: object) -> dict[str, object]:
+    result: dict[str, object] = {}
+    current = result
+    parts = field_path.split(".")
+    for part in parts[:-1]:
+        nested: dict[str, object] = {}
+        current[part] = nested
+        current = nested
+    current[parts[-1]] = value
+    return result
+
+
+def _path_value(data: dict[str, object], field_path: str) -> object:
+    current: object = data
+    for part in field_path.split("."):
+        assert isinstance(current, dict)
+        current = current[part]
+    return current
+
+
+@pytest.mark.parametrize(
+    "field_path",
+    sorted(DATABASE_RUNTIME_YAML_PATH_TOMBSTONES),
+)
+def test_database_runtime_policy_leaves_are_yaml_only_tombstones(
+    tmp_path: Path,
+    field_path: str,
+) -> None:
+    baseline = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}).model_dump(mode="python")
+    leaf_value = _path_value(baseline, field_path)
+    config_data: dict[str, object] = {
+        "config_version": 34,
+        "sandbox": {
+            "use": "deerflow.sandbox.local:LocalSandboxProvider",
+        },
+    }
+    config_data.update(_nested_path(field_path, leaf_value))
+    config_path = tmp_path / "config.yaml"
+    import yaml
+
+    config_path.write_text(
+        yaml.safe_dump(config_data, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=rf"LEGACY_CONFIG_REMOVED: {field_path}",
+    ):
+        AppConfig.from_file(str(config_path))
+
+    # The same fields remain legal for trusted programmatic policy overlays.
+    AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "deerflow.sandbox.local:LocalSandboxProvider",
+            },
+            **_nested_path(field_path, leaf_value),
+        }
+    )
+
+
+def test_deployment_owned_runtime_siblings_remain_in_yaml(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """config_version: 34
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+title:
+  prompt_template: 'custom {max_words} {user_msg} {assistant_msg}'
+summarization:
+  summary_prompt: custom summary
+tool_output:
+  storage_subdir: .custom-results
+subagents:
+  timeout_seconds: 123
+""",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.title.prompt_template.startswith("custom")
+    assert config.summarization.summary_prompt == "custom summary"
+    assert config.tool_output.storage_subdir == ".custom-results"
+    assert config.subagents.timeout_seconds == 123
+
+
+@pytest.mark.parametrize(
+    "auth_config",
+    (
+        {"local": {"allow_registraton": False}},
+        {"local_auth": {"allow_registration": False}},
+        {"oidc": {"enable": True}},
+        {
+            "oidc": {
+                "providers": {
+                    "example": {
+                        "display_name": "Example",
+                        "issuer": "https://issuer.example",
+                        "client_id": "client",
+                        "unexpected_authority": True,
+                    }
+                }
+            }
+        },
+    ),
+)
+def test_auth_security_config_rejects_unknown_keys(auth_config: dict) -> None:
+    """Security-sensitive typos must never silently restore permissive defaults."""
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        AuthAppConfig.model_validate(auth_config)
 
 
 def test_default_config_path_is_only_the_repository_root(
@@ -216,3 +365,60 @@ def test_config_upgrade_removes_retired_nested_fields() -> None:
     assert "'remove_keys': ['skill_evolution', 'skill_scan']" in source
     for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
         assert repr(field_path) in source
+
+
+def test_config_upgrade_removes_unsupported_authorization_section() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    assert "32: {" in source
+    assert "'remove_keys': ['authorization']" in source
+
+
+def test_config_upgrade_removes_database_backed_model_section() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    assert "33: {" in source
+    assert "'remove_keys': ['models']" in source
+
+
+def test_config_upgrade_removes_database_backed_runtime_policy_leaves() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    assert "34: {" in source
+    assert "DATABASE_RUNTIME_YAML_PATH_TOMBSTONES" in source
+    assert "container.pop(child_key)" in source
+
+
+def test_example_and_deployment_config_do_not_define_models() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    sources = [
+        (repo_root / "config.example.yaml").read_text(encoding="utf-8"),
+        (repo_root / "deploy/helm/deer-flow/values.yaml").read_text(encoding="utf-8"),
+    ]
+
+    for source in sources:
+        assert "\nmodels:" not in f"\n{source}"
+
+
+def test_example_and_helm_define_only_deployment_owned_runtime_siblings() -> None:
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example = yaml.safe_load((repo_root / "config.example.yaml").read_text(encoding="utf-8"))
+    values = yaml.safe_load((repo_root / "deploy/helm/deer-flow/values.yaml").read_text(encoding="utf-8"))
+    helm_config = yaml.safe_load(values["config"])
+
+    for config in (example, helm_config):
+        for field_path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES:
+            current: object = config
+            for part in field_path.split("."):
+                if not isinstance(current, dict) or part not in current:
+                    break
+                current = current[part]
+            else:
+                raise AssertionError(f"database-owned policy leaf remains in YAML: {field_path}")
+        assert config["tool_output"]["storage_subdir"] == ".tool-results"
+        assert "summary_prompt" in config["summarization"]

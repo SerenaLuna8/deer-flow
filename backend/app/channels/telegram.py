@@ -511,6 +511,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND,
             thread_ts=msg_id,
+            provider_delivery_id=msg_id,
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
@@ -555,6 +556,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=msg_id,
+            provider_delivery_id=msg_id,
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id

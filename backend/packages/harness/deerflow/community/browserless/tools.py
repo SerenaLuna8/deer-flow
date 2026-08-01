@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 from datetime import UTC, datetime
@@ -9,16 +10,22 @@ from urllib.parse import urlparse
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
 from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.file_authority import require_private_file_authority
 from deerflow.tools.types import Runtime
 from deerflow.utils.readability import ReadabilityExtractor
 
-from .browserless_client import BrowserlessClient, BrowserlessScreenshotResult
+from .browserless_client import (
+    BrowserlessClient,
+    BrowserlessFetchResult,
+    BrowserlessScreenshotResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +40,8 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
 _MAX_FILENAME_COLLISION_PROBES = 1000
+_DEFAULT_BROWSERLESS_TIMEOUT_SECONDS = 30.0
+_MAX_BROWSERLESS_TIMEOUT_SECONDS = 3600.0
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -44,16 +53,48 @@ def _get_tool_config(tool_name: str) -> dict | None:
     return extras if extras is not None else {}
 
 
+def _coerce_timeout(value: object, default: float) -> float:
+    """Return a finite positive timeout within the operator safety bound."""
+
+    if isinstance(value, bool):
+        return default
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Browserless: invalid timeout type in config; using %ss",
+            default,
+        )
+        return default
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > _MAX_BROWSERLESS_TIMEOUT_SECONDS:
+        logger.warning(
+            "Browserless: timeout must be between 0 and %ss; using %ss",
+            _MAX_BROWSERLESS_TIMEOUT_SECONDS,
+            default,
+        )
+        return default
+    return timeout
+
+
+def _resolve_timeout(cfg: dict, default: float) -> float:
+    """Read documented ``timeout_s`` first, with ``timeout`` as an alias."""
+
+    if "timeout_s" in cfg:
+        return _coerce_timeout(cfg["timeout_s"], default)
+    if "timeout" in cfg:
+        return _coerce_timeout(cfg["timeout"], default)
+    return default
+
+
 def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
     cfg = _get_tool_config(tool_name)
     base_url = "http://localhost:3032"
     token = os.getenv("BROWSERLESS_TOKEN", "")
-    timeout_s = 30.0
+    timeout_s = _DEFAULT_BROWSERLESS_TIMEOUT_SECONDS
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
         token = cfg.get("token", token)
-        raw = cfg.get("timeout_s", timeout_s)
-        timeout_s = float(raw) if not isinstance(raw, float) else raw
+        timeout_s = _resolve_timeout(cfg, timeout_s)
     return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
 
@@ -142,6 +183,17 @@ def _tool_message(content: str, tool_call_id: str) -> Command:
     return Command(update={"messages": [ToolMessage(content, tool_call_id=tool_call_id)]})
 
 
+def _private_file_authority(
+    runtime: Runtime,
+    *,
+    method: str,
+) -> object | None:
+    return require_private_file_authority(
+        getattr(runtime, "context", None),
+        method=method,
+    )
+
+
 def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
     """Return a non-colliding filename under ``outputs_path``.
 
@@ -173,7 +225,9 @@ def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) 
     return final_name
 
 
-def _target_status_warning(result: BrowserlessScreenshotResult) -> str:
+def _target_status_warning(
+    result: BrowserlessScreenshotResult | BrowserlessFetchResult,
+) -> str:
     """Return a human-readable warning when the captured page itself errored.
 
     Browserless returns HTTP 200 for the render request even when the target
@@ -224,7 +278,7 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
 
         client = _get_browserless_client("web_fetch")
-        html = await client.fetch_html(
+        result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
             wait_for_timeout_ms=wait_for_timeout_ms,
@@ -234,11 +288,14 @@ async def web_fetch_tool(url: str) -> str:
             reject_request_pattern=reject_request_pattern,
         )
 
-        if html.startswith("Error:"):
-            return html
+        if isinstance(result, str):
+            return result
 
-        article = await asyncio.to_thread(_readability_extractor.extract_article, html)
-        return article.to_markdown()[:4096]
+        article = await asyncio.to_thread(
+            _readability_extractor.extract_article,
+            result.html,
+        )
+        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")
@@ -281,6 +338,10 @@ async def web_capture_tool(
         outputs_path = _thread_outputs_path(runtime)
         if isinstance(outputs_path, str):
             return _tool_message(outputs_path, tool_call_id)
+        authority = _private_file_authority(
+            runtime,
+            method="write_output",
+        )
 
         final_format = _normalize_output_format(output_format or cfg.get("output_format", "png"))
         final_full_page = full_page if full_page is not None else _as_bool(cfg.get("full_page"), True)
@@ -309,8 +370,26 @@ async def web_capture_tool(
         if isinstance(result, str):
             return _tool_message(result, tool_call_id)
 
-        final_name = await asyncio.to_thread(_write_capture_output, outputs_path, output_name, result.content)
-        virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
+        if authority is None:
+            final_name = await asyncio.to_thread(
+                _write_capture_output,
+                outputs_path,
+                output_name,
+                result.content,
+            )
+            virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}/{final_name}"
+        else:
+            virtual_path = await authority.write_output(
+                output_name,
+                result.content,
+            )
+            presenter = _private_file_authority(
+                runtime,
+                method="record_presented_paths",
+            )
+            if presenter is None:
+                raise RuntimeError("Private file authority is unavailable")
+            presenter.record_presented_paths((virtual_path,))
         message = f"Captured screenshot: {virtual_path}{_target_status_warning(result)}"
         return Command(
             update={
@@ -319,6 +398,8 @@ async def web_capture_tool(
             }
         )
 
+    except GraphBubbleUp:
+        raise
     except Exception as e:
         logger.error(f"Error in web_capture_tool: {e}")
         return _tool_message(f"Error: {str(e)}", tool_call_id)

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from deerflow.config import get_app_config
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.exceptions import SandboxRuntimeError
@@ -276,7 +277,7 @@ class SandboxProvider(ABC):
         """Acquire a run-isolated sandbox or fail closed when unsupported."""
 
         if mounts:
-            raise SandboxRuntimeError("Configured sandbox provider does not support run-scoped read-only mounts")
+            raise PublicRunError(PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED)
         return self.acquire(thread_id, user_id=user_id)
 
     async def acquire_with_mounts_async(
@@ -304,7 +305,7 @@ class SandboxProvider(ABC):
 
         del thread_id, user_id
         if mounts:
-            raise SandboxRuntimeError("Configured sandbox provider does not support run-scoped read-only mounts")
+            raise PublicRunError(PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED)
 
     def release_run_scoped_mounts(
         self,

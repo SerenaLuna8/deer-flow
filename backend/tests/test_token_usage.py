@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -147,6 +148,10 @@ def _mock_app_config():
     model.model_dump.return_value = {"name": "test-model", "use": "langchain_openai:ChatOpenAI"}
     config = MagicMock()
     config.models = [model]
+    config.database = SimpleNamespace(
+        checkpoint_channel_mode="full",
+        checkpoint_delta=SimpleNamespace(snapshot_frequency=10),
+    )
     return config
 
 

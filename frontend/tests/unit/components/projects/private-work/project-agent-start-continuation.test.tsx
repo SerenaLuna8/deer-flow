@@ -6,7 +6,10 @@ import {
   consumeProjectStartChatIntent,
   projectStartChatCandidate,
 } from "@/components/projects/private-work/project-agent-start-continuation";
-import type { ProjectAssetList } from "@/core/shared-assets";
+import type {
+  ProjectAssetList,
+  ProjectDefaultAgent,
+} from "@/core/shared-assets";
 
 const VERSION_ID = "44444444-4444-4444-8444-444444444444";
 const catalog: ProjectAssetList = {
@@ -57,10 +60,27 @@ const catalog: ProjectAssetList = {
   ],
   request_id: "request-agents",
 };
+const mainDefault: ProjectDefaultAgent = {
+  agent_asset_id: null,
+  revision: 0,
+  request_id: "request-default-main",
+};
+const projectDefault: ProjectDefaultAgent = {
+  agent_asset_id: catalog.project_items[0]!.id,
+  revision: 2,
+  request_id: "request-default-project",
+};
 describe("project Agent start-chat continuation", () => {
-  test("selects Main only for an authorized ready start_chat intent", () => {
+  test("selects the project default or Main fallback for an authorized ready intent", () => {
     expect(
-      projectStartChatCandidate(catalog, {
+      projectStartChatCandidate(catalog, projectDefault, {
+        requested: true,
+        canCreate: true,
+        readinessStatus: "ready",
+      })?.id,
+    ).toBe(catalog.project_items[0]!.id);
+    expect(
+      projectStartChatCandidate(catalog, mainDefault, {
         requested: true,
         canCreate: true,
         readinessStatus: "ready",
@@ -75,8 +95,26 @@ describe("project Agent start-chat continuation", () => {
         readinessStatus: "unavailable" as const,
       },
     ]) {
-      expect(projectStartChatCandidate(catalog, state)).toBeNull();
+      expect(projectStartChatCandidate(catalog, mainDefault, state)).toBeNull();
     }
+  });
+
+  test("fails closed when the configured default Agent is missing", () => {
+    expect(
+      projectStartChatCandidate(
+        catalog,
+        {
+          agent_asset_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          revision: 3,
+          request_id: "request-default-missing",
+        },
+        {
+          requested: true,
+          canCreate: true,
+          readinessStatus: "ready",
+        },
+      ),
+    ).toBeNull();
   });
 
   test("explains preserved intent while configuration is incomplete", () => {
@@ -106,7 +144,7 @@ describe("project Agent start-chat continuation", () => {
 
   test("creates the first Chat and consumes start_chat with replace navigation", async () => {
     const calls: unknown[] = [];
-    const agent = projectStartChatCandidate(catalog, {
+    const agent = projectStartChatCandidate(catalog, projectDefault, {
       requested: true,
       canCreate: true,
       readinessStatus: "ready",
@@ -124,7 +162,7 @@ describe("project Agent start-chat continuation", () => {
         calls.push(["prepare", selected.id]);
       },
       createChat: async (input) => {
-        calls.push(["create", input.agent.id]);
+        calls.push(["create", Object.hasOwn(input, "agent")]);
         input.navigate("/projects/alpha/chats/first");
         return "first";
       },
@@ -133,13 +171,13 @@ describe("project Agent start-chat continuation", () => {
 
     expect(calls).toEqual([
       ["prepare", agent.id],
-      ["create", agent.id],
+      ["create", false],
       ["replace", "/projects/alpha/chats/first"],
     ]);
   });
 
   test("coalesces the same start_chat intent across project-shell remounts", async () => {
-    const agent = projectStartChatCandidate(catalog, {
+    const agent = projectStartChatCandidate(catalog, projectDefault, {
       requested: true,
       canCreate: true,
       readinessStatus: "ready",

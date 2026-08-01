@@ -10,6 +10,7 @@ from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.runtime.events.models import StreamFrame
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
 
@@ -60,6 +61,90 @@ class _CaptureBridge:
         del delay
 
 
+class _FallbackSubgraphAgent:
+    def __init__(self, namespace: tuple[str, ...]) -> None:
+        self.metadata: dict[str, Any] = {}
+        self.checkpointer = None
+        self.store = None
+        self.interrupt_before_nodes: list[str] = []
+        self.interrupt_after_nodes: list[str] = []
+        self._namespace = namespace
+
+    async def astream(
+        self,
+        _graph_input: object,
+        *,
+        config: dict[str, Any],
+        stream_mode: list[str],
+        subgraphs: bool,
+    ):
+        del config, stream_mode, subgraphs
+        yield (
+            self._namespace,
+            "values",
+            {
+                "messages": [
+                    {
+                        "id": "fallback-message",
+                        "type": "ai",
+                        "content": "provider failed",
+                        "additional_kwargs": {
+                            "deerflow_error_fallback": True,
+                            "error_detail": "provider failed",
+                        },
+                    }
+                ]
+            },
+        )
+
+
+class _SubgraphCustomAgent:
+    def __init__(self) -> None:
+        self.metadata: dict[str, Any] = {}
+        self.checkpointer = None
+        self.store = None
+        self.interrupt_before_nodes: list[str] = []
+        self.interrupt_after_nodes: list[str] = []
+
+    async def astream(
+        self,
+        _graph_input: object,
+        *,
+        config: dict[str, Any],
+        stream_mode: list[str],
+        subgraphs: bool,
+    ):
+        del config, stream_mode, subgraphs
+        yield (
+            ("tools:child-call",),
+            "custom",
+            {
+                "type": "task_completed",
+                "task_id": "child-task",
+                "result": "child result",
+            },
+        )
+        yield (
+            (),
+            "custom",
+            {
+                "type": "task_completed",
+                "task_id": "root-task",
+                "result": "root result",
+            },
+        )
+
+
+class _CaptureEventStore:
+    def __init__(self) -> None:
+        self.batches: list[list[dict[str, Any]]] = []
+
+    async def put_batch(self, events, *, scope=None):
+        del scope
+        self.batches.append(events)
+        return events
+
+
 @pytest.mark.anyio
 async def test_run_agent_preserves_subgraph_namespace_in_sse_event_name() -> None:
     run_manager = RunManager()
@@ -88,6 +173,79 @@ async def test_run_agent_preserves_subgraph_namespace_in_sse_event_name() -> Non
         "messages",
         "end",
     ]
+
+
+@pytest.mark.anyio
+async def test_namespaced_fallback_does_not_mark_parent_run_as_error() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("thread-child-fallback")
+    bridge = _CaptureBridge()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda config: _FallbackSubgraphAgent(("tools:call-1",)),
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id}},
+        stream_modes=["values", "messages-tuple"],
+        stream_subgraphs=True,
+    )
+
+    assert record.status == RunStatus.success
+    assert any(event == "values|tools:call-1" for event, _payload in bridge.events)
+
+
+@pytest.mark.anyio
+async def test_root_fallback_still_marks_parent_run_as_error_in_subgraph_mode() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("thread-root-fallback")
+    bridge = _CaptureBridge()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda config: _FallbackSubgraphAgent(()),
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id}},
+        stream_modes=["values", "messages-tuple"],
+        stream_subgraphs=True,
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "provider failed"
+
+
+@pytest.mark.anyio
+async def test_namespaced_custom_events_are_not_persisted_as_parent_subagent_events() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("thread-child-custom")
+    bridge = _CaptureBridge()
+    event_store = _CaptureEventStore()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda config: _SubgraphCustomAgent(),
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id}},
+        stream_modes=["custom", "values"],
+        stream_subgraphs=True,
+    )
+
+    assert [event for event, _payload in bridge.events] == [
+        "metadata",
+        "custom|tools:child-call",
+        "custom",
+        "end",
+    ]
+    persisted = [event for batch in event_store.batches for event in batch]
+    assert [event["metadata"]["task_id"] for event in persisted] == ["root-task"]
 
 
 def test_namespaced_stream_event_round_trips_through_bounded_event_type() -> None:
@@ -163,13 +321,26 @@ def test_stream_event_replay_is_backward_compatible_and_ignores_corrupt_metadata
     assert DbRunEventStore._stream_row(corrupt, created=False).event == "values"
 
 
+def test_namespaced_stream_event_accepts_maximum_depth_and_total_length() -> None:
+    namespace = (*("x" * 126 for _ in range(31)), "y" * 150)
+    event = "|".join(("messages", *namespace))
+
+    assert len(namespace) == 32
+    assert len(event) == 4096
+    assert StreamFrame(event=event, data={}).event == event
+
+
 @pytest.mark.parametrize(
     "event",
     (
         "values|",
         "values||tools:call-1",
+        f"values|{'|'.join(f'namespace-{index}' for index in range(33))}",
+        "values|tools:\x00call-1",
+        "values|tools:call-1\rcustom",
         "values|tools:call-1\nerror",
         f"values|{'x' * 257}",
+        f"messages|{'|'.join((*('x' * 126 for _ in range(31)), 'y' * 151))}",
     ),
 )
 def test_namespaced_stream_event_rejects_unsafe_namespace(event: str) -> None:

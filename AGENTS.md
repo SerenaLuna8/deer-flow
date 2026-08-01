@@ -59,7 +59,22 @@ deer-flow/
 Runtime config lives at the **repo root**: copy `config.example.yaml` to `config.yaml`.
 `DATABASE_URL` is the only application persistence connection. PostgreSQL owns application
 data, checkpoints, stores, durable jobs, streams, quotas, and audit records.
+The current process-config schema is `config_version: 34`. Model definitions, live Agent
+runtime policy, self-registration policy, project-quota defaults, and provider Credentials are
+PostgreSQL system settings, not `config.yaml` or ambient runtime provider environment variables.
+System admins manage runtime/auth/quota policy at `/admin/settings/system`; new Runs freeze the
+exact Agent policy while Gateway request-only features read the current committed policy. On an
+empty local target, `make setup-db` reads `DEEPSEEK_API_KEY` and
+the Credential keyring once from the root `.env` when that file exists (explicit environment
+wins, and may be used without an `.env` file), stores the removed
+example's DeepSeek V4 Pro as an encrypted active/default catalog entry, and runtime roles continue
+to read only PostgreSQL. A system admin manages the resulting catalog at
+`/admin/settings/models`.
 Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENTS.md).
+Backend module role commands (`make dev`, `make gateway`, `make worker`, and
+`make scheduler` from `backend/`) explicitly import non-provider settings from
+the root `.env`, preserve an explicit process environment, and remove ambient
+model-provider API keys before starting the role.
 
 ## Final M7 runtime boundary
 
@@ -87,7 +102,9 @@ Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENT
 `make setup-db` is the only schema initialization entry point. It requires an empty PostgreSQL
 target, executes the complete packaged `full_schema.sql`, records the exact
 `full_schema_v1` marker, seeds the packaged system catalog, initializes the LangGraph schema,
-and bootstraps the default project.
+bootstraps the default project, and atomically seeds the encrypted DeepSeek V4 Pro
+Credential/model/default pointer. Missing `DEEPSEEK_API_KEY` or an invalid Credential keyring
+fails preflight before the target database is created.
 
 There is no incremental migration chain and no supported upgrade path for an older DeerFlow
 database. A legacy marker, unknown marker, unversioned nonempty schema, or catalog drift is

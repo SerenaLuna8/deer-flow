@@ -23,7 +23,7 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
-import { ThreadTitle } from "@/components/workspace/thread-title";
+import { ThreadDocumentTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
@@ -163,6 +163,7 @@ export function ScopedChatPage({
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
+    editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -306,6 +307,11 @@ export function ScopedChatPage({
       regenerateMessage(threadId, messageId, supersededMessageIds),
     [regenerateMessage, threadId],
   );
+  const handleEditAndRegenerate = useCallback(
+    (messageId: string, replacementText: string) =>
+      editAndRegenerateMessage(threadId, messageId, replacementText),
+    [editAndRegenerateMessage, threadId],
+  );
   const handleBranchTurn = useCallback(
     async (messageId: string, messageIds: string[]) => {
       if (
@@ -385,6 +391,7 @@ export function ScopedChatPage({
           threadId={threadId}
           canDeleteFiles={scope.canDeleteFiles === true}
         >
+          <ThreadDocumentTitle thread={thread} />
           <div
             className="relative flex size-full min-h-0 justify-between"
             data-chat-content-width={localSettings.appearance.chatContentWidth}
@@ -406,7 +413,6 @@ export function ScopedChatPage({
               )}
             >
               <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
-                <ThreadTitle threadId={threadId} thread={thread} />
                 {renderHeaderAccessory?.(threadMetadata.data)}
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -457,6 +463,23 @@ export function ScopedChatPage({
                     scope.regenerateVisible === false
                       ? undefined
                       : handleRegenerate
+                  }
+                  canEdit={
+                    scope.regenerateVisible !== false &&
+                    scope.canRun &&
+                    !isNewThread &&
+                    !isMock &&
+                    !isStaticWebsiteOnly() &&
+                    !isUploading &&
+                    !thread.isLoading &&
+                    !branchThread.isPending &&
+                    !hasGoal &&
+                    !hasOpenHumanInputCard
+                  }
+                  onEditAndRegenerateMessage={
+                    scope.regenerateVisible === false
+                      ? undefined
+                      : handleEditAndRegenerate
                   }
                   onSubmitHumanInput={
                     !scope.canRun || isMock || isStaticWebsiteOnly()
@@ -558,7 +581,6 @@ export function ScopedChatPage({
                         isMock ||
                         isStaticWebsiteOnly() ||
                         isUploading ||
-                        hasOpenHumanInputCard ||
                         (!isNewThread && isHistoryLoading)
                       }
                       onContextChange={(context) =>

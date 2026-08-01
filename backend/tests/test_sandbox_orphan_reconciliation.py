@@ -401,6 +401,22 @@ def test_reconcile_adopts_young_containers():
     assert adopted_info.sandbox_id == "young123"
 
 
+def test_reconcile_never_adopts_private_run_container() -> None:
+    provider = _make_provider_for_reconciliation()
+    private_info = SandboxInfo(
+        sandbox_id="private-0123456789abcdef",
+        sandbox_url="http://localhost:8082",
+        container_name="deer-flow-sandbox-private-0123456789abcdef",
+        created_at=time.time() - 60,
+    )
+    provider._backend.list_running.return_value = [private_info]
+
+    provider._reconcile_orphans()
+
+    provider._backend.destroy.assert_not_called()
+    assert private_info.sandbox_id not in provider._warm_pool
+
+
 def test_reconcile_mixed_containers_all_adopted():
     """All containers (old and young) are adopted into warm pool."""
     provider = _make_provider_for_reconciliation()

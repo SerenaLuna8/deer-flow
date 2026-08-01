@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncIterable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 from sqlalchemy import delete, insert, literal, select
 from sqlalchemy.exc import DBAPIError
@@ -36,6 +36,7 @@ from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.quota_summary import load_project_quota_summary
+from app.quotas.models import QuotaUnavailable
 from app.upload_contracts import PRIVATE_UPLOAD_DEFAULTS
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.private_work.file_repository import (
@@ -53,6 +54,9 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+
+if TYPE_CHECKING:
+    from app.quotas.service import QuotaConfigProvider
 
 PRIVATE_DEFAULT_MAX_FILES = PRIVATE_UPLOAD_DEFAULTS.max_files
 PRIVATE_DEFAULT_MAX_FILE_SIZE = PRIVATE_UPLOAD_DEFAULTS.max_file_size
@@ -173,12 +177,14 @@ class PrivateFileService:
         conversion_temp_root: Path | None = None,
         quota: PrivateFileQuotaPort | None = None,
         quota_config: QuotaConfig | None = None,
+        quota_policy: QuotaConfigProvider | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
         self._conversion_temp_root = conversion_temp_root
         self._quota = quota or _NoopPrivateFileQuota()
         self._quota_config = quota_config or QuotaConfig()
+        self._quota_policy = quota_policy
 
     @staticmethod
     def _media_type(value: str, request_id: str) -> str:
@@ -635,8 +641,9 @@ class PrivateFileService:
         thread_id: str,
         after: tuple[str, int, uuid.UUID] | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> tuple[PrivateFileRecord, ...]:
-        """List all ready upload/workspace/output files in the private Thread."""
+        """List one bounded ready-file page in the private Thread."""
 
         context = require_issued_private_work_context(context)
         try:
@@ -656,6 +663,7 @@ class PrivateFileService:
                     thread_id=thread_id,
                     after=after,
                     limit=limit,
+                    offset=offset,
                 )
         except PrivateFileConflict:
             raise PrivateWorkInvalid(context.request_id) from None
@@ -692,11 +700,14 @@ class PrivateFileService:
                     thread_id=thread_id,
                 ):
                     raise PrivateWorkNotFound(context.request_id)
+                quota_config = self._quota_config if self._quota_policy is None else await self._quota_policy.current_config(session)
                 quota = await load_project_quota_summary(
                     session,
                     context.project_id,
-                    self._quota_config,
+                    quota_config,
                 )
+        except QuotaUnavailable:
+            raise PrivateWorkUnavailable(context.request_id) from None
         except PrivateWorkError:
             raise
         except DBAPIError:

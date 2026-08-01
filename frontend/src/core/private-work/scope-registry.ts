@@ -7,7 +7,6 @@ import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
 import { skillBuilderRootKey } from "@/core/skill-builder/query-keys";
 
 import {
-  clearProjectReconnectStorage,
   disposeProjectAPIClient,
   getProjectAPIClient,
   projectPrivateWorkBaseURL,
@@ -20,7 +19,10 @@ import {
   type ProjectClientScope,
 } from "./types";
 
-export { projectReconnectStorage } from "./api-client";
+export {
+  clearProjectReconnectStorage,
+  projectReconnectStorage,
+} from "./api-client";
 
 function scopeKey(scope: ProjectClientScope): string {
   const parsed = projectClientScopeSchema.parse(scope);
@@ -103,7 +105,6 @@ export class PrivateWorkScopeRegistry {
     const key = scopeKey(parsed);
     this.abortControllers.get(key)?.forEach((controller) => controller.abort());
     this.abortControllers.delete(key);
-    clearProjectReconnectStorage(parsed);
     disposeProjectAPIClient(parsed);
     this.entries.delete(key);
   }

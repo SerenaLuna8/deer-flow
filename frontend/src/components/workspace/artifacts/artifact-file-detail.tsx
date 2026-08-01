@@ -3,6 +3,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EyeIcon,
+  FilesIcon,
   SquareArrowOutUpRightIcon,
   XIcon,
 } from "lucide-react";
@@ -75,7 +76,7 @@ export function ArtifactFileDetail({
 }) {
   const { t } = useI18n();
   const privateWork = useProjectPrivateWorkScope();
-  const { artifacts, setOpen, select } = useArtifacts();
+  const { artifacts, setOpen, select, showList } = useArtifacts();
   const { thread } = useThread();
   const isWriteFile = useMemo(() => {
     return filepathFromProps.startsWith("write-file:");
@@ -261,6 +262,14 @@ export function ArtifactFileDetail({
         </div>
         <div className="flex items-center gap-2">
           <ArtifactActions>
+            {artifacts.length > 0 && (
+              <ArtifactAction
+                icon={FilesIcon}
+                label={t.common.showArtifacts}
+                tooltip={t.common.showArtifacts}
+                onClick={showList}
+              />
+            )}
             {!isWriteFile && openURL && (
               <ArtifactAction
                 icon={SquareArrowOutUpRightIcon}

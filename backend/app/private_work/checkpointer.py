@@ -123,6 +123,13 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
     def set_authorization_boundary(self, boundary: object) -> None:
         self._authorization_boundary = boundary
 
+    def already_authorized(
+        self,
+        session: AsyncSession,
+    ) -> _AlreadyAuthorizedCheckpointSaver:
+        """Bind graph checkpoint operations to one caller-owned transaction."""
+        return _AlreadyAuthorizedCheckpointSaver(self, session)
+
     @property
     def config_specs(self):
         return self._raw.config_specs
@@ -303,6 +310,43 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
 
+    async def alist_already_authorized(
+        self,
+        config: RunnableConfig | None,
+        *,
+        session: AsyncSession,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        """List raw tuples while the caller holds the scoped Thread lock."""
+        if not session.in_transaction():
+            raise PrivateWorkUnavailable(self._context.request_id)
+        thread_id = self._thread_id(config)
+        clean_config = self._sanitize_config(config, thread_id=thread_id)
+        clean_before = None if before is None else self._sanitize_config(before, thread_id=thread_id)
+        clean_filter = (
+            None
+            if filter is None
+            else cast(
+                dict[str, Any],
+                _drop_marker(strip_private_client_fields(filter)),
+            )
+        )
+        try:
+            async for item in self._raw.alist(
+                clean_config,
+                filter=clean_filter,
+                before=clean_before,
+                limit=limit,
+            ):
+                self._validate_marker(item, thread_id=thread_id)
+                yield item
+        except PrivateWorkError:
+            raise
+        except Exception:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
+
     async def aput(
         self,
         config: RunnableConfig,
@@ -414,6 +458,48 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 raise
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
+
+    async def aput_writes_already_authorized(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+        *,
+        session: AsyncSession,
+    ) -> None:
+        """Write pending channel values inside a caller-owned transaction."""
+        if not session.in_transaction():
+            raise PrivateWorkUnavailable(self._context.request_id)
+        thread_id = self._thread_id(config)
+        clean_config = self._sanitize_config(config, thread_id=thread_id)
+        try:
+            await self._revalidator.require(
+                session,
+                self._context,
+                Capability.PRIVATE_WORK_CREATE,
+                lock=True,
+            )
+            record = await PrivateThreadRepository(session).get(
+                scope=self._context.resource_scope,
+                thread_id=thread_id,
+                lock=True,
+            )
+            if record is None:
+                raise PrivateWorkNotFound(self._context.request_id)
+            item = await self._raw.aget_tuple(clean_config)
+            if item is not None:
+                self._validate_marker(item, thread_id=thread_id)
+            await self._raw.aput_writes(
+                clean_config,
+                writes,
+                task_id,
+                task_path,
+            )
+        except PrivateWorkError:
+            raise
+        except Exception:
+            raise PrivateWorkUnavailable(self._context.request_id) from None
 
     async def adelete_thread(
         self,
@@ -592,3 +678,113 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 expected_version=expected_version,
             )
         )
+
+
+class _AlreadyAuthorizedCheckpointSaver(BaseCheckpointSaver):
+    """Async saver facade pinned to one existing SQL transaction."""
+
+    def __init__(
+        self,
+        saver: _ScopedCheckpointSaver,
+        session: AsyncSession,
+    ) -> None:
+        super().__init__(serde=saver.serde)
+        self._saver = saver
+        self._session = session
+
+    @property
+    def config_specs(self):
+        return self._saver.config_specs
+
+    def get_next_version(self, current, channel):
+        return self._saver.get_next_version(current, channel)
+
+    async def aget_tuple(
+        self,
+        config: RunnableConfig,
+    ) -> CheckpointTuple | None:
+        return await self._saver.aget_tuple_already_authorized(
+            config,
+            session=self._session,
+        )
+
+    async def alist(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> AsyncIterator[CheckpointTuple]:
+        async for item in self._saver.alist_already_authorized(
+            config,
+            session=self._session,
+            filter=filter,
+            before=before,
+            limit=limit,
+        ):
+            yield item
+
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        return await self._saver.aput_already_authorized(
+            config,
+            checkpoint,
+            metadata,
+            new_versions,
+            session=self._session,
+        )
+
+    async def aput_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        await self._saver.aput_writes_already_authorized(
+            config,
+            writes,
+            task_id,
+            task_path,
+            session=self._session,
+        )
+
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        raise PrivateWorkUnavailable(self._saver._context.request_id)
+
+    def list(
+        self,
+        config: RunnableConfig | None,
+        *,
+        filter: dict[str, Any] | None = None,
+        before: RunnableConfig | None = None,
+        limit: int | None = None,
+    ) -> Iterator[CheckpointTuple]:
+        del config, filter, before, limit
+        raise PrivateWorkUnavailable(self._saver._context.request_id)
+
+    def put(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        del config, checkpoint, metadata, new_versions
+        raise PrivateWorkUnavailable(self._saver._context.request_id)
+
+    def put_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        del config, writes, task_id, task_path
+        raise PrivateWorkUnavailable(self._saver._context.request_id)

@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from deerflow.mcp.config import ExtensionsConfig
-from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.oauth import (
+    OAuthTokenManager,
+    _OAuthToken,
+    build_oauth_tool_interceptor,
+    get_initial_oauth_headers,
+)
 
 
 class _MockResponse:
@@ -81,6 +89,64 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
     assert len(post_calls) == 1
     assert post_calls[0]["url"] == "https://auth.example.com/oauth/token"
     assert post_calls[0]["data"]["grant_type"] == "client_credentials"
+
+
+def test_oauth_token_manager_cancelled_same_loop_waiter_does_not_leak_lock():
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                    },
+                }
+            }
+        }
+    )
+    manager = OAuthTokenManager.from_runtime_config(config)
+    fetch_started = asyncio.Event()
+    allow_fetch = asyncio.Event()
+    fetch_calls = 0
+
+    async def fetch_token(_oauth):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        fetch_started.set()
+        await allow_fetch.wait()
+        return _OAuthToken(
+            access_token="same-loop-token",
+            token_type="Bearer",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    manager._fetch_token = fetch_token  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        owner = asyncio.create_task(
+            manager.get_authorization_header("secure-http"),
+        )
+        await fetch_started.wait()
+        cancelled_waiter = asyncio.create_task(
+            manager.get_authorization_header("secure-http"),
+        )
+        await asyncio.sleep(0)
+        cancelled_waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_waiter
+        allow_fetch.set()
+        assert await owner == "Bearer same-loop-token"
+        assert await manager.get_authorization_header("secure-http") == "Bearer same-loop-token"
+
+    asyncio.run(scenario())
+
+    assert fetch_calls == 1
 
 
 def test_build_oauth_interceptor_injects_authorization_header(monkeypatch):

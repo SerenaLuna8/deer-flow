@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from typing import Literal
 
@@ -12,6 +13,7 @@ from app.private_work.context import strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import PrivateWorkInvalid
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 class StrictPrivateWorkModel(BaseModel):
@@ -37,6 +39,72 @@ PrivateRunStreamMode = Literal[
     "checkpoints",
     "custom",
 ]
+
+_PUBLIC_USER_MESSAGE_TYPES = frozenset({"human", "user"})
+
+
+def _is_public_user_message(message: Mapping[str, object]) -> bool:
+    """Accept only an explicitly user/human message at public Run ingress."""
+
+    discriminators = [message.get(key) for key in ("role", "type") if message.get(key) is not None]
+    return bool(discriminators) and all(isinstance(value, str) and value.lower() in _PUBLIC_USER_MESSAGE_TYPES for value in discriminators)
+
+
+def _sanitize_public_user_message(
+    value: object,
+) -> dict[str, object] | None:
+    if not isinstance(value, Mapping) or not _is_public_user_message(value):
+        return None
+
+    message = copy.deepcopy(dict(value))
+    # Message names control framework classification (notably ``summary``).
+    # Public callers never issue a server-classified message.
+    message.pop("name", None)
+
+    additional = message.get("additional_kwargs")
+    if isinstance(additional, Mapping):
+        safe_additional = strip_private_client_fields(additional)
+        safe_additional.pop(ORIGINAL_USER_CONTENT_KEY, None)
+        # Visibility is server-owned audit provenance. Even a shape-valid
+        # human_input_response supplied at this public boundary may not hide
+        # itself; trusted internal paths bypass this request model.
+        safe_additional.pop("hide_from_ui", None)
+        message["additional_kwargs"] = safe_additional
+    else:
+        message.pop("additional_kwargs", None)
+    return message
+
+
+def _sanitize_public_messages(value: object) -> object:
+    if not isinstance(value, list):
+        return []
+    return [message for raw in value if (message := _sanitize_public_user_message(raw)) is not None]
+
+
+def _sanitize_public_run_input(value: object) -> object:
+    if isinstance(value, Mapping):
+        # The public endpoint admits user turns, not arbitrary AgentState
+        # channels. Goal, summary, promotion, delegation and runtime state are
+        # written only by their dedicated server-owned paths.
+        return {"messages": _sanitize_public_messages(value["messages"])} if "messages" in value else {}
+    if isinstance(value, list):
+        return _sanitize_public_messages(value)
+    return {}
+
+
+def _sanitize_public_run_command(value: object) -> object:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, object] = {}
+    if "resume" in value and value["resume"] is not None:
+        # Resume payloads are opaque interrupt answers, not graph state.
+        result["resume"] = copy.deepcopy(value["resume"])
+    update = value.get("update")
+    if isinstance(update, Mapping) and "messages" in update:
+        messages = _sanitize_public_messages(update["messages"])
+        if messages:
+            result["update"] = {"messages": messages}
+    return result
 
 
 class PrivateRunCheckpoint(StrictPrivateWorkRequest):
@@ -88,6 +156,9 @@ class PrivateRunCreateRequest(StrictPrivateWorkRequest):
                 field_name,
                 strip_client_authority_fields(getattr(self, field_name)),
             )
+        self.input = _sanitize_public_run_input(self.input)
+        command = _sanitize_public_run_command(self.command)
+        self.command = command or None
         return self
 
 

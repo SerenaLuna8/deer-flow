@@ -9,6 +9,9 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message
+from deerflow.community.browserless.browserless_client import (
+    BrowserlessFetchResult,
+)
 
 
 def _normalize(content: str, *, name: str = "web_fetch") -> dict[str, object]:
@@ -89,7 +92,13 @@ def test_real_browserless_web_fetch_output_receives_expected_meta(
     from deerflow.community.browserless import tools as browserless_tools
 
     client = MagicMock()
-    client.fetch_html = AsyncMock(return_value=html)
+    client.fetch_html_with_status = AsyncMock(
+        return_value=BrowserlessFetchResult(
+            html=html,
+            target_status_code="200",
+            target_status="OK",
+        )
+    )
     with (
         patch.object(browserless_tools, "_get_browserless_client", return_value=client),
         patch.object(browserless_tools, "_get_tool_config", return_value=None),

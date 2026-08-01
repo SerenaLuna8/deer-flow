@@ -148,6 +148,16 @@ class ChannelConversationRow(Base):
             "external_topic_id",
             name="uq_channel_conversation_connection_external",
         ),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "connection_id",
+            "provider",
+            "external_conversation_id",
+            "external_topic_id",
+            "thread_id",
+            name="uq_channel_conversation_delivery_scope",
+        ),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_conversations_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_channel_conversations_owner", ondelete="RESTRICT"),
         ForeignKeyConstraint(
@@ -167,5 +177,93 @@ class ChannelConversationRow(Base):
             ["threads_meta.project_id", "threads_meta.owner_user_id", "threads_meta.thread_id"],
             name="fk_channel_conversations_private_thread",
             ondelete="CASCADE",
+        ),
+    )
+
+
+class ChannelInboundDeliveryRow(Base):
+    """One provider delivery atomically bound to one private Run."""
+
+    __tablename__ = "channel_inbound_deliveries"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    connection_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_conversation_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+    external_topic_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="",
+    )
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_delivery_digest: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "connection_id",
+            "provider",
+            "external_conversation_id",
+            "external_topic_id",
+            "provider_delivery_digest",
+            name="uq_channel_inbound_deliveries_scope",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "owner_user_id",
+                "connection_id",
+                "provider",
+                "external_conversation_id",
+                "external_topic_id",
+                "thread_id",
+            ],
+            [
+                "channel_conversations.project_id",
+                "channel_conversations.owner_user_id",
+                "channel_conversations.connection_id",
+                "channel_conversations.provider",
+                "channel_conversations.external_conversation_id",
+                "channel_conversations.external_topic_id",
+                "channel_conversations.thread_id",
+            ],
+            name="fk_channel_inbound_deliveries_conversation",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id", "run_id"],
+            [
+                "runs.project_id",
+                "runs.owner_user_id",
+                "runs.thread_id",
+                "runs.run_id",
+            ],
+            name="fk_channel_inbound_deliveries_run",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "provider_delivery_digest <> ''",
+            name="ck_channel_inbound_deliveries_digest",
+        ),
+        Index(
+            "ix_channel_inbound_deliveries_run",
+            "project_id",
+            "owner_user_id",
+            "run_id",
         ),
     )

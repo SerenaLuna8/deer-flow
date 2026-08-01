@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import yaml
 from wizard import ui as wizard_ui
-from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
+from wizard.providers import SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS
 from wizard.steps import channels as channels_step
 from wizard.steps import llm as llm_step
 from wizard.steps import search as search_step
@@ -21,73 +21,6 @@ from wizard.writer import (
 
 
 class TestProviders:
-    def test_llm_providers_not_empty(self):
-        assert len(LLM_PROVIDERS) >= 8
-
-    def test_llm_providers_cover_config_example_families(self):
-        providers = {provider.name: provider for provider in LLM_PROVIDERS}
-
-        expected = {
-            "volcengine",
-            "openai",
-            "openai_responses",
-            "ollama_qwen",
-            "ollama_gemma",
-            "anthropic",
-            "google",
-            "gemini_openai_gateway",
-            "mimo",
-            "deepseek",
-            "kimi",
-            "novita",
-            "minimax",
-            "minimax_cn",
-            "openrouter",
-            "vllm",
-            "mindie",
-            "codex",
-            "claude_code",
-        }
-        assert expected.issubset(providers)
-
-        assert providers["openai_responses"].extra_config["use_responses_api"] is True
-        assert providers["gemini_openai_gateway"].use == "deerflow.models.patched_openai:PatchedChatOpenAI"
-        assert providers["mimo"].use == "deerflow.models.patched_mimo:PatchedChatMiMo"
-        assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
-        assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
-
-    def test_minimax_vision_is_per_model(self):
-        """M3 supports vision; M2.7 variants are text-only.
-
-        The provider-level extra_config carries the default (M3) capability, but
-        extra_config_for() must drop vision when an M2.7 model is selected.
-        """
-        providers = {provider.name: provider for provider in LLM_PROVIDERS}
-
-        for name in ("minimax", "minimax_cn"):
-            provider = providers[name]
-            assert provider.extra_config["supports_vision"] is True
-            assert provider.extra_config_for("MiniMax-M3")["supports_vision"] is True
-            assert provider.extra_config_for("MiniMax-M2.7")["supports_vision"] is False
-            assert provider.extra_config_for("MiniMax-M2.7-highspeed")["supports_vision"] is False
-            # Override must not mutate the shared provider-level config.
-            assert provider.extra_config["supports_vision"] is True
-
-    def test_extra_config_for_returns_provider_config_without_override(self):
-        """Providers without per-model overrides return their config unchanged."""
-        providers = {provider.name: provider for provider in LLM_PROVIDERS}
-        openai = providers["openai"]
-        assert openai.extra_config_for("gpt-5") == openai.extra_config
-
-    def test_llm_providers_have_required_fields(self):
-        for p in LLM_PROVIDERS:
-            assert p.name
-            assert p.display_name
-            assert p.use
-            assert ":" in p.use, f"Provider '{p.name}' use path must contain ':'"
-            assert p.models
-            assert p.default_model in p.models
-
     def test_search_providers_have_required_fields(self):
         for sp in SEARCH_PROVIDERS:
             assert sp.name
@@ -118,45 +51,35 @@ class TestProviders:
 
 
 class TestBuildMinimalConfig:
-    def test_produces_valid_yaml(self):
-        content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI / gpt-4o",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+    def test_produces_valid_model_free_yaml(self):
+        content = build_minimal_config()
         data = yaml.safe_load(content)
         assert data is not None
-        assert "models" in data
-        assert len(data["models"]) == 1
-        model = data["models"][0]
-        assert model["name"] == "gpt-4o"
-        assert model["use"] == "langchain_openai:ChatOpenAI"
-        assert model["model"] == "gpt-4o"
-        assert model["api_key"] == "$OPENAI_API_KEY"
+        assert "models" not in data
+        assert "OPENAI_API_KEY" not in content
+        assert "langchain_openai:ChatOpenAI" not in content
 
-    def test_gemini_uses_gemini_api_key_field(self):
+    def test_removes_legacy_models_from_base_config(self):
         content = build_minimal_config(
-            provider_use="langchain_google_genai:ChatGoogleGenerativeAI",
-            model_name="gemini-2.0-flash",
-            display_name="Gemini",
-            api_key_field="gemini_api_key",
-            env_var="GEMINI_API_KEY",
+            base_config={
+                "config_version": 33,
+                "models": [
+                    {
+                        "name": "legacy",
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": "gpt-4o",
+                        "api_key": "$OPENAI_API_KEY",
+                    }
+                ],
+            }
         )
+
         data = yaml.safe_load(content)
-        model = data["models"][0]
-        assert "gemini_api_key" in model
-        assert model["gemini_api_key"] == "$GEMINI_API_KEY"
-        assert "api_key" not in model
+        assert "models" not in data
+        assert "OPENAI_API_KEY" not in content
 
     def test_search_tool_included(self):
         content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
             search_use="deerflow.community.tavily.tools:web_search_tool",
             search_extra_config={"max_results": 5},
         )
@@ -164,36 +87,8 @@ class TestBuildMinimalConfig:
         search_tool = next(t for t in data.get("tools", []) if t["name"] == "web_search")
         assert search_tool["max_results"] == 5
 
-    def test_openrouter_defaults_are_preserved(self):
-        content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="google/gemini-2.5-flash-preview",
-            display_name="OpenRouter",
-            api_key_field="api_key",
-            env_var="OPENROUTER_API_KEY",
-            extra_model_config={
-                "base_url": "https://openrouter.ai/api/v1",
-                "request_timeout": 600.0,
-                "max_retries": 2,
-                "max_tokens": 8192,
-                "temperature": 0.7,
-            },
-        )
-        data = yaml.safe_load(content)
-        model = data["models"][0]
-        assert model["base_url"] == "https://openrouter.ai/api/v1"
-        assert model["request_timeout"] == 600.0
-        assert model["max_retries"] == 2
-        assert model["max_tokens"] == 8192
-        assert model["temperature"] == 0.7
-
     def test_web_fetch_tool_included(self):
         content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
             web_fetch_use="deerflow.community.jina_ai.tools:web_fetch_tool",
             web_fetch_extra_config={"timeout": 10},
         )
@@ -202,26 +97,14 @@ class TestBuildMinimalConfig:
         assert fetch_tool["timeout"] == 10
 
     def test_no_search_tool_when_not_configured(self):
-        content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+        content = build_minimal_config()
         data = yaml.safe_load(content)
         tool_names = [t["name"] for t in data.get("tools", [])]
         assert "web_search" not in tool_names
         assert "web_fetch" not in tool_names
 
     def test_sandbox_included(self):
-        content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+        content = build_minimal_config()
         data = yaml.safe_load(content)
         assert "sandbox" in data
         assert "use" in data["sandbox"]
@@ -229,24 +112,13 @@ class TestBuildMinimalConfig:
         assert data["sandbox"]["allow_host_bash"] is False
 
     def test_bash_tool_disabled_by_default(self):
-        content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+        content = build_minimal_config()
         data = yaml.safe_load(content)
         tool_names = [t["name"] for t in data.get("tools", [])]
         assert "bash" not in tool_names
 
     def test_can_enable_container_sandbox_and_bash(self):
         content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
             sandbox_use="deerflow.community.aio_sandbox:AioSandboxProvider",
             include_bash_tool=True,
         )
@@ -258,11 +130,6 @@ class TestBuildMinimalConfig:
 
     def test_can_disable_write_tools(self):
         content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
             include_write_tools=False,
         )
         data = yaml.safe_load(content)
@@ -271,71 +138,12 @@ class TestBuildMinimalConfig:
         assert "str_replace" not in tool_names
 
     def test_config_version_present(self):
-        content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-            config_version=5,
-        )
+        content = build_minimal_config(config_version=34)
         data = yaml.safe_load(content)
-        assert data["config_version"] == 5
-
-    def test_cli_provider_does_not_emit_fake_api_key(self):
-        content = build_minimal_config(
-            provider_use="deerflow.models.openai_codex_provider:CodexChatModel",
-            model_name="gpt-5.4",
-            display_name="Codex CLI",
-            api_key_field="api_key",
-            env_var=None,
-        )
-        data = yaml.safe_load(content)
-        model = data["models"][0]
-        assert "api_key" not in model
-
-    def test_responses_api_provider_defaults_are_preserved(self):
-        provider = next(p for p in LLM_PROVIDERS if p.name == "openai_responses")
-        content = build_minimal_config(
-            provider_use=provider.use,
-            model_name=provider.default_model,
-            display_name=provider.display_name,
-            api_key_field=provider.api_key_field,
-            env_var=provider.env_var,
-            extra_model_config=provider.extra_config,
-        )
-        data = yaml.safe_load(content)
-        model = data["models"][0]
-        assert model["use_responses_api"] is True
-        assert model["output_version"] == "responses/v1"
-        assert model["supports_vision"] is True
-
-    def test_patched_thinking_provider_defaults_are_preserved(self):
-        provider = next(p for p in LLM_PROVIDERS if p.name == "mimo")
-        content = build_minimal_config(
-            provider_use=provider.use,
-            model_name=provider.default_model,
-            display_name=provider.display_name,
-            api_key_field=provider.api_key_field,
-            env_var=provider.env_var,
-            extra_model_config=provider.extra_config,
-        )
-        data = yaml.safe_load(content)
-        model = data["models"][0]
-        assert model["use"] == "deerflow.models.patched_mimo:PatchedChatMiMo"
-        assert model["base_url"] == "https://api.xiaomimimo.com/v1"
-        assert model["api_key"] == "$MIMO_API_KEY"
-        assert model["supports_thinking"] is True
-        assert model["when_thinking_enabled"]["extra_body"]["thinking"]["type"] == "enabled"
-        assert model["when_thinking_disabled"]["extra_body"]["thinking"]["type"] == "disabled"
+        assert data["config_version"] == 34
 
     def test_can_enable_selected_channel_connections(self):
         content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
             channel_connection_providers=["feishu", "slack"],
         )
 
@@ -353,11 +161,6 @@ class TestBuildMinimalConfig:
 
     def test_channel_connections_disabled_when_no_channels_selected(self):
         content = build_minimal_config(
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
             channel_connection_providers=[],
         )
 
@@ -368,145 +171,17 @@ class TestBuildMinimalConfig:
         assert all(not config["enabled"] for provider, config in channel_connections.items() if provider != "enabled")
 
 
-class TestThinkingSupport:
-    def test_other_provider_requests_thinking_prompt(self):
-        other = next(p for p in LLM_PROVIDERS if p.name == "other")
-        assert other.ask_thinking_support is True
-
-    def test_with_thinking_support_enabled_wires_toggles(self):
-        other = next(p for p in LLM_PROVIDERS if p.name == "other")
-        original = dict(other.extra_config)
-
-        updated = with_thinking_support(other, True)
-
-        assert updated.extra_config["supports_thinking"] is True
-        assert updated.extra_config["when_thinking_enabled"]["extra_body"]["thinking"]["type"] == "enabled"
-        assert updated.extra_config["when_thinking_disabled"]["extra_body"]["thinking"]["type"] == "disabled"
-        # The shared provider singleton must not be mutated.
-        assert other.extra_config == original
-
-    def test_with_thinking_support_disabled_marks_unsupported(self):
-        other = next(p for p in LLM_PROVIDERS if p.name == "other")
-
-        updated = with_thinking_support(other, False)
-
-        assert updated.extra_config["supports_thinking"] is False
-        assert "when_thinking_enabled" not in updated.extra_config
-
-
 class TestLLMStep:
-    def test_model_selection_defaults_to_provider_default_model(self, monkeypatch):
-        provider = LLMProvider(
-            name="test",
-            display_name="Test",
-            description="provider",
-            use="langchain_openai:ChatOpenAI",
-            models=["first-model", "default-model"],
-            default_model="default-model",
-            env_var="TEST_API_KEY",
-            package="langchain-openai",
-        )
-        prompts: list[tuple[str, int | None]] = []
-
-        def fake_choice(prompt, options, default=None):
-            prompts.append((prompt, default))
-            return default if default is not None else 0
-
-        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
-        monkeypatch.setattr(llm_step, "ask_choice", fake_choice)
-        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
+    def test_defers_model_setup_to_database_backed_admin_page(self, monkeypatch):
+        messages: list[str] = []
         monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", messages.append)
 
         result = llm_step.run_llm_step()
 
-        assert result.model_name == "default-model"
-        assert prompts == [("Enter choice", None), ("Select model", 1)]
-
-    def test_base_url_prompt_is_used_for_custom_gateway(self, monkeypatch):
-        provider = LLMProvider(
-            name="gateway",
-            display_name="Gateway",
-            description="provider",
-            use="langchain_openai:ChatOpenAI",
-            models=["gateway/model"],
-            default_model="gateway/model",
-            env_var="GATEWAY_API_KEY",
-            package="langchain-openai",
-            base_url_prompt="Gateway URL",
-        )
-
-        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
-        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
-        monkeypatch.setattr(llm_step, "ask_text", lambda *_args, **_kwargs: "https://gateway.example/v1")
-        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
-        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
-
-        result = llm_step.run_llm_step()
-
-        assert result.base_url == "https://gateway.example/v1"
-
-    def test_other_gateway_prompts_and_enables_thinking(self, monkeypatch):
-        provider = LLMProvider(
-            name="other",
-            display_name="Other OpenAI-compatible",
-            description="Custom gateway",
-            use="langchain_openai:ChatOpenAI",
-            models=["gpt-4o"],
-            default_model="gpt-4o",
-            env_var="OPENAI_API_KEY",
-            package="langchain-openai",
-            base_url_prompt="Base URL",
-            model_prompt="Model name",
-            ask_thinking_support=True,
-        )
-
-        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
-        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
-        monkeypatch.setattr(llm_step, "ask_text", lambda *_args, **_kwargs: "custom-thinking-model")
-        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
-        monkeypatch.setattr(llm_step, "ask_yes_no", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
-
-        result = llm_step.run_llm_step()
-
-        assert result.model_name == "custom-thinking-model"
-        assert result.provider.extra_config["supports_thinking"] is True
-        assert result.provider.extra_config["when_thinking_enabled"]["extra_body"]["thinking"]["type"] == "enabled"
-
-    def test_other_gateway_declined_thinking_marks_unsupported(self, monkeypatch):
-        provider = LLMProvider(
-            name="other",
-            display_name="Other OpenAI-compatible",
-            description="Custom gateway",
-            use="langchain_openai:ChatOpenAI",
-            models=["gpt-4o"],
-            default_model="gpt-4o",
-            env_var="OPENAI_API_KEY",
-            package="langchain-openai",
-            base_url_prompt="Base URL",
-            model_prompt="Model name",
-            ask_thinking_support=True,
-        )
-
-        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
-        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
-        monkeypatch.setattr(llm_step, "ask_text", lambda *_args, **_kwargs: "plain-model")
-        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
-        monkeypatch.setattr(llm_step, "ask_yes_no", lambda *_args, **_kwargs: False)
-        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
-
-        result = llm_step.run_llm_step()
-
-        assert result.provider.extra_config["supports_thinking"] is False
-        assert "when_thinking_enabled" not in result.provider.extra_config
+        assert result.admin_path == "/admin/settings/models"
+        assert any("PostgreSQL" in message for message in messages)
+        assert any("/admin/settings/models" in message for message in messages)
 
 
 class TestChannelsStep:
@@ -599,19 +274,12 @@ class TestWriteConfigYaml:
         """The generated config.yaml must be parseable (basic YAML validity)."""
 
         config_path = tmp_path / "config.yaml"
-        write_config_yaml(
-            config_path,
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI / gpt-4o",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+        write_config_yaml(config_path)
         assert config_path.exists()
         with open(config_path) as f:
             data = yaml.safe_load(f)
         assert isinstance(data, dict)
-        assert "models" in data
+        assert "models" not in data
 
     def test_copies_example_defaults_for_unconfigured_sections(self, tmp_path):
         example_path = tmp_path / "config.example.yaml"
@@ -649,28 +317,23 @@ class TestWriteConfigYaml:
                         "use": "deerflow.sandbox.local:LocalSandboxProvider",
                         "allow_host_bash": False,
                     },
-                    "summarization": {"max_tokens": 2048},
+                    "summarization": {"summary_prompt": "deployment prompt"},
+                    "tool_output": {"storage_subdir": ".custom-results"},
                 },
                 sort_keys=False,
             )
         )
 
         config_path = tmp_path / "config.yaml"
-        write_config_yaml(
-            config_path,
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI / gpt-4o",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+        write_config_yaml(config_path)
         with open(config_path) as f:
             data = yaml.safe_load(f)
 
         assert data["log_level"] == "info"
-        assert data["token_usage"]["enabled"] is True
+        assert "token_usage" not in data
         assert data["tool_groups"][0]["name"] == "web"
-        assert data["summarization"]["max_tokens"] == 2048
+        assert data["summarization"]["summary_prompt"] == "deployment prompt"
+        assert data["tool_output"]["storage_subdir"] == ".custom-results"
         assert any(tool["name"] == "image_search" and tool["max_results"] == 5 for tool in data["tools"])
 
     def test_config_version_read_from_example(self, tmp_path):
@@ -680,32 +343,36 @@ class TestWriteConfigYaml:
         example_path.write_text("config_version: 99\n")
 
         config_path = tmp_path / "config.yaml"
-        write_config_yaml(
-            config_path,
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="gpt-4o",
-            display_name="OpenAI",
-            api_key_field="api_key",
-            env_var="OPENAI_API_KEY",
-        )
+        write_config_yaml(config_path)
         with open(config_path) as f:
             data = yaml.safe_load(f)
         assert data["config_version"] == 99
 
-    def test_model_base_url_from_extra_config(self, tmp_path):
-        config_path = tmp_path / "config.yaml"
-        write_config_yaml(
-            config_path,
-            provider_use="langchain_openai:ChatOpenAI",
-            model_name="google/gemini-2.5-flash-preview",
-            display_name="OpenRouter",
-            api_key_field="api_key",
-            env_var="OPENROUTER_API_KEY",
-            extra_model_config={"base_url": "https://openrouter.ai/api/v1"},
+    def test_removes_legacy_models_from_example_defaults(self, tmp_path):
+        (tmp_path / "config.example.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "config_version": 33,
+                    "models": [
+                        {
+                            "name": "legacy",
+                            "use": "langchain_openai:ChatOpenAI",
+                            "model": "gpt-4o",
+                            "api_key": "$OPENAI_API_KEY",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
         )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(config_path)
+
         with open(config_path) as f:
             data = yaml.safe_load(f)
-        assert data["models"][0]["base_url"] == "https://openrouter.ai/api/v1"
+
+        assert "models" not in data
+        assert "OPENAI_API_KEY" not in config_path.read_text(encoding="utf-8")
 
 
 class TestSearchStep:

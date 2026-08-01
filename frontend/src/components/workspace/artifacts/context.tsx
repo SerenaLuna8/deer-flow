@@ -18,6 +18,7 @@ export interface ArtifactsContextType {
   autoSelect: boolean;
   select: (artifact: string, autoSelect?: boolean) => void;
   deselect: () => void;
+  showList: () => void;
 
   open: boolean;
   autoOpen: boolean;
@@ -75,6 +76,17 @@ function ArtifactsStateProvider({
     setOpen(false);
   }, [enabled]);
 
+  const showList = useCallback(() => {
+    if (!enabled) return;
+    setSelectedArtifact(null);
+    setAutoSelect(false);
+    setAutoOpen(false);
+    setOpen(true);
+    if (!isStaticWebsiteOnly()) {
+      setSidebarOpen(false);
+    }
+  }, [enabled, setSidebarOpen]);
+
   const value: ArtifactsContextType = {
     enabled,
     artifacts: enabled ? artifacts : [],
@@ -95,6 +107,7 @@ function ArtifactsStateProvider({
     selectedArtifact: enabled ? selectedArtifact : null,
     select,
     deselect,
+    showList,
   };
 
   return (

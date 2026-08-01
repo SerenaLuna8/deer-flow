@@ -49,11 +49,13 @@ export const auditActionSchema = z.enum([
   "quota.reconciled",
   "run.admitted",
   "run.cancel_requested",
+  "run.files_finalized",
   "run.terminal",
   "job.dead",
   "job.requeued",
   "purge.completed",
   "audit.corrected",
+  "system_setting.updated",
 ]);
 
 type AuditAction = z.infer<typeof auditActionSchema>;
@@ -99,6 +101,15 @@ const runTerminalMetadataSchema = z
     public_error_code: publicErrorCodeSchema.nullable().optional(),
   })
   .strict();
+const runFilesFinalizedMetadataSchema = z
+  .object({
+    created_count: z.number().int().nonnegative(),
+    modified_count: z.number().int().nonnegative(),
+    deleted_count: z.number().int().nonnegative(),
+    artifact_count: z.number().int().nonnegative(),
+    committed_bytes: z.number().int().nonnegative(),
+  })
+  .strict();
 const jobMetadataSchema = z
   .object({
     job_type: z.enum(["private_run", "automation_run", "retention_purge"]),
@@ -115,6 +126,19 @@ const purgeMetadataSchema = z
   .strict();
 const correctionMetadataSchema = z
   .object({ correction_kind: z.enum(["outcome", "metadata", "target"]) })
+  .strict();
+const systemSettingMetadataSchema = z
+  .object({
+    section: z.enum(["agent_runtime", "auth", "quotas"]),
+    revision: z.number().int().min(2),
+    schema_version: z.number().int().min(1),
+    payload_checksum: z.string().regex(/^[0-9a-f]{64}$/u),
+    effect_scope: z.enum([
+      "new_requests_and_runs",
+      "new_requests",
+      "next_authoritative_check",
+    ]),
+  })
   .strict();
 
 const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
@@ -151,11 +175,13 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "quota.reconciled": quotaReconciledMetadataSchema,
   "run.admitted": runAdmittedMetadataSchema,
   "run.cancel_requested": emptyMetadataSchema,
+  "run.files_finalized": runFilesFinalizedMetadataSchema,
   "run.terminal": runTerminalMetadataSchema,
   "job.dead": jobMetadataSchema,
   "job.requeued": jobMetadataSchema,
   "purge.completed": purgeMetadataSchema,
   "audit.corrected": correctionMetadataSchema,
+  "system_setting.updated": systemSettingMetadataSchema,
 };
 
 export const auditItemSchema = z
@@ -183,6 +209,7 @@ export const auditItemSchema = z
       "job",
       "purge",
       "audit",
+      "system_setting",
     ]),
     outcome: z.enum(["success", "rejected", "failed"]),
     public_error_code: z

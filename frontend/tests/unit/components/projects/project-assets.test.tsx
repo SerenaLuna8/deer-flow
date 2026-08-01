@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
-import { renderToStaticMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
+import { renderToStaticMarkup as renderReactToStaticMarkup } from "react-dom/server";
 
 import {
   McpApprovalForm,
@@ -21,6 +22,7 @@ import {
   bindingVersionLabel,
   canMoveSystemBinding,
 } from "@/components/projects/assets/system-binding-dialog";
+import { I18nProvider } from "@/core/i18n/context";
 import type {
   AssetVersion,
   ProjectAssetItem,
@@ -35,6 +37,12 @@ const PROJECT_ASSET_ID = "22222222-2222-4222-8222-222222222222";
 const VERSION_ID = "44444444-4444-4444-8444-444444444444";
 const MCP_VERSION_ID = "55555555-5555-4555-8555-555555555555";
 const SLOT_ID = "66666666-6666-4666-8666-666666666666";
+
+function renderToStaticMarkup(children: ReactNode): string {
+  return renderReactToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">{children}</I18nProvider>,
+  );
+}
 
 const base = {
   slug: "analyst",
@@ -339,7 +347,7 @@ describe("project shared asset pages", () => {
       expect(readOnly).not.toContain(">归档<");
       expect(readOnly).not.toContain(">暂停<");
     }
-    expect(editorPending).toContain("等待 Admin 审批");
+    expect(editorPending).toContain("等待管理员审批");
     expect(editorPending).not.toContain("批准并发布");
     expect(editorPending).not.toContain("发布版本");
     expect(editorDraft).toContain("提交审批");
@@ -415,9 +423,7 @@ describe("project shared asset pages", () => {
     expect(html).toContain("撤销凭据");
     expect(html).toContain("迁移兼容引用");
     expect(html).toContain(">删除<");
-    expect(html).toContain(
-      "既有 MCP Grant 与 Skill 环境变量绑定仍固定到旧版本",
-    );
+    expect(html).toContain("既有 MCP 授权与 Skill 环境变量绑定仍固定到旧版本");
     expect(html).toContain('role="tablist"');
     expect(html).toContain("系统提供");
     expect(html).toContain("项目自建");
@@ -553,7 +559,7 @@ describe("project shared asset pages", () => {
 
     expect(optionalHtml).toContain("可选槽位可留空并直接批准");
     expect(optionalHtml).not.toContain('disabled=""');
-    expect(requiredHtml).toContain("必填槽位没有可用 Credential");
+    expect(requiredHtml).toContain("必填槽位没有可用凭据");
     expect(requiredHtml).toContain('required=""');
     expect(requiredHtml).toContain('disabled=""');
   });
@@ -581,13 +587,13 @@ describe("project shared asset pages", () => {
       />,
     );
 
-    expect(loadingHtml).toContain("正在加载 Credential");
-    expect(loadingHtml).not.toContain("没有可用 Credential");
+    expect(loadingHtml).toContain("正在加载凭据");
+    expect(loadingHtml).not.toContain("没有可用凭据");
     expect(loadingHtml).toContain('disabled=""');
-    expect(errorHtml).toContain("Credential 列表加载失败，请重试");
+    expect(errorHtml).toContain("凭据列表加载失败，请重试");
     expect(errorHtml).toContain("重试");
     expect(errorHtml).not.toContain("secret-token-must-not-render");
-    expect(errorHtml).not.toContain("没有可用 Credential");
+    expect(errorHtml).not.toContain("没有可用凭据");
     expect(errorHtml).toContain('disabled=""');
   });
 

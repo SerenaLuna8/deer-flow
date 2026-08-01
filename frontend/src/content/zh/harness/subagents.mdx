@@ -88,9 +88,13 @@ subagents:
 `SubagentLimitMiddleware` 控制 Lead Agent 在单次轮次中可以并行调用多少个子 Agent，通过每次请求的配置控制：
 
 - `subagent_enabled`：是否为此会话激活子 Agent 委派
-- `max_concurrent_subagents`：单次轮次中最大并行任务调用数（默认：3）
+- `max_concurrent_subagents`：单次轮次中最大并行任务调用数（默认：3，执行范围：1–4）
 
-如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。
+如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。单个 Run 还受独立的总委派
+上限约束（默认：6，配置范围：1–50），避免通过多个轮次无限串行委派。
+
+子任务卡片会显示该次委派实际使用的模型；启用全局 Token 用量展示后，还会显示最新累计
+Token。实时事件和刷新后的结构化任务结果使用同一组字段。
 
 ## ACP Agent（外部 Agent）
 

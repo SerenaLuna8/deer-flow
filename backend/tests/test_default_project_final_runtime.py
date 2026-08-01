@@ -10,6 +10,12 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.bootstrap_identities import (
+    BUILTIN_ASSET_EMAIL,
+    BUILTIN_ASSET_USER_ID,
+    BUILTIN_MODEL_EMAIL,
+    BUILTIN_MODEL_USER_ID,
+)
 from app.projects.bootstrap import bootstrap_default_project
 from app.projects.errors import (
     ProjectBootstrapFailed,
@@ -68,6 +74,49 @@ async def test_default_bootstrap_states_idempotency_and_concurrency(
                 )
                 == 1
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_default_bootstrap_ignores_non_login_service_principals(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            for user_id, email in (
+                (BUILTIN_ASSET_USER_ID, BUILTIN_ASSET_EMAIL),
+                (BUILTIN_MODEL_USER_ID, BUILTIN_MODEL_EMAIL),
+            ):
+                await connection.execute(
+                    text(
+                        """INSERT INTO users
+                        (id,email,system_role,created_at,needs_setup,token_version)
+                        VALUES (:id,:email,'user',:now,false,0)"""
+                    ),
+                    {
+                        "id": str(user_id),
+                        "email": email,
+                        "now": datetime.now(UTC),
+                    },
+                )
+        async with factory() as session:
+            result = await bootstrap_default_project(session)
+        assert result.status is BootstrapStatus.NO_USERS
+        async with engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM project_memberships"),
+                )
+            ) == 0
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM projects"),
+                )
+            ) == 0
     finally:
         await engine.dispose()
 

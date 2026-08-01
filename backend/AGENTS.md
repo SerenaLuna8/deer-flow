@@ -74,8 +74,16 @@ does not acquire the Scheduler ownership lock or start polling.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the named
 empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
-system asset catalog, initializes the LangGraph checkpointer/store schema, and bootstraps the
-default project. The application role must be an ordinary non-superuser.
+system asset catalog, initializes the LangGraph checkpointer/store schema, bootstraps the
+default project, and seeds the former example's DeepSeek V4 Pro as the active/default PostgreSQL
+model. The backend Make target loads the root `.env` when it exists, with explicit process
+environment taking precedence; explicit environment also works without that file.
+`DEEPSEEK_API_KEY` and a valid Credential keyring are preflighted and encrypted before
+database creation; missing or invalid material fails without creating the target. Credential,
+envelope, model version, and default pointer are then written in one transaction under a distinct
+non-login bootstrap principal that has no project membership. A complete existing model catalog
+is validated and preserved rather than overwritten. The application role must be an ordinary
+non-superuser.
 
 An existing legacy DeerFlow database is never upgraded in place. A legacy or unknown marker,
 unversioned nonempty schema, or catalog drift fails closed without DDL or repair. Operators must
@@ -150,6 +158,38 @@ The dependency direction is `app.* -> deerflow.*`. Harness code must never impor
 - The application does not use PostgreSQL RLS. Application isolation therefore depends on
   immutable contexts, scoped repositories, composite constraints, and non-superuser runtime
   roles.
+
+### Authentication and browser sessions
+
+- Email is one case-insensitive account identifier. All user repository create, lookup, and
+  update paths normalize with `strip + lowercase`; ORM and `full_schema.sql` both enforce the
+  unique `lower(email)` index. This schema change follows the empty-target `make setup-db`
+  lifecycle and must never be installed with a runtime or incremental migration.
+- A browser access token is valid only while its signed `sid`, user `token_version`, and
+  PostgreSQL `auth_sessions` row all validate. Login persists the session before returning the
+  JWT; logout revokes the current `sid`, while password change increments the token version,
+  revokes every old session, and issues one new session.
+- `auth.local.allow_registration` gates only public local self-registration. A disabled gate
+  returns structured `403 registration_disabled` before account creation; first-admin
+  initialization and controlled OIDC provisioning remain independent. Public setup status has
+  the exact `{needs_setup, registration_enabled}` shape; only `needs_setup` may be cached, while
+  the registration policy is resolved for every response.
+- `AuthAppConfig`, `LocalAuthConfig`, `OIDCAuthConfig`, and every `OIDCProviderConfig` reject
+  unknown fields. A misspelled registration, auto-provisioning, domain, or cookie-policy key must
+  fail configuration loading rather than silently fall back to a permissive default.
+- Remember-me changes browser persistence, not authentication authority. A false choice keeps
+  access, CSRF, and the HttpOnly preference cookie session-only. A true choice persists them for
+  the configured token lifetime on HTTPS and localhost HTTP; public plain HTTP remains
+  session-only unless the operator explicitly enables
+  `auth.local.allow_insecure_persistent_cookie`.
+- Access and CSRF cookies resolve secure/lifetime policy together. Logout deletes access, CSRF,
+  and preference cookies even when durable revocation is unavailable and the endpoint must
+  return 503. Passwords, JWTs, CSRF values, and raw `sid` values must never enter browser storage,
+  public responses, logs, or traces.
+- The removed top-level `authorization:` config is a version-32 tombstone, not an enabled
+  generic provider. Project authority remains ProjectContext + capability + private owner scope
+  + side-effect revalidation; a future provider may only add a concrete fail-closed restriction,
+  never replace or expand that authority.
 
 ## System asset and Agent execution boundary
 
@@ -299,7 +339,9 @@ model or create an Agent. Each generation turn builds a bounded, server-authoriz
 stores only validated clarification/candidate results; raw prompts are never attached to tracing.
 Final confirmation is one transaction that creates the project Agent as `suspended`, publishes
 complete version 1 with all four logical documents, advances the pointer, and marks the Builder
-session completed. The public confirmation response returns only the completed session and Agent;
+session completed. Dependency child rows are inserted while version 1 is still Draft; only after
+the complete Skill/MCP ref set is flushed may the same transaction transition it to Published and
+advance the pointer. The public confirmation response returns only the completed session and Agent;
 the internal revision is not exposed. Project-local Agent slugs remain unique. Interrupted generation is recoverable,
 and retention removes Builder messages and blueprints with the exact project/owner private scope.
 Agent lifecycle does not expose an archive mutation. Project and project-override APIs retain
@@ -348,11 +390,81 @@ holds the raw lease token only in memory; PostgreSQL stores its hash. Durable st
 validate the exact current lease in the same transaction, use thread-monotonic sequence IDs,
 and persist one terminal outcome. Gateway only reads scoped durable frames and honors
 `Last-Event-ID` after restart.
+Every executable Run has a server-owned `origin_trace_id`. Client metadata, config, context, and
+request bodies may not select either `origin_trace_id` or `deerflow_trace_id`. Admission persists
+the same value on Run and Job; the composite
+`project_id + owner_user_id + run_id + origin_trace_id` foreign key and Worker-side revalidation
+must both hold before model, tool, stream, or settlement side effects. Same-`run_id` semantic
+retries retain the first admitted trace. Retention jobs carry no Run trace. Worker keeps this
+durable trace in its internal ContextVar/runtime authority regardless of logging configuration,
+while `logging.enhance.enabled=false` prevents only the external Langfuse
+`deerflow_trace_id` attribute. Public Run responses, metadata, browser caches, and audit payloads
+never expose the raw durable trace; audit stores only its domain-separated request HMAC.
+Operator log records may carry the trace only when the startup-frozen logging enhancement is
+enabled.
+`run_events.id` and `run_events.seq` are signed PostgreSQL BIGINT values in the full schema.
+The schema change has no in-place upgrade path: an older database must be replaced with an
+empty target and initialized through `make setup-db`. A settled terminal is replayed only when
+its cursor is strictly greater than the request cursor; an exact terminal cursor returns an
+empty successful response rather than a duplicate `stream.end`.
+The four non-SSE private-work feeds — per-Run messages, Thread messages, per-Run events, and
+Thread events — serialize every `seq` as a canonical non-negative decimal string, never a JSON
+number. Their `before_seq`/`after_seq` cursor contract uses the same decimal representation and
+is bounded by signed PostgreSQL BIGINT. The privacy-center NDJSON attachment is outside this
+Thread/task feed contract and still exports its event `seq` as a JSON number.
+Thread search offsets, Thread patch/delete `expected_version`, Run-list offsets, and ready-file
+offsets are likewise bounded by signed PostgreSQL BIGINT; overflow is a stable private 422 rather
+than a database error. Explicit same-scope Thread creation is intentionally non-idempotent under
+an insert race: exactly one request returns 201 and the loser receives 409, with one Thread row
+and one root checkpoint. Two renames using the same `expected_version` similarly produce one 200
+and one 409, incrementing the version once without a silent overwrite.
+Each project may hold one revisioned default pointer to an active, published, executable
+project-owned Agent. Project admins manage that pointer with `shared_assets.manage_bindings`;
+readers may observe it but cannot change it. Ordinary Thread creation omits both Agent fields and
+resolves the pointer inside the authoritative Gateway transaction, falling back only to the
+packaged Main Agent when the pointer is unset. Explicit Agent-card creation still supplies both
+fields and wins over the default. A configured but unavailable default fails closed, and neither
+changing the pointer nor clearing it rewrites an existing Thread or Run snapshot.
+Run catalogs use stable newest-first `limit/offset` pages. Ready-file catalogs use stable
+`logical_path + version + id` pages and return `X-Next-Offset` only for a safe full page; that
+header is CORS-exposed. Clients must enumerate the complete catalog with an AbortSignal, strict
+public schemas, duplicate/progress checks, and a hard safety bound. Invalid responses, repeated
+full pages, or an unsafe next offset fail closed rather than truncating or looping forever.
+Worker stream consumers are root/namespace separated. Child graph frames keep their namespaced
+event names and bypass root fallback detection, root file-tool batching, and parent subagent
+persistence. Root `write_file` and `str_replace` argument deltas are grouped in bounded batches
+without bypassing `LeaseAuthorizedStreamBridge`; normal text and meaningful metadata still
+stream immediately. Provider transport-only metadata such as `model_provider` must neither
+flush nor publish a pending file batch. Every pending batch is flushed on identity/mode/value,
+finish, and error boundaries.
+Worker-side RunJournal, subagent, and workspace-change event writes use the same exact private
+scope and raw Job lease. `DbRunEventStore` revalidates project membership, Job/Run state,
+cancellation, expiry, and both lease hashes in the event-write transaction; an old Worker may
+not append internal events after lease loss.
+
+Checkpoint message storage is process-frozen as `database.checkpoint_channel_mode=full|delta`;
+`database.checkpoint_delta.snapshot_frequency` is frozen with it because the cadence is compiled
+into the graph. Gateway and every Worker sharing PostgreSQL must use the same pair and restart
+together. The supported migration is full to delta only; once a Thread carries the delta marker,
+a full process must fail before reading or writing it. Private state consumers bind a
+mode-matched materialization graph above `ProjectScopedCheckpointer`, preserving the exact
+project/owner/Thread authority marker and row-lock boundary. Raw `channel_values.messages` is
+never a complete-state API in delta mode. Goal, compaction, branch, regenerate, connection
+inbound, Worker resume, and rollback must use materialized snapshots; replace-style writes wrap
+reducer channels in `Overwrite`. Branch writes the exact pre-human replay base and then the
+selected state as two target checkpoints, excluding `sandbox` and `thread_data`, so later
+regeneration has a valid ancestor. Unknown middleware channels fail closed instead of being
+silently discarded.
 
 Loop detection keeps the higher global frequency allowance for local file and shell workflows,
 but applies lower default frequency bounds to `web_search` and `web_fetch`. Varying remote
 queries must receive a stop warning and hard-stop before a private Run can exhaust its default
 LangGraph recursion ceiling.
+
+Hidden goal continuations advance their counter from the fresh goal state while holding the
+thread goal lock. A stale evaluator may not regress or collapse a committed attempt, and the
+stand-down write after a racing user message records only its reason rather than counting the
+same continuation twice.
 
 The durable top-level `message` journal is a lead-Agent conversation projection. Lead AI
 messages and their exact `tool_call_id` results belong there; subagent and middleware AI/tool
@@ -361,6 +473,13 @@ event stream. Caller attribution first follows the exact callback run ID from to
 falls back to the issuing AI tool call and callback tags, so provider-local call-ID reuse cannot
 leak nested reasoning or tool output into the user conversation. Run-level message counts and
 last-answer summaries are lead-only.
+
+For a streaming lead-Agent model call, `RunJournal` observes the interval from the first
+non-empty reasoning delta to the first visible answer delta. A reasoning-only tool-call step
+closes at that model call's end. The bounded millisecond value is persisted on the selected AI
+message as `additional_kwargs.reasoning_duration_ms`; it is never copied from Run latency,
+tool/subagent time, another model candidate, or an unobserved non-streaming response. Missing
+observation therefore remains missing rather than inventing a duration.
 
 Subagents inherit the exact admitted Agent profile, but project-authored Agent/Skill/MCP text is
 followed by a final platform security and confidentiality reminder in their single SystemMessage.
@@ -372,9 +491,51 @@ request identity, authorization, and trace ContextVars but clears the parent Lan
 `RunnableConfig` before entering its isolated loop, so raw child model/tool frames cannot leak
 through the lead stream writer. The parent `task` tool's bounded `task_running`/terminal custom
 events and persisted `subagent.step`/`subagent.end` rows are the authoritative subtask UI channels.
+Namespaced child custom frames remain visible on their namespaced SSE channel but must not be
+persisted again as parent Run subagent rows; only root-namespace task lifecycle events feed that
+parent event buffer.
 A `general-purpose` subagent without a command-execution tool rejects explicit Shell/Python
 execution requests before creating its model Agent and returns a structured failed result; it
 must never fabricate output or loop through wrapper files as a substitute for execution.
+
+Subagent batch concurrency is canonically clamped to `1..4` in configuration, prompt rendering,
+and `SubagentLimitMiddleware`; the per-Run total remains independently bounded to `1..50` and
+private ledgers count the exact project, owner, Run, and provider occurrence. A child
+`deerflow_error_fallback` marker fails only that task; only a root-namespace marker may decide the
+parent Run terminal state. Terminal ToolMessage metadata and task lifecycle events may expose only
+the effective model name and the validated cumulative `input_tokens`, `output_tokens`, and
+`total_tokens` snapshot. The executor publishes a thread-safe collector snapshot after each
+streamed graph chunk so polling can report usage before terminal completion. Subagent event-store
+batch failures are re-buffered in original order and must retain the server-issued private scope;
+`CancelledError` must re-buffer the in-flight batch before cancellation is re-raised.
+
+## Project Memory runtime
+
+PostgreSQL is the only project Memory authority. Every row remains bound to
+`project_id + owner_user_id + namespace`; the harness must not derive these coordinates from
+model arguments, request payloads, ambient user state, or a replaceable Memory backend.
+
+Private Lead Agent Runs may expose the async, read-only `memory_search` tool when
+`memory.enabled` and `memory.search_enabled` are both true. Its model-visible arguments are only
+`query`, optional `category`, and `top_k`. The Worker creates an opaque Run-bound Memory authority
+and installs it under the internal `__memory_authority` runtime key after stripping caller values.
+One search transaction locks/revalidates the exact membership and capability, active Run
+authorization, Job/Run/lease/cancellation/thread binding, then reads the exact Memory snapshot
+without creating a missing row. The ranker owns no scope, cache, index, or persistence.
+
+The canonical code-registered `memory_search` object uses the trusted read-only tool boundary, so
+its PostgreSQL read does not mark Job retry safety unknown. A name or metadata value cannot claim
+this status; legacy boundaries without the read-only hook fall back to the ordinary tool boundary.
+Search errors expose only a stable public code, and untrusted fact content/category are
+neutralized and bounded before returning to the model.
+
+Memory injection remains a hidden low-authority Human message frozen in the Thread checkpoint.
+Do not promote Memory text to System, reload it on every turn, or replace dev's latest-genuine-user
+selection with main's first-user selection. Conversation facts continue to be written passively:
+pre-summarization uses immediate queue admission, normal pending snapshots remain authoritative,
+writes for one project/owner/namespace/thread key are serialized, and Worker shutdown performs a
+bounded flush after inflight Runs settle and before registry removal. This process-local queue
+improves graceful shutdown but is not a durable job system.
 
 ## Project APIs
 
@@ -395,8 +556,23 @@ All private and governance APIs are project-scoped:
 
 Project input polish requires both `private_work.create` and `shared_assets.execute`, locks the
 Thread, and validates the exact Agent/Credential closure before the auxiliary model call.
+Project follow-up suggestions read only the authoritative scoped checkpoint and Agent snapshot;
+their stable `model_ref` (including `default`) must be resolved through the
+PostgreSQL model catalog to an exact active logical model version before the auxiliary model
+call.
 Channel inbound must resolve one connected PostgreSQL row carrying exact
 account/project/owner/connection authority before it can create a private Thread, Run, or job.
+Provider delivery identity is carried separately from authority. Its durable delivery row stores
+only a SHA-256 digest; the raw identifier remains transient in adapter/message processing and
+must not be persisted in delivery metadata. Admission locks the exact connection, conversation,
+and Thread, checks the scoped delivery before the active-Run conflict, and binds a new delivery
+to its Run in the same Run/Job/quota/audit transaction. A duplicate delivery creates no second
+Run or outbound reply; delivery rows have no TTL and are retained with their Run/conversation.
+
+GitHub does not automatically retry failed webhook deliveries. A transient fan-out failure
+returns 503 so Recent Deliveries and recovery tooling retain an operator-visible failed event
+for manual/API redelivery. A known delivery can still be manually/API redelivered after an
+accidental 200, but it is not discoverable through the normal failed-delivery recovery set.
 
 The project Token series is a `project.usage.read` aggregate across owners in one project. It
 returns exactly 24 consecutive UTC hour buckets, assigns terminal Run counters by durable Job
@@ -421,6 +597,14 @@ Private Run file finalization is separate from the ten-file upload batch contrac
 most 2,000 regular workspace/output files within a 10,000-entry traversal boundary; directories
 do not consume the file count. Per-file and 100 MiB total byte limits apply only to files created
 or changed by the current Run, not to the restored cumulative Thread workspace.
+After finalization, a Run that created or modified `outputs/*` succeeds only when at least one
+of those exact current-Run paths has a server-verified artifact from `present_files`. Presenting
+only an older output is insufficient. Finalized files remain ready when this delivery verdict
+fails; this rule does not add main's Gateway-owned RunStore receipt chain.
+The lead-Agent prompt and `write_file` tool schema treat a file explicitly requested by the user
+(including source code, scripts, configuration, and documents) as a final deliverable: write or
+copy it to `outputs/*` and call `present_files` before the final response. Workspace-only files
+remain valid temporary/intermediate files and are not implicitly published.
 Gateway authoring and the explicit project-Skill import CLI use the same `AppConfig.quotas`
 defaults. Archive-creation requests have a scoped 160 MiB wire limit at both the ASGI receive
 boundary and each Nginx entry point, before JSON/Pydantic or multipart route processing.
@@ -442,10 +626,31 @@ authority in the same transaction before physically deleting project data.
 ## Configuration
 
 Configuration is read only from an explicit `DEER_FLOW_CONFIG_PATH` or the repository-root
-`config.yaml`. `database`, `worker`, `scheduler`, `quotas`, `channels`, sandbox,
-models, tools, logging, and final runtime policy remain supported. Infrastructure configuration
-is restart-required. Unknown application extension fields remain allowed where their typed
-models permit them, but removed top-level keys fail validation instead of being ignored.
+`config.yaml`. `database`, `worker`, `scheduler`, `channels`, sandbox, tools, logging, and
+deployment-owned prompt/path policy remain supported. Infrastructure configuration is
+restart-required. Unknown application extension fields remain allowed where their typed models
+permit them, but removed top-level keys fail validation instead of being ignored.
+
+The current example schema is `config_version: 34`. In addition to the top-level `models:` and
+`authorization:` tombstones, YAML leaves now owned by the PostgreSQL `agent_runtime`, `auth`, and
+`quotas` policy sections are rejected; run `make config-upgrade` to remove them from an older local
+file. Deployment-owned siblings such as `title.prompt_template`,
+`summarization.summary_prompt`, `tool_output.storage_subdir`, and non-policy `subagents` fields stay
+in YAML. Model definitions, immutable versions, the default pointer, exact Credential
+references, and Run snapshots are PostgreSQL authority. A system admin manages the catalog at
+`/admin/settings/models` and live runtime policy at `/admin/settings/system`; provider secrets are
+encrypted Credential envelopes and are decrypted
+only at the execution boundary. Runtime configuration imports never load dotenv implicitly.
+The explicit local `make setup-db` command is the sole one-time exception: it imports
+`DEEPSEEK_API_KEY` from an existing root `.env` or explicit environment into an
+encrypted Credential before runtime starts. Doctor, Docker Compose, Helm, Gateway, Scheduler, and
+Worker must not broadcast provider keys as process-wide model configuration.
+Backend module role and database-operations Make targets use
+`scripts/run_runtime.py` to load non-provider root `.env` settings explicitly;
+caller-supplied values win, and ambient model-provider API keys are removed
+before the target process starts. `setup-db` remains the sole exception because
+it consumes the initial provider key exactly once and persists its encrypted
+Credential.
 
 Secret values must come from environment-backed configuration and must be separated by domain:
 Auth, Credential encryption, audit/quota HMAC, and database passwords cannot reuse material.

@@ -13,12 +13,19 @@ Fixtures are produced by ``scripts/record_gateway.py`` +
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 
 import pytest
-from _replay_fixture import REPLAY_MODEL_BLOCK, build_config_yaml, drive_gateway, prepare_hermetic_skills
+from _replay_fixture import (
+    build_config_yaml,
+    drive_gateway,
+    prepare_hermetic_skills,
+    prepare_replay_runtime_catalog,
+    replay_model_adapter,
+)
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "replay"
 
@@ -54,11 +61,14 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
     monkeypatch.setenv("DATABASE_URL", migrated_postgres_database_url)
 
     cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(build_config_yaml(model_block=REPLAY_MODEL_BLOCK, home=home), encoding="utf-8")
+    cfg_path.write_text(build_config_yaml(home=home), encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
     prepare_hermetic_skills(home)
 
     _reset_process_singletons(monkeypatch)
+    asyncio.run(
+        prepare_replay_runtime_catalog(migrated_postgres_database_url),
+    )
     from deerflow.config import app_config as app_config_module
 
     app_config_module.get_app_config()
@@ -72,7 +82,12 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
 
     replay_provider.reset_replay_misses()
 
-    events = drive_gateway(create_app(), prompt=fixture["prompt"], context=fixture["context"])
+    with replay_model_adapter():
+        events = drive_gateway(
+            create_app(),
+            prompt=fixture["prompt"],
+            context=fixture["context"],
+        )
 
     assert events, "replay produced no SSE events"
     assert events[0]["event"] == "metadata", f"first event should be metadata, got {events[0]!r}"
@@ -91,4 +106,5 @@ def test_replay_write_read_file_ultra_matches_golden(tmp_path: Path, monkeypatch
     # Guards backend SSE protocol drift: the event name + payload-key sequence
     # must match the committed golden. (Replay divergence is caught by the miss
     # assertion above, not here — a swallowed miss keeps the shapes identical.)
-    assert events == golden, f"SSE event-shape sequence drifted from the golden.\ngot  ({len(events)}): {[e['event'] for e in events]}\nwant ({len(golden)}): {[e['event'] for e in golden]}"
+    differences = [(index, actual, expected) for index, (actual, expected) in enumerate(zip(events, golden, strict=False)) if actual != expected]
+    assert events == golden, f"SSE event-shape sequence drifted from the golden.\ngot  ({len(events)}): {[e['event'] for e in events]}\nwant ({len(golden)}): {[e['event'] for e in golden]}\ndifferences: {differences}"

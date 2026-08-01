@@ -10,12 +10,22 @@ from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.messages import BaseMessage
-from langgraph.checkpoint.base import CheckpointTuple, uuid6
+from langgraph.types import Overwrite
 from sqlalchemy import or_, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import deerflow.utils.llm_text as llm_text
+from app.private_work.checkpoint_lineage import (
+    CheckpointLineageError,
+    find_settled_checkpoint_before_message,
+)
+from app.private_work.checkpoint_state import (
+    bind_scoped_checkpoint_state,
+    bind_transaction_checkpoint_state,
+    checkpoint_config,
+    snapshot_checkpoint_id,
+)
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
 from app.private_work.errors import (
@@ -27,6 +37,7 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.run_repository import PrivateRunRecord, PrivateRunRepository
 from app.private_work.snapshot_repository import RunSnapshotAssetStale, RunSnapshotRepository
 from app.private_work.thread_repository import PrivateThreadRecord, PrivateThreadRepository
 from app.private_work.thread_service import PrivateThreadService
@@ -37,9 +48,14 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
+from app.shared_assets.model_refs import ConfiguredModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
-from deerflow.config.app_config import AppConfig
+from app.system_settings import (
+    SystemModelMaterializationUnavailable,
+    SystemModelMaterializer,
+)
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.context_compaction import (
@@ -53,7 +69,6 @@ from deerflow.runtime.events.store import RunEventStore
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.oneshot_llm import run_oneshot_llm
-from deerflow.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -61,43 +76,6 @@ _HISTORY_SCAN_LIMIT = 200
 _SUGGESTION_MESSAGE_LIMIT = 6
 _SUGGESTION_MESSAGE_CHARS = 4000
 _SUGGESTION_TOTAL_CHARS = 12000
-
-
-class _CapturedCheckpointReader:
-    """Expose one immutable checkpoint to the compaction prepare phase."""
-
-    def __init__(self, item: CheckpointTuple, saver: Any) -> None:
-        self._item = item
-        self._saver = saver
-
-    async def aget_tuple(self, _config: object) -> CheckpointTuple:
-        return self._item
-
-    def get_next_version(self, current: object, channel: object) -> object:
-        return self._saver.get_next_version(current, channel)
-
-
-class _LockedCheckpointWriter:
-    """Commit through a saver while its caller-owned Thread lock is held."""
-
-    def __init__(self, saver: Any, session: AsyncSession) -> None:
-        self._saver = saver
-        self._session = session
-
-    async def aput(
-        self,
-        config: dict[str, Any],
-        checkpoint: dict[str, Any],
-        metadata: dict[str, Any],
-        new_versions: dict[str, Any],
-    ) -> dict[str, Any]:
-        return await self._saver.aput_already_authorized(
-            config,
-            checkpoint,
-            metadata,
-            new_versions,
-            session=self._session,
-        )
 
 
 class ProjectChatControlService:
@@ -112,6 +90,7 @@ class ProjectChatControlService:
         *,
         resolver: ProjectAssetResolver | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
+        model_materializer: SystemModelMaterializer | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._project_scoped_checkpointer = project_scoped_checkpointer
@@ -123,18 +102,24 @@ class ProjectChatControlService:
             endpoint_policy=endpoint_policy,
         )
         self._revalidator = PrivateWorkRevalidator()
+        self._model_materializer = model_materializer
 
     async def get_goal(
         self,
         context: PrivateWorkContext,
         thread_id: str,
+        *,
+        app_config: AppConfig | None = None,
     ) -> dict[str, Any] | None:
         context = require_issued_private_work_context(context)
-        item = await self._saver(context).aget_tuple(self._checkpoint_config(thread_id))
-        if item is None:
+        snapshot = await self._state(
+            context,
+            app_config or get_app_config(),
+            as_node="goal",
+        ).aget(checkpoint_config(thread_id))
+        if snapshot_checkpoint_id(snapshot) is None:
             raise PrivateWorkNotFound(context.request_id)
-        channel_values = self._channel_values(item)
-        goal = channel_values.get("goal")
+        goal = (snapshot.values or {}).get("goal")
         return copy.deepcopy(goal) if isinstance(goal, dict) else None
 
     async def set_goal(
@@ -144,6 +129,7 @@ class ProjectChatControlService:
         *,
         objective: str,
         max_continuations: int = DEFAULT_MAX_GOAL_CONTINUATIONS,
+        app_config: AppConfig | None = None,
     ) -> dict[str, Any]:
         context = require_issued_private_work_context(context)
         try:
@@ -153,22 +139,36 @@ class ProjectChatControlService:
             )
         except (TypeError, ValueError):
             raise PrivateWorkInvalid(context.request_id) from None
-        await self._write_goal(context, thread_id, goal)
+        await self._write_goal(
+            context,
+            thread_id,
+            goal,
+            app_config=app_config or get_app_config(),
+        )
         return goal
 
     async def clear_goal(
         self,
         context: PrivateWorkContext,
         thread_id: str,
+        *,
+        app_config: AppConfig | None = None,
     ) -> None:
         context = require_issued_private_work_context(context)
-        await self._write_goal(context, thread_id, None)
+        await self._write_goal(
+            context,
+            thread_id,
+            None,
+            app_config=app_config or get_app_config(),
+        )
 
     async def _write_goal(
         self,
         context: PrivateWorkContext,
         thread_id: str,
         goal: dict[str, Any] | None,
+        *,
+        app_config: AppConfig,
     ) -> None:
         saver = self._saver(context)
         try:
@@ -181,36 +181,20 @@ class ProjectChatControlService:
                     Capability.SHARED_ASSETS_EXECUTE,
                     reject_incomplete_run=True,
                 )
-                item = await saver.aget_tuple_already_authorized(
-                    self._checkpoint_config(thread_id),
-                    session=session,
+                state = bind_transaction_checkpoint_state(
+                    saver,
+                    session,
+                    app_config,
+                    as_node="goal",
                 )
-                if item is None:
+                snapshot = await state.aget(checkpoint_config(thread_id))
+                parent_checkpoint_id = snapshot_checkpoint_id(snapshot)
+                if parent_checkpoint_id is None:
                     raise PrivateWorkNotFound(context.request_id)
-                checkpoint = copy.deepcopy(getattr(item, "checkpoint", {}) or {})
-                metadata = copy.deepcopy(getattr(item, "metadata", {}) or {})
-                channel_values = dict(checkpoint.get("channel_values", {}) or {})
-                if goal is None:
-                    channel_values.pop("goal", None)
-                else:
-                    channel_values["goal"] = copy.deepcopy(goal)
-                channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
-                next_version = saver.get_next_version(channel_versions.get("goal"), None)
-                channel_versions["goal"] = next_version
-                checkpoint["channel_values"] = channel_values
-                checkpoint["channel_versions"] = channel_versions
-                checkpoint["id"] = str(uuid6())
-                metadata["updated_at"] = now_iso()
-                metadata["source"] = "update"
-                current_step = metadata.get("step")
-                metadata["step"] = current_step + 1 if isinstance(current_step, int) else 1
-                metadata["writes"] = {"goal": {"goal": goal}}
-                await saver.aput_already_authorized(
-                    self._checkpoint_config(thread_id),
-                    checkpoint,
-                    metadata,
-                    {"goal": next_version},
-                    session=session,
+                await state.aupdate(
+                    snapshot.config,
+                    {"goal": Overwrite(copy.deepcopy(goal))},
+                    as_node="goal",
                 )
         except PrivateWorkError:
             raise
@@ -231,6 +215,11 @@ class ProjectChatControlService:
         """Prepare outside locks, then compare-and-swap under a second lock."""
 
         context = require_issued_private_work_context(context)
+        runtime_config = await self._materialize_compaction_config(
+            context,
+            thread_id,
+            app_config,
+        )
         saver = self._saver(context)
         try:
             async with self._session_factory() as session, session.begin():
@@ -242,20 +231,28 @@ class ProjectChatControlService:
                     Capability.SHARED_ASSETS_EXECUTE,
                     reject_incomplete_run=True,
                 )
-                source = await saver.aget_tuple_already_authorized(
-                    self._checkpoint_config(thread_id),
-                    session=session,
+                locked_state = bind_transaction_checkpoint_state(
+                    saver,
+                    session,
+                    runtime_config,
+                    as_node="manual_compaction",
                 )
-                if source is None:
+                source = await locked_state.aget(checkpoint_config(thread_id))
+                if snapshot_checkpoint_id(source) is None:
                     raise PrivateWorkNotFound(context.request_id)
 
             prepared = await prepare_thread_compaction(
-                _CapturedCheckpointReader(source, saver),
+                self._state(
+                    context,
+                    runtime_config,
+                    as_node="manual_compaction",
+                ),
                 thread_id,
                 keep=keep,
                 force=force,
                 user_id=str(context.user_id),
-                app_config=app_config,
+                app_config=runtime_config,
+                snapshot=source,
             )
             if not prepared.result.compacted:
                 return prepared.result
@@ -269,16 +266,19 @@ class ProjectChatControlService:
                     Capability.SHARED_ASSETS_EXECUTE,
                     reject_incomplete_run=True,
                 )
-                current = await saver.aget_tuple_already_authorized(
-                    self._checkpoint_config(thread_id),
-                    session=session,
+                locked_state = bind_transaction_checkpoint_state(
+                    saver,
+                    session,
+                    runtime_config,
+                    as_node="manual_compaction",
                 )
-                if current is None:
+                current = await locked_state.aget(checkpoint_config(thread_id))
+                if snapshot_checkpoint_id(current) is None:
                     raise PrivateWorkNotFound(context.request_id)
-                if self._checkpoint_id(current) != prepared.source_checkpoint_id:
+                if snapshot_checkpoint_id(current) != prepared.source_checkpoint_id:
                     raise PrivateWorkConflict(context.request_id)
                 return await commit_thread_compaction(
-                    _LockedCheckpointWriter(saver, session),
+                    locked_state,
                     prepared,
                 )
         except ContextCompactionDisabled:
@@ -298,6 +298,37 @@ class ProjectChatControlService:
             )
             raise PrivateWorkUnavailable(context.request_id) from None
 
+    async def _materialize_compaction_config(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        app_config: AppConfig,
+    ) -> AppConfig:
+        """Bind manual compaction to one current, exact model definition.
+
+        A dedicated summarization model wins when the current database policy
+        selects one. Otherwise the thread's current Agent model is the
+        authoritative fallback. Production composition always supplies the
+        system materializer; the unmaterialized branch exists only for
+        isolated service tests that inject an exact ``AppConfig`` directly.
+        """
+
+        model_ref = app_config.summarization.model_name
+        if model_ref is None:
+            resolved = await self._resolve_agent_authority(context, thread_id)
+            model_ref = resolved.payload.model_ref
+        if self._model_materializer is None:
+            return app_config
+        try:
+            runtime_model = await self._model_materializer.materialize_active(
+                model_ref,
+            )
+        except SystemModelMaterializationUnavailable:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        if runtime_model.name != model_ref and model_ref != "default":
+            raise PrivateWorkUnavailable(context.request_id)
+        return app_config.with_runtime_models((runtime_model,))
+
     async def branch(
         self,
         context: PrivateWorkContext,
@@ -306,23 +337,52 @@ class ProjectChatControlService:
         message_id: str,
         message_ids: list[str],
         title: str | None,
+        app_config: AppConfig | None = None,
     ) -> tuple[PrivateThreadRecord, str]:
         context = require_issued_private_work_context(context)
+        resolved_app_config = app_config or get_app_config()
         source = await self._thread_service.get(context, source_thread_id)
         if source is None:
             raise PrivateWorkNotFound(context.request_id)
         target_ids = {message_id, *message_ids}
         selected = None
-        saver = self._saver(context)
-        async for item in saver.alist(
-            self._checkpoint_config(source_thread_id),
+        state = self._state(
+            context,
+            resolved_app_config,
+            as_node="branch",
+        )
+        for snapshot in await state.ahistory(
+            checkpoint_config(source_thread_id),
             limit=_HISTORY_SCAN_LIMIT,
         ):
-            if self._matches_branch_target(self._messages(item), target_ids):
-                selected = item
+            if self._matches_branch_target(
+                self._messages(snapshot),
+                target_ids,
+            ):
+                selected = snapshot
                 break
-        checkpoint_id = self._checkpoint_id(selected)
+        checkpoint_id = snapshot_checkpoint_id(selected)
         if checkpoint_id is None:
+            raise PrivateWorkConflict(context.request_id)
+        selected_messages = self._messages(selected)
+        target_indices = [index for index, message in enumerate(selected_messages) if self._message_id(message) in target_ids]
+        first_target_index = min(target_indices) if target_indices else -1
+        branch_human = next(
+            (message for message in reversed(selected_messages[:first_target_index]) if self._is_visible_human(message)),
+            None,
+        )
+        branch_human_id = self._message_id(branch_human)
+        if branch_human_id is None:
+            raise PrivateWorkConflict(context.request_id)
+        replay_base = await self._find_checkpoint_before_message(
+            state,
+            source_thread_id,
+            branch_human_id,
+            context.request_id,
+            head=selected,
+        )
+        replay_base_checkpoint_id = snapshot_checkpoint_id(replay_base)
+        if replay_base_checkpoint_id is None:
             raise PrivateWorkConflict(context.request_id)
         target_thread_id = str(uuid.uuid4())
         record = await self._thread_service.branch(
@@ -330,7 +390,9 @@ class ProjectChatControlService:
             source_thread_id=source_thread_id,
             target_thread_id=target_thread_id,
             checkpoint_id=checkpoint_id,
+            replay_base_checkpoint_id=replay_base_checkpoint_id,
             expected_source_version=source.version,
+            app_config=resolved_app_config,
             display_name=title or source.display_name,
         )
         return record, checkpoint_id
@@ -341,6 +403,7 @@ class ProjectChatControlService:
         thread_id: str,
         *,
         message_id: str,
+        app_config: AppConfig | None = None,
     ) -> dict[str, Any]:
         context = require_issued_private_work_context(context)
         await self._validate_control_authority(
@@ -348,9 +411,13 @@ class ProjectChatControlService:
             thread_id,
             reject_incomplete_run=True,
         )
-        saver = self._saver(context)
-        latest = await saver.aget_tuple(self._checkpoint_config(thread_id))
-        if latest is None:
+        state = self._state(
+            context,
+            app_config or get_app_config(),
+            as_node="regenerate",
+        )
+        latest = await state.aget(checkpoint_config(thread_id))
+        if snapshot_checkpoint_id(latest) is None:
             raise PrivateWorkNotFound(context.request_id)
         messages = self._messages(latest)
         target_index = next(
@@ -373,10 +440,11 @@ class ProjectChatControlService:
         if human is None or human_id is None:
             raise PrivateWorkConflict(context.request_id)
         base = await self._find_checkpoint_before_message(
-            saver,
+            state,
             thread_id,
             human_id,
             context.request_id,
+            head=latest,
         )
         target_run_id = await self._find_target_run_id(
             context,
@@ -384,8 +452,12 @@ class ProjectChatControlService:
             message_id,
         )
         checkpoint = self._checkpoint_response(base, context.request_id)
+        regenerate_input: dict[str, Any] = {"messages": [self._clean_human_message(human)]}
+        latest_title = self._channel_values(latest).get("title")
+        if isinstance(latest_title, str) and latest_title:
+            regenerate_input["title"] = latest_title
         return {
-            "input": {"messages": [self._clean_human_message(human)]},
+            "input": regenerate_input,
             "checkpoint": checkpoint,
             "metadata": {
                 "regenerate_from_message_id": message_id,
@@ -393,6 +465,109 @@ class ProjectChatControlService:
                 "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
             },
             "target_run_id": target_run_id,
+        }
+
+    async def prepare_edit_regenerate(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        human_message_id: str,
+        replacement_text: str,
+        app_config: AppConfig | None = None,
+    ) -> dict[str, Any]:
+        """Prepare one strict edit replay without accepting client authority."""
+
+        context = require_issued_private_work_context(context)
+        normalized_text = replacement_text.strip()
+        if not normalized_text:
+            raise PrivateWorkConflict(context.request_id)
+        await self._validate_control_authority(
+            context,
+            thread_id,
+            reject_incomplete_run=True,
+        )
+        state = self._state(
+            context,
+            app_config or get_app_config(),
+            as_node="edit_regenerate",
+        )
+        latest = await state.aget(checkpoint_config(thread_id))
+        if snapshot_checkpoint_id(latest) is None:
+            raise PrivateWorkNotFound(context.request_id)
+        latest_values = self._channel_values(latest)
+        goal = latest_values.get("goal")
+        if isinstance(goal, Mapping) and goal.get("status") == "active":
+            raise PrivateWorkConflict(context.request_id)
+
+        source_human, source_ai, source_message_ids = self._latest_editable_turn(
+            self._messages(latest),
+            human_message_id,
+            context.request_id,
+        )
+        source_text = get_original_user_content_text(
+            self._message_content(source_human),
+            self._additional_kwargs(source_human),
+        ).strip()
+        if source_text == normalized_text:
+            raise PrivateWorkConflict(context.request_id)
+        source_human_id = self._message_id(source_human)
+        source_ai_id = self._message_id(source_ai)
+        if source_human_id is None or source_ai_id is None:
+            raise PrivateWorkConflict(context.request_id)
+
+        base = await self._find_checkpoint_before_message(
+            state,
+            thread_id,
+            source_human_id,
+            context.request_id,
+            head=latest,
+        )
+        target_run_id = await self._find_target_run_id(
+            context,
+            thread_id,
+            source_ai_id,
+        )
+        source_run = await self._require_successful_source_run(
+            context,
+            thread_id,
+            target_run_id,
+        )
+        checkpoint = self._checkpoint_response(base, context.request_id)
+        replacement_human_message_id = str(uuid.uuid4())
+        edit_version_group_id = source_run.metadata.get("edit_version_group_id")
+        if not isinstance(edit_version_group_id, str) or not edit_version_group_id:
+            edit_version_group_id = source_human_id
+
+        edit_input: dict[str, Any] = {
+            "messages": [
+                self._clean_human_message_for_edit(
+                    source_human,
+                    replacement_id=replacement_human_message_id,
+                    replacement_text=normalized_text,
+                )
+            ]
+        }
+        base_title = self._channel_values(base).get("title")
+        latest_title = latest_values.get("title")
+        if isinstance(base_title, str) and base_title and isinstance(latest_title, str) and latest_title:
+            edit_input["title"] = latest_title
+
+        return {
+            "input": edit_input,
+            "checkpoint": checkpoint,
+            "metadata": {
+                "replay_kind": "edit",
+                "regenerate_from_message_id": source_ai_id,
+                "regenerate_from_run_id": target_run_id,
+                "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
+                "edit_from_message_id": source_human_id,
+                "edit_message_id": replacement_human_message_id,
+                "edit_version_group_id": edit_version_group_id,
+            },
+            "target_run_id": target_run_id,
+            "replacement_human_message_id": replacement_human_message_id,
+            "source_message_ids": source_message_ids,
         }
 
     async def suggest(
@@ -406,14 +581,41 @@ class ProjectChatControlService:
         context = require_issued_private_work_context(context)
         if not app_config.suggestions.enabled:
             return []
-        saver = self._saver(context)
-        item = await saver.aget_tuple(self._checkpoint_config(thread_id))
-        if item is None:
+        snapshot = await self._state(
+            context,
+            app_config,
+            as_node="suggest",
+        ).aget(checkpoint_config(thread_id))
+        if snapshot_checkpoint_id(snapshot) is None:
             raise PrivateWorkNotFound(context.request_id)
-        conversation = self._suggestion_conversation(self._messages(item))
+        conversation = self._suggestion_conversation(self._messages(snapshot))
         if not conversation:
             return []
         resolved = await self._resolve_agent_authority(context, thread_id)
+        runtime_config = app_config
+        if self._model_materializer is not None:
+            try:
+                runtime_model = await self._model_materializer.materialize_active(
+                    resolved.payload.model_ref,
+                )
+            except SystemModelMaterializationUnavailable:
+                logger.warning(
+                    "Project suggestion model is unavailable: request_id=%s",
+                    context.request_id,
+                )
+                return []
+            runtime_config = app_config.with_runtime_models((runtime_model,))
+            model_name = runtime_model.name
+        else:
+            model_name = ConfiguredModelRefResolver(app_config).resolve(
+                resolved.payload.model_ref,
+            )
+        if model_name is None:
+            logger.warning(
+                "Project suggestion model is unavailable: request_id=%s",
+                context.request_id,
+            )
+            return []
         system_instruction = (
             "You are generating follow-up questions to help the user continue the conversation.\n"
             f"Based on the conversation below, produce EXACTLY {n} short questions the user might ask next.\n"
@@ -429,8 +631,8 @@ class ProjectChatControlService:
                 system_instruction=system_instruction,
                 user_content=f"Conversation Context:\n{conversation}\n\nGenerate {n} follow-up questions",
                 run_name="project_suggest_agent",
-                app_config=app_config,
-                model_name=resolved.payload.model_ref,
+                app_config=runtime_config,
+                model_name=model_name,
                 thread_id=thread_id,
             )
         except Exception:
@@ -548,27 +750,23 @@ class ProjectChatControlService:
 
     async def _find_checkpoint_before_message(
         self,
-        saver: Any,
+        state: Any,
         thread_id: str,
         message_id: str,
         request_id: str,
-    ) -> CheckpointTuple:
-        checkpoints = [
-            item
-            async for item in saver.alist(
-                self._checkpoint_config(thread_id),
-                limit=_HISTORY_SCAN_LIMIT,
+        *,
+        head: object,
+    ) -> Any:
+        del thread_id
+        try:
+            return await find_settled_checkpoint_before_message(
+                state,
+                head,
+                message_id,
+                max_depth=_HISTORY_SCAN_LIMIT * 2,
             )
-        ]
-        previous = None
-        for item in reversed(checkpoints):
-            if message_id in {self._message_id(message) for message in self._messages(item)}:
-                if previous is None:
-                    raise PrivateWorkConflict(request_id)
-                return previous
-            if self._checkpoint_id(item) is not None:
-                previous = item
-        raise PrivateWorkConflict(request_id)
+        except CheckpointLineageError:
+            raise PrivateWorkConflict(request_id) from None
 
     async def _find_target_run_id(
         self,
@@ -593,6 +791,43 @@ class ProjectChatControlService:
             if isinstance(run_id, str) and run_id:
                 return run_id
         raise PrivateWorkConflict(context.request_id)
+
+    async def _require_successful_source_run(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        run_id: str,
+    ) -> PrivateRunRecord:
+        """Revalidate an edit source under the exact private coordinates."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.SHARED_ASSETS_EXECUTE,
+                    lock=True,
+                )
+                thread = await PrivateThreadRepository(session).get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                    lock=True,
+                )
+                if thread is None:
+                    raise PrivateWorkNotFound(context.request_id)
+                record = await PrivateRunRepository(session).get(
+                    scope=context.resource_scope,
+                    run_id=run_id,
+                    lock=True,
+                )
+                if record is None or record.thread_id != thread_id or record.status != "success":
+                    raise PrivateWorkConflict(context.request_id)
+                return record
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
 
     @classmethod
     def _suggestion_conversation(cls, messages: list[Any]) -> str:
@@ -651,9 +886,10 @@ class ProjectChatControlService:
 
     @staticmethod
     def _channel_values(item: object) -> dict[str, Any]:
-        checkpoint = getattr(item, "checkpoint", {}) or {}
-        values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, Mapping) else {}
-        return dict(values) if isinstance(values, Mapping) else {}
+        snapshot_values = getattr(item, "values", None)
+        if isinstance(snapshot_values, Mapping):
+            return dict(snapshot_values)
+        return {}
 
     @classmethod
     def _messages(cls, item: object) -> list[Any]:
@@ -699,6 +935,13 @@ class ProjectChatControlService:
         return dict(value) if isinstance(value, Mapping) else {}
 
     @classmethod
+    def _message_tool_calls(cls, message: object) -> list[Any]:
+        value = message.get("tool_calls") if isinstance(message, Mapping) else getattr(message, "tool_calls", None)
+        if not isinstance(value, list):
+            value = cls._additional_kwargs(message).get("tool_calls")
+        return list(value) if isinstance(value, list) else []
+
+    @classmethod
     def _hidden(cls, message: object) -> bool:
         return cls._message_type(message) == "remove" or cls._message_name(message) == "summary" or cls._additional_kwargs(message).get("hide_from_ui") is True
 
@@ -709,6 +952,37 @@ class ProjectChatControlService:
     @classmethod
     def _is_visible_ai(cls, message: object) -> bool:
         return cls._message_type(message) == "ai" and not cls._hidden(message)
+
+    @classmethod
+    def _latest_editable_turn(
+        cls,
+        messages: list[Any],
+        human_message_id: str,
+        request_id: str,
+    ) -> tuple[Any, Any, list[str]]:
+        latest_human_index = next(
+            (index for index in range(len(messages) - 1, -1, -1) if cls._is_visible_human(messages[index])),
+            None,
+        )
+        if latest_human_index is None or cls._message_id(messages[latest_human_index]) != human_message_id:
+            raise PrivateWorkConflict(request_id)
+        source_human = messages[latest_human_index]
+        last_ai_index: int | None = None
+        for index, message in enumerate(
+            messages[latest_human_index + 1 :],
+            start=latest_human_index + 1,
+        ):
+            if cls._is_visible_human(message):
+                break
+            if cls._is_visible_ai(message):
+                last_ai_index = index
+        if last_ai_index is None:
+            raise PrivateWorkConflict(request_id)
+        source_ai = messages[last_ai_index]
+        if not message_to_text(source_ai).strip() or cls._message_tool_calls(source_ai):
+            raise PrivateWorkConflict(request_id)
+        source_message_ids = [message_id for message in messages[latest_human_index : last_ai_index + 1] if (message_id := cls._message_id(message)) is not None]
+        return source_human, source_ai, source_message_ids
 
     @classmethod
     def _matches_branch_target(
@@ -747,6 +1021,26 @@ class ProjectChatControlService:
         return clean
 
     @classmethod
+    def _clean_human_message_for_edit(
+        cls,
+        message: object,
+        *,
+        replacement_id: str,
+        replacement_text: str,
+    ) -> dict[str, Any]:
+        source_kwargs = cls._additional_kwargs(message)
+        additional_kwargs = {key: copy.deepcopy(source_kwargs[key]) for key in ("files", "referenced_message_contexts") if key in source_kwargs}
+        clean: dict[str, Any] = {
+            "type": "human",
+            "id": replacement_id,
+            "content": [{"type": "text", "text": replacement_text}],
+            "additional_kwargs": additional_kwargs,
+        }
+        if name := cls._message_name(message):
+            clean["name"] = name
+        return clean
+
+    @classmethod
     def _event_message_id(cls, row: dict[str, Any]) -> str | None:
         content = row.get("content")
         if isinstance(content, (BaseMessage, Mapping)):
@@ -772,6 +1066,20 @@ class ProjectChatControlService:
 
     def _saver(self, context: PrivateWorkContext) -> Any:
         return self._project_scoped_checkpointer.for_context(context)
+
+    def _state(
+        self,
+        context: PrivateWorkContext,
+        app_config: AppConfig,
+        *,
+        as_node: str,
+    ) -> Any:
+        return bind_scoped_checkpoint_state(
+            self._project_scoped_checkpointer,
+            context,
+            app_config,
+            as_node=as_node,
+        )
 
 
 __all__ = ["ProjectChatControlService"]

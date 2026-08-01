@@ -7,6 +7,8 @@ import {
   createHtmlPreviewScrollKey,
   extractWriteArtifactSelections,
   getArtifactViewState,
+  mergeDurableArtifactPaths,
+  resolveDurableArtifactSelection,
 } from "@/core/artifacts/preview";
 
 const ARTIFACT_PATH = "/artifact-fixtures/report.html";
@@ -46,6 +48,36 @@ test("extracts stable preview selections for streamed file writes", () => {
       url: `write-file:${ARTIFACT_PATH}?message_id=ai-1&tool_call_id=call-1`,
     },
   ]);
+});
+
+test("replaces a completed write preview with the matching durable project file", () => {
+  expect(
+    resolveDurableArtifactSelection(
+      "write-file:/mnt/user-data/workspace/QuickSort.java?message_id=ai-1&tool_call_id=call-1",
+      [
+        { logical_path: "uploads/request.txt" },
+        { logical_path: "workspace/QuickSort.java" },
+      ],
+    ),
+  ).toBe("workspace/QuickSort.java");
+});
+
+test("does not replace a write preview with a different durable file", () => {
+  expect(
+    resolveDurableArtifactSelection(
+      "write-file:/mnt/user-data/workspace/QuickSort.java?message_id=ai-1&tool_call_id=call-1",
+      [{ logical_path: "workspace/MergeSort.java" }],
+    ),
+  ).toBeUndefined();
+});
+
+test("deduplicates presented and ready paths for the same finalized file", () => {
+  expect(
+    mergeDurableArtifactPaths(
+      ["/mnt/user-data/outputs/QuickSort.java"],
+      [{ logical_path: "outputs/QuickSort.java" }],
+    ),
+  ).toEqual(["outputs/QuickSort.java"]);
 });
 
 test("allows in-progress write artifacts to render a throttled preview", () => {

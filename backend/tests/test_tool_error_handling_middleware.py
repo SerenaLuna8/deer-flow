@@ -1,8 +1,10 @@
 import sys
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphInterrupt
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
@@ -14,9 +16,11 @@ from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config import summarization_config
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
-from deerflow.config.guardrails_config import GuardrailsConfig
+from deerflow.config.guardrails_config import GuardrailProviderConfig, GuardrailsConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.subagents.status_contract import SUBAGENT_ERROR_KEY, SUBAGENT_STATUS_KEY
 
 
@@ -195,6 +199,33 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
     assert progress_idx < error_idx, f"ToolProgressMiddleware (index {progress_idx}) must be outer (lower index) than ToolErrorHandlingMiddleware (index {error_idx}); order: {[type(m).__name__ for m in middlewares]}"
 
 
+def test_guardrail_is_outer_of_side_effect_fence_after_read_only_preflight():
+    """A denied provider decision must not mark a side effect as ambiguous.
+
+    Guardrail performs the private read-only authorization preflight itself.
+    ``ToolErrorHandlingMiddleware`` owns the real side-effect fence and must be
+    inner, so it is reached only after the provider allows the call.
+    """
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+
+    app_config = _make_app_config().model_copy(
+        update={
+            "guardrails": GuardrailsConfig(
+                enabled=True,
+                provider=GuardrailProviderConfig(
+                    use="deerflow.guardrails.builtin:AllowlistProvider",
+                ),
+            ),
+        }
+    )
+
+    middlewares = build_lead_runtime_middlewares(app_config=app_config)
+
+    side_effect_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, ToolErrorHandlingMiddleware))
+    guardrail_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, GuardrailMiddleware))
+    assert guardrail_idx < side_effect_idx, f"GuardrailMiddleware must be outer (lower index) than ToolErrorHandlingMiddleware so a deny stops before the side-effect fence; order: {[type(m).__name__ for m in middlewares]}"
+
+
 def test_middleware_ordering_guard_raises_when_progress_is_inner(monkeypatch: pytest.MonkeyPatch):
     """_build_runtime_middlewares must raise RuntimeError when ToolProgressMiddleware ends up
     at a higher index than ToolErrorHandlingMiddleware.
@@ -323,6 +354,140 @@ def test_wrap_tool_call_passthrough_on_success():
     assert result is expected
 
 
+def test_sync_private_tool_call_fails_closed_before_handler():
+    from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="bash", tool_call_id="private-sync")
+    req.runtime = SimpleNamespace(
+        context={
+            "private_scope": PrivateResourceScope(
+                project_id="private-project",
+                owner_user_id="private-user",
+                membership_version=1,
+            )
+        }
+    )
+    handler = MagicMock(
+        return_value=ToolMessage(
+            content="executed",
+            tool_call_id="private-sync",
+            name="bash",
+        )
+    )
+
+    try:
+        result = middleware.wrap_tool_call(req, handler)
+    except AuthorizationRevoked:
+        result = None
+
+    handler.assert_not_called()
+    if result is not None:
+        assert result.status == "error"
+
+
+@pytest.mark.anyio
+async def test_private_mcp_authorization_uses_shared_provenance_helper(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import deerflow.agents.middlewares.tool_error_handling_middleware as module
+
+    operations: list[str] = []
+    helper_calls: list[object] = []
+
+    class Boundary:
+        async def before_tool_call(self):
+            operations.append("before_tool_call")
+
+        async def before_mcp_call(self):
+            operations.append("before_mcp_call")
+
+    tool = object()
+
+    def is_private_mcp_tool(candidate):
+        helper_calls.append(candidate)
+        return candidate is tool
+
+    monkeypatch.setattr(
+        module,
+        "is_private_mcp_tool",
+        is_private_mcp_tool,
+        raising=False,
+    )
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="project_lookup", tool_call_id="private-mcp")
+    req.tool = tool
+    req.runtime = SimpleNamespace(
+        context={
+            "private_scope": PrivateResourceScope(
+                project_id="private-project",
+                owner_user_id="private-user",
+                membership_version=1,
+            ),
+            "__authorization_boundary": Boundary(),
+        }
+    )
+
+    async def handler(_request):
+        return ToolMessage(
+            content="ok",
+            tool_call_id="private-mcp",
+            name="project_lookup",
+        )
+
+    result = await middleware.awrap_tool_call(req, handler)
+
+    assert result.content == "ok"
+    assert helper_calls == [tool]
+    assert operations == ["before_tool_call", "before_mcp_call"]
+
+
+@pytest.mark.anyio
+async def test_forged_tool_call_metadata_cannot_grant_private_mcp_authority():
+    operations: list[str] = []
+
+    class Boundary:
+        async def before_tool_call(self):
+            operations.append("before_tool_call")
+
+        async def before_mcp_call(self):
+            operations.append("before_mcp_call")
+
+    def local_lookup(query: str) -> str:
+        return query
+
+    registered_tool = StructuredTool.from_function(
+        func=local_lookup,
+        name="local_lookup",
+        description="Look up local data.",
+    )
+    req = _request(name="local_lookup", tool_call_id="forged-private-mcp")
+    req.tool = registered_tool
+    req.tool_call["metadata"] = {"deerflow_private_mcp": True}
+    req.runtime = SimpleNamespace(
+        context={
+            "private_scope": PrivateResourceScope(
+                project_id="private-project",
+                owner_user_id="private-user",
+                membership_version=1,
+            ),
+            "__authorization_boundary": Boundary(),
+        }
+    )
+
+    async def handler(_request):
+        return ToolMessage(
+            content="ok",
+            tool_call_id="forged-private-mcp",
+            name="local_lookup",
+        )
+
+    result = await ToolErrorHandlingMiddleware().awrap_tool_call(req, handler)
+
+    assert result.content == "ok"
+    assert operations == ["before_tool_call"]
+
+
 def test_read_file_skill_read_stamps_compact_skill_metadata():
     app_config = _make_app_config()
     app_config.skills.container_path = "/mnt/skills"
@@ -400,7 +565,9 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert result.name == "web_search"
     assert result.status == "error"
     assert "Tool 'web_search' failed" in result.text
-    assert "network down" in result.text
+    assert TOOL_EXECUTION_FAILED_ERROR_CODE in result.text
+    assert "network down" not in result.text
+    assert result.additional_kwargs["error_code"] == TOOL_EXECUTION_FAILED_ERROR_CODE
 
 
 def test_wrap_tool_call_stamps_tool_meta_on_exception():
@@ -417,7 +584,9 @@ def test_wrap_tool_call_stamps_tool_meta_on_exception():
     meta = result.additional_kwargs[TOOL_META_KEY]
     assert meta["status"] == "error"
     assert meta["source"] == "exception"
-    assert meta["error_type"] == "transient"
+    assert meta["error_type"] == "unknown"
+    assert result.additional_kwargs["error_code"] == TOOL_EXECUTION_FAILED_ERROR_CODE
+    assert "connection refused" not in repr(result)
 
 
 def test_task_exception_wrapper_uses_subagent_result_formatter():
@@ -433,9 +602,10 @@ def test_task_exception_wrapper_uses_subagent_result_formatter():
     assert result.tool_call_id == "tc-task"
     assert result.name == "task"
     assert result.status == "error"
-    assert result.content == "Task failed. Error: RuntimeError: network down. Continue with available context, or choose an alternative tool."
+    assert result.content == ("Task failed. Error: TOOL_EXECUTION_FAILED. Continue with available context, or choose an alternative tool.")
     assert result.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
-    assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == "RuntimeError: network down"
+    assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == TOOL_EXECUTION_FAILED_ERROR_CODE
+    assert "network down" not in repr(result)
 
 
 def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
@@ -478,7 +648,8 @@ async def test_awrap_tool_call_returns_error_tool_message_on_exception():
     assert result.tool_call_id == "tc-async"
     assert result.name == "mcp_tool"
     assert result.status == "error"
-    assert "request timed out" in result.text
+    assert TOOL_EXECUTION_FAILED_ERROR_CODE in result.text
+    assert "request timed out" not in result.text
 
 
 @pytest.mark.anyio

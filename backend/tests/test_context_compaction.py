@@ -13,23 +13,18 @@ class _FakeCheckpointer:
     def __init__(self, checkpoint: dict, metadata: dict | None = None) -> None:
         self.checkpoint = checkpoint
         self.metadata = metadata or {"step": 4, "created_at": "2026-07-06T00:00:00+00:00"}
-        self.put_args = None
+        self.update_args = None
 
-    async def aget_tuple(self, config):
+    async def aget(self, config):
         return SimpleNamespace(
-            checkpoint=self.checkpoint,
+            values=self.checkpoint.get("channel_values", {}),
             metadata=self.metadata,
             config={"configurable": {"thread_id": config["configurable"]["thread_id"], "checkpoint_id": "ckpt-old", "checkpoint_ns": ""}},
         )
 
-    def get_next_version(self, current_version, _channel):
-        if current_version is None:
-            return 1
-        return current_version + 1
-
-    async def aput(self, config, checkpoint, metadata, new_versions):
-        self.put_args = (config, checkpoint, metadata, new_versions)
-        return {"configurable": {"checkpoint_id": checkpoint["id"]}}
+    async def aupdate(self, config, values, *, as_node=None):
+        self.update_args = (config, values, as_node)
+        return {"configurable": {"checkpoint_id": "ckpt-new"}}
 
 
 class _FakeCompactionMiddleware:
@@ -56,29 +51,6 @@ class _FakeCompactionMiddleware:
             preserved_messages=tuple(preserved_messages),
             total_tokens=total_tokens,
         )
-
-
-class _SyncCheckpointer:
-    def __init__(self, checkpoint: dict, metadata: dict | None = None) -> None:
-        self.checkpoint = checkpoint
-        self.metadata = metadata or {"step": 4, "created_at": "2026-07-06T00:00:00+00:00"}
-        self.put_args = None
-
-    def get_tuple(self, config):
-        return SimpleNamespace(
-            checkpoint=self.checkpoint,
-            metadata=self.metadata,
-            config={"configurable": {"thread_id": config["configurable"]["thread_id"], "checkpoint_id": "ckpt-old", "checkpoint_ns": ""}},
-        )
-
-    def get_next_version(self, current_version, _channel):
-        if current_version is None:
-            return 1
-        return current_version + 1
-
-    def put(self, config, checkpoint, metadata, new_versions):
-        self.put_args = (config, checkpoint, metadata, new_versions)
-        return {"configurable": {"checkpoint_id": checkpoint["id"]}}
 
 
 class _RejectDeepcopy:
@@ -121,20 +93,12 @@ async def test_compact_thread_context_writes_summary_and_bumps_changed_channels(
     assert result.summary_updated is True
     assert result.total_tokens == 123
 
-    assert checkpointer.put_args is not None
-    _config, written_checkpoint, written_metadata, new_versions = checkpointer.put_args
-    assert written_checkpoint["channel_values"]["messages"] == [messages[-1]]
-    assert written_checkpoint["channel_values"]["summary_text"] == "COMPRESSED SUMMARY"
-    assert isinstance(written_checkpoint["channel_values"]["sandbox"], _RejectDeepcopy)
-    assert written_checkpoint["channel_versions"]["messages"] == 8
-    assert written_checkpoint["channel_versions"]["summary_text"] == 4
-    assert written_checkpoint["channel_versions"]["title"] == 2
-    assert new_versions == {"messages": 8, "summary_text": 4}
-    assert written_metadata["writes"]["manual_compaction"]["messages"] == {
-        "removed": 2,
-        "preserved": 1,
-    }
-    assert "COMPRESSED SUMMARY" not in str(written_metadata["writes"])
+    assert checkpointer.update_args is not None
+    _config, written_values, as_node = checkpointer.update_args
+    assert written_values["messages"].value == [messages[-1]]
+    assert written_values["summary_text"] == "COMPRESSED SUMMARY"
+    assert "sandbox" not in written_values
+    assert as_node == "manual_compaction"
     assert middleware.prepare_calls == 1
     assert middleware.runtime_contexts == [
         {"thread_id": "thread-1", "user_id": "user-1", "agent_name": "research-agent"},
@@ -169,7 +133,7 @@ async def test_compaction_can_prepare_without_writing_then_commit(monkeypatch):
 
     assert prepared.source_checkpoint_id == "ckpt-old"
     assert prepared.result.compacted is True
-    assert checkpointer.put_args is None
+    assert checkpointer.update_args is None
 
     result = await context_compaction.commit_thread_compaction(
         checkpointer,
@@ -178,7 +142,7 @@ async def test_compaction_can_prepare_without_writing_then_commit(monkeypatch):
 
     assert result.compacted is True
     assert result.checkpoint_id is not None
-    assert checkpointer.put_args is not None
+    assert checkpointer.update_args is not None
 
 
 @pytest.mark.asyncio
@@ -201,18 +165,18 @@ async def test_compact_thread_context_returns_noop_without_writing(monkeypatch):
 
     assert result.compacted is False
     assert result.reason == "not_enough_messages"
-    assert checkpointer.put_args is None
+    assert checkpointer.update_args is None
     assert middleware.prepare_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_compact_thread_context_supports_sync_checkpointer_methods(monkeypatch):
+async def test_compact_thread_context_uses_materialized_accessor(monkeypatch):
     messages = [
         HumanMessage(content="old question"),
         AIMessage(content="old answer"),
         HumanMessage(content="latest question"),
     ]
-    checkpointer = _SyncCheckpointer(
+    checkpointer = _FakeCheckpointer(
         {
             "id": "ckpt-old",
             "channel_values": {"messages": messages, "summary_text": "OLD SUMMARY"},
@@ -228,4 +192,4 @@ async def test_compact_thread_context_supports_sync_checkpointer_methods(monkeyp
     result = await compact_thread_context(checkpointer, "thread-1", app_config=SimpleNamespace())
 
     assert result.compacted is True
-    assert checkpointer.put_args is not None
+    assert checkpointer.update_args is not None

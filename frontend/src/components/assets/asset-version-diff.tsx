@@ -1,3 +1,5 @@
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type { AssetVersion } from "@/core/shared-assets";
 
 type DiffRow = {
@@ -11,66 +13,77 @@ function value(value: string | number | null | undefined): string {
   return String(value);
 }
 
-function list(items: readonly string[]): string {
-  return items.length === 0 ? "—" : items.join("、");
+function list(items: readonly string[], separator: string): string {
+  return items.length === 0 ? "—" : items.join(separator);
 }
 
-function describe(version: AssetVersion): Record<string, string> {
+type DiffCopy = Translations["adminAssets"]["diff"];
+type StatusCopy = Translations["adminAssets"]["status"];
+
+function describe(
+  version: AssetVersion,
+  copy: DiffCopy,
+  statuses: StatusCopy,
+  separator: string,
+): Record<string, string> {
   const common = {
-    载荷校验和: value(
+    [copy.payloadChecksum]: value(
       "payload_checksum" in version ? version.payload_checksum : undefined,
     ),
   };
   if ("agent_id" in version) {
     return {
       ...common,
-      描述: value(version.description),
-      模型: value(version.model_ref),
-      工具组: list(version.tool_groups),
-      "Skill 版本": list(version.skill_version_ids),
-      "MCP 版本": list(version.mcp_version_ids),
+      [copy.description]: value(version.description),
+      [copy.model]: value(version.model_ref),
+      [copy.toolGroups]: list(version.tool_groups, separator),
+      [copy.skillVersions]: list(version.skill_version_ids, separator),
+      [copy.mcpVersions]: list(version.mcp_version_ids, separator),
     };
   }
   if ("skill_id" in version) {
     return {
       ...common,
-      描述: value(version.description),
-      兼容性: value(version.compatibility),
-      扫描结论: value(version.scan_decision),
-      扫描规则: list(version.scan_rule_ids),
-      文件: version.file_views
+      [copy.description]: value(version.description),
+      [copy.compatibility]: value(version.compatibility),
+      [copy.scanDecision]: value(version.scan_decision),
+      [copy.scanRules]: list(version.scan_rule_ids, separator),
+      [copy.files]: version.file_views
         .map(
           (file) =>
             `${file.path} · ${file.size_bytes} B · ${file.media_type} · ${file.sha256}`,
         )
         .join("\n"),
-      凭据要求: version.secret_requirements
-        .map((item) => `${item.name}${item.optional ? "（可选）" : "（必需）"}`)
-        .join("、"),
+      [copy.credentialRequirements]: version.secret_requirements
+        .map(
+          (item) =>
+            `${item.name}（${item.optional ? copy.optional : copy.required}）`,
+        )
+        .join(separator),
     };
   }
   if ("mcp_server_id" in version) {
     return {
       ...common,
-      描述: value(version.definition.description),
-      传输方式: version.definition.transport,
-      命令: value(version.definition.command),
-      URL: value(version.definition.url),
-      参数: list(version.definition.args),
-      超时: `${version.definition.timeout_seconds} 秒`,
-      "Credential 槽位": version.credential_slots
+      [copy.description]: value(version.definition.description),
+      [copy.transport]: version.definition.transport,
+      [copy.command]: value(version.definition.command),
+      [copy.url]: value(version.definition.url),
+      [copy.arguments]: list(version.definition.args, separator),
+      [copy.timeout]: copy.seconds(version.definition.timeout_seconds),
+      [copy.credentialSlots]: version.credential_slots
         .map(
           (slot) =>
-            `${slot.name}${slot.required ? "（必需）" : "（可选）"} · ${slot.purpose || "无说明"}`,
+            `${slot.name}（${slot.required ? copy.required : copy.optional}） · ${slot.purpose || copy.noDescription}`,
         )
         .join("\n"),
     };
   }
   return {
-    状态: version.status,
-    载荷结构版本: String(version.payload_schema_version),
-    载荷字段: Object.entries(version.payload_schema)
-      .map(([group, fields]) => `${group}: ${fields.join("、")}`)
+    [copy.status]: statuses[version.status],
+    [copy.payloadSchemaVersion]: String(version.payload_schema_version),
+    [copy.payloadFields]: Object.entries(version.payload_schema)
+      .map(([group, fields]) => `${group}: ${fields.join(separator)}`)
       .join("\n"),
   };
 }
@@ -78,9 +91,12 @@ function describe(version: AssetVersion): Record<string, string> {
 function diffRows(
   previous: AssetVersion | null,
   current: AssetVersion,
+  copy: DiffCopy,
+  statuses: StatusCopy,
+  separator: string,
 ): DiffRow[] {
-  const before = previous ? describe(previous) : {};
-  const after = describe(current);
+  const before = previous ? describe(previous, copy, statuses, separator) : {};
+  const after = describe(current, copy, statuses, separator);
   return Object.entries(after)
     .filter(([key, currentValue]) => before[key] !== currentValue)
     .map(([label, currentValue]) => ({
@@ -97,18 +113,35 @@ export function AssetVersionDiff({
   previous?: AssetVersion | null;
   current: AssetVersion;
 }) {
-  const rows = diffRows(previous, current);
+  const { locale, t } = useI18n();
+  const rows = diffRows(
+    previous,
+    current,
+    t.adminAssets.diff,
+    t.adminAssets.status,
+    locale === "zh-CN" ? "、" : ", ",
+  );
   if (rows.length === 0) {
-    return <p className="text-muted-foreground text-sm">没有结构化变化。</p>;
+    return (
+      <p className="text-muted-foreground text-sm">
+        {t.adminAssets.diff.noChanges}
+      </p>
+    );
   }
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[36rem] text-left text-xs">
         <thead className="text-muted-foreground">
           <tr className="border-b">
-            <th className="px-2 py-2 font-medium">字段</th>
-            <th className="px-2 py-2 font-medium">上一版本</th>
-            <th className="px-2 py-2 font-medium">当前版本</th>
+            <th className="px-2 py-2 font-medium">
+              {t.adminAssets.diff.field}
+            </th>
+            <th className="px-2 py-2 font-medium">
+              {t.adminAssets.diff.previous}
+            </th>
+            <th className="px-2 py-2 font-medium">
+              {t.adminAssets.diff.current}
+            </th>
           </tr>
         </thead>
         <tbody>

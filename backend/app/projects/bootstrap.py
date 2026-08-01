@@ -7,6 +7,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bootstrap_identities import BUILTIN_SERVICE_USER_IDS
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
@@ -54,11 +55,23 @@ async def bootstrap_default_project(
     try:
         async with session.begin():
             await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BOOTSTRAP_LOCK_KEY})
-            total, admin_count = (await session.execute(select(func.count(UserRow.id), func.count(UserRow.id).filter(UserRow.system_role == "system_admin")))).one()
-            if total == 0:
+            service_ids = tuple(str(value) for value in BUILTIN_SERVICE_USER_IDS)
+            human_count, admin_count = (
+                await session.execute(
+                    select(
+                        func.count(UserRow.id).filter(
+                            UserRow.id.not_in(service_ids),
+                        ),
+                        func.count(UserRow.id).filter(
+                            UserRow.system_role == "system_admin",
+                        ),
+                    )
+                )
+            ).one()
+            if human_count == 0:
                 return BootstrapResult(BootstrapStatus.NO_USERS)
             if admin_count == 0:
-                if total <= 1:
+                if human_count <= 1:
                     return BootstrapResult(BootstrapStatus.WAITING_FOR_ADMIN)
                 raise ProjectBootstrapFailed("AMBIGUOUS_BOOTSTRAP_ADMIN")
             if admin_count != 1:

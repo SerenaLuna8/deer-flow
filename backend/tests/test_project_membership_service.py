@@ -4,10 +4,11 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
+from app.private_work.authorization import AUTHORIZATION_REVOKED_REASON
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectForbidden, ProjectLastAdmin, ProjectMembershipVersionConflict, ProjectNotFound
@@ -289,11 +290,21 @@ async def test_repository_revalidates_actor_after_project_lock_before_target_loc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("new_role", [ProjectRole.EDITOR, ProjectRole.RUNNER])
-async def test_executable_role_downgrade_keeps_active_runs(new_role: ProjectRole) -> None:
+@pytest.mark.parametrize(
+    ("current_role", "new_role"),
+    [
+        (ProjectRole.ADMIN, ProjectRole.EDITOR),
+        (ProjectRole.ADMIN, ProjectRole.RUNNER),
+        (ProjectRole.EDITOR, ProjectRole.RUNNER),
+    ],
+)
+async def test_capability_reducing_role_change_revokes_active_runs(
+    current_role: ProjectRole,
+    new_role: ProjectRole,
+) -> None:
     context = _context()
     repository = _repository()
-    target = _member(role=ProjectRole.ADMIN)
+    target = _member(role=current_role)
     repository.lock_project_and_member.return_value = (SimpleNamespace(id=context.project_id), target)
     authorization = AsyncMock()
     retention = AsyncMock()
@@ -304,7 +315,13 @@ async def test_executable_role_downgrade_keeps_active_runs(new_role: ProjectRole
         retention=retention,
     ).change_role(context, target.id, new_role, expected_version=1)
 
-    authorization.mark_revoked.assert_not_awaited()
+    authorization.mark_revoked.assert_awaited_once_with(
+        repository.session,
+        project_id=context.project_id,
+        owner_user_id=target.user_id,
+        reason=AUTHORIZATION_REVOKED_REASON,
+        now=ANY,
+    )
     retention.freeze_owner.assert_not_awaited()
 
 

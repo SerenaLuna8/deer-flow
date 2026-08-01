@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """DeerFlow Health Check (make doctor).
 
-Checks system requirements, configuration, LLM provider, and optional
-components, then prints an actionable report.
+Checks system requirements, configuration, the PostgreSQL model catalog, and
+optional components, then prints an actionable report.
 
 Exit codes:
   0 — all required checks passed (warnings allowed)
@@ -11,6 +11,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -36,6 +37,9 @@ _ensure_backend_import_path(Path(__file__).resolve().parents[1])
 # ---------------------------------------------------------------------------
 
 Status = Literal["ok", "warn", "fail", "skip"]
+PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
+COREPACK_NOTICE = "Using pnpm via Corepack."
 
 
 def _supports_color() -> bool:
@@ -177,18 +181,44 @@ def check_node() -> CheckResult:
 
 
 def check_pnpm() -> CheckResult:
-    candidates = [["pnpm"], ["pnpm.cmd"]]
-    if shutil.which("corepack"):
-        candidates.append(["corepack", "pnpm"])
-    for cmd in candidates:
-        if shutil.which(cmd[0]):
-            out = _run([*cmd, "-v"]) or ""
-            return CheckResult("pnpm", "ok", out)
-    return CheckResult(
-        "pnpm",
-        "fail",
-        fix="npm install -g pnpm   (or: corepack enable)",
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
+            cwd=FRONTEND_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+        )
+    except OSError as exc:
+        return CheckResult(
+            "pnpm",
+            "fail",
+            f"Unable to run pnpm resolver: {exc}",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+
+    stdout = (result.stdout or "").strip()
+    stderr_lines = (result.stderr or "").splitlines()
+    via_corepack = COREPACK_NOTICE in stderr_lines
+    stderr = "\n".join(line for line in stderr_lines if line != COREPACK_NOTICE).strip()
+    if result.returncode != 0:
+        detail = "\n".join(part for part in (stderr, stdout) if part)
+        return CheckResult(
+            "pnpm",
+            "fail",
+            detail or f"pnpm resolver exited with status {result.returncode}",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+    if not stdout:
+        return CheckResult(
+            "pnpm",
+            "fail",
+            stderr or "pnpm resolver returned no version",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+    resolution_hint = " (via Corepack)" if via_corepack else ""
+    return CheckResult("pnpm", "ok", f"{stdout}{resolution_hint}")
 
 
 def check_uv() -> CheckResult:
@@ -262,24 +292,6 @@ def check_config_version(config_path: Path, project_root: Path) -> CheckResult:
     return CheckResult("config.yaml version", "ok", f"v{user_ver}")
 
 
-def check_models_configured(config_path: Path) -> CheckResult:
-    if not config_path.exists():
-        return CheckResult("models configured", "skip")
-    try:
-        data = _load_yaml_file(config_path)
-        models = data.get("models", [])
-        if models:
-            return CheckResult("models configured", "ok", f"{len(models)} model(s)")
-        return CheckResult(
-            "models configured",
-            "fail",
-            "no models found",
-            fix="Run 'make setup' to configure an LLM provider",
-        )
-    except Exception as exc:
-        return CheckResult("models configured", "fail", str(exc))
-
-
 def check_config_loadable(config_path: Path) -> CheckResult:
     if not config_path.exists():
         return CheckResult("config.yaml loadable", "skip")
@@ -296,150 +308,77 @@ def check_config_loadable(config_path: Path) -> CheckResult:
         )
 
 
-def check_llm_api_key(config_path: Path) -> list[CheckResult]:
-    """Check that each model's env var is set in the environment."""
-    if not config_path.exists():
-        return []
+def _run_model_catalog_query(database_url: str) -> dict[str, int | bool]:
+    """Return a closed, read-only model-catalog readiness summary."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
 
-    results: list[CheckResult] = []
+    from deerflow.config.database_config import DatabaseConfig
+
+    async def _query() -> dict[str, int | bool]:
+        engine = create_async_engine(
+            DatabaseConfig(url=database_url).sqlalchemy_url,
+            poolclass=NullPool,
+        )
+        try:
+            async with engine.connect() as connection:
+                table_exists = bool(await connection.scalar(text("SELECT to_regclass('system_model_configs') IS NOT NULL")))
+                if not table_exists:
+                    return {"table_exists": False, "active_count": 0}
+                active_count = await connection.scalar(text("SELECT count(*) FROM system_model_configs WHERE status = 'active' AND current_version_id IS NOT NULL"))
+                return {
+                    "table_exists": True,
+                    "active_count": int(active_count or 0),
+                }
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_query())
+
+
+def check_model_catalog() -> CheckResult:
+    """Check database-backed model readiness without reading YAML or secrets."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return CheckResult(
+            "PostgreSQL model catalog",
+            "skip",
+            "DATABASE_URL not set",
+        )
+
     try:
-        import yaml
-        from dotenv import load_dotenv
+        readiness = _run_model_catalog_query(database_url)
+    except Exception:
+        return CheckResult(
+            "PostgreSQL model catalog",
+            "fail",
+            "readiness unavailable",
+            fix="Run `make check-db`, then retry `make doctor`.",
+        )
 
-        env_path = config_path.parent / ".env"
-        if env_path.exists():
-            load_dotenv(env_path, override=False)
+    if readiness.get("table_exists") is not True:
+        return CheckResult(
+            "PostgreSQL model catalog",
+            "fail",
+            "catalog table missing",
+            fix=("Use a new empty PostgreSQL database and run `make setup-db`; older schemas are not upgraded in place."),
+        )
 
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+    active_count = readiness.get("active_count")
+    if type(active_count) is not int or active_count < 1:
+        return CheckResult(
+            "PostgreSQL model catalog",
+            "fail",
+            "no active models",
+            fix=("Start DeerFlow, sign in as a system administrator, and open `/admin/settings/models` to configure and activate a model."),
+        )
 
-        for model in data.get("models", []):
-            # Collect all values that look like $ENV_VAR references
-            def _collect_env_refs(obj: object) -> list[str]:
-                refs: list[str] = []
-                if isinstance(obj, str) and obj.startswith("$"):
-                    refs.append(obj[1:])
-                elif isinstance(obj, dict):
-                    for v in obj.values():
-                        refs.extend(_collect_env_refs(v))
-                elif isinstance(obj, list):
-                    for item in obj:
-                        refs.extend(_collect_env_refs(item))
-                return refs
-
-            env_refs = _collect_env_refs(model)
-            model_name = model.get("name", "default")
-            for var in env_refs:
-                label = f"{var} set (model: {model_name})"
-                if os.environ.get(var):
-                    results.append(CheckResult(label, "ok"))
-                else:
-                    results.append(
-                        CheckResult(
-                            label,
-                            "fail",
-                            fix=f"Add {var}=<your-key> to your .env file",
-                        )
-                    )
-    except Exception as exc:
-        results.append(CheckResult("LLM API key check", "fail", str(exc)))
-
-    return results
-
-
-def check_llm_package(config_path: Path) -> list[CheckResult]:
-    """Check that the LangChain provider package is installed."""
-    if not config_path.exists():
-        return []
-
-    results: list[CheckResult] = []
-    try:
-        import yaml
-
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-
-        seen_packages: set[str] = set()
-        for model in data.get("models", []):
-            use = model.get("use", "")
-            if ":" in use:
-                package_path = use.split(":")[0]
-                # e.g. langchain_openai → langchain-openai
-                top_level = package_path.split(".")[0]
-                pip_name = top_level.replace("_", "-")
-                if pip_name in seen_packages:
-                    continue
-                seen_packages.add(pip_name)
-                label = f"{pip_name} installed"
-                try:
-                    __import__(top_level)
-                    results.append(CheckResult(label, "ok"))
-                except ImportError:
-                    results.append(
-                        CheckResult(
-                            label,
-                            "fail",
-                            fix=f"cd backend && uv add {pip_name}",
-                        )
-                    )
-    except Exception as exc:
-        results.append(CheckResult("LLM package check", "fail", str(exc)))
-
-    return results
-
-
-def check_llm_auth(config_path: Path) -> list[CheckResult]:
-    if not config_path.exists():
-        return []
-
-    results: list[CheckResult] = []
-    try:
-        data = _load_yaml_file(config_path)
-        for model in data.get("models", []):
-            use = model.get("use", "")
-            model_name = model.get("name", "default")
-
-            if use == "deerflow.models.openai_codex_provider:CodexChatModel":
-                auth_path = Path(os.environ.get("CODEX_AUTH_PATH", "~/.codex/auth.json")).expanduser()
-                if auth_path.exists():
-                    results.append(CheckResult(f"Codex CLI auth available (model: {model_name})", "ok", str(auth_path)))
-                else:
-                    results.append(
-                        CheckResult(
-                            f"Codex CLI auth available (model: {model_name})",
-                            "fail",
-                            str(auth_path),
-                            fix="Run `codex login`, or set CODEX_AUTH_PATH to a valid auth.json",
-                        )
-                    )
-
-            if use == "deerflow.models.claude_provider:ClaudeChatModel":
-                credential_paths = [Path(os.environ["CLAUDE_CODE_CREDENTIALS_PATH"]).expanduser() for env_name in ("CLAUDE_CODE_CREDENTIALS_PATH",) if os.environ.get(env_name)]
-                credential_paths.append(Path("~/.claude/.credentials.json").expanduser())
-                has_oauth_env = any(
-                    os.environ.get(name)
-                    for name in (
-                        "ANTHROPIC_API_KEY",
-                        "CLAUDE_CODE_OAUTH_TOKEN",
-                        "ANTHROPIC_AUTH_TOKEN",
-                        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-                    )
-                )
-                existing_path = next((path for path in credential_paths if path.exists()), None)
-                if has_oauth_env or existing_path is not None:
-                    detail = "env var set" if has_oauth_env else str(existing_path)
-                    results.append(CheckResult(f"Claude auth available (model: {model_name})", "ok", detail))
-                else:
-                    results.append(
-                        CheckResult(
-                            f"Claude auth available (model: {model_name})",
-                            "fail",
-                            fix=("Set ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN, or place credentials at ~/.claude/.credentials.json"),
-                        )
-                    )
-    except Exception as exc:
-        results.append(CheckResult("LLM auth check", "fail", str(exc)))
-    return results
+    return CheckResult(
+        "PostgreSQL model catalog",
+        "ok",
+        f"{active_count} active model(s)",
+    )
 
 
 def check_web_search(config_path: Path) -> CheckResult:
@@ -768,20 +707,19 @@ def main() -> int:
         check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
-        check_models_configured(config_path),
     ]
     sections.append(("Configuration", cfg_checks))
 
     # ── Database ──────────────────────────────────────────────────────────────
-    sections.append(("Database", [check_postgres(project_root)]))
-
-    # ── LLM Provider ──────────────────────────────────────────────────────────
-    llm_checks: list[CheckResult] = [
-        *check_llm_api_key(config_path),
-        *check_llm_auth(config_path),
-        *check_llm_package(config_path),
-    ]
-    sections.append(("LLM Provider", llm_checks))
+    sections.append(
+        (
+            "Database",
+            [
+                check_postgres(project_root),
+                check_model_catalog(),
+            ],
+        )
+    )
 
     # ── Web Capabilities ─────────────────────────────────────────────────────
     search_checks = [

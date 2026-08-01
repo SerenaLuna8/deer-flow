@@ -4,9 +4,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from deerflow.runtime.run_config_security import (
+    ABSOLUTE_MAX_RECURSION_LIMIT,
     DEFAULT_RECURSION_LIMIT,
     clamp_recursion_limit,
-    resolve_max_recursion_limit,
 )
 
 _AUTHORITY_KEYS = frozenset(
@@ -28,8 +28,12 @@ _AUTHORITY_KEYS = frozenset(
         "channel_user_id",
         "connection",
         "connection_id",
+        "deerflow_trace_id",
+        "authz_attributes",
         "is_bootstrap",
+        "is_internal",
         "is_plan_mode",
+        "is_subagent",
         "file_authority",
         "membership_id",
         "membership_version",
@@ -38,12 +42,14 @@ _AUTHORITY_KEYS = frozenset(
         "model",
         "model_name",
         "max_concurrent_subagents",
+        "memory_authority",
         "non_interactive",
         "oauth_id",
         "oauth_provider",
         "owner",
         "owner_id",
         "owner_user_id",
+        "origin_trace_id",
         "private_resource_scope",
         "private_agent_runtime",
         "private_scope",
@@ -61,6 +67,7 @@ _AUTHORITY_KEYS = frozenset(
         "stop_reason",
         "system_role",
         "tool_groups",
+        "trace_id",
         "trusted_asset_context",
         "user_id",
         "user_role",
@@ -135,7 +142,7 @@ def prepare_private_run_config(
     config: dict[str, Any] = sanitized_request
     config["recursion_limit"] = clamp_recursion_limit(
         raw_recursion_limit,
-        resolve_max_recursion_limit(),
+        ABSOLUTE_MAX_RECURSION_LIMIT,
     )
     config["metadata"] = _mapping(metadata or {})
     config["configurable"] = caller_configurable

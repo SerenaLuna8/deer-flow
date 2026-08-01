@@ -20,9 +20,11 @@ from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
+from app.quotas.system_policy import SystemQuotaPolicyReader
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.scheduler.service import AutomationSchedulerService
-from app.shared_assets.model_refs import ConfiguredModelRefResolver
+from app.system_runtime_settings import SystemRuntimePolicyService
+from app.system_settings import SystemModelCatalogService
 from deerflow.config import get_app_config
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
@@ -129,6 +131,10 @@ async def run_scheduler(
         from app.audit.sinks import OperationalAuditSink
 
         audit_service = AuditService(session_factory, audit_keyring)
+        runtime_policy_service = SystemRuntimePolicyService(
+            session_factory,
+            audit_service,
+        )
         audit_sink = OperationalAuditSink(
             audit_service,
             process_context=_bind_scheduler_audit_process(audit_service),
@@ -138,6 +144,7 @@ async def run_scheduler(
                 session_factory,
                 config.quotas,
                 source_ref_hasher=audit_keyring,
+                current_policy_reader=SystemQuotaPolicyReader(),
             )
         )
         occurrences = AutomationOccurrenceService(
@@ -149,7 +156,8 @@ async def run_scheduler(
             dispatcher=AutomationDispatcher(
                 session_factory,
                 max_concurrent_runs=config.scheduler.max_concurrent_runs,
-                model_ref_resolver=ConfiguredModelRefResolver(config),
+                model_catalog=SystemModelCatalogService(session_factory),
+                runtime_policy=runtime_policy_service,
                 endpoint_policy=mcp_endpoint_policy,
                 quota=quota_enforcer,
                 audit=audit_sink,

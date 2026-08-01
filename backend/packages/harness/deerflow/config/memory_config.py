@@ -14,6 +14,10 @@ class MemoryConfig(BaseModel):
         default=True,
         description="Whether to enable memory mechanism",
     )
+    search_enabled: bool = Field(
+        default=True,
+        description=("Expose the read-only memory_search tool to private project Runs. The Worker supplies scope and authorization; the model supplies only query/category/top_k."),
+    )
     debounce_seconds: int = Field(
         default=30,
         ge=1,
@@ -131,6 +135,12 @@ def set_memory_config(config: MemoryConfig) -> None:
     """Set the memory configuration."""
     global _memory_config
     _memory_config = config
+
+
+def should_use_project_memory_search(config: MemoryConfig) -> bool:
+    """Return whether private Runs should expose read-only Memory recall."""
+
+    return config.enabled and config.search_enabled
 
 
 def load_memory_config_from_dict(config_dict: dict) -> None:

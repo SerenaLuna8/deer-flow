@@ -174,4 +174,23 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
       tag: "gateway_unavailable",
     });
   });
+
+  test("returns gateway_unavailable rather than logging out on /auth/me 403", async () => {
+    rs.doMock("next/headers", () => ({
+      cookies: rs.fn(async () => ({
+        get: (name: string) =>
+          name === "access_token" ? { value: "stub-token" } : undefined,
+      })),
+    }));
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(() => Promise.resolve(new Response(null, { status: 403 }))),
+    );
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "gateway_unavailable",
+    });
+  });
 });

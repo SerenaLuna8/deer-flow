@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -7,6 +8,8 @@ from starlette.testclient import TestClient
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.trace_context import TRACE_ID_HEADER, get_current_trace_id
 
+logger = logging.getLogger(__name__)
+
 
 def _make_app(*, enabled: bool) -> FastAPI:
     app = FastAPI()
@@ -14,6 +17,7 @@ def _make_app(*, enabled: bool) -> FastAPI:
 
     @app.get("/plain")
     async def plain() -> dict[str, str | None]:
+        logger.info("request trace=%s", get_current_trace_id())
         return {"trace_id": get_current_trace_id()}
 
     @app.get("/stream")
@@ -39,13 +43,23 @@ def test_trace_header_absent_when_disabled() -> None:
     assert response.json() == {"trace_id": None}
 
 
-def test_trace_header_inherits_inbound_value_and_binds_context() -> None:
+def test_trace_header_ignores_public_value_and_binds_server_generated_context(
+    caplog,
+) -> None:
     client = TestClient(_make_app(enabled=True))
+    sentinel = "Authorization: Bearer PUBLIC-TRACE-SECRET-7QZ9"
 
-    response = client.get("/plain", headers={TRACE_ID_HEADER: "trace-from-upstream"})
+    with caplog.at_level(logging.INFO, logger=__name__):
+        response = client.get(
+            "/plain",
+            headers={TRACE_ID_HEADER: sentinel},
+        )
 
-    assert response.headers[TRACE_ID_HEADER] == "trace-from-upstream"
-    assert response.json() == {"trace_id": "trace-from-upstream"}
+    server_trace_id = response.headers[TRACE_ID_HEADER]
+    assert server_trace_id
+    assert server_trace_id != sentinel
+    assert response.json() == {"trace_id": server_trace_id}
+    assert sentinel not in caplog.text
 
 
 def test_trace_header_generated_when_missing() -> None:
@@ -63,8 +77,9 @@ def test_trace_header_added_to_streaming_response_without_consuming_body() -> No
 
     response = client.get("/stream", headers={TRACE_ID_HEADER: "stream-trace"})
 
-    assert response.headers[TRACE_ID_HEADER] == "stream-trace"
-    assert response.text == "trace=stream-trace"
+    server_trace_id = response.headers[TRACE_ID_HEADER]
+    assert server_trace_id != "stream-trace"
+    assert response.text == f"trace={server_trace_id}"
 
 
 def test_trace_header_overwrites_duplicate_downstream_value() -> None:
@@ -72,8 +87,9 @@ def test_trace_header_overwrites_duplicate_downstream_value() -> None:
 
     response = client.get("/pre-set", headers={TRACE_ID_HEADER: "canonical-trace"})
 
-    assert response.headers[TRACE_ID_HEADER] == "canonical-trace"
-    assert response.headers.get_list(TRACE_ID_HEADER) == ["canonical-trace"]
+    server_trace_id = response.headers[TRACE_ID_HEADER]
+    assert server_trace_id not in {"canonical-trace", "downstream"}
+    assert response.headers.get_list(TRACE_ID_HEADER) == [server_trace_id]
 
 
 def test_trace_header_rejects_crafted_non_ascii_and_generates_fresh_id() -> None:

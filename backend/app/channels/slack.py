@@ -340,6 +340,7 @@ class SlackChannel(Channel):
             text=text,
             msg_type=msg_type,
             thread_ts=thread_ts,
+            provider_delivery_id=str(event.get("ts") or "").strip() or None,
             metadata={
                 # team_id is already resolved (payload team_id/team, else event team) by the caller.
                 "team_id": team_id,

@@ -48,4 +48,6 @@ async def test_run_oneshot_llm_forwards_explicit_tracing_policy(
     assert result == "generated"
     assert captured["attach_tracing"] is attach_tracing
     assert bool(metadata_calls) is attach_tracing
+    if attach_tracing:
+        assert metadata_calls[0][1]["include_deerflow_trace_id"] is False
     assert len(model.calls) == 1

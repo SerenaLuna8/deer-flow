@@ -104,6 +104,43 @@ async def test_oidc_auto_create_assigns_admin_role_from_configured_email():
 
 
 @pytest.mark.asyncio
+async def test_oidc_identity_and_policy_emails_share_canonical_normalization():
+    local_provider = AsyncMock()
+    local_provider.get_user_by_oauth.return_value = None
+    local_provider.get_user_by_email.return_value = None
+    created_user = User(
+        email="admin@example.com",
+        password_hash=None,
+        system_role="system_admin",
+        oauth_provider="keycloak",
+        oauth_id="canonical-admin-subject",
+    )
+    local_provider.create_oauth_user.return_value = created_user
+
+    result = await get_or_provision_oidc_user(
+        provider_id="keycloak",
+        provider_config=_provider_config(
+            allowed_email_domains=[" @EXAMPLE.COM "],
+            admin_emails=[" ADMIN@EXAMPLE.COM "],
+        ),
+        identity=_identity(
+            subject="canonical-admin-subject",
+            email=" ADMIN@Example.Com ",
+        ),
+        local_provider=local_provider,
+    )
+
+    assert result == {"user": created_user, "created": True}
+    local_provider.get_user_by_email.assert_awaited_once_with("admin@example.com")
+    local_provider.create_oauth_user.assert_awaited_once_with(
+        email="admin@example.com",
+        oauth_provider="keycloak",
+        oauth_id="canonical-admin-subject",
+        system_role="system_admin",
+    )
+
+
+@pytest.mark.asyncio
 async def test_oidc_validate_id_token_refreshes_jwks_once_on_kid_miss(monkeypatch):
     service = OIDCService()
     metadata = OIDCMetadata(
@@ -187,6 +224,24 @@ async def test_oidc_existing_account_lookup_uses_normalized_email():
 
     assert exc_info.value.status_code == 409
     local_provider.get_user_by_email.assert_awaited_once_with("user@example.com")
+
+
+def test_oidc_state_preserves_remember_me_choice() -> None:
+    from app.gateway.auth.oidc_state import OIDCStatePayload
+
+    transient = OIDCStatePayload(
+        provider="example",
+        state="state",
+        remember_me=False,
+    )
+    persistent = OIDCStatePayload(
+        provider="example",
+        state="state",
+        remember_me=True,
+    )
+
+    assert transient.model_dump()["remember_me"] is False
+    assert persistent.model_dump()["remember_me"] is True
 
 
 @pytest.mark.asyncio

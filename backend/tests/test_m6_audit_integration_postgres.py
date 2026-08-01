@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from support.m4_private_threads import seed_m4_thread_database
 
 import app.audit.sinks as audit_sinks
@@ -34,7 +35,10 @@ from app.automations.dispatcher import AutomationDefinitionRef, AutomationDispat
 from app.automations.models import AutomationChanges, AutomationCreate
 from app.automations.service import ProjectAutomationService
 from app.gateway.routers import project_assets
-from app.private_work.run_admission import PrivateRunAdmissionService
+from app.private_work.run_admission import (
+    PrivateRunAdmissionServerContext,
+    PrivateRunAdmissionService,
+)
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.run_service import PrivateRunService
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -61,7 +65,8 @@ from app.reliability.execution import (
     PrivateRunJobTerminalPort,
 )
 from app.reliability.owner_refs import AuditHmacKeyring
-from app.worker.service import JobLeaseAuthority
+from app.worker.service import JobLeaseAuthority, WorkerService
+from deerflow.config.worker_config import WorkerConfig
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.jobs.model import DeadJobRow, JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import (
@@ -192,6 +197,202 @@ async def test_private_run_admission_writes_audit_in_domain_transaction(
             "non_interactive": False,
         }
         assert run_id not in repr(row.__dict__)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_private_trace_is_durable_idempotent_recovered_and_shared_by_terminal_audit(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    run_id = str(uuid.uuid4())
+    thread_id = f"trace-chain-{uuid.uuid4()}"
+    worker_id = uuid.uuid4()
+    trace_id = "gateway-origin-trace-09"
+    keyring = _keyring()
+    gateway_audit = _operational_sink(
+        AuditService(seed.factory, keyring),
+        AuditProcess.GATEWAY,
+    )
+    worker_audit = _operational_sink(
+        AuditService(seed.factory, keyring),
+        AuditProcess.WORKER,
+    )
+
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="trace-chain-test",
+                    capabilities_json=["private_run"],
+                    max_concurrent_jobs=1,
+                )
+            )
+
+        service = PrivateRunAdmissionService(
+            seed.factory,
+            audit=gateway_audit,
+        )
+        request = PrivateRunCreate(
+            run_id=run_id,
+            metadata={
+                "safe": "kept",
+                "deerflow_trace_id": "forged-metadata",
+                "origin_trace_id": "forged-origin",
+            },
+            kwargs={
+                "config": {
+                    "metadata": {
+                        "deerflow_trace_id": "forged-config-metadata",
+                    },
+                    "context": {
+                        "deerflow_trace_id": "forged-context",
+                        "origin_trace_id": "forged-context-origin",
+                    },
+                }
+            },
+        )
+        first = await service.admit(
+            seed.owner_a,
+            thread_id,
+            request,
+            server_context=PrivateRunAdmissionServerContext(
+                origin_trace_id=trace_id,
+            ),
+        )
+        retried = await service.admit(
+            seed.owner_a,
+            thread_id,
+            request,
+            server_context=PrivateRunAdmissionServerContext(
+                origin_trace_id="different-http-retry-trace",
+            ),
+        )
+
+        assert retried.run.origin_trace_id == trace_id
+        assert retried.job.origin_trace_id == trace_id
+        assert retried.run.run_id == first.run.run_id
+        assert retried.job.job_id == first.job.job_id
+        assert retried.run.metadata == {"safe": "kept"}
+        assert "deerflow_trace_id" not in repr(retried.run.kwargs)
+        assert "origin_trace_id" not in repr(retried.run.kwargs)
+
+        async with seed.factory() as session:
+            persisted = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT r.origin_trace_id AS run_trace,
+                               j.origin_trace_id AS job_trace
+                        FROM runs r
+                        JOIN jobs j ON j.id = r.job_id
+                        WHERE r.run_id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert persisted.run_trace == trace_id
+        assert persisted.job_trace == trace_id
+
+        with pytest.raises(IntegrityError):
+            async with seed.factory() as session, session.begin():
+                await session.execute(
+                    text(
+                        """
+                        UPDATE jobs
+                        SET origin_trace_id = 'corrupted-job-trace'
+                        WHERE id = :job_id
+                        """
+                    ),
+                    {"job_id": first.job.job_id},
+                )
+
+        trace_started_at = datetime.now(UTC)
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            first_claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=30,
+                now=trace_started_at,
+            )
+            assert first_claim is not None
+            assert first_claim.origin_trace_id == trace_id
+            assert await jobs.mark_running(
+                first_claim.job_id,
+                lease_token=first_claim.lease_token,
+                now=trace_started_at,
+            )
+
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            recovered_claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=30,
+                now=trace_started_at + timedelta(seconds=31),
+            )
+            assert recovered_claim is not None
+            assert recovered_claim.job_id == first_claim.job_id
+            assert recovered_claim.origin_trace_id == trace_id
+
+        class Executor:
+            async def execute(self, execution, authority):
+                assert execution.run.origin_trace_id == trace_id
+                assert authority.claim.origin_trace_id == trace_id
+                return AgentExecutionResult.succeeded()
+
+        handler = PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+            audit=worker_audit,
+        )
+        worker = WorkerService(
+            seed.factory,
+            object(),
+            {"private_run": handler},
+            WorkerConfig(lease_seconds=30, heartbeat_seconds=5),
+        )
+        await worker._execute_claim(recovered_claim)
+
+        async with seed.factory() as session:
+            audit_rows = (
+                (
+                    await session.execute(
+                        select(AuditLogRow)
+                        .where(
+                            AuditLogRow.project_id == seed.owner_a.project_id,
+                            AuditLogRow.action.in_(
+                                ("run.admitted", "run.terminal"),
+                            ),
+                        )
+                        .order_by(
+                            AuditLogRow.occurred_at,
+                            AuditLogRow.id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert [row.action for row in audit_rows] == [
+            "run.admitted",
+            "run.terminal",
+        ]
+        expected_request_hmac = keyring.audit_request_ref(trace_id).hmac_hex
+        assert {row.request_id for row in audit_rows} == {
+            expected_request_hmac,
+        }
     finally:
         await seed.engine.dispose()
 
@@ -1316,6 +1517,7 @@ async def test_dead_job_audit_contains_codes_not_exception_text(
                     cancel_reason=None,
                     occurred_at=NOW,
                     attempt_count=2,
+                    origin_trace_id=admitted.run.origin_trace_id,
                 ),
             )
 

@@ -8,6 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class BrowserlessFetchResult:
+    html: str
+    target_status_code: str
+    target_status: str
+
+
+@dataclass(frozen=True)
 class BrowserlessScreenshotResult:
     content: bytes
     content_type: str
@@ -41,7 +48,30 @@ class BrowserlessClient:
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
     ) -> str:
-        """Fetch the rendered HTML of a page using Browserless.
+        """Fetch rendered HTML while preserving the public string contract."""
+
+        result = await self.fetch_html_with_status(
+            url=url,
+            wait_for_event=wait_for_event,
+            wait_for_timeout_ms=wait_for_timeout_ms,
+            wait_for_selector=wait_for_selector,
+            wait_for_selector_timeout_ms=wait_for_selector_timeout_ms,
+            reject_resource_types=reject_resource_types,
+            reject_request_pattern=reject_request_pattern,
+        )
+        return result.html if isinstance(result, BrowserlessFetchResult) else result
+
+    async def fetch_html_with_status(
+        self,
+        url: str,
+        wait_for_event: str = "",
+        wait_for_timeout_ms: int = 0,
+        wait_for_selector: str = "",
+        wait_for_selector_timeout_ms: int = 5000,
+        reject_resource_types: list[str] | None = None,
+        reject_request_pattern: list[str] | None = None,
+    ) -> BrowserlessFetchResult | str:
+        """Fetch rendered HTML and expose the target page's real status.
 
         Only sends accepted parameters for the current Browserless API version.
         Sets a default navigation timeout (30s) via query param.
@@ -56,7 +86,7 @@ class BrowserlessClient:
             reject_request_pattern: URL patterns to block.
 
         Returns:
-            Rendered HTML content.
+            A status-aware fetch result, or an ``Error: ...`` string.
         """
         payload: dict[str, Any] = {
             "url": url,
@@ -103,7 +133,17 @@ class BrowserlessClient:
                 if not html or not html.strip():
                     return "Error: Browserless returned empty response"
 
-                return html
+                return BrowserlessFetchResult(
+                    html=html,
+                    target_status_code=_get_header(
+                        resp.headers,
+                        "X-Response-Code",
+                    ),
+                    target_status=_get_header(
+                        resp.headers,
+                        "X-Response-Status",
+                    ),
+                )
 
         except httpx.TimeoutException:
             return f"Error: Browserless request timed out after {self.timeout_s}s"

@@ -276,6 +276,9 @@ class _RecordingBoundary:
     async def before_tool_call(self) -> None:
         self.calls.append("tool")
 
+    async def before_read_only_tool_call(self) -> None:
+        self.calls.append("read-only-tool")
+
     async def before_mcp_call(self) -> None:
         self.calls.append("mcp")
 
@@ -305,6 +308,133 @@ async def test_middleware_checks_every_model_tool_and_private_mcp_dispatch() -> 
     )
 
     assert boundary.calls == ["model", "tool", "mcp"]
+
+
+@pytest.mark.asyncio
+async def test_memory_search_uses_code_registered_read_only_boundary() -> None:
+    from deerflow.agents.memory.tools import memory_search_tool
+
+    boundary = _RecordingBoundary()
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(
+            context={"__authorization_boundary": boundary},
+        ),
+        tool=memory_search_tool,
+        tool_call={"name": "memory_search", "id": "call-memory"},
+    )
+
+    await ToolErrorHandlingMiddleware().awrap_tool_call(
+        request,
+        AsyncMock(
+            return_value=ToolMessage(
+                content="memory-result",
+                tool_call_id="call-memory",
+                name="memory_search",
+            )
+        ),
+    )
+
+    assert boundary.calls == ["read-only-tool"]
+
+
+@pytest.mark.asyncio
+async def test_uploaded_file_listing_uses_code_registered_read_only_boundary() -> None:
+    from deerflow.tools.builtins.list_uploaded_files_tool import (
+        list_uploaded_files_tool,
+    )
+
+    boundary = _RecordingBoundary()
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(
+            context={"__authorization_boundary": boundary},
+        ),
+        tool=list_uploaded_files_tool,
+        tool_call={
+            "name": "list_uploaded_files",
+            "id": "call-upload-list",
+        },
+    )
+
+    await ToolErrorHandlingMiddleware().awrap_tool_call(
+        request,
+        AsyncMock(
+            return_value=ToolMessage(
+                content='{"count": 0, "files": [], "omitted": 0}',
+                tool_call_id="call-upload-list",
+                name="list_uploaded_files",
+            )
+        ),
+    )
+
+    assert boundary.calls == ["read-only-tool"]
+
+
+@pytest.mark.asyncio
+async def test_memory_search_falls_back_to_legacy_tool_boundary() -> None:
+    from deerflow.agents.memory.tools import memory_search_tool
+
+    class LegacyBoundary:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def before_tool_call(self) -> None:
+            self.calls.append("tool")
+
+    boundary = LegacyBoundary()
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(
+            context={"__authorization_boundary": boundary},
+        ),
+        tool=memory_search_tool,
+        tool_call={"name": "memory_search", "id": "call-memory-legacy"},
+    )
+
+    await ToolErrorHandlingMiddleware().awrap_tool_call(
+        request,
+        AsyncMock(
+            return_value=ToolMessage(
+                content="memory-result",
+                tool_call_id="call-memory-legacy",
+                name="memory_search",
+            )
+        ),
+    )
+
+    assert boundary.calls == ["tool"]
+
+
+@pytest.mark.asyncio
+async def test_read_only_boundary_cannot_be_claimed_by_name_or_metadata() -> None:
+    boundary = _RecordingBoundary()
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(
+            context={"__authorization_boundary": boundary},
+        ),
+        tool=SimpleNamespace(
+            metadata={
+                "deerflow_read_only": True,
+                "deerflow_trusted_read_only": True,
+            }
+        ),
+        tool_call={
+            "name": "memory_search",
+            "id": "call-forged-memory",
+            "metadata": {"deerflow_trusted_read_only": True},
+        },
+    )
+
+    await ToolErrorHandlingMiddleware().awrap_tool_call(
+        request,
+        AsyncMock(
+            return_value=ToolMessage(
+                content="forged-result",
+                tool_call_id="call-forged-memory",
+                name="memory_search",
+            )
+        ),
+    )
+
+    assert boundary.calls == ["tool"]
 
 
 @pytest.mark.asyncio
@@ -542,19 +672,22 @@ async def test_postgres_marker_boundary_and_retention_are_scope_bound(
         await session.execute(
             text(
                 """INSERT INTO runs
-                (run_id,thread_id,project_id,owner_user_id,status,
+                (run_id,thread_id,project_id,owner_user_id,origin_trace_id,status,
                  multitask_strategy,metadata_json,kwargs_json,finalization_status,
                  message_count,total_input_tokens,total_output_tokens,total_tokens,
                  llm_call_count,lead_agent_tokens,subagent_tokens,middleware_tokens,
                  token_usage_by_model,created_at,updated_at)
                 VALUES
-                ('task6-live','task6-thread-a',:project_id,:owner,'running',
+                ('task6-live','task6-thread-a',:project_id,:owner,
+                 'test-task6-live-trace','running',
                  'reject','{}'::json,'{}'::json,'pending',0,0,0,0,0,0,0,0,
                  '{}'::json,now(),now()),
-                ('task6-success','task6-thread-a',:project_id,:owner,'success',
+                ('task6-success','task6-thread-a',:project_id,:owner,
+                 'test-task6-success-trace','success',
                  'reject','{}'::json,'{}'::json,'complete',0,0,0,0,0,0,0,0,
                  '{}'::json,now(),now()),
-                ('task6-other','task6-thread-b',:other_project_id,:owner,'running',
+                ('task6-other','task6-thread-b',:other_project_id,:owner,
+                 'test-task6-other-trace','running',
                  'reject','{}'::json,'{}'::json,'pending',0,0,0,0,0,0,0,0,
                  '{}'::json,now(),now())"""
             ),
@@ -872,12 +1005,13 @@ async def test_postgres_late_revocation_marker_overrides_memory_terminal_status(
         await session.execute(
             text(
                 """INSERT INTO runs
-                (run_id,thread_id,project_id,owner_user_id,status,
+                (run_id,thread_id,project_id,owner_user_id,origin_trace_id,status,
                  multitask_strategy,metadata_json,kwargs_json,finalization_status,
                  message_count,total_input_tokens,total_output_tokens,total_tokens,
                  llm_call_count,lead_agent_tokens,subagent_tokens,middleware_tokens,
                  token_usage_by_model,created_at,updated_at)
-                VALUES (:run_id,:thread_id,:project_id,:owner,'running',
+                VALUES (:run_id,:thread_id,:project_id,:owner,
+                 'test-task6-late-marker-trace','running',
                  'reject','{}'::json,'{}'::json,'pending',0,0,0,0,0,0,0,0,
                  '{}'::json,now(),now())"""
             ),

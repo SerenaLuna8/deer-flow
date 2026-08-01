@@ -4,6 +4,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.local.local_sandbox import (
@@ -464,7 +465,7 @@ class LocalSandboxProvider(SandboxProvider):
             configured_prefix = skills_prefix
             allow_host_bash = False
         if allow_host_bash:
-            raise ValueError("Local private runtime cannot enforce read-only mounts when host bash is enabled")
+            raise PublicRunError(PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED)
         if skills_prefix != configured_prefix:
             raise ValueError("Run-scoped skills must replace the configured skills root")
         host_root = Path(mount.host_path).resolve()

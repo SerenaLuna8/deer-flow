@@ -650,6 +650,13 @@ async def purge_project_shared_scope(
         "purged_at": datetime.now(UTC),
     }
 
+    # The default pointer must be removed before project Agent packages can be
+    # physically deleted or reduced to retained shells.
+    await session.execute(
+        text("DELETE FROM project_default_agents WHERE project_id=:project_id"),
+        parameters,
+    )
+
     for table_name in (
         "project_system_agent_bindings",
         "project_system_skill_bindings",

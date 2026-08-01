@@ -1,5 +1,6 @@
 import type { Message, Thread } from "@langchain/langgraph-sdk";
 
+import type { EventSequence } from "../private-work/event-sequence";
 import type { Todo } from "../todos";
 
 export interface GoalState {
@@ -53,7 +54,7 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
-  seq?: number;
+  seq?: EventSequence;
   content: Message;
   metadata: {
     caller?: string;

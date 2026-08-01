@@ -8,6 +8,7 @@ Verifies that the agent factory's resulting graph receives a
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -104,7 +105,14 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
         model_name="gpt-4o",
     )
     record.abort_event = asyncio.Event()
-    ctx = RunContext(checkpointer=None)
+    ctx = RunContext(
+        checkpointer=None,
+        app_config=SimpleNamespace(
+            logging=SimpleNamespace(
+                enhance=SimpleNamespace(enabled=True),
+            ),
+        ),
+    )
 
     with request_trace_context("gateway-trace-1"):
         await run_agent(
@@ -129,6 +137,62 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "gateway-trace-1"
     tags = metadata.get("langfuse_tags") or []
     assert "model:gpt-4o" in tags
+
+
+@pytest.mark.asyncio
+async def test_run_agent_keeps_internal_origin_trace_but_omits_langfuse_correlation_when_enhance_disabled(
+    monkeypatch,
+):
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+
+    fake_agent = _FakeAgent()
+
+    def agent_factory(config):
+        return fake_agent
+
+    record = RunRecord(
+        run_id="run-internal-trace-only",
+        thread_id="thread-internal-trace-only",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="gpt-4o",
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(
+        checkpointer=None,
+        app_config=SimpleNamespace(
+            logging=SimpleNamespace(
+                enhance=SimpleNamespace(enabled=False),
+            ),
+        ),
+    )
+
+    with request_trace_context("trusted-origin-disabled"):
+        await run_agent(
+            _FakeBridge(),
+            _FakeRunManager(),
+            record,
+            ctx=ctx,
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={
+                "configurable": {
+                    "thread_id": "thread-internal-trace-only",
+                },
+            },
+        )
+
+    assert fake_agent.captured_config is not None
+    metadata = fake_agent.captured_config.get("metadata") or {}
+    assert metadata.get("langfuse_session_id") == "thread-internal-trace-only"
+    assert DEERFLOW_TRACE_METADATA_KEY not in metadata
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "trusted-origin-disabled"
 
 
 @pytest.mark.asyncio

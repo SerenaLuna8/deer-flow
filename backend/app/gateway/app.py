@@ -16,8 +16,10 @@ from app.gateway.routers import (
     admin_assets,
     admin_audit,
     admin_jobs,
+    admin_model_settings,
     admin_operations,
     admin_projects,
+    admin_system_settings,
     auth,
     github_webhooks,
     models,
@@ -46,6 +48,10 @@ from app.reliability.error_mapping import (
 )
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.runtime.checkpoint_mode import (
+    freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
+)
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
@@ -135,6 +141,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
+        freeze_checkpoint_channel_mode(startup_config.database.checkpoint_channel_mode)
+        freeze_checkpoint_snapshot_frequency(startup_config.database.checkpoint_delta.snapshot_frequency)
         validate_proxy_identity_config(startup_config.auth)
         configure_logging(startup_config)
         logger.info("Configuration loaded successfully")
@@ -148,31 +156,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError(error_msg) from None
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
-
-    # Pre-warm tiktoken encoding cache so the first memory-injection request
-    # never blocks on the BPE data download (which hits an OpenAI/Azure URL
-    # that may be unreachable in restricted networks — see issue #3402).
-    # When memory.token_counting is "char", token counting never touches
-    # tiktoken, so skip the warm-up entirely (avoids even the 5s probe in
-    # network-restricted deployments — see issue #3429).
-    if startup_config.memory.token_counting == "char":
-        logger.info("memory.token_counting='char'; skipping tiktoken warm-up (network-free token estimation)")
-    else:
-        try:
-            from deerflow.agents.memory.prompt import warm_tiktoken_cache
-
-            warmed = await asyncio.wait_for(
-                asyncio.to_thread(warm_tiktoken_cache),
-                timeout=5,
-            )
-            if warmed:
-                logger.info("tiktoken encoding cache warmed successfully")
-            else:
-                logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
-        except TimeoutError:
-            logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
-        except Exception:
-            logger.warning("tiktoken warm-up skipped", exc_info=True)
 
     try:
         removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
@@ -303,6 +286,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
                 "Content-Location",
                 "Location",
                 "Retry-After",
+                "X-Next-Offset",
                 "X-Trace-Id",
             ],
         )
@@ -345,6 +329,8 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(admin_projects.router)
     app.include_router(admin_jobs.router)
     app.include_router(admin_audit.router)
+    app.include_router(admin_model_settings.router)
+    app.include_router(admin_system_settings.router)
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)

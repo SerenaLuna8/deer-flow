@@ -70,7 +70,6 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
     ),
     "worker": ("The independent Worker process captures polling, leasing, concurrency, shutdown, and retry policy at process startup; live workers are not rebuilt on config.yaml edits."),
-    "quotas": ("Project quota services capture platform defaults and warning policy at Gateway and Worker startup so every admission path applies one coherent policy snapshot."),
 }
 
 

@@ -484,43 +484,61 @@ class AioSandbox(Sandbox):
         # (caught by grep_tool's except re.error handler) rather than a
         # generic remote API error.
         _re.compile(regex_source, 0 if case_sensitive else _re.IGNORECASE)
-        regex = regex_source if case_sensitive else f"(?i){regex_source}"
-
-        if glob is not None:
-            find_result = self._client.file.find_files(path=path, glob=glob)
-            candidate_paths = find_result.data.files if find_result.data and find_result.data.files else []
-        else:
-            list_result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
-            entries = list_result.data.files if list_result.data and list_result.data.files else []
-            candidate_paths = [entry.path for entry in entries if not entry.is_directory]
-
+        page_size = min(max(max_results * 2, 100), 500)
+        max_pages = 20
+        root = path.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
+        offset = 0
         truncated = False
 
-        for file_path in candidate_paths:
-            if should_ignore_path(file_path):
-                continue
+        for _ in range(max_pages):
+            result = self._client.file.grep_files(
+                path=path,
+                pattern=pattern,
+                case_insensitive=not case_sensitive,
+                fixed_strings=literal,
+                max_results=page_size,
+                max_file_size="1M",
+                offset=offset,
+                recursive=True,
+            )
+            data = result.data
+            provider_matches = data.matches if data and data.matches else []
+            provider_truncated = bool(data and data.truncated)
 
-            search_result = self._client.file.search_in_file(file=file_path, regex=regex)
-            data = search_result.data
-            if data is None:
-                continue
-
-            line_numbers = data.line_numbers or []
-            matched_lines = data.matches or []
-            for line_number, line in zip(line_numbers, matched_lines):
+            for match in provider_matches:
+                file_path = match.file
+                if should_ignore_path(file_path):
+                    continue
+                if file_path == root:
+                    rel_path = file_path.rsplit("/", 1)[-1]
+                elif file_path.startswith(root_prefix):
+                    rel_path = file_path[len(root_prefix) :]
+                else:
+                    continue
+                if glob is not None and not path_matches(glob, rel_path):
+                    continue
                 matches.append(
                     GrepMatch(
                         path=file_path,
-                        line_number=line_number if isinstance(line_number, int) else 0,
-                        line=truncate_line(line),
+                        line_number=match.line_number,
+                        line=truncate_line(match.line_content),
                     )
                 )
-                if len(matches) >= max_results:
-                    truncated = True
-                    return matches, truncated
+                if len(matches) > max_results:
+                    return matches[:max_results], True
 
-        return matches, truncated
+            if not provider_truncated:
+                break
+            if not provider_matches:
+                truncated = True
+                break
+            offset += len(provider_matches)
+        else:
+            truncated = True
+
+        return matches[:max_results], truncated
 
     def update_file(self, path: str, content: bytes) -> None:
         """Update a file with binary content in the sandbox.

@@ -115,6 +115,9 @@ type MockPrivateWorkOptions = {
   metadataStatus?: number;
   stateMessages?: unknown[];
   stateMessagesAfterStream?: unknown[];
+  initialStateGate?: Promise<void>;
+  initialStateGateRequests?: string[];
+  historyRunMessages?: unknown[];
   stateArtifacts?: string[];
   artifactFileStatus?: number;
   runBodies?: unknown[];
@@ -130,6 +133,10 @@ type MockPrivateWorkOptions = {
   goalGate?: ReturnType<typeof deferredGate>;
   compactGate?: ReturnType<typeof deferredGate>;
   streamTerminalStatus?: "error" | "failed" | "timeout";
+  streamResponseStatus?: number;
+  stateStatusAfterStream?: number;
+  stateStatusAfterStreamRequests?: string[];
+  failurePartialMessages?: unknown[];
   failureMessageIds?: Partial<
     Record<"submitted" | "live" | "admission", string>
   >;
@@ -179,6 +186,7 @@ async function mockProjectContext(page: Page, currentProject = project) {
       email: "runner@example.test",
       system_role: "user",
       needs_setup: false,
+      oauth_provider: null,
     }),
   );
   await page.route(/\/api\/projects(?:\?.*)?$/, (route) =>
@@ -235,6 +243,20 @@ async function mockPrivateWork(
       }
       if (path.endsWith(`/threads/${THREAD_ID}/state`)) {
         if (!threadExists) return json(route, { detail: "not found" }, 404);
+        if (!hasStreamed && options.initialStateGate) {
+          options.initialStateGateRequests?.push(`${request.method()} ${path}`);
+          await options.initialStateGate;
+        }
+        if (hasStreamed && options.stateStatusAfterStream) {
+          options.stateStatusAfterStreamRequests?.push(
+            `${request.method()} ${path}`,
+          );
+          return json(
+            route,
+            { detail: "post-stream state temporarily unavailable" },
+            options.stateStatusAfterStream,
+          );
+        }
         return json(route, {
           values: {
             title: "Owner research",
@@ -328,6 +350,39 @@ async function mockPrivateWork(
           workspace_clone_mode: "current_thread_authority_copy",
         });
       }
+      if (path.endsWith(`/threads/${THREAD_ID}/runs/edit-regenerate/prepare`)) {
+        const body = request.postDataJSON() as {
+          human_message_id: string;
+          replacement_text: string;
+        };
+        options.controlBodies?.push({ path, body });
+        const replacementMessage = {
+          type: "human",
+          id: "msg-project-edited",
+          content: [{ type: "text", text: body.replacement_text }],
+          additional_kwargs: {},
+        };
+        return json(route, {
+          input: { messages: [replacementMessage] },
+          checkpoint: {
+            checkpoint_ns: "",
+            checkpoint_id: "checkpoint-before-human",
+            checkpoint_map: null,
+          },
+          metadata: {
+            replay_kind: "edit",
+            regenerate_from_message_id: "msg-edit-ai",
+            regenerate_from_run_id: "run-original",
+            regenerate_checkpoint_id: "checkpoint-before-human",
+            edit_from_message_id: body.human_message_id,
+            edit_message_id: replacementMessage.id,
+            edit_version_group_id: body.human_message_id,
+          },
+          target_run_id: "run-original",
+          replacement_human_message_id: replacementMessage.id,
+          source_message_ids: [body.human_message_id, "msg-edit-ai"],
+        });
+      }
       if (path.endsWith(`/threads/${THREAD_ID}/runs/regenerate/prepare`)) {
         const body = request.postDataJSON() as { message_id: string };
         options.controlBodies?.push({ path, body });
@@ -406,7 +461,7 @@ async function mockPrivateWork(
                 id: PROJECT_FILE_ID,
                 logical_path: "outputs/presented-report.md",
                 display_name: "presented-report.md",
-                kind: "artifact",
+                kind: "output",
                 media_type: "text/markdown",
                 size: 26,
                 sha256: "project-file-sha",
@@ -452,6 +507,13 @@ async function mockPrivateWork(
         };
         options.runBodies?.push(body);
         await options.streamGate;
+        if (options.streamResponseStatus) {
+          return json(
+            route,
+            { detail: "run admission temporarily unavailable" },
+            options.streamResponseStatus,
+          );
+        }
         hasStreamed = true;
         if (options.streamTerminalStatus) {
           failedSubmittedMessage = latestVisibleSubmittedHumanMessage(
@@ -488,6 +550,9 @@ async function mockPrivateWork(
           return route.fulfill({
             status: 200,
             contentType: "text/event-stream",
+            headers: {
+              "Content-Location": `/threads/${THREAD_ID}/runs/run-failed`,
+            },
             body: [
               "event: metadata",
               `data: ${JSON.stringify({ run_id: "run-failed", thread_id: THREAD_ID })}`,
@@ -496,7 +561,11 @@ async function mockPrivateWork(
               "event: values",
               `data: ${JSON.stringify({
                 title: "Owner research",
-                messages: [...initialStateMessages, liveFailedMessage],
+                messages: [
+                  ...initialStateMessages,
+                  liveFailedMessage,
+                  ...(options.failurePartialMessages ?? []),
+                ],
                 artifacts: [],
                 todos: [],
               })}`,
@@ -514,6 +583,9 @@ async function mockPrivateWork(
           return route.fulfill({
             status: 200,
             contentType: "text/event-stream",
+            headers: {
+              "Content-Location": `/threads/${THREAD_ID}/runs/run-artifact`,
+            },
             body: [
               "event: metadata",
               `data: ${JSON.stringify({ run_id: "run-artifact", thread_id: THREAD_ID })}`,
@@ -530,7 +602,9 @@ async function mockPrivateWork(
             ].join("\n"),
           });
         }
-        return handleRunStream(route, options.streamValues);
+        return handleRunStream(route, options.streamValues, undefined, {
+          "Content-Location": `/threads/${THREAD_ID}/runs/00000000-0000-0000-0000-000000000099`,
+        });
       }
       if (path.endsWith(`/threads/${THREAD_ID}/runs/run-retained/events`)) {
         return json(route, []);
@@ -569,13 +643,31 @@ async function mockPrivateWork(
             ? [
                 {
                   run_id: "run-failed",
-                  seq: 0,
+                  seq: "0",
                   content: admittedFailedMessage,
                   metadata: { source: "run_admission" },
                   created_at: "2026-07-15T03:00:00Z",
                 },
               ]
             : [],
+          has_more: false,
+        });
+      }
+      if (
+        options.historyRunMessages &&
+        path.endsWith(`/threads/${THREAD_ID}/runs/run-history/messages`)
+      ) {
+        return json(route, {
+          data: options.historyRunMessages.map((content, index) => ({
+            run_id: "run-history",
+            seq: String(index + 1),
+            content,
+            metadata: {
+              caller: "lead_agent",
+              ...(index === 0 ? { source: "run_admission" } : {}),
+            },
+            created_at: `2026-07-15T02:00:0${index}Z`,
+          })),
           has_more: false,
         });
       }
@@ -597,7 +689,22 @@ async function mockPrivateWork(
                   updated_at: "2026-07-15T03:00:01Z",
                 },
               ]
-            : [],
+            : options.historyRunMessages
+              ? [
+                  {
+                    run_id: "run-history",
+                    thread_id: THREAD_ID,
+                    assistant_id: null,
+                    status: "success",
+                    metadata: {},
+                    multitask_strategy: "reject",
+                    error: null,
+                    model_name: "test-model",
+                    created_at: "2026-07-15T02:00:00Z",
+                    updated_at: "2026-07-15T02:00:01Z",
+                  },
+                ]
+              : [],
         );
       }
       return json(route, { detail: "not found" }, 404);
@@ -1086,6 +1193,348 @@ async function switchProjectParent(page: Page, threadId: string) {
   ).toBeVisible();
 }
 
+type MockSpeechResult = {
+  transcript: string;
+  isFinal: boolean;
+};
+
+type MockSpeechRecognitionSnapshot = {
+  abortCalls: number;
+  active: boolean;
+  continuous: boolean;
+  handlers: {
+    end: boolean;
+    error: boolean;
+    result: boolean;
+  };
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  startCalls: number;
+  stopCalls: number;
+};
+
+async function installControllableSpeechRecognition(page: Page) {
+  await page.addInitScript(() => {
+    type MockResult = {
+      transcript: string;
+      isFinal: boolean;
+    };
+    type MockResultEvent = {
+      results: Array<{
+        0: { transcript: string };
+        isFinal: boolean;
+        length: number;
+      }>;
+    };
+    type ResultHandler = ((event: MockResultEvent) => void) | null;
+    type ErrorHandler = ((event: { error?: string }) => void) | null;
+
+    const instances: MockSpeechRecognition[] = [];
+
+    class MockSpeechRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      maxAlternatives = 0;
+      startCalls = 0;
+      stopCalls = 0;
+      abortCalls = 0;
+      active = false;
+      private endHandler: (() => void) | null = null;
+      private errorHandler: ErrorHandler = null;
+      private resultHandler: ResultHandler = null;
+      private staleResultHandler: ResultHandler = null;
+
+      constructor() {
+        instances.push(this);
+      }
+
+      get onend() {
+        return this.endHandler;
+      }
+
+      set onend(handler: (() => void) | null) {
+        this.endHandler = handler;
+      }
+
+      get onerror() {
+        return this.errorHandler;
+      }
+
+      set onerror(handler: ErrorHandler) {
+        this.errorHandler = handler;
+      }
+
+      get onresult() {
+        return this.resultHandler;
+      }
+
+      set onresult(handler: ResultHandler) {
+        this.resultHandler = handler;
+        if (handler) {
+          this.staleResultHandler = handler;
+        }
+      }
+
+      start() {
+        this.startCalls += 1;
+        this.active = true;
+      }
+
+      stop() {
+        this.stopCalls += 1;
+        this.emitEnd();
+      }
+
+      abort() {
+        this.abortCalls += 1;
+        this.emitEnd();
+      }
+
+      emitResult(results: MockResult[]) {
+        this.resultHandler?.(this.resultEvent(results));
+      }
+
+      emitStaleResult(results: MockResult[]) {
+        this.staleResultHandler?.(this.resultEvent(results));
+      }
+
+      emitError(error: string) {
+        this.errorHandler?.({ error });
+      }
+
+      emitEnd() {
+        this.active = false;
+        this.endHandler?.();
+      }
+
+      private resultEvent(results: MockResult[]): MockResultEvent {
+        return {
+          results: results.map((result) => ({
+            0: { transcript: result.transcript },
+            isFinal: result.isFinal,
+            length: 1,
+          })),
+        };
+      }
+    }
+
+    function recognitionAt(instanceIndex?: number) {
+      const recognition =
+        instanceIndex === undefined
+          ? instances.at(-1)
+          : instances[instanceIndex];
+      if (!recognition) {
+        throw new Error("Speech recognition instance was not found");
+      }
+      return recognition;
+    }
+
+    const control = {
+      emitEnd(instanceIndex?: number) {
+        recognitionAt(instanceIndex).emitEnd();
+      },
+      emitError(error: string, instanceIndex?: number) {
+        recognitionAt(instanceIndex).emitError(error);
+      },
+      emitResult(results: MockResult[], instanceIndex?: number) {
+        recognitionAt(instanceIndex).emitResult(results);
+      },
+      emitStaleResult(instanceIndex: number, results: MockResult[]) {
+        recognitionAt(instanceIndex).emitStaleResult(results);
+      },
+      snapshot() {
+        return instances.map((recognition) => ({
+          abortCalls: recognition.abortCalls,
+          active: recognition.active,
+          continuous: recognition.continuous,
+          handlers: {
+            end: recognition.onend !== null,
+            error: recognition.onerror !== null,
+            result: recognition.onresult !== null,
+          },
+          interimResults: recognition.interimResults,
+          lang: recognition.lang,
+          maxAlternatives: recognition.maxAlternatives,
+          startCalls: recognition.startCalls,
+          stopCalls: recognition.stopCalls,
+        }));
+      },
+    };
+
+    Object.defineProperty(window, "SpeechRecognition", {
+      configurable: true,
+      value: MockSpeechRecognition,
+    });
+    Object.defineProperty(window, "webkitSpeechRecognition", {
+      configurable: true,
+      value: MockSpeechRecognition,
+    });
+    Object.defineProperty(window, "__deerFlowSpeechRecognitionTest", {
+      configurable: true,
+      value: control,
+    });
+  });
+}
+
+async function emitMockSpeechResult(
+  page: Page,
+  results: MockSpeechResult[],
+  instanceIndex?: number,
+) {
+  await page.evaluate(
+    ({ emittedResults, index }) => {
+      const control = Reflect.get(
+        window,
+        "__deerFlowSpeechRecognitionTest",
+      ) as {
+        emitResult: (
+          results: MockSpeechResult[],
+          instanceIndex?: number,
+        ) => void;
+      };
+      control.emitResult(emittedResults, index);
+    },
+    { emittedResults: results, index: instanceIndex },
+  );
+}
+
+async function emitMockSpeechError(
+  page: Page,
+  error: string,
+  instanceIndex?: number,
+) {
+  await page.evaluate(
+    ({ emittedError, index }) => {
+      const control = Reflect.get(
+        window,
+        "__deerFlowSpeechRecognitionTest",
+      ) as {
+        emitError: (error: string, instanceIndex?: number) => void;
+      };
+      control.emitError(emittedError, index);
+    },
+    { emittedError: error, index: instanceIndex },
+  );
+}
+
+async function emitMockSpeechEnd(page: Page, instanceIndex?: number) {
+  await page.evaluate((index) => {
+    const control = Reflect.get(window, "__deerFlowSpeechRecognitionTest") as {
+      emitEnd: (instanceIndex?: number) => void;
+    };
+    control.emitEnd(index);
+  }, instanceIndex);
+}
+
+async function emitStaleMockSpeechResult(
+  page: Page,
+  instanceIndex: number,
+  results: MockSpeechResult[],
+) {
+  await page.evaluate(
+    ({ index, emittedResults }) => {
+      const control = Reflect.get(
+        window,
+        "__deerFlowSpeechRecognitionTest",
+      ) as {
+        emitStaleResult: (
+          instanceIndex: number,
+          results: MockSpeechResult[],
+        ) => void;
+      };
+      control.emitStaleResult(index, emittedResults);
+    },
+    { index: instanceIndex, emittedResults: results },
+  );
+}
+
+async function mockSpeechRecognitionSnapshot(page: Page) {
+  return page.evaluate(() => {
+    const control = Reflect.get(window, "__deerFlowSpeechRecognitionTest") as {
+      snapshot: () => MockSpeechRecognitionSnapshot[];
+    };
+    return control.snapshot();
+  });
+}
+
+async function mockSecondaryProjectThread(page: Page) {
+  await page.route(
+    new RegExp(
+      `/api/projects/${PROJECT_ID}/private-work/threads/${SECOND_THREAD_ID}(?:/[^?]*)?(?:\\?.*)?$`,
+      "u",
+    ),
+    async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}/state`)) {
+        return json(route, {
+          values: {
+            title: "Second owner research",
+            messages: [
+              {
+                type: "human",
+                id: "msg-second-project-history",
+                content: [{ type: "text", text: "Second thread history" }],
+              },
+            ],
+            artifacts: [],
+            todos: [],
+          },
+          next: [],
+          metadata: {},
+          checkpoint: {},
+          checkpoint_id: null,
+          parent_checkpoint_id: null,
+          created_at: "2026-07-15T02:00:00Z",
+          tasks: [],
+        });
+      }
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}/token-usage`)) {
+        return json(route, {
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_tokens: 0,
+        });
+      }
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}/goal`)) {
+        return json(route, { goal: null });
+      }
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}/uploads/limits`)) {
+        return json(route, {
+          max_files: 10,
+          max_file_size: 50 * 1024 * 1024,
+          max_total_size: 100 * 1024 * 1024,
+          project_storage: {
+            policy: "project_quota",
+            remaining_bytes: 5 * 1024 * 1024 * 1024,
+          },
+          request_id: "second-project-private-upload-limits",
+        });
+      }
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}/uploads`)) {
+        return json(route, []);
+      }
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}/runs`)) {
+        return json(route, []);
+      }
+      if (path.endsWith(`/threads/${SECOND_THREAD_ID}`)) {
+        return json(route, {
+          ...privateThread,
+          thread_id: SECOND_THREAD_ID,
+          display_name: "Second owner research",
+          metadata: {
+            created_at: "2026-07-15T00:00:00Z",
+            updated_at: "2026-07-15T02:00:00Z",
+          },
+          updated_at: "2026-07-15T02:00:00Z",
+        });
+      }
+      return json(route, { detail: "not found" }, 404);
+    },
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   mockLangGraphAPI(page, { suggestionsEnabled: true });
   await mockProjectContext(page);
@@ -1107,6 +1556,13 @@ test.beforeEach(async ({ page }) => {
       system_items: [],
       project_items: [],
       request_id: "req-project-skills",
+    }),
+  );
+  await page.route(`**/api/projects/${PROJECT_ID}/mcp-servers`, (route) =>
+    json(route, {
+      system_items: [],
+      project_items: [],
+      request_id: "req-project-mcp-servers",
     }),
   );
   await page.route(`**/api/projects/${PROJECT_ID}/agents`, (route) =>
@@ -1142,6 +1598,42 @@ test.beforeEach(async ({ page }) => {
       project_items: [],
       request_id: "req-project-agents",
     }),
+  );
+  await page.route(`**/api/projects/${PROJECT_ID}/default-agent`, (route) =>
+    json(route, {
+      agent_asset_id: null,
+      revision: 0,
+      request_id: "req-project-default-agent",
+    }),
+  );
+  await page.route(
+    `**/api/projects/${PROJECT_ID}/agents/${MAIN_AGENT_ID}/versions`,
+    (route) =>
+      json(route, {
+        data: [
+          {
+            id: "31000000-0000-4000-8000-000000000001",
+            agent_id: MAIN_AGENT_ID,
+            version_number: 1,
+            workflow_status: "published",
+            description: "Main project assistant",
+            agents_instructions: "",
+            soul: "",
+            identity: "",
+            user_context: "",
+            payload_schema_version: 1,
+            model_ref: "mock-model",
+            tool_groups: [],
+            skill_version_ids: [],
+            mcp_version_ids: [],
+            supersedes_version_id: null,
+            payload_checksum: "main-agent-v1",
+            created_by_user_id: "system",
+            created_at: "2026-07-15T00:00:00Z",
+          },
+        ],
+        request_id: "req-project-main-agent-versions",
+      }),
   );
 });
 
@@ -1207,6 +1699,283 @@ test("project detail loads history and streams without legacy private-work calls
   expect(legacySuggestionRequests).toEqual([]);
   expect(legacyArtifactRequests).toEqual([]);
   expect(legacyPrivateRequests).toEqual([]);
+});
+
+test("project voice dictation merges browser transcripts and cleans up without submitting", async ({
+  page,
+}) => {
+  await installControllableSpeechRecognition(page);
+
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, { runBodies });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  const voiceButton = page.getByTestId("voice-input-button");
+  await textarea.fill("Existing typed draft");
+  await expect(voiceButton).toBeEnabled();
+  await expect(voiceButton).toHaveAttribute("aria-label", "Dictate with voice");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+
+  await voiceButton.click();
+  await expect(voiceButton).toHaveAttribute("aria-label", "Stop voice input");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const control = Reflect.get(
+          window,
+          "__deerFlowSpeechRecognitionTest",
+        ) as {
+          snapshot: () => Array<{ startCalls: number }>;
+        };
+        return control.snapshot()[0]?.startCalls;
+      }),
+    )
+    .toBe(1);
+
+  await emitMockSpeechResult(page, [
+    { transcript: " interim phrase ", isFinal: false },
+  ]);
+  await expect(textarea).toHaveValue("Existing typed draft interim phrase");
+
+  await emitMockSpeechResult(page, [
+    { transcript: " final words ", isFinal: true },
+    { transcript: " interim tail ", isFinal: false },
+  ]);
+  await expect(textarea).toHaveValue(
+    "Existing typed draft final words interim tail",
+  );
+
+  await voiceButton.click();
+  await expect(voiceButton).toHaveAttribute("aria-label", "Dictate with voice");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+  await expect(textarea).toHaveValue(
+    "Existing typed draft final words interim tail",
+  );
+
+  const recognitionState = await mockSpeechRecognitionSnapshot(page);
+  expect(recognitionState).toEqual([
+    {
+      abortCalls: 0,
+      active: false,
+      continuous: true,
+      handlers: { end: false, error: false, result: false },
+      interimResults: true,
+      lang: "en-US",
+      maxAlternatives: 1,
+      startCalls: 1,
+      stopCalls: 1,
+    },
+  ]);
+  expect(runBodies).toEqual([]);
+  expect(projectRequests).not.toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/stream`,
+  );
+});
+
+test("project voice dictation restarts after natural end and ignores the old recognizer", async ({
+  page,
+}) => {
+  await installControllableSpeechRecognition(page);
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, { runBodies });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+
+  const textarea = page.getByPlaceholder(/how can i assist you/i);
+  const voiceButton = page.getByTestId("voice-input-button");
+  await textarea.fill("Restart baseline");
+  await voiceButton.click();
+  await emitMockSpeechResult(
+    page,
+    [{ transcript: " first segment ", isFinal: true }],
+    0,
+  );
+  await expect(textarea).toHaveValue("Restart baseline first segment");
+
+  await emitMockSpeechEnd(page, 0);
+  await expect(voiceButton).toHaveAttribute("aria-label", "Stop voice input");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(async () => (await mockSpeechRecognitionSnapshot(page)).length, {
+      timeout: 2_000,
+    })
+    .toBe(2);
+
+  let recognitionState = await mockSpeechRecognitionSnapshot(page);
+  expect(recognitionState[0]).toMatchObject({
+    active: false,
+    handlers: { end: false, error: false, result: false },
+    startCalls: 1,
+    stopCalls: 0,
+  });
+  expect(recognitionState[1]).toMatchObject({
+    active: true,
+    handlers: { end: true, error: true, result: true },
+    startCalls: 1,
+  });
+  await expect(textarea).toHaveValue("Restart baseline first segment");
+
+  await emitStaleMockSpeechResult(page, 0, [
+    { transcript: " stale old transcript ", isFinal: true },
+  ]);
+  await expect(textarea).toHaveValue("Restart baseline first segment");
+
+  await emitMockSpeechResult(
+    page,
+    [{ transcript: " second segment ", isFinal: false }],
+    1,
+  );
+  await expect(textarea).toHaveValue(
+    "Restart baseline first segment second segment",
+  );
+
+  await voiceButton.click();
+  await expect(voiceButton).toHaveAttribute("aria-label", "Dictate with voice");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+  recognitionState = await mockSpeechRecognitionSnapshot(page);
+  expect(recognitionState[1]).toMatchObject({
+    active: false,
+    handlers: { end: false, error: false, result: false },
+    stopCalls: 1,
+  });
+  expect(runBodies).toEqual([]);
+  expect(projectRequests).not.toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/stream`,
+  );
+});
+
+test("project voice permission denial returns to idle without restarting or submitting", async ({
+  page,
+}) => {
+  await installControllableSpeechRecognition(page);
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, { runBodies });
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+
+  const voiceButton = page.getByTestId("voice-input-button");
+  await voiceButton.click();
+  await expect(voiceButton).toHaveAttribute("aria-label", "Stop voice input");
+  await emitMockSpeechError(page, "not-allowed", 0);
+  await expect(
+    page.getByText(
+      "Microphone access was denied. Allow microphone access and try again.",
+    ),
+  ).toBeVisible();
+  await emitMockSpeechEnd(page, 0);
+
+  await expect(voiceButton).toHaveAttribute("aria-label", "Dictate with voice");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+  await page.waitForTimeout(250);
+  expect(await mockSpeechRecognitionSnapshot(page)).toEqual([
+    {
+      abortCalls: 0,
+      active: false,
+      continuous: true,
+      handlers: { end: false, error: false, result: false },
+      interimResults: true,
+      lang: "en-US",
+      maxAlternatives: 1,
+      startCalls: 1,
+      stopCalls: 0,
+    },
+  ]);
+  expect(runBodies).toEqual([]);
+  expect(projectRequests).not.toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/stream`,
+  );
+});
+
+test("project thread navigation aborts dictation and isolates stale callbacks from the next composer", async ({
+  page,
+}) => {
+  await installControllableSpeechRecognition(page);
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, { runBodies });
+  await mockSecondaryProjectThread(page);
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+
+  let textarea = page.getByPlaceholder(/how can i assist you/i);
+  let voiceButton = page.getByTestId("voice-input-button");
+  await textarea.fill("First thread baseline");
+  await voiceButton.click();
+  await emitMockSpeechResult(
+    page,
+    [{ transcript: " active voice ", isFinal: false }],
+    0,
+  );
+  await expect(textarea).toHaveValue("First thread baseline active voice");
+
+  const secondStateResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === "GET" &&
+      url.pathname.endsWith(`/threads/${SECOND_THREAD_ID}/state`)
+    );
+  });
+  await page.evaluate(async (nextThreadId) => {
+    const appRouter = (
+      window as Window & {
+        next?: { router?: { push: (href: string) => Promise<void> } };
+      }
+    ).next?.router;
+    if (!appRouter) {
+      throw new Error("Next app router is unavailable");
+    }
+    await appRouter.push(`/projects/research-lab/chats/${nextThreadId}`);
+  }, SECOND_THREAD_ID);
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/research-lab/chats/${SECOND_THREAD_ID}$`, "u"),
+  );
+  await secondStateResponse;
+  await expect(page.getByText("Second thread history")).toBeVisible();
+  await expect
+    .poll(
+      async () =>
+        (await mockSpeechRecognitionSnapshot(page))[0]?.abortCalls ?? 0,
+    )
+    .toBeGreaterThan(0);
+
+  let recognitionState = await mockSpeechRecognitionSnapshot(page);
+  expect(recognitionState[0]).toMatchObject({
+    active: false,
+    handlers: { end: false, error: false, result: false },
+    stopCalls: 0,
+  });
+  textarea = page.getByPlaceholder(/how can i assist you/i);
+  voiceButton = page.getByTestId("voice-input-button");
+  await expect(textarea).toHaveValue("");
+  await expect(voiceButton).toHaveAttribute("aria-label", "Dictate with voice");
+  await expect(voiceButton).toHaveAttribute("aria-pressed", "false");
+
+  await emitStaleMockSpeechResult(page, 0, [
+    { transcript: " stale after navigation ", isFinal: true },
+  ]);
+  await expect(textarea).toHaveValue("");
+
+  await voiceButton.click();
+  await emitMockSpeechResult(
+    page,
+    [{ transcript: " second thread voice ", isFinal: true }],
+    1,
+  );
+  await expect(textarea).toHaveValue("second thread voice");
+  await emitStaleMockSpeechResult(page, 0, [
+    { transcript: " stale against new composer ", isFinal: false },
+  ]);
+  await expect(textarea).toHaveValue("second thread voice");
+
+  await voiceButton.click();
+  recognitionState = await mockSpeechRecognitionSnapshot(page);
+  expect(recognitionState[1]).toMatchObject({
+    active: false,
+    handlers: { end: false, error: false, result: false },
+    stopCalls: 1,
+  });
+  expect(runBodies).toEqual([]);
+  expect(projectRequests).not.toContain(
+    `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/stream`,
+  );
 });
 
 test("project goal and compact commands use only scoped control routes", async ({
@@ -1374,6 +2143,278 @@ test("project regenerate prepares from scoped history before a scoped run", asyn
     body: { message_id: "msg-ai-1" },
   });
   expect(JSON.stringify(runBodies[0])).toContain("checkpoint-before-human");
+});
+
+test("project edit and rerun stays scoped and submits the server-issued replacement", async ({
+  page,
+}) => {
+  const controlBodies: Array<{ path: string; body: unknown }> = [];
+  const runBodies: unknown[] = [];
+  const projectRequests = await mockPrivateWork(page, true, {
+    controlBodies,
+    runBodies,
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-edit-human",
+        content: [{ type: "text", text: "Original project question" }],
+      },
+      {
+        type: "ai",
+        id: "msg-edit-ai",
+        content: "Original project answer",
+      },
+    ],
+    stateMessagesAfterStream: [
+      {
+        type: "human",
+        id: "msg-project-edited",
+        content: [{ type: "text", text: "Edited project question" }],
+      },
+      {
+        type: "ai",
+        id: "msg-edit-ai-new",
+        content: "Edited project answer",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const original = page.getByText("Original project question");
+  await expect(original).toBeVisible();
+  await original.hover();
+  await page.getByRole("button", { name: "Edit and rerun" }).click();
+
+  const editor = page.getByTestId("message-edit-textarea");
+  await expect(editor).toHaveValue("Original project question");
+  await expect(page.getByRole("button", { name: "Regenerate" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Branch conversation" }),
+  ).toBeDisabled();
+  await editor.fill("Edited project question");
+  await page.getByRole("button", { name: "Update and rerun" }).click();
+
+  await expect
+    .poll(() =>
+      projectRequests.includes(
+        `POST /api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/edit-regenerate/prepare`,
+      ),
+    )
+    .toBe(true);
+  expect(controlBodies).toContainEqual({
+    path: `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/edit-regenerate/prepare`,
+    body: {
+      human_message_id: "msg-edit-human",
+      replacement_text: "Edited project question",
+    },
+  });
+  await expect.poll(() => runBodies).toHaveLength(1);
+  expect(runBodies[0]).toMatchObject({
+    input: {
+      messages: [
+        {
+          id: "msg-project-edited",
+          content: [{ type: "text", text: "Edited project question" }],
+        },
+      ],
+    },
+    checkpoint: { checkpoint_id: "checkpoint-before-human" },
+    metadata: {
+      replay_kind: "edit",
+      edit_from_message_id: "msg-edit-human",
+      edit_message_id: "msg-project-edited",
+    },
+  });
+  await expect(page.getByText("Edited project question")).toBeVisible();
+  expect(
+    projectRequests.some((request) => request.includes("/api/threads/")),
+  ).toBe(false);
+});
+
+test("project replay controls wait for the SDK initial state request to settle", async ({
+  page,
+}) => {
+  let releaseInitialState!: () => void;
+  const initialStateGate = new Promise<void>((resolve) => {
+    releaseInitialState = resolve;
+  });
+  const initialStateGateRequests: string[] = [];
+  const runBodies: unknown[] = [];
+  const historyMessages = [
+    {
+      type: "human",
+      id: "msg-history-human",
+      content: [{ type: "text", text: "History loaded before SDK state" }],
+    },
+    {
+      type: "ai",
+      id: "msg-history-ai",
+      content: "History answer loaded independently",
+    },
+  ];
+  await mockPrivateWork(page, true, {
+    initialStateGate,
+    initialStateGateRequests,
+    historyRunMessages: historyMessages,
+    runBodies,
+    stateMessages: historyMessages,
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  await expect.poll(() => initialStateGateRequests.length).toBeGreaterThan(0);
+  const historyHuman = page.getByText("History loaded before SDK state");
+  await expect(historyHuman).toBeVisible();
+  await historyHuman.hover();
+  await expect(
+    page.getByRole("button", { name: "Edit and rerun" }),
+  ).toHaveCount(0);
+  expect(runBodies).toHaveLength(0);
+
+  releaseInitialState();
+
+  await historyHuman.hover();
+  await expect(
+    page.getByRole("button", { name: "Edit and rerun" }),
+  ).toBeVisible();
+});
+
+test("project edit replay restores its source and draft when run creation fails before metadata", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  await mockPrivateWork(page, true, {
+    runBodies,
+    streamResponseStatus: 400,
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-edit-human",
+        content: [{ type: "text", text: "Original project question" }],
+      },
+      {
+        type: "ai",
+        id: "msg-edit-ai",
+        content: "Original project answer",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const original = page.getByText("Original project question");
+  await original.hover();
+  await page.getByRole("button", { name: "Edit and rerun" }).click();
+  const editor = page.getByTestId("message-edit-textarea");
+  await editor.fill("Replacement after pre-create failure");
+  await page.getByRole("button", { name: "Update and rerun" }).click();
+
+  await expect.poll(() => runBodies).toHaveLength(1);
+  await expect(page.getByTestId("message-edit-textarea")).toHaveValue(
+    "Replacement after pre-create failure",
+  );
+  await expect(page.getByText("Original project answer")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Update and rerun" }),
+  ).toBeEnabled();
+});
+
+test("successful project edit survives a post-stream history refetch failure", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  const stateStatusAfterStreamRequests: string[] = [];
+  await mockPrivateWork(page, true, {
+    runBodies,
+    stateStatusAfterStream: 503,
+    stateStatusAfterStreamRequests,
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-edit-human",
+        content: [{ type: "text", text: "Original project question" }],
+      },
+      {
+        type: "ai",
+        id: "msg-edit-ai",
+        content: "Original project answer",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const original = page.getByText("Original project question");
+  await original.hover();
+  await page.getByRole("button", { name: "Edit and rerun" }).click();
+  await page
+    .getByTestId("message-edit-textarea")
+    .fill("Successful replacement");
+  await page.getByRole("button", { name: "Update and rerun" }).click();
+
+  await expect.poll(() => runBodies).toHaveLength(1);
+  await expect
+    .poll(() => stateStatusAfterStreamRequests.length)
+    .toBeGreaterThan(0);
+  await expect(
+    page.getByText("post-stream state temporarily unavailable"),
+  ).toBeVisible();
+  await expect(page.getByText("Successful replacement")).toBeVisible();
+  await expect(original).not.toBeVisible();
+  await expect(page.getByTestId("run-failure-alert")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Update and rerun" }),
+  ).toHaveCount(0);
+});
+
+test("failed project edit replay restores the original turn and removes its optimistic replacement", async ({
+  page,
+}) => {
+  const runBodies: unknown[] = [];
+  await mockPrivateWork(page, true, {
+    runBodies,
+    streamTerminalStatus: "failed",
+    failurePartialMessages: [
+      {
+        type: "ai",
+        id: "msg-edit-ai-partial-failed",
+        content: "Partial replacement answer that must disappear",
+      },
+    ],
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-edit-human",
+        content: [{ type: "text", text: "Original project question" }],
+      },
+      {
+        type: "ai",
+        id: "msg-edit-ai",
+        content: "Original project answer",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const original = page.getByText("Original project question");
+  await original.hover();
+  await page.getByRole("button", { name: "Edit and rerun" }).click();
+  const editor = page.getByTestId("message-edit-textarea");
+  await editor.fill("Replacement that must roll back");
+  await page.getByRole("button", { name: "Update and rerun" }).click();
+
+  await expect.poll(() => runBodies).toHaveLength(1);
+  await expect(page.getByTestId("run-failure-alert")).toBeVisible();
+  await expect(page.getByText("Replacement that must roll back")).toHaveCount(
+    1,
+  );
+  await expect(page.getByText("Original project answer")).toBeVisible();
+  await expect(
+    page.getByText("Partial replacement answer that must disappear"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("message-edit-textarea")).toHaveValue(
+    "Replacement that must roll back",
+  );
+  await expect(
+    page.getByRole("button", { name: "Update and rerun" }),
+  ).toBeEnabled();
 });
 
 test("project chat keeps quoted references inside the scoped conversation", async ({
@@ -1869,7 +2910,7 @@ test("project write-file artifacts retain preview and survive artifact-less stre
   await expect(
     page.locator("#artifacts").getByText("Project report"),
   ).toBeVisible();
-  const artifactTrigger = page.getByRole("button", { name: /artifacts/i });
+  const artifactTrigger = page.getByTestId("artifact-trigger");
   await expect(artifactTrigger).toBeVisible();
   const textarea = page.getByPlaceholder(/how can i assist you/i);
   await textarea.fill("Continue scoped artifact work");
@@ -1930,7 +2971,25 @@ test("a live file write collapses project navigation, opens preview, and present
     tool_call_id: "present-live-project-file",
     content: "Successfully presented files",
   };
-  const finalMessages = [submitted, write, writeResult, present, presentResult];
+  const finalAnswer = {
+    type: "ai",
+    id: "msg-live-artifact-final",
+    run_id: "run-live-artifact",
+    content: "Project report completed.",
+    additional_kwargs: {
+      reasoning_content: "Confirm the requested file is ready.",
+      reasoning_duration_ms: 19_000,
+      turn_duration: 45,
+    },
+  };
+  const finalMessages = [
+    submitted,
+    write,
+    writeResult,
+    present,
+    presentResult,
+    finalAnswer,
+  ];
   await mockPrivateWork(page, true, {
     stateMessages: [],
     stateMessagesAfterStream: finalMessages,
@@ -1954,7 +3013,7 @@ test("a live file write collapses project navigation, opens preview, and present
         id: PROJECT_FILE_ID,
         logical_path: "outputs/project-report.md",
         display_name: "project-report.md",
-        kind: "artifact",
+        kind: "output",
         media_type: "text/markdown",
         size: 21,
         sha256: "live-project-file-sha",
@@ -1975,13 +3034,94 @@ test("a live file write collapses project navigation, opens preview, and present
 
   await expect(menu).toHaveAttribute("data-state", "collapsed");
   await expect(
-    page.locator("#artifacts").getByText("Live project report"),
+    page.getByText("Project report completed.", { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByText("The live report is ready.", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.locator("#artifacts").getByRole("combobox")).toContainText(
+    "project-report.md",
+  );
   await expect(
     page
       .getByTestId("chat-message-content")
       .getByText("project-report.md", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByTestId("assistant-delivered-files")).toHaveCount(1);
+  await expect(
+    page.getByTestId("assistant-process-disclosure"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("thinking-disclosure")).toHaveAttribute(
+    "data-state",
+    "closed",
+  );
+  await expect(page.getByTestId("thinking-disclosure")).toContainText(
+    "Thought (19 seconds)",
+  );
+  await expect(page.getByTestId("thinking-disclosure")).not.toContainText(
+    "45s",
+  );
+  await expect(page.getByTestId("run-duration")).toContainText(
+    "Completed in 45s",
+  );
+  const thinkingTrigger = page
+    .getByTestId("thinking-disclosure")
+    .getByRole("button", { name: "Thought (19 seconds)" });
+  await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "false");
+  await thinkingTrigger.click();
+  await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByText("Confirm the requested file is ready.", { exact: true }),
+  ).toBeVisible();
+  await thinkingTrigger.click();
+  await expect(thinkingTrigger).toHaveAttribute("aria-expanded", "false");
+  const completedAssistantTurn = page
+    .locator("[data-assistant-turn]")
+    .filter({ hasText: "Project report completed." });
+  const completedTurnOrder = await completedAssistantTurn.evaluate((turn) => {
+    const thinking = turn.querySelector(
+      '[data-testid="thinking-disclosure"]',
+    );
+    const answer = Array.from(
+      turn.querySelectorAll("p"),
+    ).find((element) =>
+      element.textContent?.includes("Project report completed."),
+    );
+    const deliveredFiles = turn.querySelector(
+      '[data-testid="assistant-delivered-files"]',
+    );
+    const runDuration = turn.parentElement?.querySelector(
+      '[data-testid="run-duration"]',
+    );
+
+    return {
+      answerTop: answer?.getBoundingClientRect().top ?? null,
+      deliveredFilesTop:
+        deliveredFiles?.getBoundingClientRect().top ?? null,
+      runDurationTop: runDuration?.getBoundingClientRect().top ?? null,
+      thinkingTop: thinking?.getBoundingClientRect().top ?? null,
+    };
+  });
+  expect(completedTurnOrder.thinkingTop).not.toBeNull();
+  expect(completedTurnOrder.answerTop).not.toBeNull();
+  expect(completedTurnOrder.deliveredFilesTop).not.toBeNull();
+  expect(completedTurnOrder.runDurationTop).not.toBeNull();
+  expect(completedTurnOrder.thinkingTop!).toBeLessThan(
+    completedTurnOrder.answerTop!,
+  );
+  expect(completedTurnOrder.answerTop!).toBeLessThan(
+    completedTurnOrder.deliveredFilesTop!,
+  );
+  expect(completedTurnOrder.deliveredFilesTop!).toBeLessThan(
+    completedTurnOrder.runDurationTop!,
+  );
+  await page.reload();
+  await expect(page.getByTestId("thinking-disclosure")).toContainText(
+    "Thought (19 seconds)",
+  );
+  await expect(page.getByTestId("run-duration")).toContainText(
+    "Completed in 45s",
+  );
   await expect(
     page.getByRole("link", { name: /download/i }).first(),
   ).toHaveAttribute(
@@ -1991,12 +3131,107 @@ test("a live file write collapses project navigation, opens preview, and present
       "u",
     ),
   );
+  await page
+    .getByRole("button", { name: "Open file: project-report.md", exact: true })
+    .click();
+  await expect(page.locator("#artifacts").getByRole("combobox")).toContainText(
+    "project-report.md",
+  );
   if (process.env.CAPTURE_ARTIFACT_FLOW_SCREENSHOT === "1") {
     await page.screenshot({
       path: "test-results/artifact-file-flow.png",
       fullPage: false,
     });
   }
+
+  await page
+    .locator("#artifacts")
+    .getByRole("button", { name: /close/i })
+    .click();
+  await page.getByTestId("artifact-trigger").click();
+  const durableFileButton = page.locator("#artifacts").getByRole("button", {
+    name: /open file.*project-report\.md/i,
+  });
+  await expect(durableFileButton).toHaveCount(1);
+  await durableFileButton.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#artifacts").getByRole("combobox")).toContainText(
+    "project-report.md",
+  );
+});
+
+test("a finalized workspace file can be reopened from the file list after closing its preview", async ({
+  page,
+}) => {
+  await mockPrivateWork(page, true, {
+    stateMessages: [
+      {
+        type: "human",
+        id: "msg-java-request",
+        content: "Write a Java quicksort implementation",
+      },
+      {
+        type: "ai",
+        id: "msg-java-write",
+        content: "QuickSort.java is ready.",
+        tool_calls: [
+          {
+            id: "write-java-file",
+            name: "write_file",
+            args: {
+              path: "/mnt/user-data/workspace/QuickSort.java",
+              content: "public class QuickSort {}",
+            },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        id: "msg-java-write-result",
+        name: "write_file",
+        tool_call_id: "write-java-file",
+        content: "OK",
+      },
+    ],
+    stateArtifacts: [],
+    uploadedFiles: [
+      {
+        id: PROJECT_FILE_ID,
+        logical_path: "workspace/QuickSort.java",
+        display_name: "QuickSort.java",
+        kind: "workspace",
+        media_type: "text/x-java-source",
+        size: 25,
+        sha256: "java-file-sha",
+        status: "ready",
+        created_at: "2026-07-15T00:00:00Z",
+        updated_at: "2026-07-15T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto(`/projects/research-lab/chats/${THREAD_ID}`);
+  const fileTrigger = page.getByTestId("artifact-trigger");
+  await fileTrigger.click();
+  const openFile = page.getByRole("button", {
+    name: /open file.*QuickSort\.java/i,
+  });
+  await expect(openFile).toBeVisible();
+  await openFile.click();
+  await expect(
+    page.locator("#artifacts").getByText("QuickSort.java", { exact: true }),
+  ).toBeVisible();
+
+  await page
+    .locator("#artifacts")
+    .getByRole("button", { name: /close/i })
+    .click();
+  await fileTrigger.click();
+  await expect(openFile).toBeVisible();
+  await openFile.click();
+  await expect(
+    page.locator("#artifacts").getByText("QuickSort.java", { exact: true }),
+  ).toBeVisible();
 });
 
 test("project workspace changes use only the private-work route", async ({
@@ -2219,7 +3454,7 @@ test("project list is owner-scoped and direct metadata misses show one public no
   ).toHaveCount(0);
 });
 
-test("new conversation creates directly with Main without opening an Agent selector", async ({
+test("new conversation lets the Gateway resolve the default Agent without opening a selector", async ({
   page,
 }) => {
   await mockPrivateWork(page);
@@ -2230,8 +3465,8 @@ test("new conversation creates directly with Main without opening an Agent selec
       createBody = route.request().postDataJSON() as Record<string, unknown>;
       await json(route, {
         thread_id: createBody.thread_id,
-        agent_asset_id: createBody.agent_asset_id,
-        agent_scope: createBody.agent_scope,
+        agent_asset_id: MAIN_AGENT_ID,
+        agent_scope: "system",
         display_name: createBody.display_name,
         status: "idle",
         metadata: {},
@@ -2248,10 +3483,10 @@ test("new conversation creates directly with Main without opening an Agent selec
   await expect
     .poll(() => createBody)
     .toMatchObject({
-      agent_asset_id: MAIN_AGENT_ID,
-      agent_scope: "system",
       display_name: "新对话",
     });
+  expect(createBody).not.toHaveProperty("agent_asset_id");
+  expect(createBody).not.toHaveProperty("agent_scope");
   await expect(page.getByRole("dialog", { name: "选择 Agent" })).toHaveCount(0);
   await expect(page).toHaveURL(
     new RegExp("/projects/research-lab/chats/[0-9a-f-]+$", "u"),
@@ -2360,7 +3595,7 @@ test("project .skill artifacts are download-only on the UUID file route", async 
         id: PROJECT_SKILL_FILE_ID,
         logical_path: "outputs/reviewer.skill",
         display_name: "reviewer.skill",
-        kind: "artifact",
+        kind: "output",
         media_type: "application/octet-stream",
         size: 512,
         sha256: "project-skill-sha",
@@ -2412,7 +3647,7 @@ test("project Skill catalog suggestions submit through the scoped run", async ({
           slug: "review-skill",
           display_name: "Review Skill",
           status: "active",
-          current_published_version_id: null,
+          current_published_version_id: "51000000-0000-4000-8000-000000000001",
           version: 1,
           created_by_user_id: ACCOUNT_ID,
           created_at: "2026-07-15T00:00:00Z",

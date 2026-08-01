@@ -143,7 +143,6 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
     assert trusted_context is context
     assert body.input == {
         "messages": [{"role": "user", "content": "stream"}],
-        "owner_user_id": "forged",
     }
     assert body.command == {"resume": {"role": "tool", "project_id": "payload-project"}}
     assert body.metadata == {"safe": "value"}
@@ -332,6 +331,56 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
         thread_id,
         run_id,
         status="interrupted",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", [7, 9])
+async def test_durable_consumer_does_not_reemit_terminal_at_or_before_cursor(
+    cursor: int,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    terminal = StoredStreamFrame(
+        id="7",
+        thread_id=thread_id,
+        run_id=run_id,
+        event="end",
+        data={"status": "completed"},
+        terminal=True,
+        created=False,
+    )
+    bridge = SimpleNamespace(
+        read_after=AsyncMock(return_value=()),
+        ensure_settled_terminal=AsyncMock(return_value=terminal),
+    )
+    service = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(status="success")),
+    )
+    context = SimpleNamespace(request_id="terminal-cursor", resource_scope=object())
+    request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+
+    chunks = [
+        chunk
+        async for chunk in private_work_router._durable_private_sse_consumer(
+            bridge=bridge,
+            service=service,
+            context=context,
+            thread_id=thread_id,
+            run_id=run_id,
+            request=request,
+            cursor=cursor,
+            initial_frames=(),
+            cancel_on_disconnect=False,
+        )
+    ]
+
+    assert chunks == []
+    bridge.ensure_settled_terminal.assert_awaited_once_with(
+        context.resource_scope,
+        thread_id,
+        run_id,
+        status="completed",
     )
 
 

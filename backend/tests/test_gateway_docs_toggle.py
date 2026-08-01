@@ -151,6 +151,7 @@ def test_gateway_cors_allows_configured_origin():
         "content-location",
         "location",
         "retry-after",
+        "x-next-offset",
         "x-trace-id",
     } <= exposed
 

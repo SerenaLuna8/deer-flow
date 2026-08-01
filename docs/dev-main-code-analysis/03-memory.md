@@ -396,3 +396,245 @@ PrivateMemoryService method
 | 检索 | 中文、连字符、category、top-k、重复 fact ID | 索引损坏重建且不跨 scope |
 | shutdown | drain 成功、超时、异常 | Worker 终止窗口内已确认项不丢、未确认项可观测 |
 | 管理 API | 输入校验和公开错误码 | 404/403、version conflict、导入导出、删除项目后的不可达 |
+
+## 16. 移植计划与执行状态
+
+本次移植不把 main 的 Memory 子系统整体覆盖到 dev，而是以 dev 的最终运行边界为宿主，
+逐个吸收第 13 节确认的可移植能力。执行顺序先封闭权限和提示安全，再开放模型可见的
+只读检索，最后补齐队列尾部可靠性；这样任一阶段都不会产生一个可跨 scope 调用或可写入
+不明后端的半成品。
+
+| 阶段 | 目标 | 状态 | 验收条件 |
+| --- | --- | --- | --- |
+| M0 | 冻结 PostgreSQL、project + owner + namespace 权威 | 已完成 | 不增加文件/远端权威，不新增 schema，不接受模型 scope |
+| M1 | 移植 main 的提示转义与异常数据稳健性 | 已完成 | Memory/会话不突破低权限标签；坏 confidence、无 ID fact 不使更新崩溃 |
+| M2 | 建立 dev 专用 capability、manager 和确定性检索 | 已完成 | 检索只消费已授权 snapshot；无 cache、索引或身份状态 |
+| M3 | 增加只读 `memory_search` 并接入私有 Lead Agent | 已完成 | 模型 schema 只有 query/category/top_k；无任何模型写工具 |
+| M4 | 由 Worker 签发 Run-bound Memory authority | 已完成 | membership、capability、Run、Job lease、取消状态和 Memory 读取在同一事务闭包内 |
+| M5 | 补齐压缩前立即入队与 Worker shutdown drain | 已完成 | 同 key 峰值并发为 1；完整 snapshot 不被压缩子集覆盖；停止前有界 flush |
+| M6 | 文档、静态检查、单元与 PostgreSQL 验收 | 已完成 | 聚焦回归通过；两项新增真实 PostgreSQL 边界测试通过 |
+
+本轮没有改 Gateway Memory API、前端或数据库 schema。已有管理 API 继续承担人工
+fact CRUD；Agent 只获得搜索能力，被动更新队列继续承担会话事实提取。
+
+## 17. 按可移植落点的实际实现
+
+### 17.1 提示注入与更新安全
+
+落点：
+
+- `backend/packages/harness/deerflow/agents/memory/prompt.py`
+- `backend/packages/harness/deerflow/agents/memory/updater.py`
+- `backend/tests/test_private_memory_safety.py`
+
+已移植 main 后期的低权限文本防护，并按 dev 数据形态补强：
+
+1. `workContext`、`personalContext`、`topOfMind`、三类 History summary，以及 fact
+   的 `content/category/sourceError` 在进入伪 XML Memory 块前转义。
+2. 更新提示里的 `current_memory` 使用递归副本，字符串 key 和字符串 value 都转义，
+   防止 JSON key 构造 `</current_memory>` 之类的结构逃逸。
+3. 会话提取同时清除 `<uploaded_files>` 与 `<current_uploads>`，长消息保留首尾各
+   500 字符后再转义，既不持久化临时路径，也不丢掉位于消息尾部的真实指令。
+4. null、bool、NaN、Infinity 和越界 confidence 统一安全归一化；staleness 候选缺少
+   ID 时忽略；裁剪使用同一安全排序函数，不再因异构旧数据抛异常。
+5. 保留 dev 的既有语义：Memory 仍是隐藏 `HumanMessage`，首次注入仍选择最新 genuine
+   user message，同一线程仍使用 checkpoint 中冻结的 Memory prefix。
+
+没有移植 main 的“每轮 reload”或把 Memory 提升为 `SystemMessage` 的行为。
+
+### 17.2 Capability、Manager 与 snapshot 检索
+
+落点：
+
+- `backend/packages/harness/deerflow/agents/memory/manager.py`
+- `backend/packages/harness/deerflow/agents/memory/retrieval.py`
+- `backend/tests/test_project_memory_retrieval.py`
+
+`ProjectMemoryCapabilities` 明确声明当前宿主能力：
+
+```text
+supports_search = true
+supports_fact_mutation = false
+requires_passive_writes = true
+```
+
+这里的 manager 不是新的身份或持久化层。它只接受一个 app 层签发的 opaque
+`ProjectMemoryReadAuthority`，调用 `load_snapshot()` 后检查版本和 facts 形态，再把
+单个已授权 PostgreSQL snapshot 交给纯函数 ranker。manager、ranker 和工具参数里都没有
+project、owner、namespace、thread、Run 或 lease。
+
+检索移植了 main 的 BM25/中文 recall 思路，但没有移植 FTS5：
+
+- NFKC + casefold 归一化；
+- Unicode word、连字符整词/分词、CJK 单字与 bigram；
+- category 在 document-frequency 与 top-k 之前过滤；
+- BM25-like 文本相关度为准入门槛，confidence 与 30 天后的时间衰减只能重排已命中的事实，
+  不能让无文本命中的 fact 混入结果；
+- query 最长 1000 字符，category 最长 32 字符，top-k 为 1..20；
+- 结果只投影 `id/content/category/confidence/createdAt/score/matchType`。
+
+PostgreSQL facts 仍是唯一权威。当前规模下直接对单个 snapshot 排序，避免引入第二份
+scope-sensitive 索引；将来若有容量数据证明需要索引，应单独设计 PostgreSQL 派生索引及
+失效/重建协议。
+
+### 17.3 只读模型工具与 Lead Agent 装配
+
+落点：
+
+- `backend/packages/harness/deerflow/agents/memory/tools.py`
+- `backend/packages/harness/deerflow/agents/lead_agent/agent.py`
+- `backend/packages/harness/deerflow/config/memory_config.py`
+- `backend/tests/test_project_memory_tools.py`
+
+模型只看见一个 async 工具：
+
+```python
+memory_search(query: str, category: str | None = None, top_k: int = 5)
+```
+
+工具从内部 runtime 读取 `__memory_authority`。映射、缺失对象或没有
+`load_snapshot()` 的对象全部 fail closed；`AuthorizationRevoked` 保持内部控制流，
+其他失败只返回固定 `MEMORY_SEARCH_UNAVAILABLE`，不回显数据库或异常详情。
+
+fact content 和用户可编辑 category 都经过 framework-tag/boundary neutralization；
+单条 content 最长 768 字符，总 JSON 最长 20,000 字符。工具注册表明确只有 search，
+没有 `memory_add/update/delete`。Lead Agent 仅在 Worker 已物化 private runtime 且
+`memory.enabled && memory.search_enabled` 时绑定它；公开/嵌入式 Agent 不获得该工具。
+
+### 17.4 Worker 签发的 Run-bound 读取权限
+
+落点：
+
+- `backend/app/private_work/memory_authority.py`
+- `backend/app/reliability/execution.py`
+- `backend/packages/harness/deerflow/runtime/runs/worker.py`
+- `backend/app/private_work/context.py`
+- `backend/app/private_work/runtime_context.py`
+- `backend/tests/test_private_memory_authority.py`
+- `backend/tests/test_private_runtime_context.py`
+- `backend/tests/test_run_worker_rollback.py`
+
+`PrivateRunMemoryAuthority` 只由生产 Worker 构造。构造时冻结已签发
+`PrivateWorkContext`、精确 `JobClaim`、thread 和服务端 namespace；读取时在一个事务中：
+
+1. 锁定并重新解析当前 project membership；
+2. 比对 membership ID 和 version，并要求 `private_work.read_own`；
+3. 验证 Run authorization 仍 active；
+4. 验证精确 job ID、run ID、lease token 和执行状态，拒绝 cancel；
+5. 验证 Run 的 thread/job 绑定；
+6. 锁定并读取同一 project + owner + namespace Memory；不存在时返回空，不创建行。
+
+任何业务或数据库异常都转换为无详情 `AuthorizationRevoked`，`CancelledError` 原样传播。
+客户端 runtime 中的 `memory_authority`/`__memory_authority` 会被剥离；复用 config 时旧
+authority 也会先清除，只有本次 Worker 对象能写入内部 runtime。
+
+普通 async tool 仍在调用前把 retry safety 标为 unknown。`memory_search` 是纯只读，因此
+中间件只按 canonical、代码注册的 tool 对象身份选择
+`before_read_only_tool_call()`；仅伪造工具名或 metadata 不能声明自己只读。旧 boundary
+没有新方法时回退到普通 `before_tool_call()`，宁可保守标 unknown，也不能跳过授权。
+
+### 17.5 压缩前抢救、per-key 串行化与停止 drain
+
+落点：
+
+- `backend/packages/harness/deerflow/agents/memory/queue.py`
+- `backend/packages/harness/deerflow/agents/memory/summarization_hook.py`
+- `backend/app/worker/service.py`
+- `backend/tests/test_private_memory_queue.py`
+- `backend/tests/test_m6_worker_service.py`
+
+`enqueue_immediate()` 实现压缩前抢救：
+
+- 同 key 已有 normal pending 时，不用较窄的压缩消息覆盖完整 snapshot，只取消 debounce
+  并提前处理原 normal；
+- 没有 pending 时，才把 rescue 自身作为一次更新；
+- normal 已进入 updater 时，immediate 复用 active item，不发起重复写；
+- active 后另有更新 normal 时，immediate 只使它在 active 完成后串行执行。
+
+队列用 `_active` 记录每个 key 的当前 task，确保同 key 峰值并发为 1。`flush_all()` 和
+`clear()` 同时覆盖 pending 与 active，避免 reset 只清 debounce task。
+
+Worker shutdown 顺序改为：
+
+```text
+mark draining -> 等待 inflight -> flush 已初始化 Memory queue -> registry.remove
+```
+
+停止过程不会为一个从未使用 Memory 的 Worker 懒初始化数据库队列。flush 预算是
+`min(worker.shutdown_grace_seconds, 30s)`；超时会 cancel，再进行很短的 cancel drain，
+仍拒绝取消的 task 被 detach。超时和异常只记录类型级安全日志，不能阻止 registry remove。
+
+这提高了正常停止时尾部更新的可靠性，但没有把进程内 debounce 变成 durable queue，
+也不承诺跨 Worker exactly-once。同一进程同 key 已串行化；不同 Worker 若同时更新同一
+Memory，仍只由 PostgreSQL version CAS 拒绝冲突，而当前被动 updater 不自动重放失败的
+那次提取。进程被强杀时尚未持久化的 item，以及超时后拒绝取消而被 detach 的 producer，
+都不在 shutdown flush 保证内。
+
+### 17.6 配置
+
+`config.example.yaml` 的版本从 29 提升到 30，并增加：
+
+```yaml
+memory:
+  enabled: true
+  # Read-only recall for private project Runs. Scope and authorization always
+  # come from the Worker; the model cannot choose a project, owner or namespace.
+  search_enabled: true
+```
+
+本轮没有引入 main 的 `mode` 和 `manager_class`。dev 不是可任意切换权威后端的单用户
+应用：`search_enabled` 只控制是否给私有 Run 暴露只读 recall，被动 PostgreSQL 写入策略
+保持不变。
+
+## 18. 明确延期或不移植的能力
+
+| main 能力 | 本轮决定 | 原因 |
+| --- | --- | --- |
+| DeerMem Markdown + FTS5 | 不移植 | 会形成第二事实权威及本地 scope 生命周期 |
+| Mem0 / OpenViking | 不移植 | 远端 user bucket 不满足 exact project/owner/admitted snapshot |
+| 通用 manager dotted class | 不移植 | 允许运行时替换持久化权威，不符合 dev 最终边界 |
+| Agent fact add/update/delete tools | 不移植 | 模型写入扩大副作用面；已有 capability 受控管理 API 与被动更新 |
+| Gateway `/memory/*` user router | 不移植 | dev 已有 `/api/projects/{project_id}/memory` |
+| 每轮 Memory reload | 不移植 | 破坏 frozen prompt prefix 与 checkpoint 稳定性 |
+| 持久化检索索引 | 延期 | 先取得容量数据，再设计 PostgreSQL 派生索引与隔离/重建协议 |
+| expected-valid-days / lifetime extension / consolidation | 延期 | dev relational fact schema 尚未保存所需元数据，不能只搬一半算法 |
+| durable Memory update job | 延期 | 需要独立的 job/idempotency/lease 设计，不应伪装成进程内 queue 小改 |
+
+## 19. 验收矩阵
+
+本轮聚焦门禁至少覆盖：
+
+```bash
+cd backend
+.venv/bin/pytest -q \
+  tests/test_project_memory_retrieval.py \
+  tests/test_project_memory_tools.py \
+  tests/test_private_memory_safety.py \
+  tests/test_private_memory_authority.py \
+  tests/test_private_memory_queue.py \
+  tests/test_memory_prompt_injection.py \
+  tests/test_memory_staleness_review.py \
+  tests/test_memory_upload_filtering.py \
+  tests/test_private_run_authorization.py \
+  tests/test_private_runtime_context.py \
+  tests/test_run_worker_rollback.py \
+  tests/test_m6_worker_service.py
+```
+
+真实数据库边界位于
+`tests/test_m6_private_run_worker_postgres.py`，覆盖 membership revoke 与 snapshot read
+的锁顺序，以及只读工具调用后 Job `retry_safety` 仍为 `safe`。未配置
+`POSTGRES_TEST_URL` 时这些项只能报告 skip，不能作为 PostgreSQL 验收通过；发布候选仍需按
+根 `AGENTS.md` 运行固定 PostgreSQL gate 与 `make release-acceptance`。
+
+本轮实际结果：
+
+- 上述聚焦组合：`298 passed, 6 skipped`；
+- 全部 Memory 专用测试文件：`179 passed, 11 skipped`；
+- 新增真实 PostgreSQL 锁序与 retry-safety 用例：`2 passed`；
+- backend Ruff：`1110 files already formatted`、`All checks passed`；
+- `git diff --check`：通过。
+
+skip 来自组合中未注入 PostgreSQL fixture 或特定运行环境的既有条件项；新增的两条
+PostgreSQL 权限边界已另外使用真实测试库运行通过。这仍不替代完整 23 文件 PostgreSQL
+release gate。

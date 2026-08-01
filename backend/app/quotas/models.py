@@ -43,6 +43,13 @@ class QuotaConflict(QuotaError):
     """Quota version or idempotency authority conflicts."""
 
 
+class QuotaUnavailable(QuotaError):
+    """The current platform quota policy cannot be read safely."""
+
+    def __init__(self) -> None:
+        super().__init__("Quota policy unavailable")
+
+
 class QuotaExceeded(QuotaError):
     """A new consumption would cross the effective hard limit."""
 

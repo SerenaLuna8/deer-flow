@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { RememberLoginField } from "@/components/auth/remember-login-field";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
@@ -12,12 +13,32 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { safeInternalNextPath } from "@/core/auth/next-path";
 import { restoreSessionThenNavigate } from "@/core/auth/post-auth-navigation";
 import {
+  fetchAuthProviders,
+  type AuthProviderSummary,
+} from "@/core/auth/providers";
+import {
+  loadRememberLoginPreference,
+  saveRememberLoginPreference,
+} from "@/core/auth/remember-login";
+import {
+  buildLocalLoginBody,
+  buildOidcLoginUrl,
+  buildRememberingCredentialPayload,
+} from "@/core/auth/remember-payloads";
+import {
+  AUTH_SUBMIT_TIMEOUT_MS,
+  fetchAuth,
+  isAbortError,
+} from "@/core/auth/request";
+import {
   canCreateRegularAccount,
   fetchSetupStatus,
   type SetupStatusResponse,
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
+
+type SetupStatusPhase = "checking" | "ready" | "unavailable";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -28,14 +49,14 @@ export default function LoginPage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
   const [isLogin, setIsLogin] = useState(true);
-  const [ssoProviders, setSsoProviders] = useState<
-    { id: string; display_name: string; type: string }[]
-  >([]);
+  const [ssoProviders, setSsoProviders] = useState<AuthProviderSummary[]>([]);
   const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(
     null,
   );
-  const [setupStatusChecked, setSetupStatusChecked] = useState(false);
+  const [setupStatusPhase, setSetupStatusPhase] =
+    useState<SetupStatusPhase>("checking");
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
@@ -52,12 +73,14 @@ export default function LoginPage() {
   const [showSsoHint, setShowSsoHint] = useState(false);
   const [loading, setLoading] = useState(false);
   const localAuthNavigationRef = useRef(false);
+  const setupControllerRef = useRef<AbortController | null>(null);
+  const submitControllerRef = useRef<AbortController | null>(null);
 
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
   const redirectPath = safeInternalNextPath(nextParam);
   const regularSignupAllowed = canCreateRegularAccount({
-    checked: setupStatusChecked,
+    checked: setupStatusPhase === "ready",
     status: setupStatus,
   });
   const systemNeedsAdminSetup = setupStatus?.needs_setup === true;
@@ -69,48 +92,52 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, redirectPath, router]);
 
-  // Fetch setup state and SSO providers
   useEffect(() => {
-    let cancelled = false;
+    const preference = loadRememberLoginPreference();
+    setRememberMe(preference.rememberMe);
+    setEmail(preference.email);
+  }, []);
 
-    void fetchSetupStatus()
-      .then((data) => {
-        if (cancelled) return;
-        setSetupStatus(data);
-        if (data.needs_setup) {
-          setIsLogin(true);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSetupStatus(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSetupStatusChecked(true);
-        }
-      });
+  const checkSetupStatus = useCallback(async () => {
+    setupControllerRef.current?.abort();
+    const controller = new AbortController();
+    setupControllerRef.current = controller;
+    setSetupStatusPhase("checking");
+    setSetupStatus(null);
 
-    void fetch("/api/v1/auth/providers")
-      .then((r) => r.json())
-      .then(
-        (data: {
-          providers: { id: string; display_name: string; type: string }[];
-        }) => {
-          if (!cancelled) {
-            setSsoProviders(data.providers ?? []);
-          }
-        },
-      )
-      .catch(() => {
-        // Ignore errors; no SSO providers shown
+    try {
+      const data = await fetchSetupStatus(controller.signal);
+      if (controller.signal.aborted) return;
+      setSetupStatus(data);
+      setSetupStatusPhase("ready");
+      if (data.needs_setup || !data.registration_enabled) setIsLogin(true);
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return;
+      setSetupStatus(null);
+      setSetupStatusPhase("unavailable");
+    }
+  }, []);
+
+  // Fetch setup state and SSO providers with independent bounded requests.
+  useEffect(() => {
+    void checkSetupStatus();
+    const providersController = new AbortController();
+    void fetchAuthProviders(providersController.signal)
+      .then((providers) => {
+        if (!providersController.signal.aborted) setSsoProviders(providers);
+      })
+      .catch((error: unknown) => {
+        if (!providersController.signal.aborted && !isAbortError(error)) {
+          setSsoProviders([]);
+        }
       });
 
     return () => {
-      cancelled = true;
+      setupControllerRef.current?.abort();
+      providersController.abort();
+      submitControllerRef.current?.abort();
     };
-  }, []);
+  }, [checkSetupStatus]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,32 +146,52 @@ export default function LoginPage() {
     setLoading(true);
 
     if (!isLogin && !regularSignupAllowed) {
-      setError(t.login.adminSetupRequiredDescription);
+      setError(
+        setupStatusPhase === "unavailable"
+          ? t.login.registrationUnavailable
+          : setupStatus?.needs_setup
+            ? t.login.adminSetupRequiredDescription
+            : t.login.registrationDisabled,
+      );
       setLoading(false);
       return;
     }
+
+    submitControllerRef.current?.abort();
+    const controller = new AbortController();
+    submitControllerRef.current = controller;
 
     try {
       const endpoint = isLogin
         ? "/api/v1/auth/login/local"
         : "/api/v1/auth/register";
       const body = isLogin
-        ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
-        : JSON.stringify({ email, password });
+        ? buildLocalLoginBody({ email, password, rememberMe })
+        : JSON.stringify(
+            buildRememberingCredentialPayload({
+              email,
+              password,
+              rememberMe,
+            }),
+          );
 
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
         : { "Content-Type": "application/json" };
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body,
-        credentials: "include", // Important: include HttpOnly cookie
-      });
+      const res = await fetchAuth(
+        endpoint,
+        {
+          method: "POST",
+          headers,
+          body,
+          signal: controller.signal,
+        },
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
-        const data = await res.json();
+        const data: unknown = await res.json();
         const authError = parseAuthError(data);
         setError(authError.message);
         // On a failed login with SSO configured, surface a hint pointing at the
@@ -154,6 +201,8 @@ export default function LoginPage() {
         }
         return;
       }
+
+      saveRememberLoginPreference({ email, rememberMe });
 
       // Both login and register set an HttpOnly cookie. Restore that identity
       // in the currently mounted provider, then cross the auth boundary with a
@@ -167,11 +216,15 @@ export default function LoginPage() {
         localAuthNavigationRef.current = false;
         setError(t.login.networkError);
       }
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return;
       localAuthNavigationRef.current = false;
       setError(t.login.networkError);
     } finally {
-      setLoading(false);
+      if (submitControllerRef.current === controller) {
+        submitControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -210,6 +263,31 @@ export default function LoginPage() {
           </div>
         )}
 
+        {setupStatusPhase === "checking" && (
+          <p className="text-muted-foreground text-center text-sm">
+            {t.login.checkingRegistration}
+          </p>
+        )}
+
+        {setupStatusPhase === "unavailable" && (
+          <div
+            role="status"
+            className="border-border bg-background/70 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm"
+          >
+            <span className="text-muted-foreground">
+              {t.login.registrationUnavailable}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void checkSetupStatus()}
+            >
+              {t.login.retry}
+            </Button>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
@@ -238,6 +316,13 @@ export default function LoginPage() {
               minLength={isLogin ? 6 : 8}
             />
           </div>
+
+          <RememberLoginField
+            checked={rememberMe}
+            disabled={loading}
+            label={t.login.rememberMe}
+            onCheckedChange={setRememberMe}
+          />
 
           {error && <p className="text-sm text-red-500">{error}</p>}
 
@@ -277,7 +362,12 @@ export default function LoginPage() {
                 className="w-full"
                 disabled={loading}
                 onClick={() => {
-                  window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}`;
+                  saveRememberLoginPreference({ email, rememberMe });
+                  window.location.href = buildOidcLoginUrl({
+                    next: redirectPath,
+                    providerId: provider.id,
+                    rememberMe,
+                  });
                 }}
               >
                 {t.login.continueWith(provider.display_name)}
@@ -301,6 +391,14 @@ export default function LoginPage() {
             </button>
           </div>
         )}
+
+        {setupStatusPhase === "ready" &&
+          setupStatus?.needs_setup === false &&
+          !setupStatus.registration_enabled && (
+            <p className="text-muted-foreground text-center text-xs">
+              {t.login.registrationDisabled}
+            </p>
+          )}
 
         <div className="text-muted-foreground text-center text-xs">
           <Link href="/" className="hover:underline">

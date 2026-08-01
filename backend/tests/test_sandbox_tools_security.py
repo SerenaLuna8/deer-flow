@@ -357,6 +357,47 @@ def test_replace_virtual_paths_in_command_replaces_user_data_only() -> None:
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
 
 
+@pytest.mark.parametrize(
+    "sibling_path",
+    [
+        "/mnt/user-data-backup",
+        "/mnt/user-data.bak",
+        "/mnt/user-data_old",
+        "/mnt/user-data2",
+    ],
+)
+def test_replace_virtual_paths_in_command_preserves_prefix_siblings(
+    sibling_path: str,
+) -> None:
+    command = f"cat {sibling_path} {sibling_path}/report.txt"
+
+    assert replace_virtual_paths_in_command(command, _THREAD_DATA) == command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (
+            "ls /mnt/user-data",
+            "ls /tmp/deer-flow/threads/t1/user-data",
+        ),
+        (
+            "cat /mnt/user-data/workspace/report.txt",
+            "cat /tmp/deer-flow/threads/t1/user-data/workspace/report.txt",
+        ),
+        (
+            "printf '(%s),' /mnt/user-data/workspace/report.txt",
+            "printf '(%s),' /tmp/deer-flow/threads/t1/user-data/workspace/report.txt",
+        ),
+    ],
+)
+def test_replace_virtual_paths_in_command_keeps_valid_segment_boundaries(
+    command: str,
+    expected: str,
+) -> None:
+    assert replace_virtual_paths_in_command(command, _THREAD_DATA) == expected
+
+
 # ---------- validate_local_bash_command_paths ----------
 
 

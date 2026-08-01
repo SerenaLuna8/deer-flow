@@ -19,6 +19,7 @@ spec:
         app.kubernetes.io/component: frontend
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      automountServiceAccountToken: false
       securityContext:
         # Non-root: node:22-alpine ships a `node` user (uid 1000). fsGroup 1000
         # is harmless here (no PVC) but keeps the pod spec uniform.

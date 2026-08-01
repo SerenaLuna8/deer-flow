@@ -97,7 +97,7 @@ class OperationalAuditSink:
                 "job_type": job.job_type,
                 "non_interactive": job.job_type == "automation_run",
             },
-            request_id=context.request_id,
+            request_id=run.origin_trace_id,
             job_id=_uuid(job.job_id),
         )
 
@@ -502,7 +502,7 @@ class OperationalAuditSink:
             ),
             AuditOutcome.SUCCESS,
             {"trigger_kind": trigger},
-            request_id=context.request_id,
+            request_id=run.origin_trace_id,
             job_id=_uuid(job.job_id),
         )
         await self._service.append(
@@ -516,7 +516,7 @@ class OperationalAuditSink:
             ),
             AuditOutcome.SUCCESS,
             {"job_type": "automation_run", "non_interactive": True},
-            request_id=context.request_id,
+            request_id=run.origin_trace_id,
             job_id=_uuid(job.job_id),
         )
 
@@ -568,6 +568,42 @@ class OperationalAuditSink:
             job_id=_uuid(job_id),
         )
 
+    async def run_files_finalized(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        request_id: str,
+        created_count: int,
+        modified_count: int,
+        deleted_count: int,
+        artifact_count: int,
+        committed_bytes: int,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.RUN_FILES_FINALIZED,
+            AuditTarget(
+                AuditTargetKind.RUN,
+                _uuid(run_id),
+                _uuid(scope.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "created_count": created_count,
+                "modified_count": modified_count,
+                "deleted_count": deleted_count,
+                "artifact_count": artifact_count,
+                "committed_bytes": committed_bytes,
+            },
+            request_id=request_id,
+            job_id=_uuid(job_id),
+        )
+
     async def job_terminalized(
         self,
         session: AsyncSession,
@@ -593,7 +629,7 @@ class OperationalAuditSink:
                     "retry_safety": event.retry_safety,
                 },
                 public_error_code=event.public_error_code,
-                request_id="worker-job-terminal",
+                request_id=event.origin_trace_id or "worker-job-terminal",
                 job_id=_uuid(event.job_id),
                 occurred_at=event.occurred_at,
             )

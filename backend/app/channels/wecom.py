@@ -200,7 +200,7 @@ class WeComChannel(Channel):
     async def _on_ws_text(self, frame: dict[str, Any]) -> None:
         body = frame.get("body", {}) or {}
         text = ((body.get("text") or {}).get("content") or "").strip()
-        quote = body.get("quote", {}).get("text", {}).get("content", "").strip()
+        quote = (((body.get("quote") or {}).get("text") or {}).get("content") or "").strip()
         if not text and not quote:
             return
         await self._publish_ws_inbound(frame, text + (f"\nQuote message: {quote}" if quote else ""))
@@ -312,6 +312,7 @@ class WeComChannel(Channel):
             text=text,
             msg_type=inbound_type,
             thread_ts=msg_id,
+            provider_delivery_id=str(msg_id),
             files=files or [],
             metadata={
                 "aibotid": body.get("aibotid"),

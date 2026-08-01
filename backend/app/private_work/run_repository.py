@@ -17,6 +17,7 @@ from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.trace_context import generate_trace_id, normalize_trace_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,13 @@ class PrivateRunCreate:
     metadata: dict[str, Any] = field(default_factory=dict)
     kwargs: dict[str, Any] = field(default_factory=dict)
     model_name: str | None = None
+    origin_trace_id: str = field(default_factory=generate_trace_id)
+
+    def __post_init__(self) -> None:
+        normalized = normalize_trace_id(self.origin_trace_id)
+        if normalized is None:
+            raise ValueError("origin_trace_id is invalid")
+        object.__setattr__(self, "origin_trace_id", normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +49,7 @@ class PrivateRunRecord:
     multitask_strategy: str
     metadata: dict[str, Any]
     kwargs: dict[str, Any]
+    origin_trace_id: str
     error: str | None
     model_name: str | None
     created_at: datetime
@@ -168,6 +177,7 @@ class PrivateRunRepository:
             multitask_strategy=row.multitask_strategy,
             metadata=dict(row.metadata_json or {}),
             kwargs=dict(row.kwargs_json or {}),
+            origin_trace_id=row.origin_trace_id,
             error=row.error,
             model_name=row.model_name,
             created_at=row.created_at,
@@ -207,6 +217,7 @@ class PrivateRunRepository:
             multitask_strategy=request.multitask_strategy,
             metadata_json=dict(request.metadata),
             kwargs_json=dict(request.kwargs),
+            origin_trace_id=request.origin_trace_id,
             model_name=request.model_name,
             created_at=now,
             updated_at=now,
@@ -283,6 +294,10 @@ class PrivateRunRepository:
         row.job_id = job_id
         row.updated_at = datetime.now(UTC)
         await self.session.flush()
+        # The canonical PostgreSQL schema owns ``updated_at`` through
+        # ``trg_runs_updated_at``. Refresh the trigger-produced value so an
+        # admitted response is byte-for-byte stable with an idempotent retry.
+        await self.session.refresh(row, attribute_names=["updated_at"])
         return self.record(row)
 
     async def _locked_job_run(
@@ -331,6 +346,8 @@ class PrivateRunRepository:
         ).scalar_one_or_none()
         if run is None:
             raise PrivateRunExecutionLeaseLost
+        if normalize_trace_id(job.origin_trace_id) is None or job.origin_trace_id != run.origin_trace_id:
+            raise PrivateRunExecutionLeaseLost
         return job, run
 
     @staticmethod
@@ -349,6 +366,7 @@ class PrivateRunRepository:
         run_id: str,
         job_id: uuid.UUID,
         lease_token: str,
+        origin_trace_id: str | None = None,
         now: datetime | None = None,
     ) -> PrivateRunExecutionState:
         started_at = now or datetime.now(UTC)
@@ -358,6 +376,8 @@ class PrivateRunRepository:
             run_id=run_id,
             job_id=job_id,
         )
+        if origin_trace_id is not None and (normalize_trace_id(origin_trace_id) is None or origin_trace_id != run.origin_trace_id):
+            raise PrivateRunExecutionLeaseLost
         if not self._active_job_lease(job, token_hash=token_hash, now=started_at):
             raise PrivateRunExecutionLeaseLost
         if run.status not in {"pending", "running"}:
@@ -398,8 +418,9 @@ class PrivateRunRepository:
         """Record this attempt's baseline and decide whether to resume latest.
 
         A later attempt resumes without replaying its original input/Command
-        only when the durable checkpoint advanced beyond the previous
-        attempt's baseline.
+        once the durable checkpoint advances beyond the Job's first-attempt
+        baseline. Comparing every takeover with that stable baseline keeps all
+        later attempts in resume mode even when no additional progress occurs.
         """
 
         checked_at = now or datetime.now(UTC)
@@ -435,7 +456,7 @@ class PrivateRunRepository:
         ).scalar_one_or_none()
         if attempt is None:
             raise PrivateRunExecutionLeaseLost
-        previous = (
+        baseline = (
             await self.session.execute(
                 select(
                     JobAttemptRow.id,
@@ -445,13 +466,13 @@ class PrivateRunRepository:
                     JobAttemptRow.job_id == job_id,
                     JobAttemptRow.attempt_number < attempt.attempt_number,
                 )
-                .order_by(JobAttemptRow.attempt_number.desc())
+                .order_by(JobAttemptRow.attempt_number.asc())
                 .limit(1)
             )
         ).one_or_none()
         attempt.checkpoint_cursor = latest_checkpoint_id
         await self.session.flush()
-        return previous is not None and latest_checkpoint_id is not None and latest_checkpoint_id != previous.checkpoint_cursor
+        return baseline is not None and latest_checkpoint_id is not None and latest_checkpoint_id != baseline.checkpoint_cursor
 
     async def heartbeat_execution(
         self,
@@ -791,6 +812,27 @@ class PrivateRunRepository:
         )
         rows = (await self.session.execute(statement)).scalars()
         return tuple(self.record(row) for row in rows)
+
+    async def get_many_by_thread(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_ids: set[str],
+    ) -> dict[str, PrivateRunRecord]:
+        selected = {run_id for run_id in run_ids if isinstance(run_id, str) and run_id}
+        if not selected:
+            return {}
+        rows = (
+            await self.session.execute(
+                select(RunRow).where(
+                    RunRow.thread_id == thread_id,
+                    RunRow.run_id.in_(selected),
+                    *self.predicates(scope),
+                )
+            )
+        ).scalars()
+        return {row.run_id: self.record(row) for row in rows}
 
     async def update_status(
         self,

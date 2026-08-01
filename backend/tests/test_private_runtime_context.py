@@ -58,6 +58,7 @@ def test_private_runtime_context_strips_client_authority_and_server_values_win()
                 "sandbox_id": "forged-context-sandbox",
                 "authorization_checker": "forged-checker",
                 "file_authority": "forged-file-authority",
+                "memory_authority": "forged-memory-authority",
                 "private_agent_runtime": "forged-runtime",
                 "asset_context": "forged-asset-context",
                 "trusted_asset_context": "forged-trusted-asset-context",
@@ -105,6 +106,41 @@ def test_private_runtime_context_strips_client_authority_and_server_values_win()
     assert "forged-" not in serialized
 
 
+def test_private_runtime_context_strips_client_guardrail_attribution_fields_recursively() -> None:
+    config = prepare_private_run_config(
+        thread_id="trusted-thread",
+        opaque_scope=_OpaqueScope(),
+        request_config={
+            "is_internal": True,
+            "context": {
+                "authz_attributes": {"role": "forged-admin"},
+                "nested": {"is_subagent": True},
+            },
+            "configurable": {"is_internal": True},
+        },
+        metadata={
+            "authz_attributes": {"role": "forged-admin"},
+            "nested": {"is_subagent": True},
+        },
+        body_context={
+            "is_subagent": True,
+            "nested": {"is_internal": True},
+            "safe": "retained",
+        },
+    )
+
+    serializable = {
+        **config,
+        "context": {key: value for key, value in config["context"].items() if key != "private_scope"},
+    }
+    serialized = json.dumps(serializable, default=str)
+    assert config["context"]["safe"] == "retained"
+    assert "is_internal" not in serialized
+    assert "authz_attributes" not in serialized
+    assert "is_subagent" not in serialized
+    assert "forged-admin" not in serialized
+
+
 def test_private_runtime_context_is_secret_and_marker_free_except_opaque_hook() -> None:
     sentinel = "task5-secret-sentinel"
     config = prepare_private_run_config(
@@ -136,12 +172,12 @@ def test_private_runtime_context_is_secret_and_marker_free_except_opaque_hook() 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        pytest.param(10_000_000, 1000, id="huge-clamped"),
+        pytest.param(10_000_000, 100_000, id="huge-clamped-to-code-bound"),
         pytest.param(True, 100, id="bool-defaulted"),
         pytest.param(-1, 100, id="negative-defaulted"),
     ],
 )
-def test_private_runtime_context_clamps_client_recursion_limit(
+def test_private_runtime_context_applies_only_authority_free_recursion_bound(
     value,
     expected,
 ) -> None:
@@ -386,6 +422,13 @@ async def test_private_worker_preflights_mount_support_before_factory_and_cleans
     assert provider.released_users == ["exact-admitted-owner"]
     assert record.status == RunStatus.error
     assert record.error == ("Configured sandbox provider does not support run-scoped read-only mounts")
+    error_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert error_events == [
+        {
+            "message": "Configured sandbox provider does not support run-scoped read-only mounts",
+            "name": "SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED",
+        }
+    ]
     assert "private-host-path-sentinel" not in caplog.text
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
@@ -807,6 +850,13 @@ async def test_private_worker_rejects_local_host_bash_before_model_factory(
     assert factory_calls == 0
     assert record.status == RunStatus.error
     assert record.error == ("Local private runtime cannot enforce read-only mounts when host bash is enabled")
+    error_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert error_events == [
+        {
+            "message": "Local private runtime cannot enforce read-only mounts when host bash is enabled",
+            "name": "LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED",
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -926,12 +976,121 @@ def _private_body(*, checkpoint_id=None, assistant_id=None):
 
 
 @pytest.mark.anyio
+async def test_worker_event_store_forces_exact_scope_and_raw_job_lease() -> None:
+    from app.reliability.execution import LeaseAuthorizedRunEventStore
+    from deerflow.runtime.events.models import StreamLeaseProof
+    from deerflow.runtime.private_scope import PrivateResourceScope
+
+    exact_scope = PrivateResourceScope(
+        project_id=str(uuid.uuid4()),
+        owner_user_id=str(uuid.uuid4()),
+        membership_version=7,
+    )
+    forged_scope = PrivateResourceScope(
+        project_id=str(uuid.uuid4()),
+        owner_user_id=str(uuid.uuid4()),
+        membership_version=1,
+    )
+    proof = StreamLeaseProof(
+        job_id=uuid.uuid4(),
+        lease_token="exact-worker-lease",
+    )
+    raw_store = SimpleNamespace(
+        put=AsyncMock(return_value={"event_type": "trace"}),
+        put_batch=AsyncMock(return_value=[{"event_type": "trace"}]),
+    )
+    boundary = SimpleNamespace(stream_lease_proof=lambda: proof)
+    store = LeaseAuthorizedRunEventStore(
+        raw_store,
+        boundary,
+        scope=exact_scope,
+    )
+
+    await store.put(
+        thread_id="thread",
+        run_id="run",
+        event_type="trace",
+        category="trace",
+        scope=forged_scope,
+    )
+    batch = [{"thread_id": "thread", "run_id": "run", "event_type": "trace"}]
+    await store.put_batch(batch, scope=forged_scope)
+
+    raw_store.put.assert_awaited_once_with(
+        thread_id="thread",
+        run_id="run",
+        event_type="trace",
+        category="trace",
+        scope=exact_scope,
+        lease=proof,
+    )
+    raw_store.put_batch.assert_awaited_once_with(
+        batch,
+        scope=exact_scope,
+        lease=proof,
+    )
+
+
+@pytest.mark.anyio
+async def test_worker_event_store_marks_stale_lease_before_rejecting_write() -> None:
+    from app.reliability.execution import LeaseAuthorizedRunEventStore
+    from deerflow.runtime.events.models import (
+        StreamLeaseProof,
+        StreamWriteLeaseLost,
+    )
+    from deerflow.runtime.private_scope import PrivateResourceScope
+    from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+    scope = PrivateResourceScope(
+        project_id=str(uuid.uuid4()),
+        owner_user_id=str(uuid.uuid4()),
+        membership_version=1,
+    )
+    proof = StreamLeaseProof(
+        job_id=uuid.uuid4(),
+        lease_token="stale-worker-lease",
+    )
+
+    class Boundary:
+        lease_lost = False
+
+        def stream_lease_proof(self):
+            return proof
+
+        def record_stream_lease_lost(self):
+            self.lease_lost = True
+
+    boundary = Boundary()
+    raw_store = SimpleNamespace(
+        put_batch=AsyncMock(
+            side_effect=StreamWriteLeaseLost("stale"),
+        ),
+    )
+    store = LeaseAuthorizedRunEventStore(
+        raw_store,
+        boundary,
+        scope=scope,
+    )
+
+    with pytest.raises(AuthorizationRevoked):
+        await store.put_batch(
+            [{"thread_id": "thread", "run_id": "run", "event_type": "trace"}],
+        )
+
+    assert boundary.lease_lost is True
+
+
+@pytest.mark.anyio
 async def test_worker_executor_derives_runtime_identities_from_admitted_owner() -> None:
     from datetime import UTC, datetime
 
     from app.private_work.run_admission import PersistedRunSnapshot
     from app.private_work.run_repository import PrivateRunRecord
-    from app.reliability.execution import PrivateRunExecution, RunAgentPrivateExecutor
+    from app.reliability.execution import (
+        LeaseAuthorizedRunEventStore,
+        PrivateRunExecution,
+        RunAgentPrivateExecutor,
+    )
     from app.reliability.jobs import JobClaim, JobScope
     from deerflow.runtime.user_context import (
         get_current_user,
@@ -956,6 +1115,7 @@ async def test_worker_executor_derives_runtime_identities_from_admitted_owner() 
         multitask_strategy="reject",
         metadata={},
         kwargs={},
+        origin_trace_id=context.request_id,
         error=None,
         model_name="test-model",
         created_at=now,
@@ -992,8 +1152,9 @@ async def test_worker_executor_derives_runtime_identities_from_admitted_owner() 
         occurrence_id=None,
         retry_safety="safe",
         cancel_requested=False,
+        origin_trace_id=run.origin_trace_id,
     )
-    captured: list[tuple[str | None, str | None, object]] = []
+    captured: list[tuple[str | None, str | None, object, object, object, object]] = []
 
     async def runner(_bridge, run_manager, record, *, ctx, **_kwargs):
         current = get_current_user()
@@ -1002,6 +1163,9 @@ async def test_worker_executor_derives_runtime_identities_from_admitted_owner() 
                 str(current.id) if current is not None else None,
                 get_runtime_storage_user_id(),
                 ctx.private_scope,
+                ctx.memory_authority,
+                ctx.event_store,
+                ctx.guardrail_attribution,
             )
         )
         await run_manager.set_status(record.run_id, RunStatus.success)
@@ -1056,9 +1220,30 @@ async def test_worker_executor_derives_runtime_identities_from_admitted_owner() 
     try:
         result = await executor.execute(execution, Authority())
         assert result.status == "succeeded"
-        assert captured == [
-            (owner_user_id, owner_user_id, context.resource_scope),
-        ]
+        assert len(captured) == 1
+        assert captured[0][:3] == (
+            owner_user_id,
+            owner_user_id,
+            context.resource_scope,
+        )
+        from app.private_work.memory_authority import (
+            PrivateRunMemoryAuthority,
+        )
+
+        assert type(captured[0][3]) is PrivateRunMemoryAuthority
+        assert type(captured[0][4]) is LeaseAuthorizedRunEventStore
+        assert captured[0][5] == {
+            "user_id": owner_user_id,
+            "user_role": "admin",
+            "thread_id": run.thread_id,
+            "run_id": run.run_id,
+            "is_subagent": False,
+            "authz_attributes": {
+                "project_id": str(context.project_id),
+                "project_role": "admin",
+                "capabilities": tuple(sorted(capability.value for capability in context.capabilities)),
+            },
+        }
         assert get_current_user().id == "forged-ambient-owner"
         assert get_runtime_storage_user_id() == "forged-ambient-storage"
     finally:

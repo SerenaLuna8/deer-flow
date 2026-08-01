@@ -82,6 +82,7 @@ _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS = 15
 _DEFAULT_MCP_TOOL_CALL_TIMEOUT_SECONDS = 60
 _MCP_CLOSE_TIMEOUT_SECONDS = 1
 _MAX_MCP_TOOLS_PER_SERVER = 128
+_VALID_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+\Z")
 _MAX_MCP_SCHEMA_DEPTH = 12
 _MAX_MCP_SCHEMA_NODES = 2_048
 _MAX_MCP_SCHEMA_MAPPING_ENTRIES = 256
@@ -1038,8 +1039,10 @@ class PrivateAgentRuntime:
             name=schema.name,
             description=schema.description,
             args_schema=schema.args_schema,
-            metadata={"deerflow_private_mcp": True},
         )
+        from deerflow.tools.mcp_metadata import tag_private_mcp_tool
+
+        tag_private_mcp_tool(proxy)
         tag_mcp_tool(proxy)
         if schema.routing is not None:
             tag_mcp_routing(proxy, schema.routing)
@@ -1295,7 +1298,10 @@ class PrivateAgentRuntime:
             server_prefix = f"project_{version_id.hex[:16]}_"
             copied: list[_DiscoveredMcpTool] = []
             for index, remote in enumerate(remote_tools):
-                name = str(getattr(remote, "name", ""))
+                raw_name = getattr(remote, "name", None)
+                if not isinstance(raw_name, str) or _VALID_MCP_TOOL_NAME.fullmatch(raw_name) is None:
+                    raise PrivateWorkAssetStale("unknown")
+                name = raw_name
                 description = str(getattr(remote, "description", ""))
                 args_schema = getattr(remote, "args_schema", None)
                 if args_schema is None:

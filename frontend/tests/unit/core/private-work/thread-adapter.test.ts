@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
 import {
+  PROJECT_DEFAULT_AGENT_UNAVAILABLE_MESSAGE,
+  projectNewChatErrorMessage,
+} from "@/components/projects/private-work/project-new-chat-error";
+import {
   createProjectThread,
   disposeProjectAPIClient,
   getProjectAPIClient,
+  isProjectResponseErrorCode,
+  type CreateProjectThreadInput,
 } from "@/core/private-work/api-client";
 
 const scope = {
@@ -128,6 +134,73 @@ describe("project thread adapter", () => {
       "createProjectThread",
     );
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  test("allows the Gateway to resolve the project default Agent for a normal new chat", async () => {
+    const fetcher = rs.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse(privateThread(1), 201),
+    );
+    rs.stubGlobal("fetch", fetcher);
+
+    await createProjectThread(scope, {
+      threadId,
+      displayName: "Default Agent Thread",
+    });
+
+    const [, init] = fetcher.mock.calls[0]!;
+    expect(jsonRequestBody(init)).toEqual({
+      thread_id: threadId,
+      display_name: "Default Agent Thread",
+      metadata: {},
+    });
+  });
+
+  test("rejects an Agent scope without an Agent ID at the runtime boundary", async () => {
+    await expect(
+      createProjectThread(scope, {
+        threadId,
+        agentScope: "project",
+      } as unknown as CreateProjectThreadInput),
+    ).rejects.toThrow("Agent scope requires an Agent asset ID");
+  });
+
+  test("recognizes only the stable default-Agent error code and refreshes without exposing raw detail", async () => {
+    const fetcher = rs.fn(async () =>
+      jsonResponse(
+        {
+          detail: {
+            code: "DEFAULT_AGENT_UNAVAILABLE",
+            message: "private backend detail must stay hidden",
+            request_id: "request-default-unavailable",
+          },
+        },
+        409,
+      ),
+    );
+    rs.stubGlobal("fetch", fetcher);
+    let failure: unknown;
+    try {
+      await createProjectThread(scope, { threadId });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(
+      isProjectResponseErrorCode(failure, "DEFAULT_AGENT_UNAVAILABLE"),
+    ).toBe(true);
+    expect(failure).toMatchObject({
+      message: "Failed to create project thread",
+    });
+    const refreshDefaultAgent = rs.fn(async () => undefined);
+    await expect(
+      projectNewChatErrorMessage(
+        failure,
+        refreshDefaultAgent,
+        "无法创建项目对话",
+      ),
+    ).resolves.toBe(PROJECT_DEFAULT_AGENT_UNAVAILABLE_MESSAGE);
+    expect(refreshDefaultAgent).toHaveBeenCalledTimes(1);
+    expect(String(failure)).not.toContain("private backend detail");
   });
 
   test("renames with the cached version and advances it", async () => {

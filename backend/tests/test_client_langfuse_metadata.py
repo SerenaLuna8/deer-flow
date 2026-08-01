@@ -23,11 +23,13 @@ class _FakeAgent:
 
     def __init__(self) -> None:
         self.captured_config: dict | None = None
+        self.captured_context: dict | None = None
         self.checkpointer = None
         self.store = None
 
     def stream(self, state, *, config, context, stream_mode):
         self.captured_config = config
+        self.captured_context = context
         return iter(())  # empty stream
 
 
@@ -81,9 +83,12 @@ def _make_client(_monkeypatch, *, enhance_enabled: bool = True) -> DeerFlowClien
     client._available_skills = None
     client._middlewares = None
     client._checkpointer = None
+    client._checkpoint_channel_mode = "full"
+    client._checkpoint_snapshot_frequency = 10
     client._agent = None
     client._agent_config_key = None
     client._environment = None
+    client._asset_context = None
     return client
 
 
@@ -202,11 +207,11 @@ def test_stream_omits_deerflow_trace_id_when_enhance_disabled(monkeypatch):
     assert DEERFLOW_TRACE_METADATA_KEY not in metadata
 
 
-def test_stream_respects_caller_bound_trace_when_enhance_disabled(monkeypatch):
-    """Even with the enhancement disabled, a caller that explicitly binds
-    :func:`request_trace_context` has opted into propagation. The embedded
-    client must not swallow that id — the flag only gates *implicit*
-    per-turn id creation, not caller-supplied context."""
+def test_stream_keeps_caller_bound_trace_internal_when_enhance_disabled(
+    monkeypatch,
+):
+    """A caller-bound trace remains available to the embedded runtime, but
+    the disabled external-correlation switch must keep it out of Langfuse."""
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
@@ -223,7 +228,8 @@ def test_stream_respects_caller_bound_trace_when_enhance_disabled(monkeypatch):
         list(client.stream("hi", thread_id="thread-client-opt-in"))
 
     metadata = captured["config"].get("metadata") or {}
-    assert metadata.get(DEERFLOW_TRACE_METADATA_KEY) == "caller-opt-in"
+    assert DEERFLOW_TRACE_METADATA_KEY not in metadata
+    assert fake_agent.captured_context.get(DEERFLOW_TRACE_METADATA_KEY) == "caller-opt-in"
 
 
 def test_stream_does_not_leak_trace_id_to_caller_context_between_yields(monkeypatch):

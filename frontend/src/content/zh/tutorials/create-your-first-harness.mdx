@@ -3,6 +3,8 @@ title: 创建你的第一个 Harness
 description: 本教程介绍如何以编程方式使用 DeerFlow Harness Python SDK——直接在你的 Python 代码中导入和使用 DeerFlow，而不是通过 Web 界面。
 ---
 
+import { Callout } from "nextra/components";
+
 # 创建你的第一个 Harness
 
 本教程介绍如何以编程方式使用 DeerFlow Harness Python SDK——直接在你的 Python 代码中导入和使用 DeerFlow，而不是通过 Web 界面。
@@ -20,59 +22,41 @@ cd deer-flow/backend
 uv sync
 ```
 
-## 创建配置
-
-创建一个最小的 `config.yaml`：
-
-```yaml
-config_version: 6
-
-models:
-  - name: gpt-4o
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-
-sandbox:
-  use: deerflow.sandbox.local:LocalSandboxProvider
-
-tools:
-  - use: deerflow.community.ddg_search.tools:web_search_tool
-  - use: deerflow.sandbox.tools:read_file_tool
-  - use: deerflow.sandbox.tools:write_file_tool
-```
+<Callout type="info">
+  完整 DeerFlow 应用会把模型定义和加密 Credential 存入 PostgreSQL 系统设置。
+  下面的底层 SDK 示例仅直接构造一个内存中的 LangChain 模型实例，不会创建或持久化
+  应用模型定义。
+</Callout>
 
 ## 编写代码
 
 创建 `my_agent.py`：
 
 ```python
-import asyncio
-import os
-from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
+from getpass import getpass
 
-# 设置 API Key
-os.environ["OPENAI_API_KEY"] = "sk-..."
+from deerflow.agents import create_deerflow_agent
+from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
-# 加载配置
-load_config()
+model = ChatOpenAI(
+    model="gpt-4o",
+    api_key=SecretStr(getpass("OpenAI API key: ")),
+)
+agent = create_deerflow_agent(model)
 
-client = DeerFlowClient()
-
-async def main():
-    async for event in client.astream(
-        thread_id="my-first-thread",
-        message="用 Python 写一个斐波那契数列函数，包含文档字符串",
-        config={
-            "configurable": {
-                "model_name": "gpt-4o",
+for event in agent.stream(
+    {
+        "messages": [
+            {
+                "role": "user",
+                "content": "用 Python 写一个斐波那契数列函数，包含文档字符串",
             }
-        },
-    ):
-        print(event)
-
-asyncio.run(main())
+        ]
+    },
+    stream_mode=["messages", "values"],
+):
+    print(event)
 ```
 
 ## 运行

@@ -8,10 +8,12 @@ from typing import get_type_hints
 
 import pytest
 from langchain_core.messages import BaseMessage
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 
 from app.private_work.errors import PrivateWorkMcpQuotaExceeded
+from app.private_work.memory_authority import PrivateRunMemoryAuthority
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import (
     PrivateRunCreate,
@@ -21,6 +23,10 @@ from app.private_work.run_repository import (
     PrivateRunUsageSnapshot,
 )
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.projects.context import resolve_project_context
+from app.projects.membership_repository import MembershipRepository
+from app.projects.membership_service import MembershipService
+from app.projects.models import ProjectRole
 from app.reliability.execution import (
     AgentExecutionResult,
     AmbiguousExternalSideEffect,
@@ -30,6 +36,7 @@ from app.reliability.execution import (
     PrivateRunJobTerminalPort,
     RunAgentPrivateExecutor,
     TransientExecutionError,
+    _checkpoint_progress_cursor,
 )
 from app.reliability.workers import WorkerRegistry
 from app.worker.service import JobLeaseAuthority, LeaseLost
@@ -37,13 +44,18 @@ from deerflow.persistence.jobs.sql import JobOwnerRef, JobRepository
 from deerflow.persistence.private_work.file_repository import (
     PrivateFileRepository,
 )
+from deerflow.persistence.private_work.memory_repository import (
+    PrivateMemoryRepository,
+)
 from deerflow.persistence.run.sql import RunRepository as TokenRunRepository
 from deerflow.runtime import RunStatus
+from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
 from deerflow.runtime.events.models import (
     StreamLeaseProof,
     StreamWriteAuthorityRequired,
     StreamWriteLeaseLost,
 )
+from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
@@ -51,6 +63,51 @@ from deerflow.sandbox.sandbox import AuthorizationRevoked
 def test_private_run_repository_return_annotations_match_runtime_contract() -> None:
     assert get_type_hints(PrivateRunRepository.create)["return"] is PrivateRunRecord
     assert get_type_hints(PrivateRunRepository.settle_execution)["return"] is PrivateRunSettlement
+
+
+def test_checkpoint_progress_cursor_covers_pending_write_identity_and_value() -> None:
+    saver = SimpleNamespace(serde=JsonPlusSerializer())
+
+    def item(
+        *,
+        checkpoint_id: str = "checkpoint-1",
+        writes=(),
+    ):
+        return SimpleNamespace(
+            config={"configurable": {"checkpoint_id": checkpoint_id}},
+            pending_writes=list(writes),
+        )
+
+    assert _checkpoint_progress_cursor(saver, None) is None
+    assert _checkpoint_progress_cursor(saver, item()) == "checkpoint-1"
+
+    first = _checkpoint_progress_cursor(
+        saver,
+        item(writes=[("task-1", "messages", {"secret": "value"})]),
+    )
+    assert first is not None
+    assert first.startswith("pw:")
+    assert len(first) == 67
+    assert "secret" not in first
+    assert first == _checkpoint_progress_cursor(
+        saver,
+        item(writes=[("task-1", "messages", {"secret": "value"})]),
+    )
+    assert first != _checkpoint_progress_cursor(
+        saver,
+        item(writes=[("task-2", "messages", {"secret": "value"})]),
+    )
+    assert first != _checkpoint_progress_cursor(
+        saver,
+        item(writes=[("task-1", "messages", {"secret": "changed"})]),
+    )
+    assert first != _checkpoint_progress_cursor(
+        saver,
+        item(
+            checkpoint_id="checkpoint-2",
+            writes=[("task-1", "messages", {"secret": "value"})],
+        ),
+    )
 
 
 async def _admit_and_claim(
@@ -406,6 +463,16 @@ async def test_missing_exact_model_is_terminal_without_retry(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
+
+    def production_jobs(session):
+        return JobRepository(
+            session,
+            owner_ref_hasher=lambda _owner: JobOwnerRef(
+                key_id="m6-test",
+                hmac_hex="c" * 64,
+            ),
+        )
+
     try:
         admitted, claim = await _admit_and_claim(
             seed,
@@ -427,9 +494,15 @@ async def test_missing_exact_model_is_terminal_without_retry(
         settlement = await PrivateRunJobHandler(
             seed.factory,
             executor=executor,
+            job_repository_builder=production_jobs,
         )(
             claim,
-            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+            JobLeaseAuthority(
+                seed.factory,
+                claim,
+                lease_seconds=90,
+                repository_builder=production_jobs,
+            ),
         )
         await settlement.commit()
 
@@ -463,6 +536,97 @@ async def test_missing_exact_model_is_terminal_without_retry(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_checkpoint_mode_mismatch_is_terminal_without_retry(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+
+    def production_jobs(session):
+        return JobRepository(
+            session,
+            owner_ref_hasher=lambda _owner: JobOwnerRef(
+                key_id="m6-test",
+                hmac_hex="d" * 64,
+            ),
+        )
+
+    class ScopedCheckpointer:
+        def set_authorization_boundary(self, _boundary) -> None:
+            return None
+
+    class ProjectCheckpointer:
+        def for_context(self, _context):
+            return ScopedCheckpointer()
+
+    async def runner(*_args, **_kwargs) -> None:
+        raise CheckpointModeMismatchError(
+            "persisted checkpoint requires delta mode",
+        )
+
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-terminal-checkpoint-mode-{uuid.uuid4()}",
+        )
+        executor = RunAgentPrivateExecutor(
+            seed.factory,
+            app_config=SimpleNamespace(
+                get_model_config=lambda name: SimpleNamespace(name=name) if name == "test-model" else None,
+                skills=SimpleNamespace(container_path="/mnt/skills"),
+                run_events=SimpleNamespace(track_token_usage=True),
+            ),
+            bridge=object(),
+            project_checkpointer=ProjectCheckpointer(),
+            store=object(),
+            event_store=object(),
+            runner=runner,
+            agent_factory=object(),
+        )
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=executor,
+            job_repository_builder=production_jobs,
+        )(
+            claim,
+            JobLeaseAuthority(
+                seed.factory,
+                claim,
+                lease_seconds=90,
+                repository_builder=production_jobs,
+            ),
+        )
+        await settlement.commit()
+
+        async with seed.factory() as session:
+            state = (
+                await session.execute(
+                    text(
+                        """SELECT r.status,j.status,j.public_error_code,
+                        j.attempt_count,
+                        (SELECT outcome FROM job_attempts
+                         WHERE job_id=j.id ORDER BY attempt_number DESC LIMIT 1),
+                        (SELECT count(*) FROM dead_jobs WHERE job_id=j.id)
+                        FROM runs r JOIN jobs j ON j.id=r.job_id
+                        WHERE r.run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+
+        assert tuple(state) == (
+            "error",
+            "dead",
+            "CHECKPOINT_MODE_MISMATCH",
+            1,
+            "dead",
+            1,
+        )
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_command(
     migrated_postgres_database_url: str,
 ) -> None:
@@ -472,6 +636,7 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
     class Saver:
         def __init__(self, parent) -> None:
             self.parent = parent
+            self.serde = JsonPlusSerializer()
 
         async def aget_tuple_already_authorized(self, _config, *, session):
             assert session.in_transaction()
@@ -480,11 +645,13 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
                     "configurable": {
                         "checkpoint_id": self.parent.current,
                     }
-                }
+                },
+                pending_writes=self.parent.pending_writes,
             )
 
     class ProjectCheckpointer:
         current = "checkpoint-before-attempt"
+        pending_writes = []
 
         def for_context(self, _context):
             return Saver(self)
@@ -495,7 +662,13 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
         async def execute(self, execution, _authority):
             executions.append(execution)
             if len(executions) == 1:
-                checkpointer.current = "checkpoint-after-progress"
+                checkpointer.pending_writes = [
+                    (
+                        "durable-task",
+                        "messages",
+                        {"progress": "written-without-a-new-checkpoint"},
+                    )
+                ]
                 return AgentExecutionResult.failed(
                     "MODEL_TEMPORARILY_UNAVAILABLE",
                     attempt_usage=PrivateRunUsageSnapshot(
@@ -514,6 +687,10 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
                             }
                         },
                     ),
+                )
+            if len(executions) == 2:
+                return AgentExecutionResult.failed(
+                    "MODEL_TEMPORARILY_UNAVAILABLE",
                 )
             return AgentExecutionResult.succeeded(
                 attempt_usage=PrivateRunUsageSnapshot(
@@ -556,6 +733,28 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
             retry_initial_seconds=1,
             project_checkpointer=checkpointer,
         )
+
+        async def claim_retry(version: str):
+            worker_id = uuid.uuid4()
+            await WorkerRegistry(
+                seed.factory,
+                version=version,
+            ).register(worker_id, frozenset({"private_run"}), 1)
+            async with seed.factory() as session, session.begin():
+                jobs = JobRepository(session)
+                retry_claim = await jobs.claim_next(
+                    worker_id=worker_id,
+                    capabilities=frozenset({"private_run"}),
+                    lease_seconds=90,
+                )
+                assert retry_claim is not None
+                assert retry_claim.job_id == first_claim.job_id
+                assert await jobs.mark_running(
+                    retry_claim.job_id,
+                    lease_token=retry_claim.lease_token,
+                )
+                return retry_claim
+
         first = await handler(
             first_claim,
             JobLeaseAuthority(seed.factory, first_claim, lease_seconds=90),
@@ -567,45 +766,40 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
                 {"job_id": first_claim.job_id},
             )
 
-        second_worker = uuid.uuid4()
-        await WorkerRegistry(
-            seed.factory,
-            version="test-m6-checkpoint-takeover",
-        ).register(second_worker, frozenset({"private_run"}), 1)
-        async with seed.factory() as session, session.begin():
-            jobs = JobRepository(session)
-            second_claim = await jobs.claim_next(
-                worker_id=second_worker,
-                capabilities=frozenset({"private_run"}),
-                lease_seconds=90,
-            )
-            assert second_claim is not None
-            assert second_claim.job_id == first_claim.job_id
-            assert await jobs.mark_running(
-                second_claim.job_id,
-                lease_token=second_claim.lease_token,
-            )
-
+        second_claim = await claim_retry("test-m6-checkpoint-takeover-2")
         second = await handler(
             second_claim,
             JobLeaseAuthority(seed.factory, second_claim, lease_seconds=90),
         )
         await second.commit()
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE jobs SET available_at=now() WHERE id=:job_id"),
+                {"job_id": first_claim.job_id},
+            )
 
+        third_claim = await claim_retry("test-m6-checkpoint-takeover-3")
+        third = await handler(
+            third_claim,
+            JobLeaseAuthority(seed.factory, third_claim, lease_seconds=90),
+        )
+        await third.commit()
+
+        assert len(executions) == 3
         assert executions[0].run.run_id == admitted.run.run_id
         assert executions[0].command == {"resume": "approved"}
         assert executions[0].resume_from_checkpoint is False
-        takeover = executions[1]
-        assert takeover.run.run_id == admitted.run.run_id
-        assert takeover.snapshot == admitted.snapshot
-        assert takeover.resume_from_checkpoint is True
-        assert takeover.graph_input is None
-        assert takeover.command is None
-        assert RunAgentPrivateExecutor._graph_input(takeover) is None
-        configurable = takeover.config["configurable"]
-        assert configurable["checkpoint_ns"] == ""
-        assert "checkpoint_id" not in configurable
-        assert "checkpoint_map" not in configurable
+        for takeover in executions[1:]:
+            assert takeover.run.run_id == admitted.run.run_id
+            assert takeover.snapshot == admitted.snapshot
+            assert takeover.resume_from_checkpoint is True
+            assert takeover.graph_input is None
+            assert takeover.command is None
+            assert RunAgentPrivateExecutor._graph_input(takeover) is None
+            configurable = takeover.config["configurable"]
+            assert configurable["checkpoint_ns"] == ""
+            assert "checkpoint_id" not in configurable
+            assert "checkpoint_map" not in configurable
         async with seed.factory() as session:
             usage = (
                 await session.execute(
@@ -618,6 +812,23 @@ async def test_retry_resumes_latest_confirmed_checkpoint_without_replaying_comma
                     {"run_id": admitted.run.run_id},
                 )
             ).one()
+            checkpoint_cursors = (
+                (
+                    await session.execute(
+                        text(
+                            """SELECT checkpoint_cursor FROM job_attempts
+                        WHERE job_id=:job_id ORDER BY attempt_number"""
+                        ),
+                        {"job_id": first_claim.job_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert checkpoint_cursors[0] == "checkpoint-before-attempt"
+        assert checkpoint_cursors[1].startswith("pw:")
+        assert len(checkpoint_cursors[1]) == 67
+        assert checkpoint_cursors[2] == checkpoint_cursors[1]
         assert tuple(usage[:-1]) == (30, 7, 37, 3, 28, 7, 2)
         assert usage.token_usage_by_model == {
             "retry-model": {
@@ -681,6 +892,96 @@ async def test_execution_boundary_rejects_stale_lease_before_side_effect(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_memory_authority_serializes_membership_revocation_with_snapshot_read(
+    migrated_postgres_database_url: str,
+    monkeypatch,
+) -> None:
+    import app.private_work.memory_authority as module
+
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    release_authority = asyncio.Event()
+    governance_locked = asyncio.Event()
+    revocation_task = None
+    load_task = None
+    original_is_active = module.PrivateRunAuthorizationService.is_active
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-memory-authority-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+            expected = await PrivateMemoryRepository(
+                session,
+            ).create_if_needed(
+                scope=seed.owner_a.resource_scope,
+                namespace="default",
+                context_summary={"version": "1.0"},
+            )
+
+        async def pause_after_governance_lock(session, **kwargs):
+            active = await original_is_active(session, **kwargs)
+            governance_locked.set()
+            await release_authority.wait()
+            return active
+
+        monkeypatch.setattr(
+            module.PrivateRunAuthorizationService,
+            "is_active",
+            pause_after_governance_lock,
+        )
+        authority = PrivateRunMemoryAuthority(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim,
+            thread_id=admitted.run.thread_id,
+            namespace="default",
+        )
+        load_task = asyncio.create_task(authority.load_snapshot())
+        await asyncio.wait_for(governance_locked.wait(), timeout=2)
+
+        async def revoke_membership() -> None:
+            async with seed.factory() as session, session.begin():
+                await session.execute(
+                    text(
+                        """UPDATE project_memberships
+                        SET status='removed',version=version+1
+                        WHERE id=:membership_id"""
+                    ),
+                    {"membership_id": seed.owner_a.membership_id},
+                )
+
+        revocation_task = asyncio.create_task(revoke_membership())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.shield(revocation_task),
+                timeout=0.1,
+            )
+
+        release_authority.set()
+        snapshot = await load_task
+        assert snapshot is not None
+        assert snapshot.id == expected.id
+        await revocation_task
+
+        with pytest.raises(AuthorizationRevoked):
+            await authority.load_snapshot()
+    finally:
+        release_authority.set()
+        for task in (load_task, revocation_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_stale_worker_cannot_publish_stream_end(
     migrated_postgres_database_url: str,
 ) -> None:
@@ -728,6 +1029,69 @@ async def test_stale_worker_cannot_publish_stream_end(
         )
         assert frames == ()
         assert boundary.lease_lost is True
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_stale_worker_cannot_persist_internal_run_events(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-stale-internal-event-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+
+        events = DbRunEventStore(seed.factory)
+        proof = StreamLeaseProof(
+            job_id=claim.job_id,
+            lease_token=claim.lease_token,
+        )
+        await events.put(
+            thread_id=admitted.run.thread_id,
+            run_id=admitted.run.run_id,
+            event_type="test.live.internal",
+            category="trace",
+            content="live",
+            scope=seed.owner_a.resource_scope,
+            lease=proof,
+        )
+
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE jobs SET lease_token_hash=:other WHERE id=:job_id"),
+                {"other": "d" * 64, "job_id": claim.job_id},
+            )
+
+        with pytest.raises(StreamWriteLeaseLost):
+            await events.put(
+                thread_id=admitted.run.thread_id,
+                run_id=admitted.run.run_id,
+                event_type="test.stale.internal",
+                category="trace",
+                content="stale",
+                scope=seed.owner_a.resource_scope,
+                lease=proof,
+            )
+
+        persisted = await events.list_events(
+            admitted.run.thread_id,
+            admitted.run.run_id,
+            scope=seed.owner_a.resource_scope,
+        )
+        assert [event["event_type"] for event in persisted] == [
+            "test.live.internal",
+        ]
     finally:
         await seed.engine.dispose()
 
@@ -815,6 +1179,145 @@ async def test_sandbox_restore_authority_check_keeps_job_retry_safe(
         _admitted, claim = await _admit_and_claim(
             seed,
             thread_id=f"m6-safe-sandbox-restore-{uuid.uuid4()}",
+        )
+        settlement = await PrivateRunJobHandler(
+            seed.factory,
+            executor=Executor(),
+        )(
+            claim,
+            JobLeaseAuthority(seed.factory, claim, lease_seconds=90),
+        )
+        await settlement.commit()
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_capability_reducing_role_change_revokes_live_run_before_provider_and_side_effect(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    reached: list[str] = []
+
+    try:
+        admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-role-downgrade-revoked-{uuid.uuid4()}",
+        )
+        async with seed.factory() as session, session.begin():
+            await PrivateRunRepository(session).begin_execution(
+                scope=seed.owner_a.resource_scope,
+                run_id=admitted.run.run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+            )
+
+        # The seed starts with one admin. Promote the runner first so the real
+        # MembershipService can then exercise its last-admin invariant while
+        # applying the capability-reducing admin -> runner transition.
+        async with seed.factory() as session:
+            actor = await resolve_project_context(
+                session,
+                seed.owner_a.user_id,
+                seed.owner_a.project_id,
+                "m6-role-downgrade",
+            )
+            membership_service = MembershipService(
+                MembershipRepository(session),
+            )
+            promoted = await membership_service.change_role(
+                actor,
+                seed.owner_b.membership_id,
+                ProjectRole.ADMIN,
+                expected_version=1,
+            )
+            assert promoted.role is ProjectRole.ADMIN
+            demoted = await membership_service.change_role(
+                actor,
+                seed.owner_a.membership_id,
+                ProjectRole.RUNNER,
+                expected_version=1,
+            )
+            assert demoted.role is ProjectRole.RUNNER
+
+        async with seed.factory() as session:
+            marked = (
+                await session.execute(
+                    text(
+                        """SELECT r.status,
+                        r.authorization_cancel_requested_at IS NOT NULL,
+                        r.authorization_cancel_reason,
+                        j.retry_safety
+                        FROM runs r
+                        JOIN jobs j ON j.id=r.job_id
+                        WHERE r.run_id=:run_id"""
+                    ),
+                    {"run_id": admitted.run.run_id},
+                )
+            ).one()
+        assert tuple(marked) == (
+            "running",
+            True,
+            "authorization_revoked",
+            "safe",
+        )
+
+        boundary = PrivateRunExecutionBoundary(
+            seed.factory,
+            context=seed.owner_a,
+            claim=claim,
+        )
+
+        async def attempt_guarded_dispatch() -> None:
+            await boundary.before_read_only_tool_call()
+            reached.append("provider")
+            await boundary.before_tool_call()
+            reached.append("side_effect")
+
+        with pytest.raises(AuthorizationRevoked):
+            await attempt_guarded_dispatch()
+
+        assert reached == []
+        assert boundary.authorization_revoked is True
+        assert boundary.ambiguous_side_effect is False
+        async with seed.factory() as session:
+            retry_safety = await session.scalar(
+                text("SELECT retry_safety FROM jobs WHERE id=:job_id"),
+                {"job_id": claim.job_id},
+            )
+        assert retry_safety == "safe"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_read_only_tool_boundary_keeps_job_retry_safe(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+
+    class Executor:
+        async def execute(self, execution, _authority):
+            boundary = PrivateRunExecutionBoundary(
+                seed.factory,
+                context=execution.context,
+                claim=claim,
+            )
+            await boundary.before_read_only_tool_call()
+            async with seed.factory() as session:
+                retry_safety = await session.scalar(
+                    text("SELECT retry_safety FROM jobs WHERE id=:job_id"),
+                    {"job_id": claim.job_id},
+                )
+            assert retry_safety == "safe"
+            return AgentExecutionResult.succeeded()
+
+    try:
+        _admitted, claim = await _admit_and_claim(
+            seed,
+            thread_id=f"m6-safe-read-only-tool-{uuid.uuid4()}",
         )
         settlement = await PrivateRunJobHandler(
             seed.factory,

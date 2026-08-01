@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.channels.message_bus import InboundMessage
-from app.private_work import connection_inbound
+from app.private_work import checkpoint_state, connection_inbound
+from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.connection_inbound import build_gateway_project_run_launcher
 from app.private_work.context import PrivateWorkContext
 from app.private_work.run_admission import PrivateRunInboundAuthority
@@ -46,7 +47,9 @@ def test_channel_launcher_imports_only_project_private_http_runtime() -> None:
 
 
 @pytest.mark.asyncio
-async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_run() -> None:
+async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_run(
+    monkeypatch,
+) -> None:
     context = _context()
     thread_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
@@ -79,22 +82,42 @@ async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_ru
             assert selected_run_id == run_id
             return SimpleNamespace(status="success")
 
-    class Checkpointer:
-        def for_context(self, selected_context):
-            assert selected_context is context
-            return self
+    class Checkpointer(ProjectScopedCheckpointer):
+        def __init__(self) -> None:
+            # This test exercises the launcher boundary, not PostgreSQL-backed
+            # checkpoint persistence. Retain the exact production service type
+            # so the fail-closed isinstance guard remains covered.
+            pass
 
-        async def aget_tuple(self, config):
+    class CheckpointState:
+        async def aget(self, config):
             assert config["configurable"]["thread_id"] == thread_id
             return SimpleNamespace(
-                checkpoint={
-                    "channel_values": {
-                        "messages": [
-                            {"role": "assistant", "content": "done"},
-                        ]
-                    }
-                }
+                config={"configurable": {"checkpoint_id": "checkpoint-1"}},
+                values={
+                    "messages": [
+                        {"role": "assistant", "content": "done"},
+                    ]
+                },
             )
+
+    def bind_checkpoint_state(
+        selected_checkpointer,
+        selected_context,
+        _app_config,
+        *,
+        as_node,
+    ):
+        assert isinstance(selected_checkpointer, Checkpointer)
+        assert selected_context is context
+        assert as_node == "inbound_response"
+        return CheckpointState()
+
+    monkeypatch.setattr(
+        checkpoint_state,
+        "bind_scoped_checkpoint_state",
+        bind_checkpoint_state,
+    )
 
     app = SimpleNamespace(
         state=SimpleNamespace(
@@ -109,6 +132,7 @@ async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_ru
         workspace_id="workspace-1",
         topic_id="topic-1",
         text="hello",
+        provider_delivery_id="delivery-1",
     )
     authority = PrivateRunInboundAuthority(
         connection_id="connection-1",
@@ -135,6 +159,7 @@ async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_ru
         "channel_name": "slack",
         "channel_user_id": "external-user",
     }
-    assert state == {
+    assert state.state == {
         "messages": [{"role": "assistant", "content": "done"}],
     }
+    assert state.disposition == "admitted"

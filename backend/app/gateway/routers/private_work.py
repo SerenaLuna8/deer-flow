@@ -22,7 +22,13 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from app.gateway.deps import get_config, private_work_context, project_session, require_project_private_open
+from app.gateway.deps import (
+    get_config,
+    get_current_agent_runtime_config,
+    private_work_context,
+    project_session,
+    require_project_private_open,
+)
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.private_work_schemas import (
     PrivateRunCreateRequest,
@@ -32,6 +38,11 @@ from app.gateway.private_work_schemas import (
     StrictPrivateWorkResponse,
 )
 from app.private_work.chat_controls import ProjectChatControlService
+from app.private_work.checkpoint_state import (
+    bind_scoped_checkpoint_state,
+    checkpoint_config,
+    snapshot_checkpoint_id,
+)
 from app.private_work.checkpointer import (
     PRIVATE_SCOPE_MARKER,
     ProjectScopedCheckpointer,
@@ -55,6 +66,11 @@ from app.private_work.file_streaming import (
     private_streaming_response,
 )
 from app.private_work.http_runtime import format_sse, start_private_run
+from app.private_work.message_projection import (
+    compute_run_durations,
+    project_checkpoint_message_durations,
+    project_event_message_durations,
+)
 from app.private_work.readiness_service import (
     PrivateWorkReadinessService,
     ReadinessStatus,
@@ -95,22 +111,47 @@ router = APIRouter(
     dependencies=[Depends(require_project_private_open)],
 )
 
+_POSTGRES_BIGINT_MAX = (1 << 63) - 1
+
 
 class PrivateThreadCreateRequest(StrictPrivateWorkRequest):
     thread_id: uuid.UUID
-    agent_asset_id: uuid.UUID
-    agent_scope: Literal["project", "system"] = "project"
+    agent_asset_id: uuid.UUID | None = None
+    agent_scope: Literal["project", "system"] | None = None
     display_name: str | None = Field(default=None, max_length=256)
     metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_agent_selection(self) -> PrivateThreadCreateRequest:
+        selection_fields = {"agent_asset_id", "agent_scope"}
+        provided_fields = selection_fields.intersection(self.model_fields_set)
+        if provided_fields and (provided_fields != selection_fields or self.agent_asset_id is None or self.agent_scope is None):
+            raise ValueError("agent_asset_id and agent_scope must be provided together")
+        return self
 
 
 class PrivateThreadSearchRequest(StrictPrivateWorkRequest):
     limit: int = Field(default=100, ge=1, le=1000)
-    offset: int = Field(default=0, ge=0)
+    offset: int = Field(
+        default=0,
+        ge=0,
+        le=_POSTGRES_BIGINT_MAX,
+        json_schema_extra={
+            "format": "int64",
+            "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
+        },
+    )
 
 
 class PrivateThreadPatchRequest(StrictPrivateWorkRequest):
-    expected_version: int = Field(ge=1)
+    expected_version: int = Field(
+        ge=1,
+        le=_POSTGRES_BIGINT_MAX,
+        json_schema_extra={
+            "format": "int64",
+            "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
+        },
+    )
     display_name: str | None = Field(default=None, max_length=256)
 
 
@@ -164,7 +205,7 @@ class PrivateRunDeleteResponse(StrictPrivateWorkResponse):
 
 class PrivateRunMessageResponse(StrictPrivateWorkResponse):
     run_id: str
-    seq: int = Field(ge=0)
+    seq: str = Field(pattern=r"^(?:0|[1-9][0-9]*)$")
     content: dict[str, Any]
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str
@@ -303,6 +344,16 @@ class PrivateRegeneratePrepareResponse(StrictPrivateWorkResponse):
     checkpoint: dict[str, Any]
     metadata: dict[str, Any]
     target_run_id: str
+
+
+class PrivateEditRegeneratePrepareRequest(StrictPrivateWorkRequest):
+    human_message_id: str = Field(min_length=1, max_length=128)
+    replacement_text: str = Field(min_length=1, max_length=65_536)
+
+
+class PrivateEditRegeneratePrepareResponse(PrivateRegeneratePrepareResponse):
+    replacement_human_message_id: str
+    source_message_ids: list[str]
 
 
 class PrivateSuggestionsRequest(StrictPrivateWorkRequest):
@@ -476,17 +527,94 @@ def _feedback_response(record: PrivateFeedbackRecord) -> PrivateFeedbackResponse
 
 
 def _public_event(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in record.items() if key not in {"project_id", "owner_user_id", "user_id"}}
+    public = {key: value for key, value in record.items() if key not in {"project_id", "owner_user_id", "user_id"}}
+    if "seq" in public:
+        public["seq"] = str(int(public["seq"]))
+    return public
 
 
 def _run_message_response(record: Mapping[str, Any]) -> PrivateRunMessageResponse:
     return PrivateRunMessageResponse(
         run_id=str(record["run_id"]),
-        seq=int(record["seq"]),
+        seq=str(int(record["seq"])),
         content=dict(record["content"]),
         metadata=dict(record.get("metadata") or {}),
         created_at=str(record["created_at"]),
     )
+
+
+async def _project_scoped_event_durations(
+    request: Request,
+    context: PrivateWorkContext,
+    thread_id: str,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    run_ids = {run_id for record in records if isinstance((run_id := record.get("run_id")), str) and run_id}
+    if not run_ids:
+        return records
+    try:
+        runs = await _run_service(request, context.request_id).get_many(
+            context,
+            thread_id,
+            run_ids,
+        )
+        last_ai = await _run_event_store(
+            request,
+            context.request_id,
+        ).get_last_visible_ai_seq_by_run(
+            thread_id,
+            run_ids,
+            scope=context.resource_scope,
+        )
+    except PrivateWorkError:
+        raise
+    except Exception:
+        raise PrivateWorkUnavailable(context.request_id) from None
+    return project_event_message_durations(
+        records,
+        run_durations=compute_run_durations(runs.values()),
+        last_visible_ai_seq_by_run=last_ai,
+    )
+
+
+async def _project_scoped_checkpoint_durations(
+    request: Request,
+    context: PrivateWorkContext,
+    thread_id: str,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    messages = values.get("messages")
+    if not isinstance(messages, list):
+        return values
+    run_ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("type") not in {
+            "human",
+            "user",
+        }:
+            continue
+        additional_kwargs = message.get("additional_kwargs")
+        run_id = additional_kwargs.get("run_id") if isinstance(additional_kwargs, Mapping) else None
+        if isinstance(run_id, str) and run_id:
+            run_ids.add(run_id)
+    if not run_ids:
+        return values
+    try:
+        runs = await _run_service(request, context.request_id).get_many(
+            context,
+            thread_id,
+            run_ids,
+        )
+    except PrivateWorkError:
+        raise
+    except Exception:
+        raise PrivateWorkUnavailable(context.request_id) from None
+    projected = dict(values)
+    projected["messages"] = project_checkpoint_message_durations(
+        messages,
+        run_durations=compute_run_durations(runs.values()),
+    )
+    return projected
 
 
 _FAILED_PRIVATE_RUN_STATUSES = frozenset({"error", "failed", "timeout"})
@@ -580,6 +708,18 @@ def _private_stream_cursor(request: Request, request_id: str) -> int:
         return parse_stream_cursor(raw_cursor)
     except ValueError:
         raise ReliabilityInvalidStreamCursor(request_id)
+
+
+def _private_rest_feed_cursor(
+    raw_cursor: str | None,
+    request_id: str,
+) -> int | None:
+    if raw_cursor is None:
+        return None
+    try:
+        return parse_stream_cursor(raw_cursor)
+    except ValueError:
+        raise PrivateWorkInvalid(request_id) from None
 
 
 def _private_stream_headers(
@@ -679,13 +819,15 @@ async def _durable_private_sse_consumer(
                     run_id,
                     status=_fallback_terminal_status(record.status),
                 )
-                cursor = int(terminal.id)
-                terminal_emitted = True
-                yield format_sse(
-                    terminal.event,
-                    terminal.data,
-                    event_id=terminal.id,
-                )
+                terminal_cursor = int(terminal.id)
+                if terminal_cursor > cursor:
+                    cursor = terminal_cursor
+                    terminal_emitted = True
+                    yield format_sse(
+                        terminal.event,
+                        terminal.data,
+                        event_id=terminal.id,
+                    )
                 return
 
             now = loop.time()
@@ -794,12 +936,17 @@ async def get_private_thread_goal(
     thread_id: uuid.UUID,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateThreadGoalResponse:
     try:
         goal = await _chat_control_service(
             request,
             context.request_id,
-        ).get_goal(context, str(thread_id))
+        ).get_goal(
+            context,
+            str(thread_id),
+            app_config=config,
+        )
     except PrivateWorkError as error:
         _raise_http(error)
     return PrivateThreadGoalResponse(goal=goal)
@@ -814,6 +961,7 @@ async def set_private_thread_goal(
     body: PrivateThreadGoalRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateThreadGoalResponse:
     try:
         goal = await _chat_control_service(
@@ -824,6 +972,7 @@ async def set_private_thread_goal(
             str(thread_id),
             objective=body.objective,
             max_continuations=body.max_continuations,
+            app_config=config,
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -838,12 +987,17 @@ async def clear_private_thread_goal(
     thread_id: uuid.UUID,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateThreadGoalResponse:
     try:
         await _chat_control_service(
             request,
             context.request_id,
-        ).clear_goal(context, str(thread_id))
+        ).clear_goal(
+            context,
+            str(thread_id),
+            app_config=config,
+        )
     except PrivateWorkError as error:
         _raise_http(error)
     return PrivateThreadGoalResponse(goal=None)
@@ -858,7 +1012,7 @@ async def compact_private_thread(
     body: PrivateThreadCompactRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
+    config: AppConfig = Depends(get_current_agent_runtime_config),
 ) -> PrivateThreadCompactResponse:
     try:
         result = await _chat_control_service(
@@ -895,6 +1049,7 @@ async def branch_private_thread(
     body: PrivateThreadBranchRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateThreadBranchResponse:
     try:
         record, checkpoint_id = await _chat_control_service(
@@ -906,6 +1061,7 @@ async def branch_private_thread(
             message_id=body.message_id,
             message_ids=body.message_ids,
             title=body.title,
+            app_config=config,
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -927,6 +1083,7 @@ async def prepare_private_regenerate_run(
     body: PrivateRegeneratePrepareRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateRegeneratePrepareResponse:
     try:
         payload = await _chat_control_service(
@@ -936,10 +1093,38 @@ async def prepare_private_regenerate_run(
             context,
             str(thread_id),
             message_id=body.message_id,
+            app_config=config,
         )
     except PrivateWorkError as error:
         _raise_http(error)
     return PrivateRegeneratePrepareResponse.model_validate(payload)
+
+
+@router.post(
+    "/threads/{thread_id}/runs/edit-regenerate/prepare",
+    response_model=PrivateEditRegeneratePrepareResponse,
+)
+async def prepare_private_edit_regenerate_run(
+    thread_id: uuid.UUID,
+    body: PrivateEditRegeneratePrepareRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
+) -> PrivateEditRegeneratePrepareResponse:
+    try:
+        payload = await _chat_control_service(
+            request,
+            context.request_id,
+        ).prepare_edit_regenerate(
+            context,
+            str(thread_id),
+            human_message_id=body.human_message_id,
+            replacement_text=body.replacement_text,
+            app_config=config,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateEditRegeneratePrepareResponse.model_validate(payload)
 
 
 @router.post(
@@ -951,7 +1136,7 @@ async def generate_private_suggestions(
     body: PrivateSuggestionsRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
-    config: AppConfig = Depends(get_config),
+    config: AppConfig = Depends(get_current_agent_runtime_config),
 ) -> PrivateSuggestionsResponse:
     try:
         suggestions = await _chat_control_service(
@@ -1039,15 +1224,30 @@ async def get_private_upload_limits(
 async def list_private_files(
     thread_id: uuid.UUID,
     request: Request,
+    response: Response,
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        le=_POSTGRES_BIGINT_MAX,
+        json_schema_extra={
+            "format": "int64",
+            "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
+        },
+    ),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[PrivateFileResponse]:
     try:
         records = await _file_service(request, context.request_id).list_ready(
             context,
             thread_id=str(thread_id),
+            limit=limit,
+            offset=offset,
         )
     except PrivateWorkError as error:
         _raise_http(error)
+    if len(records) == limit and offset <= _POSTGRES_BIGINT_MAX - limit:
+        response.headers["X-Next-Offset"] = str(offset + limit)
     return [_file_response(record) for record in records]
 
 
@@ -1231,6 +1431,7 @@ async def wait_private_run(
     body: PrivateRunCreateRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> dict[str, Any]:
     try:
         _require_run_runtime(request, context.request_id)
@@ -1249,20 +1450,15 @@ async def wait_private_run(
                 "error": durable_record.error,
             }
 
-        saver = _scoped_checkpointer(request, context.request_id).for_context(context)
-        item = await saver.aget_tuple(
-            {
-                "configurable": {
-                    "thread_id": str(thread_id),
-                    "checkpoint_ns": "",
-                }
-            }
-        )
-        if item is None:
+        snapshot = await bind_scoped_checkpoint_state(
+            _scoped_checkpointer(request, context.request_id),
+            context,
+            config,
+            as_node="wait",
+        ).aget(checkpoint_config(str(thread_id)))
+        if snapshot_checkpoint_id(snapshot) is None:
             raise PrivateWorkNotFound(context.request_id)
-        checkpoint = item.checkpoint or {}
-        channel_values = checkpoint.get("channel_values", {})
-        return serialize_channel_values_for_api(channel_values if isinstance(channel_values, dict) else {})
+        return serialize_channel_values_for_api(dict(snapshot.values or {}))
     except PrivateWorkError as error:
         _raise_http(error)
     except ReliabilityError as error:
@@ -1277,7 +1473,15 @@ async def list_private_runs(
     thread_id: uuid.UUID,
     request: Request,
     limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        le=_POSTGRES_BIGINT_MAX,
+        json_schema_extra={
+            "format": "int64",
+            "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
+        },
+    ),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[PrivateRunResponse]:
     try:
@@ -1389,12 +1593,20 @@ async def list_private_run_messages(
     run_id: uuid.UUID,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
-    before_seq: int | None = Query(default=None, ge=0),
-    after_seq: int | None = Query(default=None, ge=0),
+    before_seq: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateRunMessagesPageResponse:
     try:
-        if before_seq is not None and after_seq is not None:
+        before_sequence = _private_rest_feed_cursor(
+            before_seq,
+            context.request_id,
+        )
+        after_sequence = _private_rest_feed_cursor(
+            after_seq,
+            context.request_id,
+        )
+        if before_sequence is not None and after_sequence is not None:
             raise PrivateWorkInvalid(context.request_id)
         run = await _run_service(request, context.request_id).get(
             context,
@@ -1408,15 +1620,15 @@ async def list_private_run_messages(
             str(thread_id),
             str(run_id),
             limit=limit + 1,
-            before_seq=before_seq,
-            after_seq=after_seq,
+            before_seq=before_sequence,
+            after_seq=after_sequence,
             scope=context.resource_scope,
         )
         if not records:
             admitted_message = _admitted_failure_message(
                 run,
-                before_seq=before_seq,
-                after_seq=after_seq,
+                before_seq=before_sequence,
+                after_seq=after_sequence,
             )
             if admitted_message is not None:
                 records = [admitted_message]
@@ -1426,8 +1638,17 @@ async def list_private_run_messages(
     data, has_more = trim_run_message_page(
         records,
         limit=limit,
-        after_seq=after_seq,
+        after_seq=after_sequence,
     )
+    try:
+        data = await _project_scoped_event_durations(
+            request,
+            context,
+            str(thread_id),
+            data,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
     return PrivateRunMessagesPageResponse(
         data=[_run_message_response(record) for record in data],
         has_more=has_more,
@@ -1442,11 +1663,21 @@ async def list_private_thread_messages(
     thread_id: uuid.UUID,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
-    before_seq: int | None = Query(default=None, ge=0),
-    after_seq: int | None = Query(default=None, ge=0),
+    before_seq: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[dict[str, Any]]:
     try:
+        before_sequence = _private_rest_feed_cursor(
+            before_seq,
+            context.request_id,
+        )
+        after_sequence = _private_rest_feed_cursor(
+            after_seq,
+            context.request_id,
+        )
+        if before_sequence is not None and after_sequence is not None:
+            raise PrivateWorkInvalid(context.request_id)
         await _run_service(request, context.request_id).list(
             context,
             str(thread_id),
@@ -1459,9 +1690,15 @@ async def list_private_thread_messages(
         ).list_messages(
             str(thread_id),
             limit=limit,
-            before_seq=before_seq,
-            after_seq=after_seq,
+            before_seq=before_sequence,
+            after_seq=after_sequence,
             scope=context.resource_scope,
+        )
+        records = await _project_scoped_event_durations(
+            request,
+            context,
+            str(thread_id),
+            records,
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -1508,10 +1745,14 @@ async def list_private_run_events(
     event_types: str | None = Query(default=None),
     task_id: str | None = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
-    after_seq: int | None = Query(default=None, ge=0),
+    after_seq: str | None = Query(default=None),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[dict[str, Any]]:
     try:
+        after_sequence = _private_rest_feed_cursor(
+            after_seq,
+            context.request_id,
+        )
         return await _private_run_events(
             thread_id=thread_id,
             run_id=run_id,
@@ -1520,7 +1761,7 @@ async def list_private_run_events(
             event_types=event_types,
             task_id=task_id,
             limit=limit,
-            after_seq=after_seq,
+            after_seq=after_sequence,
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -1537,10 +1778,14 @@ async def list_private_thread_events(
     event_types: str | None = Query(default=None),
     task_id: str | None = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
-    after_seq: int | None = Query(default=None, ge=0),
+    after_seq: str | None = Query(default=None),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[dict[str, Any]]:
     try:
+        after_sequence = _private_rest_feed_cursor(
+            after_seq,
+            context.request_id,
+        )
         return await _private_run_events(
             thread_id=thread_id,
             run_id=run_id,
@@ -1549,7 +1794,7 @@ async def list_private_thread_events(
             event_types=event_types,
             task_id=task_id,
             limit=limit,
-            after_seq=after_seq,
+            after_seq=after_sequence,
         )
     except PrivateWorkError as error:
         _raise_http(error)
@@ -1711,10 +1956,11 @@ async def create_thread(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateThreadResponse:
     try:
+        agent = ThreadAgentRef(body.agent_asset_id, body.agent_scope) if body.agent_asset_id is not None and body.agent_scope is not None else None
         record = await _thread_service(request, context.request_id).create(
             context,
             thread_id=str(body.thread_id),
-            agent=ThreadAgentRef(body.agent_asset_id, body.agent_scope),
+            agent=agent,
             display_name=body.display_name,
             metadata=body.metadata,
         )
@@ -1784,7 +2030,14 @@ async def patch_thread(
 async def delete_thread(
     thread_id: uuid.UUID,
     request: Request,
-    expected_version: int = Query(ge=1),
+    expected_version: int = Query(
+        ge=1,
+        le=_POSTGRES_BIGINT_MAX,
+        json_schema_extra={
+            "format": "int64",
+            "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
+        },
+    ),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateThreadDeleteResponse:
     try:
@@ -1806,36 +2059,41 @@ async def get_thread_state(
     thread_id: uuid.UUID,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateThreadStateResponse:
     try:
-        saver = _scoped_checkpointer(request, context.request_id).for_context(context)
-        item = await saver.aget_tuple(
-            {
-                "configurable": {
-                    "thread_id": str(thread_id),
-                    "checkpoint_ns": "",
-                }
-            }
-        )
-        if item is None:
+        snapshot = await bind_scoped_checkpoint_state(
+            _scoped_checkpointer(request, context.request_id),
+            context,
+            config,
+            as_node="state",
+        ).aget(checkpoint_config(str(thread_id)))
+        if snapshot_checkpoint_id(snapshot) is None:
             raise PrivateWorkNotFound(context.request_id)
     except PrivateWorkError as error:
         _raise_http(error)
 
-    checkpoint = item.checkpoint or {}
-    metadata = dict(item.metadata or {})
+    metadata = dict(snapshot.metadata or {})
     metadata.pop(PRIVATE_SCOPE_MARKER, None)
-    configurable = (item.config or {}).get("configurable", {})
+    configurable = (snapshot.config or {}).get("configurable", {})
     checkpoint_id_value = configurable.get("checkpoint_id")
     checkpoint_id = str(checkpoint_id_value) if checkpoint_id_value is not None else None
-    parent_configurable = (item.parent_config or {}).get("configurable", {})
+    parent_configurable = (snapshot.parent_config or {}).get("configurable", {})
     parent_id_value = parent_configurable.get("checkpoint_id")
     parent_checkpoint_id = str(parent_id_value) if parent_id_value is not None else None
-    raw_tasks = getattr(item, "tasks", ()) or ()
+    raw_tasks = getattr(snapshot, "tasks", ()) or ()
     tasks = [{"id": str(getattr(task, "id", "")), "name": str(getattr(task, "name", ""))} for task in raw_tasks]
     created_at = coerce_iso(metadata.get("created_at", ""))
-    channel_values = checkpoint.get("channel_values", {})
-    values = serialize_channel_values_for_api(channel_values if isinstance(channel_values, dict) else {})
+    values = serialize_channel_values_for_api(dict(snapshot.values or {}))
+    try:
+        values = await _project_scoped_checkpoint_durations(
+            request,
+            context,
+            str(thread_id),
+            values,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
     return PrivateThreadStateResponse(
         values=values,
         next=[task["name"] for task in tasks if task["name"]],

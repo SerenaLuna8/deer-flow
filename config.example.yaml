@@ -1,4 +1,4 @@
-config_version: 29
+config_version: 34
 log_level: info
 logging:
   enhance:
@@ -10,39 +10,10 @@ auth:
   trusted_proxies:
   - 127.0.0.1/32
   - ::1/128
-token_usage:
-  enabled: true
-token_budget:
-  enabled: false
-  max_tokens: 200000
-  max_input_tokens: null
-  max_output_tokens: null
-  warn_threshold: 0.8
-  hard_stop_threshold: 1.0
-max_recursion_limit: 1000
-models:
-- name: deepseek-v4
-  display_name: DeepSeek V4 Pro
-  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-  model: deepseek-v4-pro
-  api_key: $DEEPSEEK_API_KEY
-  base_url: https://api.deepseek.com
-  request_timeout: 600.0
-  max_retries: 2
-  max_tokens: 16384
-  temperature: 0.7
-  reasoning_effort: high
-  supports_thinking: true
-  supports_reasoning_effort: true
-  supports_vision: false
-  when_thinking_enabled:
-    extra_body:
-      thinking:
-        type: enabled
-  when_thinking_disabled:
-    extra_body:
-      thinking:
-        type: disabled
+  local:
+    # Persistent remember-me cookies require HTTPS, except on localhost.
+    # Do not enable this for ordinary public HTTP deployments.
+    allow_insecure_persistent_cookie: false
 tool_groups:
 - name: web
 - name: file:read
@@ -84,9 +55,6 @@ tools:
 - name: bash
   group: bash
   use: deerflow.sandbox.tools:bash_tool
-tool_search:
-  enabled: false
-  auto_promote_top_k: 3
 mcp_security:
   # Project MCP servers cannot use stdio. Remote project MCP execution is
   # disabled until an operator lists the exact HTTPS endpoint here.
@@ -98,38 +66,7 @@ mcp_security:
   discovery_timeout_seconds: 15
   tool_call_timeout_seconds: 60
 tool_output:
-  enabled: true
-  externalize_min_chars: 12000
-  preview_head_chars: 2000
-  preview_tail_chars: 1000
-  fallback_max_chars: 30000
-  fallback_head_chars: 8000
-  fallback_tail_chars: 3000
   storage_subdir: .tool-results
-  exempt_tools:
-  - read_file
-  - read_file_tool
-suggestions:
-  enabled: true
-loop_detection:
-  enabled: true
-  warn_threshold: 3
-  hard_limit: 5
-  window_size: 20
-  max_tracked_threads: 100
-  tool_freq_warn: 30
-  tool_freq_hard_limit: 50
-  tool_freq_overrides:
-    web_search:
-      warn: 6
-      hard_limit: 10
-    web_fetch:
-      warn: 6
-      hard_limit: 10
-read_before_write:
-  enabled: true
-safety_finish_reason:
-  enabled: true
 uploads:
   pdf_converter: auto
 sandbox:
@@ -139,65 +76,36 @@ sandbox:
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000
   bash_command_timeout: 600
+  # Kubernetes Provisioner mode requires both of these settings. The same
+  # PROVISIONER_API_KEY must also be present in the Provisioner process.
+  # provisioner_url: http://provisioner:8002
+  # provisioner_api_key: $PROVISIONER_API_KEY
 skills:
   container_path: /mnt/skills
-title:
-  enabled: true
-  max_words: 6
-  max_chars: 60
-  model_name: null
 summarization:
-  enabled: true
-  model_name: null
-  trigger:
-  - type: tokens
-    value: 32000
-  keep:
-    type: messages
-    value: 10
-  trim_tokens_to_summarize: 15564
+  # Deployment-owned prompt text remains in YAML; enablement, thresholds and
+  # model selection are managed at /admin/settings/system.
   summary_prompt: null
-  skill_file_read_tool_names:
-  - read_file
-  - read
-  - view
-  - cat
-subagents:
-  # Hard total across every delegation batch in one exact private Run.
-  max_total_per_run: 6
-memory:
-  enabled: true
-  debounce_seconds: 30
-  model_name: null
-  max_facts: 100
-  fact_confidence_threshold: 0.7
-  injection_enabled: true
-  max_injection_tokens: 2000
-  token_counting: tiktoken
-  guaranteed_categories:
-  - correction
-  guaranteed_token_budget: 500
-  staleness_review_enabled: true
-  staleness_age_days: 90
-  staleness_min_candidates: 3
-  staleness_max_removals_per_cycle: 10
-  staleness_protected_categories:
-  - correction
 database:
   url: $DATABASE_URL
   pool_size: 5
   max_overflow: 10
   pool_timeout_seconds: 30
   statement_timeout_seconds: 30
+  # Checkpoint representation is a process-wide, restart-required setting.
+  # All Gateway and Worker processes must use the same value. "full" keeps
+  # compatibility; "delta" stores incremental message writes and materializes
+  # them through the scoped checkpoint accessor.
+  checkpoint_channel_mode: full
+  checkpoint_delta:
+    # In delta mode, persist a complete messages seed every N delta writes.
+    # This value is also restart-required and must match across all processes.
+    snapshot_frequency: 10
 scheduler:
   enabled: false
   poll_interval_seconds: 5
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
-input_polish:
-  enabled: true
-  max_chars: 4000
-  model_name: null
 worker:
   enabled: true
   poll_interval_seconds: 0.5
@@ -207,9 +115,3 @@ worker:
   shutdown_grace_seconds: 30
   retry_initial_seconds: 2
   retry_max_seconds: 300
-quotas:
-  default_member_limit: 20
-  default_storage_bytes_limit: 5368709120
-  default_concurrent_run_limit: 3
-  default_mcp_calls_daily_limit: 10000
-  warning_threshold: 0.8

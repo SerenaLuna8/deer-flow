@@ -185,6 +185,41 @@ def test_pull_request_review_prompt_includes_state() -> None:
     assert "alice" in prompt
 
 
+def test_pull_request_review_prompt_fetches_suppressed_inline_comments() -> None:
+    payload = {
+        "action": "submitted",
+        "pull_request": {"number": 5},
+        "review": {
+            "id": 999001,
+            "state": "changes_requested",
+            "user": {"login": "alice"},
+            "body": "Looks risky",
+        },
+        "repository": {"full_name": "a/b"},
+    }
+
+    prompt = build_prompt("pull_request_review", payload)
+
+    assert "gh api repos/a/b/pulls/5/reviews/999001/comments" in prompt
+
+
+def test_pull_request_review_prompt_omits_fetch_hint_without_review_id() -> None:
+    payload = {
+        "action": "submitted",
+        "pull_request": {"number": 5},
+        "review": {
+            "state": "approved",
+            "user": {"login": "alice"},
+            "body": "LGTM",
+        },
+        "repository": {"full_name": "a/b"},
+    }
+
+    prompt = build_prompt("pull_request_review", payload)
+
+    assert "gh api" not in prompt
+
+
 def test_issues_prompt() -> None:
     payload = {
         "action": "opened",

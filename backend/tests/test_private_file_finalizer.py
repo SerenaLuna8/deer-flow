@@ -298,7 +298,9 @@ async def finalizer_seed(migrated_postgres_database_url: str):
 
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     thread_id = f"finalizer-{uuid.uuid4()}"
-    run_id = f"run-{uuid.uuid4()}"
+    run_id = str(uuid.uuid4())
+    job_id = uuid.uuid4()
+    origin_trace_id = "test-private-file-finalizer-trace"
     async with seed.factory() as session, session.begin():
         await PrivateThreadRepository(session).create(
             scope=seed.owner_a_scope,
@@ -316,12 +318,14 @@ async def finalizer_seed(migrated_postgres_database_url: str):
         await connection.execute(
             text(
                 """INSERT INTO runs
-                (run_id,thread_id,project_id,owner_user_id,status,multitask_strategy,
+                (run_id,thread_id,project_id,owner_user_id,origin_trace_id,status,
+                 multitask_strategy,
                  metadata_json,kwargs_json,finalization_status,
                  message_count,total_input_tokens,total_output_tokens,total_tokens,
                  llm_call_count,lead_agent_tokens,subagent_tokens,middleware_tokens,
                  token_usage_by_model,created_at,updated_at)
-                VALUES (:run_id,:thread_id,:project_id,:owner,'running','reject',
+                VALUES (:run_id,:thread_id,:project_id,:owner,
+                        :origin_trace_id,'running','reject',
                         '{}'::json,'{}'::json,'pending',0,0,0,0,0,0,0,0,
                         '{}'::json,now(),now())"""
             ),
@@ -330,6 +334,37 @@ async def finalizer_seed(migrated_postgres_database_url: str):
                 "thread_id": thread_id,
                 "project_id": seed.owner_a.project_id,
                 "owner": seed.owner_a_scope.owner_user_id,
+                "origin_trace_id": origin_trace_id,
+            },
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO jobs
+                (id,job_type,project_id,owner_user_id,run_id,origin_trace_id,
+                 idempotency_key,status,max_attempts)
+                VALUES (:job_id,'private_run',:project_id,:owner,:run_id,
+                        :origin_trace_id,:idempotency_key,'queued',3)"""
+            ),
+            {
+                "job_id": job_id,
+                "project_id": seed.owner_a.project_id,
+                "owner": seed.owner_a_scope.owner_user_id,
+                "run_id": run_id,
+                "origin_trace_id": origin_trace_id,
+                "idempotency_key": hashlib.sha256(f"finalizer:{run_id}".encode()).hexdigest(),
+            },
+        )
+        await connection.execute(
+            text(
+                """UPDATE runs SET job_id=:job_id
+                WHERE project_id=:project_id AND owner_user_id=:owner
+                AND run_id=:run_id"""
+            ),
+            {
+                "job_id": job_id,
+                "project_id": seed.owner_a.project_id,
+                "owner": seed.owner_a_scope.owner_user_id,
+                "run_id": run_id,
             },
         )
     try:
@@ -341,12 +376,15 @@ async def finalizer_seed(migrated_postgres_database_url: str):
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_finalizer_authorizes_then_atomically_supersedes_and_creates_artifact(finalizer_seed) -> None:
+    from app.audit.service import AuditService, _bind_worker_audit_process
+    from app.audit.sinks import OperationalAuditSink
     from app.private_work.file_finalizer import PrivateFileFinalizer
     from app.private_work.sandbox_files import (
         AuthorityManifest,
         AuthorityManifestEntry,
         PrivateFileRunScope,
     )
+    from app.reliability.owner_refs import AuditHmacKeyring
 
     seed, thread_id, run_id, old = finalizer_seed
     boundary = SimpleNamespace(
@@ -373,7 +411,15 @@ async def test_finalizer_authorizes_then_atomically_supersedes_and_creates_artif
         )
     )
 
-    result = await PrivateFileFinalizer(seed.factory).finalize(
+    audit_service = AuditService(
+        seed.factory,
+        AuditHmacKeyring.from_environment(),
+    )
+    audit = OperationalAuditSink(
+        audit_service,
+        process_context=_bind_worker_audit_process(audit_service),
+    )
+    result = await PrivateFileFinalizer(seed.factory, audit=audit).finalize(
         PrivateFileRunScope(
             seed.owner_a,
             thread_id=thread_id,
@@ -422,11 +468,155 @@ async def test_finalizer_authorizes_then_atomically_supersedes_and_creates_artif
                 {"run_id": run_id},
             )
         ).one()
+        audit_row = (
+            await connection.execute(
+                text(
+                    """SELECT actor_process,action,target_kind,request_id,job_id,
+                    metadata_json,target_ref_hmac
+                    FROM audit_logs
+                    WHERE project_id=:project_id
+                    AND action='run.files_finalized'"""
+                ),
+                {"project_id": seed.owner_a.project_id},
+            )
+        ).one()
     assert rows[0][1] == "deleted"
     assert rows[1][1:4] == ("ready", 2, old.id)
     assert rows[1][4] == hashlib.sha256(sandbox.files["/mnt/user-data/workspace/draft.txt"]).hexdigest()
     assert finalization_status == "complete"
     assert artifact.deleted_at is None
+    assert audit_row.actor_process == "worker"
+    assert audit_row.action == "run.files_finalized"
+    assert audit_row.target_kind == "run"
+    assert audit_row.request_id != "test-private-file-finalizer-trace"
+    assert len(audit_row.request_id) == 64
+    assert audit_row.job_id is not None
+    assert audit_row.metadata_json == {
+        "created_count": 1,
+        "modified_count": 1,
+        "deleted_count": 0,
+        "artifact_count": 1,
+        "committed_bytes": len(sandbox.files["/mnt/user-data/workspace/draft.txt"]) + len(sandbox.files["/mnt/user-data/outputs/report.txt"]),
+    }
+    assert run_id not in audit_row.target_ref_hmac
+    assert not {
+        "path",
+        "name",
+        "file_id",
+        "body",
+        "locator",
+        "sha256",
+    }.intersection(audit_row.metadata_json)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_finalizer_rolls_back_files_artifact_and_audit_when_audit_append_fails(
+    finalizer_seed,
+) -> None:
+    from app.audit.service import AuditService, _bind_worker_audit_process
+    from app.audit.sinks import OperationalAuditSink
+    from app.private_work.file_finalizer import PrivateFileFinalizer
+    from app.private_work.sandbox_files import (
+        AuthorityManifest,
+        PrivateFileRunScope,
+    )
+    from app.reliability.owner_refs import AuditHmacKeyring
+
+    seed, thread_id, run_id, old = finalizer_seed
+    sandbox = MemorySecureSandbox(
+        {
+            "/mnt/user-data/workspace/draft.txt": b"changed",
+            "/mnt/user-data/outputs/report.txt": b"presented",
+        }
+    )
+    manifest = AuthorityManifest(entries=(_manifest_entry(old),))
+    boundary = SimpleNamespace(
+        before_file_finalization=AsyncMock(),
+        before_file_finalization_in_session=AsyncMock(),
+    )
+    audit_service = AuditService(
+        seed.factory,
+        AuditHmacKeyring.from_environment(),
+    )
+    audit = OperationalAuditSink(
+        audit_service,
+        process_context=_bind_worker_audit_process(audit_service),
+    )
+
+    class FailAfterAuditAppend:
+        async def run_files_finalized(self, *args, **kwargs) -> None:
+            await audit.run_files_finalized(*args, **kwargs)
+            raise RuntimeError("injected failure after audit append")
+
+    scope = PrivateFileRunScope(
+        seed.owner_a,
+        thread_id=thread_id,
+        run_id=run_id,
+        authorization_boundary=boundary,
+    )
+    with pytest.raises(PrivateWorkUnavailable):
+        await PrivateFileFinalizer(
+            seed.factory,
+            audit=FailAfterAuditAppend(),
+        ).finalize(
+            scope,
+            manifest,
+            sandbox,
+            presented_paths=("/mnt/user-data/outputs/report.txt",),
+        )
+
+    async with seed.engine.connect() as connection:
+        failed_snapshot = (
+            await connection.execute(
+                text(
+                    """SELECT
+                    (SELECT status FROM files WHERE id=:old_id) AS old_status,
+                    (SELECT count(*) FROM files
+                     WHERE created_by_run_id=:run_id) AS run_file_count,
+                    (SELECT count(*) FROM artifacts
+                     WHERE run_id=:run_id) AS artifact_count,
+                    (SELECT count(*) FROM audit_logs
+                     WHERE action='run.files_finalized'
+                     AND project_id=:project_id) AS audit_count,
+                    (SELECT finalization_status FROM runs
+                     WHERE run_id=:run_id) AS finalization_status"""
+                ),
+                {
+                    "old_id": old.id,
+                    "run_id": run_id,
+                    "project_id": seed.owner_a.project_id,
+                },
+            )
+        ).one()
+    assert failed_snapshot == ("ready", 0, 0, 0, "failed")
+
+    await PrivateFileFinalizer(seed.factory, audit=audit).finalize(
+        scope,
+        manifest,
+        sandbox,
+        presented_paths=("/mnt/user-data/outputs/report.txt",),
+    )
+    async with seed.engine.connect() as connection:
+        committed_snapshot = (
+            await connection.execute(
+                text(
+                    """SELECT
+                    (SELECT count(*) FROM audit_logs
+                     WHERE action='run.files_finalized'
+                     AND project_id=:project_id) AS audit_count,
+                    (SELECT count(*) FROM artifacts
+                     WHERE run_id=:run_id) AS artifact_count,
+                    (SELECT finalization_status FROM runs
+                     WHERE run_id=:run_id) AS finalization_status"""
+                ),
+                {
+                    "run_id": run_id,
+                    "project_id": seed.owner_a.project_id,
+                },
+            )
+        ).one()
+    assert committed_snapshot == (1, 1, "complete")
 
 
 @pytest.mark.postgres

@@ -353,3 +353,38 @@ test("short-circuits reconnect to an interrupted (user-cancelled) run", async ()
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
+
+test("keeps raw error frames for an active ephemeral run", async () => {
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    if (url.toString().endsWith("/runs/run-1")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    return new Response(
+      [
+        "event: error",
+        'data: {"error":"RuntimeError","message":"worker failed"}',
+        "",
+        "",
+      ].join("\n"),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const frames: unknown[] = [];
+  for await (const frame of createTestClient(true).runs.joinStream(
+    "thread-1",
+    "run-1",
+  )) {
+    frames.push(frame);
+  }
+
+  expect(frames).toEqual([
+    {
+      event: "error",
+      data: { error: "RuntimeError", message: "worker failed" },
+    },
+  ]);
+});

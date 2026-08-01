@@ -11,14 +11,20 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { z } from "zod";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { getAgentModeRuntimeContext } from "@/core/threads/agent-mode";
 
 import { fetch } from "../api/fetcher";
 import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import { isProjectRunTerminalFailure } from "../private-work/api-client";
+import {
+  compareEventSequences,
+  type EventSequence,
+} from "../private-work/event-sequence";
 import { usePrivateWorkAccess } from "../private-work/provider";
 import { privateWorkQueryKey } from "../private-work/query-keys";
 import {
@@ -29,6 +35,7 @@ import {
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useUpdateSubtask } from "../tasks/context";
+import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import { parseSubtaskTerminalEvent } from "../tasks/subtask-result";
 import type { UploadedFileInfo } from "../uploads";
@@ -45,6 +52,11 @@ import {
   type RunMessagesPageResponse,
 } from "./api";
 import { useCoalescedStreamMessages } from "./coalesce";
+import {
+  buildRootThreadStreamOptions,
+  createDeferredThreadStreamDetach,
+  isRootStreamCallback,
+} from "./stream-events";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -118,6 +130,59 @@ type RegeneratePrepareResponse = {
   target_run_id: string;
 };
 
+type EditRegeneratePrepareResponse = RegeneratePrepareResponse & {
+  replacement_human_message_id: string;
+  source_message_ids: string[];
+};
+
+export type PendingPreparedReplayMask = {
+  kind: "regenerate" | "edit";
+  targetRunId: string;
+  supersededMessageIds: string[];
+  replacementHumanMessageId?: string;
+};
+
+type PreparedReplayAttempt = {
+  replay: PendingPreparedReplayMask;
+  threadId: string;
+  createdRunId: string | null;
+  historyRefetchError: unknown | null;
+  status: "submitting" | "succeeded" | "failed";
+};
+
+export function canStartPreparedReplay({
+  threadId,
+  sendInFlight,
+  isThreadLoading,
+}: {
+  threadId: string | null | undefined;
+  sendInFlight: boolean;
+  isThreadLoading: boolean;
+}): boolean {
+  return Boolean(threadId) && !sendInFlight && !isThreadLoading;
+}
+
+export function getPreparedReplayStopRollback(
+  attempt: {
+    replay: PendingPreparedReplayMask;
+    createdRunId: string | null;
+    status: "submitting" | "succeeded" | "failed";
+  } | null,
+):
+  | {
+      replay: PendingPreparedReplayMask;
+      failedRunId: string | null;
+    }
+  | undefined {
+  if (attempt?.status !== "submitting") {
+    return undefined;
+  }
+  return {
+    replay: attempt.replay,
+    failedRunId: attempt.createdRunId,
+  };
+}
+
 export function buildThreadSubmitMessages({
   text,
   messageId,
@@ -150,6 +215,24 @@ export function buildThreadSubmitMessages({
   ];
 }
 
+export function uploadedFileInfoToMessage(
+  info: UploadedFileInfo,
+): FileInMessage {
+  if (!info.id) {
+    throw new TypeError("Uploaded file response is missing its opaque id");
+  }
+  if (!z.string().uuid().safeParse(info.id).success) {
+    throw new TypeError("Uploaded file response has an invalid opaque id");
+  }
+  return {
+    file_id: info.id,
+    filename: info.filename,
+    size: info.size,
+    path: info.virtual_path,
+    status: "uploaded",
+  };
+}
+
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
   messages: [],
@@ -175,6 +258,19 @@ function messageRunId(message: Message): string | undefined {
   return typeof additionalRunId === "string" && additionalRunId.length > 0
     ? additionalRunId
     : undefined;
+}
+
+export function filterMessagesBySupersededRunIds(
+  messages: Message[],
+  supersededRunIds: ReadonlySet<string>,
+): Message[] {
+  if (supersededRunIds.size === 0) {
+    return messages;
+  }
+  return messages.filter((message) => {
+    const runId = messageRunId(message);
+    return !runId || !supersededRunIds.has(runId);
+  });
 }
 
 export function resolveActiveRunIdForMessages(
@@ -245,6 +341,7 @@ export function attachRunIdToNewMessages(
 }
 
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
+  const firstIndexByIdentity = new Map<string, number>();
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
 
@@ -254,10 +351,14 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // independent tracing/task semantics should use a distinct id or a custom
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
+  const preservedReasoningDurations = new Map<string, number>();
   const preservedRunIds = new Map<string, string>();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
+      if (!firstIndexByIdentity.has(identity)) {
+        firstIndexByIdentity.set(identity, index);
+      }
       lastIndexByIdentity.set(identity, index);
       if (!isHiddenFromUIMessage(message)) {
         lastVisibleIndexByIdentity.set(identity, index);
@@ -268,6 +369,14 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
           message.additional_kwargs.turn_duration as number,
         );
       }
+      const reasoningDuration =
+        message.additional_kwargs?.reasoning_duration_ms;
+      if (
+        typeof reasoningDuration === "number" &&
+        Number.isSafeInteger(reasoningDuration)
+      ) {
+        preservedReasoningDurations.set(identity, reasoningDuration);
+      }
       const runId = Reflect.get(message, "run_id");
       if (typeof runId === "string" && runId.length > 0) {
         preservedRunIds.set(identity, runId);
@@ -275,36 +384,65 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
     }
   });
 
+  const selectedMessageByIdentity = new Map<string, Message>();
+  for (const [identity, lastIndex] of lastIndexByIdentity) {
+    // Keep the latest visible payload, but render it in the first identity
+    // slot. A stale live duplicate must not move an older HumanMessage behind
+    // a later clarification request during asynchronous history hydration.
+    const selectedIndex = lastVisibleIndexByIdentity.get(identity) ?? lastIndex;
+    const selected = messages[selectedIndex];
+    if (selected) {
+      selectedMessageByIdentity.set(identity, selected);
+    }
+  }
+
   return messages
     .filter((message, index) => {
       const identity = messageIdentity(message);
       if (!identity) {
         return true;
       }
-      const visibleIndex = lastVisibleIndexByIdentity.get(identity);
-      if (visibleIndex !== undefined) {
-        return visibleIndex === index;
-      }
-      return lastIndexByIdentity.get(identity) === index;
+      return firstIndexByIdentity.get(identity) === index;
     })
     .map((message) => {
       const identity = messageIdentity(message);
       if (!identity) return message;
+      const selectedMessage =
+        selectedMessageByIdentity.get(identity) ?? message;
       const preserveDuration =
         preservedTurnDurations.has(identity) &&
-        message.additional_kwargs?.turn_duration === undefined;
+        selectedMessage.additional_kwargs?.turn_duration === undefined;
+      const preserveReasoningDuration =
+        preservedReasoningDurations.has(identity) &&
+        selectedMessage.additional_kwargs?.reasoning_duration_ms === undefined;
       const preserveRunId =
         preservedRunIds.has(identity) &&
-        typeof Reflect.get(message, "run_id") !== "string";
-      if (!preserveDuration && !preserveRunId) return message;
+        typeof Reflect.get(selectedMessage, "run_id") !== "string";
+      if (
+        !preserveDuration &&
+        !preserveReasoningDuration &&
+        !preserveRunId
+      ) {
+        return selectedMessage;
+      }
       return {
-        ...message,
+        ...selectedMessage,
         ...(preserveRunId ? { run_id: preservedRunIds.get(identity) } : {}),
-        ...(preserveDuration
+        ...(preserveDuration || preserveReasoningDuration
           ? {
               additional_kwargs: {
-                ...message.additional_kwargs,
-                turn_duration: preservedTurnDurations.get(identity),
+                ...selectedMessage.additional_kwargs,
+                ...(preserveDuration
+                  ? {
+                      turn_duration: preservedTurnDurations.get(identity),
+                    }
+                  : {}),
+                ...(preserveReasoningDuration
+                  ? {
+                      reasoning_duration_ms:
+                        preservedReasoningDurations.get(identity),
+                    }
+                  : {}),
               },
             }
           : {}),
@@ -327,6 +465,28 @@ function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
       return true;
     }
     return lastIndexByIdentity.get(`${message.run_id}:${identity}`) === index;
+  });
+}
+
+function attachRunIdWithinKnownTurns(messages: Message[]): Message[] {
+  let currentRunId: string | undefined;
+
+  return messages.map((message) => {
+    const explicitRunId = messageRunId(message);
+    if (explicitRunId) {
+      currentRunId = explicitRunId;
+      return message;
+    }
+
+    if (message.type === "human" && !isHiddenFromUIMessage(message)) {
+      currentRunId = undefined;
+      return message;
+    }
+
+    if (!currentRunId) {
+      return message;
+    }
+    return { ...message, run_id: currentRunId } as unknown as Message;
   });
 }
 
@@ -361,13 +521,15 @@ export function mergeRunMessageRows(
 
       const leftSeq = left.message.seq;
       const rightSeq = right.message.seq;
-      if (typeof leftSeq === "number" && typeof rightSeq === "number") {
-        return leftSeq - rightSeq || left.index - right.index;
+      if (typeof leftSeq === "string" && typeof rightSeq === "string") {
+        return (
+          compareEventSequences(leftSeq, rightSeq) || left.index - right.index
+        );
       }
-      if (typeof leftSeq === "number") {
+      if (typeof leftSeq === "string") {
         return -1;
       }
-      if (typeof rightSeq === "number") {
+      if (typeof rightSeq === "string") {
         return 1;
       }
       return left.index - right.index;
@@ -437,6 +599,64 @@ export function removeSetItems<T>(
     next.delete(item);
   }
   return next;
+}
+
+export function getRunMasksAfterPreparedReplayFailure(
+  current: ReadonlySet<string>,
+  replay: PendingPreparedReplayMask,
+  failedRunId?: string | null,
+) {
+  const next = removeSetItems(current, [replay.targetRunId]);
+  if (failedRunId) {
+    next.add(failedRunId);
+  }
+  return next;
+}
+
+export function getMessageMasksAfterPreparedReplayFailure(
+  current: ReadonlySet<string>,
+  replay: PendingPreparedReplayMask,
+) {
+  const next = removeSetItems(current, replay.supersededMessageIds);
+  if (replay.replacementHumanMessageId) {
+    next.add(replay.replacementHumanMessageId);
+  }
+  return next;
+}
+
+export function classifyPreparedReplaySdkError({
+  createdRunId,
+  callbackRunId,
+  error,
+  historyRefetchError,
+}: {
+  createdRunId: string | null;
+  callbackRunId: string | null;
+  error: unknown;
+  historyRefetchError: unknown | null;
+}):
+  | { kind: "rollback"; failedRunId: string | null }
+  | { kind: "history-refetch-failure"; error: unknown }
+  | { kind: "ignore-history-refetch-duplicate" }
+  | { kind: "ignore-unrelated-run" } {
+  if (!callbackRunId) {
+    // In @langchain/langgraph-sdk 1.9.27, an error before onRunCreated has no
+    // callback metadata. The same hook-level callback is also invoked without
+    // metadata when the SDK's post-stream state refetch fails. A Run ID already
+    // captured by onCreated is the reliable boundary between those two phases.
+    return createdRunId
+      ? { kind: "history-refetch-failure", error }
+      : { kind: "rollback", failedRunId: null };
+  }
+  if (callbackRunId !== createdRunId) {
+    return { kind: "ignore-unrelated-run" };
+  }
+  if (historyRefetchError !== null && Object.is(historyRefetchError, error)) {
+    // The SDK rethrows the same state-refetch error through StreamManager after
+    // first reporting it without metadata from useThreadHistory.
+    return { kind: "ignore-history-refetch-duplicate" };
+  }
+  return { kind: "rollback", failedRunId: callbackRunId };
 }
 
 function isInternalHistoryCaller(caller: unknown): boolean {
@@ -523,9 +743,7 @@ export function buildVisibleHistoryMessages(
   appendedMessages: Message[],
 ) {
   const visibleRows = filterVisibleHistoryRows(
-    messageRows.filter(
-      (message) => !supersededRunIds.has(message.run_id),
-    ),
+    messageRows.filter((message) => !supersededRunIds.has(message.run_id)),
   );
   return dedupeMessagesByIdentity([
     // Carry the owning run_id onto the content message so historical subtask
@@ -573,20 +791,22 @@ export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
 }
 
 export function getOldestRunMessageSeq(messages: RunMessage[]) {
-  let oldestSeq: number | null = null;
+  let oldestSeq: EventSequence | null = null;
   for (const message of messages) {
-    if (typeof message.seq !== "number") {
+    if (typeof message.seq !== "string") {
       continue;
     }
     oldestSeq =
-      oldestSeq === null ? message.seq : Math.min(oldestSeq, message.seq);
+      oldestSeq === null || compareEventSequences(message.seq, oldestSeq) < 0
+        ? message.seq
+        : oldestSeq;
   }
   return oldestSeq;
 }
 
 export function getNextRunMessagesBeforeSeq(
   result: RunMessagesPageResponse,
-): number | null | undefined {
+): EventSequence | null | undefined {
   if (!runMessagesPageHasMore(result)) {
     return null;
   }
@@ -604,14 +824,22 @@ export function mergeMessages(
   // message that must survive as task/tracing data should use custom events or a
   // separate state channel instead of participating in this overlap heuristic.
 
+  // Materialized checkpoint state carries the owning run_id on each admitted
+  // HumanMessage, while its following AI/Tool messages can remain unscoped.
+  // Propagate that trusted turn boundary before comparing it with the
+  // run-scoped history journal. Otherwise the same ToolMessage has two
+  // identities (`run:<id>+tool:<id>` in history versus `tool:<id>` live),
+  // survives dedupe twice, and a partially hydrated latest clarification can
+  // appear before an older checkpoint HumanMessage.
+  const scopedThreadMessages = attachRunIdWithinKnownTurns(threadMessages);
   const threadMessageIds = new Set(
-    threadMessages
+    scopedThreadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
       .map(messageIdentity)
       .filter(isNonEmptyString),
   );
   const visibleLiveHumanRunIds = new Set(
-    threadMessages
+    scopedThreadMessages
       .filter(
         (message) =>
           message.type === "human" && !isHiddenFromUIMessage(message),
@@ -637,6 +865,7 @@ export function mergeMessages(
   });
 
   const savedTurnDurations = new Map<string, number>();
+  const savedReasoningDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
@@ -645,6 +874,14 @@ export function mergeMessages(
         identity,
         msg.additional_kwargs.turn_duration as number,
       );
+    }
+    const reasoningDuration = msg.additional_kwargs?.reasoning_duration_ms;
+    if (
+      identity &&
+      typeof reasoningDuration === "number" &&
+      Number.isSafeInteger(reasoningDuration)
+    ) {
+      savedReasoningDurations.set(identity, reasoningDuration);
     }
     const runId = Reflect.get(msg, "run_id");
     if (identity && typeof runId === "string" && runId.length > 0) {
@@ -671,7 +908,7 @@ export function mergeMessages(
 
   const merged = dedupeMessagesByIdentity([
     ...regularHistoryMessages.slice(0, cutoff),
-    ...threadMessages,
+    ...scopedThreadMessages,
     ...optimisticMessages,
   ]);
   const chronologicalRunOrder = new Map<string, number>();
@@ -729,23 +966,71 @@ export function mergeMessages(
     const preserveDuration =
       savedTurnDurations.has(identity) &&
       message.additional_kwargs?.turn_duration === undefined;
+    const preserveReasoningDuration =
+      savedReasoningDurations.has(identity) &&
+      message.additional_kwargs?.reasoning_duration_ms === undefined;
     const preserveRunId =
       savedRunIds.has(identity) &&
       typeof Reflect.get(message, "run_id") !== "string";
-    if (!preserveDuration && !preserveRunId) return message;
+    if (!preserveDuration && !preserveReasoningDuration && !preserveRunId) {
+      return message;
+    }
     return {
       ...message,
       ...(preserveRunId ? { run_id: savedRunIds.get(identity) } : {}),
-      ...(preserveDuration
+      ...(preserveDuration || preserveReasoningDuration
         ? {
             additional_kwargs: {
               ...message.additional_kwargs,
-              turn_duration: savedTurnDurations.get(identity),
+              ...(preserveDuration
+                ? {
+                    turn_duration: savedTurnDurations.get(identity),
+                  }
+                : {}),
+              ...(preserveReasoningDuration
+                ? {
+                    reasoning_duration_ms:
+                      savedReasoningDurations.get(identity),
+                  }
+                : {}),
             },
           }
         : {}),
     } as Message;
   });
+}
+
+/**
+ * Overlay the UI-safe thread projection without eagerly evaluating SDK
+ * getters.
+ *
+ * LangGraph's stream handle exposes enumerable getters such as `toolCalls`.
+ * During a `RemoveMessage(__remove_all__)` compaction transition its internal
+ * message array can briefly be sparse while message-tuple indexes are rebuilt.
+ * Object spread would invoke every enumerable getter immediately, and the SDK
+ * tool-call getter then reads `.type` from a sparse slot and crashes the page.
+ * Copying property descriptors preserves the lazy SDK surface while the three
+ * fields consumed by DeerFlow use the already-normalized UI projection.
+ */
+export function overlayThreadProjection<T extends object>(
+  thread: T,
+  overrides: Record<string, unknown>,
+): T {
+  const overrideDescriptors = Object.fromEntries(
+    Object.entries(overrides).map(([key, value]) => [
+      key,
+      {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: false,
+      },
+    ]),
+  );
+  return Object.create(Object.getPrototypeOf(thread), {
+    ...Object.getOwnPropertyDescriptors(thread),
+    ...overrideDescriptors,
+  }) as T;
 }
 
 /**
@@ -857,6 +1142,17 @@ function getMessagesAfterBaseline(
     const id = messageIdentity(message);
     return !id || !baselineMessageIds.has(id);
   });
+}
+
+export function countHumanMessagesExcludingSuperseded(
+  messages: Message[],
+  supersededMessageIds: readonly string[],
+): number {
+  const superseded = new Set(supersededMessageIds);
+  return messages.filter(
+    (message) =>
+      message.type === "human" && (!message.id || !superseded.has(message.id)),
+  ).length;
 }
 
 export function getVisibleOptimisticMessages(
@@ -1178,6 +1474,10 @@ export function useThreadStream({
   const runBaselinePreparedRef = useRef(false);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  const preparedReplayAttemptRef = useRef<PreparedReplayAttempt | null>(null);
+  const [ignoredReplayHistoryError, setIgnoredReplayHistoryError] = useState<{
+    error: unknown;
+  } | null>(null);
   const listeners = useRef({
     onSend,
     onStart,
@@ -1260,6 +1560,34 @@ export function useThreadStream({
 
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
+  const clearPreparedReplayMasks = useCallback(
+    (replay: PendingPreparedReplayMask | null) => {
+      if (!replay) {
+        return;
+      }
+      setPendingSupersededRunIds((current) =>
+        removeSetItems(current, [replay.targetRunId]),
+      );
+      setPendingSupersededMessageIds((current) =>
+        removeSetItems(current, replay.supersededMessageIds),
+      );
+    },
+    [],
+  );
+  const rollbackPreparedReplayFailure = useCallback(
+    (replay: PendingPreparedReplayMask | null, failedRunId?: string | null) => {
+      if (!replay) {
+        return;
+      }
+      setPendingSupersededRunIds((current) =>
+        getRunMasksAfterPreparedReplayFailure(current, replay, failedRunId),
+      );
+      setPendingSupersededMessageIds((current) =>
+        getMessageMasksAfterPreparedReplayFailure(current, replay),
+      );
+    },
+    [],
+  );
 
   const thread = useStream<AgentThreadState>({
     client: privateWork.client,
@@ -1269,6 +1597,14 @@ export function useThreadStream({
     fetchStateHistory: { limit: 1 },
     throttle: true,
     onCreated(meta) {
+      const replayAttempt = preparedReplayAttemptRef.current;
+      if (
+        replayAttempt?.status === "submitting" &&
+        replayAttempt.threadId === meta.thread_id
+      ) {
+        replayAttempt.createdRunId = meta.run_id;
+      }
+      setIgnoredReplayHistoryError(null);
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       const runQueryKey = scopedThreadQueryKey(
@@ -1431,7 +1767,9 @@ export function useThreadStream({
         }
       }
     },
-    onCustomEvent(event: unknown) {
+    onCustomEvent(event: unknown, callbackOptions) {
+      if (!isRootStreamCallback(callbackOptions)) return;
+
       const terminalUpdate = parseSubtaskTerminalEvent(event);
       if (terminalUpdate) {
         updateSubtask({
@@ -1444,6 +1782,7 @@ export function useThreadStream({
         return;
       }
 
+      const lifecycleUpdate = taskEventToSubtaskUpdate(event);
       if (
         typeof event === "object" &&
         event !== null &&
@@ -1460,12 +1799,17 @@ export function useThreadStream({
         // latestMessage for the collapsed-header tool-call hint, and append the
         // normalized step (assistant turn or tool output) to the timeline.
         updateSubtask({
+          ...(lifecycleUpdate ?? {}),
           id: e.task_id,
           status: "in_progress",
           statusSource: "custom_event",
           latestMessage: e.message,
           steps: [messageToStep(e.message, e.message_index ?? 0)],
         });
+        return;
+      }
+      if (lifecycleUpdate) {
+        updateSubtask(lifecycleUpdate);
         return;
       }
 
@@ -1482,17 +1826,48 @@ export function useThreadStream({
         toast(e.message);
       }
     },
-    onError(error) {
-      setOptimisticMessages([]);
-      setOptimisticThreadId(null);
-      setLiveMessagesThreadId(null);
-      setPendingSupersededRunIds(new Set());
-      setPendingSupersededMessageIds(new Set());
-      toast.error(
-        isProjectRunTerminalFailure(error)
-          ? t.conversation.runFailedDescription
-          : getStreamErrorMessage(error),
-      );
+    onError(error, callbackOptions) {
+      const replayAttempt = preparedReplayAttemptRef.current;
+      const decision =
+        replayAttempt?.status === "submitting"
+          ? classifyPreparedReplaySdkError({
+              createdRunId: replayAttempt.createdRunId,
+              callbackRunId: callbackOptions?.run_id ?? null,
+              error,
+              historyRefetchError: replayAttempt.historyRefetchError,
+            })
+          : null;
+      const leavesReplayProjectionIntact =
+        decision?.kind === "history-refetch-failure" ||
+        decision?.kind === "ignore-history-refetch-duplicate" ||
+        decision?.kind === "ignore-unrelated-run";
+
+      if (decision?.kind === "rollback" && replayAttempt) {
+        replayAttempt.status = "failed";
+        rollbackPreparedReplayFailure(
+          replayAttempt.replay,
+          decision.failedRunId,
+        );
+      } else if (
+        decision?.kind === "history-refetch-failure" &&
+        replayAttempt
+      ) {
+        replayAttempt.historyRefetchError = error;
+        setIgnoredReplayHistoryError({ error });
+      }
+
+      if (!leavesReplayProjectionIntact) {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
+      }
+      if (decision?.kind !== "ignore-history-refetch-duplicate") {
+        toast.error(
+          isProjectRunTerminalFailure(error)
+            ? t.conversation.runFailedDescription
+            : getStreamErrorMessage(error),
+        );
+      }
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -1505,7 +1880,15 @@ export function useThreadStream({
         privateWork.scope,
       );
     },
-    onFinish(state) {
+    onFinish(state, callbackOptions) {
+      const replayAttempt = preparedReplayAttemptRef.current;
+      if (
+        replayAttempt?.status === "submitting" &&
+        replayAttempt.createdRunId === callbackOptions?.run_id
+      ) {
+        replayAttempt.status = "succeeded";
+      }
+      setIgnoredReplayHistoryError(null);
       listeners.current.onFinish?.(state.values);
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -1520,10 +1903,28 @@ export function useThreadStream({
       );
     },
   });
+  const deferredStreamDetachRef = useRef<ReturnType<
+    typeof createDeferredThreadStreamDetach
+  > | null>(null);
+  deferredStreamDetachRef.current ??= createDeferredThreadStreamDetach();
+  const deferredStreamDetach = deferredStreamDetachRef.current;
+  const switchStreamThread = thread.switchThread;
+  useEffect(() => {
+    deferredStreamDetach.retain();
+    return () => {
+      deferredStreamDetach.defer(() => {
+        // switchThread clears/aborts the local SDK projection only. Unlike
+        // stop(), it never sends a backend Run cancellation.
+        switchStreamThread(null);
+      });
+    };
+  }, [deferredStreamDetach, switchStreamThread]);
 
   const stopThread = useCallback(async () => {
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    const replayAttempt = preparedReplayAttemptRef.current;
+    const replayRollback = getPreparedReplayStopRollback(replayAttempt);
     await stopThreadAndInvalidateCaches(
       queryClient,
       () => thread.stop(),
@@ -1531,11 +1932,24 @@ export function useThreadStream({
       isMock,
       privateWork.scope,
     );
+    if (replayAttempt && replayRollback) {
+      replayAttempt.status = "failed";
+      setOptimisticMessages([]);
+      setOptimisticThreadId(null);
+      rollbackPreparedReplayFailure(
+        replayRollback.replay,
+        replayRollback.failedRunId,
+      );
+      if (preparedReplayAttemptRef.current === replayAttempt) {
+        preparedReplayAttemptRef.current = null;
+      }
+    }
   }, [
     displayThreadId,
     isMock,
     privateWork.scope,
     queryClient,
+    rollbackPreparedReplayFailure,
     thread,
     threadId,
   ]);
@@ -1557,8 +1971,14 @@ export function useThreadStream({
     thread.isLoading,
   );
   const visibleHistory = useMemo(
-    () => (threadId ? history : []),
-    [history, threadId],
+    () =>
+      threadId
+        ? history.filter(
+            (message) =>
+              !message.id || !pendingSupersededMessageIds.has(message.id),
+          )
+        : [],
+    [history, pendingSupersededMessageIds, threadId],
   );
   const humanMessageCount = persistedMessages.filter(
     (m) => m.type === "human",
@@ -1600,6 +2020,8 @@ export function useThreadStream({
     pendingArchiveThreadIdRef.current = null;
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
+    preparedReplayAttemptRef.current = null;
+    setIgnoredReplayHistoryError(null);
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
@@ -1766,12 +2188,7 @@ export function useThreadStream({
 
               // Update optimistic human message with uploaded status + paths
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
-                }),
+                uploadedFileInfoToMessage,
               );
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
@@ -1806,12 +2223,7 @@ export function useThreadStream({
 
         // Build files metadata for submission (included in additional_kwargs)
         const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
-            size: info.size,
-            path: info.virtual_path,
-            status: "uploaded" as const,
-          }),
+          uploadedFileInfoToMessage,
         );
 
         await thread.submit(
@@ -1826,27 +2238,12 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
-            streamSubgraphs: true,
-            streamResumable: true,
-            config: {
-              recursion_limit: 1000,
-            },
+            ...buildRootThreadStreamOptions(),
             context: {
               ...extraContext,
               ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
               thread_id: threadId,
+              ...getAgentModeRuntimeContext(context.mode),
             },
           },
         );
@@ -1889,14 +2286,30 @@ export function useThreadStream({
     ],
   );
 
-  const regenerateMessage = useCallback(
-    async (
-      threadId: string,
-      messageId: string,
-      supersededMessageIds: string[] = [messageId],
-    ) => {
-      if (sendInFlightRef.current || !threadId || !messageId) {
-        return;
+  const submitPreparedReplay = useCallback(
+    async <TPrepared extends RegeneratePrepareResponse>({
+      threadId,
+      prepare,
+      getSupersededMessageIds,
+      getOptimisticMessages,
+    }: {
+      threadId: string;
+      prepare: () => Promise<TPrepared>;
+      getSupersededMessageIds: (prepared: TPrepared) => string[];
+      getOptimisticMessages?: (prepared: TPrepared) => Message[];
+    }) => {
+      // The SDK reports both its initial state-load failure and a replay
+      // admission failure through the same metadata-less onError callback.
+      // Do not open a replay attribution window until the initial state request
+      // has settled, so those two error sources cannot be confused.
+      if (
+        !canStartPreparedReplay({
+          threadId,
+          sendInFlight: sendInFlightRef.current,
+          isThreadLoading: thread.isThreadLoading,
+        })
+      ) {
+        return false;
       }
       sendInFlightRef.current = true;
       prevHumanMsgCountRef.current = humanMessageCount;
@@ -1913,29 +2326,39 @@ export function useThreadStream({
       runBaselinePreparedRef.current = true;
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
-      let preparedSupersededRunId: string | null = null;
-      let preparedSupersededMessageIds: string[] = [];
+      let pendingReplay: PendingPreparedReplayMask | null = null;
+      let replayAttempt: PreparedReplayAttempt | null = null;
+      setIgnoredReplayHistoryError(null);
 
       try {
-        const response = await fetch(
-          `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
-            threadId,
-          )}/runs/regenerate/prepare`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            credentials: "include",
-            body: JSON.stringify({ message_id: messageId }),
-          },
-        );
-        if (!response.ok) {
-          throw new Error(await readResponseErrorMessage(response));
+        const prepared = await prepare();
+        if (privateWork.isActive && !privateWork.isActive()) {
+          throw new Error("The active project changed before replay started.");
         }
-        const prepared = (await response.json()) as RegeneratePrepareResponse;
-        preparedSupersededRunId = prepared.target_run_id;
-        preparedSupersededMessageIds = supersededMessageIds;
+        const supersededMessageIds = getSupersededMessageIds(prepared);
+        prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
+          persistedMessages,
+          supersededMessageIds,
+        );
+        const replacementHumanMessageId =
+          "replacement_human_message_id" in prepared &&
+          typeof prepared.replacement_human_message_id === "string"
+            ? prepared.replacement_human_message_id
+            : undefined;
+        pendingReplay = {
+          kind: replacementHumanMessageId ? "edit" : "regenerate",
+          targetRunId: prepared.target_run_id,
+          supersededMessageIds,
+          replacementHumanMessageId,
+        };
+        replayAttempt = {
+          replay: pendingReplay,
+          threadId,
+          createdRunId: null,
+          historyRefetchError: null,
+          status: "submitting",
+        };
+        preparedReplayAttemptRef.current = replayAttempt;
         setPendingSupersededRunIds((current) => {
           const next = new Set(current);
           next.add(prepared.target_run_id);
@@ -1949,32 +2372,33 @@ export function useThreadStream({
           return next;
         });
 
+        const nextOptimisticMessages = getOptimisticMessages?.(prepared) ?? [];
+        if (nextOptimisticMessages.length > 0) {
+          setOptimisticThreadId(threadId);
+          setOptimisticMessages(nextOptimisticMessages);
+        }
+
         await thread.submit(prepared.input, {
           threadId,
           checkpoint: prepared.checkpoint,
           metadata: prepared.metadata,
-          streamSubgraphs: true,
-          streamResumable: true,
-          config: {
-            recursion_limit: 1000,
-          },
+          ...buildRootThreadStreamOptions(),
           context: {
             ...context,
-            thinking_enabled: context.mode !== "flash",
-            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode === "ultra",
-            reasoning_effort:
-              context.reasoning_effort ??
-              (context.mode === "ultra"
-                ? "high"
-                : context.mode === "pro"
-                  ? "medium"
-                  : context.mode === "thinking"
-                    ? "low"
-                    : undefined),
             thread_id: threadId,
+            ...getAgentModeRuntimeContext(context.mode),
           },
         });
+        if (replayAttempt.status === "failed") {
+          if (preparedReplayAttemptRef.current === replayAttempt) {
+            preparedReplayAttemptRef.current = null;
+          }
+          return false;
+        }
+        replayAttempt.status = "succeeded";
+        if (preparedReplayAttemptRef.current === replayAttempt) {
+          preparedReplayAttemptRef.current = null;
+        }
         void queryClient.invalidateQueries({
           queryKey: scopedThreadQueryKey(privateWork.scope, "thread", threadId),
         });
@@ -1997,23 +2421,29 @@ export function useThreadStream({
             ...threadTokenUsageQueryKey(threadId),
           ),
         });
+        return true;
       } catch (error) {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
-        if (preparedSupersededRunId) {
-          const supersededRunId = preparedSupersededRunId;
-          setPendingSupersededRunIds((current) =>
-            removeSetItems(current, [supersededRunId]),
-          );
-          setPendingSupersededMessageIds((current) =>
-            removeSetItems(current, preparedSupersededMessageIds),
-          );
+        runBaselinePreparedRef.current = false;
+        if (pendingReplay) {
+          clearPreparedReplayMasks(pendingReplay);
+        }
+        if (replayAttempt) {
+          replayAttempt.status = "failed";
+        }
+        if (preparedReplayAttemptRef.current === replayAttempt) {
+          preparedReplayAttemptRef.current = null;
         }
         toast.error(getStreamErrorMessage(error));
+        return false;
       } finally {
         sendInFlightRef.current = false;
       }
     },
     [
+      clearPreparedReplayMasks,
       context,
       humanMessageCount,
       persistedMessages,
@@ -2021,6 +2451,86 @@ export function useThreadStream({
       queryClient,
       thread,
     ],
+  );
+
+  const regenerateMessage = useCallback(
+    async (
+      threadId: string,
+      messageId: string,
+      supersededMessageIds: string[] = [messageId],
+    ) => {
+      if (!messageId) {
+        return false;
+      }
+      return submitPreparedReplay({
+        threadId,
+        prepare: () =>
+          runPrivateWorkAbortable(privateWork, async (signal) => {
+            const response = await fetch(
+              `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
+                threadId,
+              )}/runs/regenerate/prepare`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify({ message_id: messageId }),
+                signal,
+              },
+            );
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as RegeneratePrepareResponse;
+          }),
+        getSupersededMessageIds: () => supersededMessageIds,
+      });
+    },
+    [privateWork, submitPreparedReplay],
+  );
+
+  const editAndRegenerateMessage = useCallback(
+    async (
+      threadId: string,
+      humanMessageId: string,
+      replacementText: string,
+    ) => {
+      if (!humanMessageId) {
+        return false;
+      }
+      return submitPreparedReplay<EditRegeneratePrepareResponse>({
+        threadId,
+        prepare: () =>
+          runPrivateWorkAbortable(privateWork, async (signal) => {
+            const response = await fetch(
+              `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
+                threadId,
+              )}/runs/edit-regenerate/prepare`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify({
+                  human_message_id: humanMessageId,
+                  replacement_text: replacementText,
+                }),
+                signal,
+              },
+            );
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as EditRegeneratePrepareResponse;
+          }),
+        getSupersededMessageIds: (prepared) => prepared.source_message_ids,
+        getOptimisticMessages: (prepared) => prepared.input.messages ?? [],
+      });
+    },
+    [privateWork, submitPreparedReplay],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
@@ -2047,9 +2557,7 @@ export function useThreadStream({
   const activeRunId = resolveActiveRunIdForMessages(
     persistedMessages,
     thread.isLoading,
-    currentRunThreadIdRef.current === threadId
-      ? currentRunIdRef.current
-      : null,
+    currentRunThreadIdRef.current === threadId ? currentRunIdRef.current : null,
   );
   const runBaselineMessageIds = new Set(
     currentRunBaselineMessageIdsRef.current,
@@ -2065,9 +2573,13 @@ export function useThreadStream({
     activeRunId,
     runBaselineMessageIds,
   );
+  const visibleRunScopedPersistedMessages = filterMessagesBySupersededRunIds(
+    runScopedPersistedMessages,
+    pendingSupersededRunIds,
+  );
   const mergedMessages = mergeMessages(
     effectiveHistory,
-    runScopedPersistedMessages,
+    visibleRunScopedPersistedMessages,
     visibleOptimisticMessages,
     historyRuns,
   );
@@ -2077,15 +2589,20 @@ export function useThreadStream({
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
+  const projectedThreadError =
+    ignoredReplayHistoryError !== null &&
+    Object.is(thread.error, ignoredReplayHistoryError.error)
+      ? undefined
+      : thread.error;
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
-  const mergedThread = {
-    ...thread,
+  const mergedThread = overlayThreadProjection(thread, {
+    error: projectedThreadError,
     stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
-  } as typeof thread;
+  });
 
   return {
     thread: mergedThread,
@@ -2093,6 +2610,7 @@ export function useThreadStream({
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
+    editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -2126,7 +2644,7 @@ export function useThreadHistory(
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
-  const runBeforeSeqRef = useRef<Map<string, number>>(new Map());
+  const runBeforeSeqRef = useRef<Map<string, EventSequence>>(new Map());
   const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [messageLoadError, setMessageLoadError] = useState<Error | null>(null);
@@ -2209,7 +2727,7 @@ export function useThreadHistory(
           mergeRunMessageRows(prev, _messages, runsRef.current),
         );
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
-        if (typeof nextBeforeSeq === "number") {
+        if (typeof nextBeforeSeq === "string") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
           pendingLoadRef.current = true;
         } else if (nextBeforeSeq === undefined) {
@@ -2493,6 +3011,200 @@ export function useInfiniteThreads(
   });
 }
 
+export const THREAD_RUNS_PAGE_SIZE = 1000;
+export const THREAD_RUNS_MAX_PAGES = 1000;
+export const THREAD_RUNS_MAX_OFFSET = 100_000;
+
+const PRIVATE_RUN_METADATA_KEYS = new Set([
+  "project_id",
+  "owner_user_id",
+  "user_id",
+]);
+const PRIVATE_RUN_METADATA_KEY_PARTS = [
+  "secret",
+  "token",
+  "password",
+  "credential",
+  "ciphertext",
+  "private_key",
+  "key_id",
+  "nonce",
+  "storage_locator",
+] as const;
+const THREAD_RUN_METADATA_MAX_NODES = 10_000;
+
+function isPrivateRunMetadataKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return (
+    PRIVATE_RUN_METADATA_KEYS.has(normalized) ||
+    PRIVATE_RUN_METADATA_KEY_PARTS.some((part) => normalized.includes(part))
+  );
+}
+
+const threadRunMetadataSchema = z
+  .record(z.unknown())
+  .superRefine((metadata, context) => {
+    const pending: Array<{
+      path: Array<string | number>;
+      value: unknown;
+    }> = [{ path: [], value: metadata }];
+    const visited = new Set<object>();
+    let visitedNodes = 0;
+
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (!current || current.value === null) {
+        continue;
+      }
+      if (typeof current.value !== "object") {
+        continue;
+      }
+      if (visited.has(current.value)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Run metadata must be an acyclic JSON object.",
+          path: current.path,
+        });
+        return;
+      }
+      visited.add(current.value);
+      visitedNodes += 1;
+      if (visitedNodes > THREAD_RUN_METADATA_MAX_NODES) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Run metadata exceeds the validation safety limit.",
+          path: current.path,
+        });
+        return;
+      }
+
+      if (Array.isArray(current.value)) {
+        current.value.forEach((value, index) => {
+          pending.push({ path: [...current.path, index], value });
+        });
+        continue;
+      }
+
+      for (const [key, value] of Object.entries(current.value)) {
+        const path = [...current.path, key];
+        if (isPrivateRunMetadataKey(key)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Run metadata contains private authority data.",
+            path,
+          });
+          continue;
+        }
+        pending.push({ path, value });
+      }
+    }
+  });
+
+const threadRunSchema = z
+  .object({
+    run_id: z.string().min(1),
+    thread_id: z.string().min(1),
+    assistant_id: z.string().min(1).nullable(),
+    created_at: z.string().min(1),
+    updated_at: z.string().min(1),
+    status: z.enum([
+      "pending",
+      "running",
+      "error",
+      "success",
+      "timeout",
+      "interrupted",
+    ]),
+    metadata: threadRunMetadataSchema,
+    multitask_strategy: z.enum(["reject", "interrupt", "rollback", "enqueue"]),
+    error: z.string().nullable(),
+    model_name: z.string().min(1).nullable(),
+  })
+  .strict();
+
+const threadRunPageSchema = z.array(threadRunSchema).max(THREAD_RUNS_PAGE_SIZE);
+
+type ThreadRunsListClient = {
+  runs: {
+    list: (
+      threadId: string,
+      options?: {
+        limit?: number;
+        offset?: number;
+        signal?: AbortSignal;
+      },
+    ) => Promise<unknown>;
+  };
+};
+
+export async function fetchAllThreadRuns(
+  apiClient: ThreadRunsListClient,
+  threadId: string,
+  pageSize: number = THREAD_RUNS_PAGE_SIZE,
+  signal?: AbortSignal,
+): Promise<Run[]> {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+    throw new RangeError("Thread Run page size must be between 1 and 1000.");
+  }
+
+  const runs: Run[] = [];
+  const seenRunIds = new Set<string>();
+  let offset = 0;
+  let pageCount = 0;
+
+  while (true) {
+    signal?.throwIfAborted();
+    if (pageCount >= THREAD_RUNS_MAX_PAGES) {
+      throw new Error("Thread Run pagination exceeded the page safety limit.");
+    }
+    if (offset > THREAD_RUNS_MAX_OFFSET) {
+      throw new Error(
+        "Thread Run pagination exceeded the offset safety limit.",
+      );
+    }
+
+    const rawPage = await apiClient.runs.list(threadId, {
+      limit: pageSize,
+      offset,
+      ...(signal ? { signal } : {}),
+    });
+    signal?.throwIfAborted();
+    const page = threadRunPageSchema.parse(rawPage);
+    pageCount += 1;
+    if (page.length > pageSize) {
+      throw new Error(
+        "Thread Run pagination returned more rows than requested.",
+      );
+    }
+
+    const seenCountBeforePage = seenRunIds.size;
+    for (const run of page) {
+      if (!seenRunIds.has(run.run_id)) {
+        seenRunIds.add(run.run_id);
+        // Gateway runs intentionally use a nullable assistant_id and expose
+        // two public diagnostic fields beyond the SDK's narrower Run type.
+        runs.push(run as unknown as Run);
+      }
+    }
+
+    if (page.length < pageSize) {
+      return runs;
+    }
+    if (seenRunIds.size === seenCountBeforePage) {
+      throw new Error("Thread Run pagination returned a non-advancing page.");
+    }
+    if (pageCount >= THREAD_RUNS_MAX_PAGES) {
+      throw new Error("Thread Run pagination exceeded the page safety limit.");
+    }
+    if (page.length > THREAD_RUNS_MAX_OFFSET - offset) {
+      throw new Error(
+        "Thread Run pagination exceeded the offset safety limit.",
+      );
+    }
+    offset += page.length;
+  }
+}
+
 export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
@@ -2501,12 +3213,16 @@ export function useThreadRuns(
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run[]>({
     queryKey: scopedThreadQueryKey(privateWork.scope, "thread", threadId),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!threadId) {
         return [];
       }
-      const response = await privateWork.client.runs.list(threadId);
-      return response;
+      return fetchAllThreadRuns(
+        privateWork.client,
+        threadId,
+        undefined,
+        signal,
+      );
     },
     enabled: enabled && Boolean(threadId),
     retry: false,

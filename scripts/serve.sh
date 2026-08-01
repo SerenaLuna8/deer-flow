@@ -16,9 +16,9 @@
 #   --restart   Stop all services, then start with the given mode flags
 #
 # Examples:
-#   ./scripts/serve.sh --dev                 # Gateway dev, hot reload
-#   ./scripts/serve.sh --prod                # Gateway prod
-#   ./scripts/serve.sh --dev --daemon        # Gateway dev, background
+#   ./scripts/serve.sh --dev                 # Full stack, hot reload
+#   ./scripts/serve.sh --prod                # Full stack, production mode
+#   ./scripts/serve.sh --dev --daemon        # Full stack, background
 #   ./scripts/serve.sh --stop                # Stop all services
 #   ./scripts/serve.sh --restart --dev       # Restart dev services
 #
@@ -36,6 +36,24 @@ if [ -f "$REPO_ROOT/.env" ]; then
     source "$REPO_ROOT/.env"
     set +a
 fi
+
+# Model API keys are PostgreSQL-backed System Credentials. Keep common legacy
+# provider variables out of Gateway, Worker, and Scheduler process environments
+# so a provider cannot silently bypass the exact admitted Credential version.
+# Tool/process credentials remain available through their own distinct names.
+# The opt-in Claude Code/Codex CLI handoff variables are intentionally separate.
+unset "ANTHROPIC_API_KEY"
+unset "DEEPSEEK_API_KEY"
+unset "GEMINI_API_KEY"
+unset "MIMO_API_KEY"
+unset "MINIMAX_API_KEY"
+unset "MOONSHOT_API_KEY"
+unset "NOVITA_API_KEY"
+unset "OPENAI_API_KEY"
+unset "OPENROUTER_API_KEY"
+unset "STEPFUN_API_KEY"
+unset "VLLM_API_KEY"
+unset "VOLCENGINE_API_KEY"
 
 _pick_python() {
     local candidate
@@ -293,24 +311,28 @@ fi
 
 # Mode label for banner
 if $DEV_MODE; then
-    MODE_LABEL="DEV (Gateway runtime, hot-reload enabled)"
+    MODE_LABEL="DEV (hot-reload enabled)"
 else
-    MODE_LABEL="PROD (Gateway runtime, optimized)"
+    MODE_LABEL="PROD (optimized)"
 fi
 
 if $DAEMON_MODE; then
     MODE_LABEL="$MODE_LABEL [daemon]"
 fi
 
-# Frontend command
+# Resolve pnpm through the same runner used by check/install/doctor. Exporting
+# both paths preserves whitespace when run_service invokes a child shell.
+if ! DEERFLOW_PNPM_PYTHON="$(_pick_python)"; then
+    echo "Python 3 is required to locate pnpm or its Corepack fallback."
+    exit 1
+fi
+DEERFLOW_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"
+export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
+
 if $DEV_MODE; then
-    FRONTEND_CMD="pnpm run dev"
+    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
 else
-    if ! PYTHON_BIN="$(_pick_python)"; then
-        echo "Python is required to generate BETTER_AUTH_SECRET."
-        exit 1
-    fi
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
@@ -378,7 +400,7 @@ fi
 # Pick a runnable Python for the extras detector. On Windows/Git Bash,
 # `python3` can resolve to the Microsoft Store alias in WindowsApps, which is
 # present on PATH but not executable from Bash.
-DETECT_PYTHON="$(_pick_python || true)"
+DETECT_PYTHON="$DEERFLOW_PNPM_PYTHON"
 
 # Resolve existing optional extras (for example ollama or discord) from
 # UV_EXTRAS or config.yaml so that
@@ -405,7 +427,7 @@ if ! $SKIP_INSTALL; then
     # `--all-packages` propagates selected extras into workspace members.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"
@@ -429,8 +451,8 @@ echo ""
 echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
-echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
-echo "    Worker      → background      (durable job execution)"
+echo "    Gateway     → localhost:8001  (admission/query/SSE)"
+echo "    Worker      → background      (Agent graph execution)"
 if [ "$SCHEDULER_ENABLED" = "true" ]; then
     echo "    Scheduler   → background      (Automation polling)"
 fi
@@ -514,8 +536,8 @@ run_service() {
 }
 
 # run_process NAME COMMAND LOGFILE
-# Background roles have no public port. They are required to remain alive
-# through their startup window; readiness then reports their DB registration.
+# Background roles have no public port. They must remain alive through their
+# startup window; Gateway health later reports their durable DB registration.
 run_process() {
     local name="$1" cmd="$2" logfile="$3" pid attempt
     echo "Starting $name..."
@@ -580,7 +602,8 @@ echo ""
 echo "  🌐 http://localhost:2026"
 echo ""
 echo "  Routing: Frontend → Nginx → Gateway"
-echo "  API:     /api/*  →  Gateway REST API (8001)"
+echo "  API:       /api/*  →  Gateway admission/query/SSE (8001)"
+echo "  Execution: durable jobs → Worker Agent graph execution"
 echo ""
 echo "  📋 Logs: $LOG_ROOT/{gateway,worker,scheduler,frontend,nginx}.log"
 echo ""

@@ -22,6 +22,7 @@ from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, Pr
 from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectRole, ProjectView
 from app.projects.repository import ProjectRepository
 from app.projects.service import ProjectService
+from app.quotas.models import QuotaUnavailable
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 
@@ -39,7 +40,7 @@ class ProjectRoute(APIRoute):
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"], route_class=ProjectRoute)
-DOMAIN_ERRORS = (ProjectNotFound, ProjectForbidden, ProjectSlugConflict, ProjectMemberQuotaExceeded, ProjectQuotaStateConflict, ProjectValidationFailed, ProjectDatabaseUnavailable)
+DOMAIN_ERRORS = (ProjectNotFound, ProjectForbidden, ProjectSlugConflict, ProjectMemberQuotaExceeded, ProjectQuotaStateConflict, ProjectValidationFailed, ProjectDatabaseUnavailable, QuotaUnavailable)
 
 
 class CreateProjectRequest(BaseModel):
@@ -119,6 +120,7 @@ def _raise_domain(exc: Exception) -> None:
         ProjectQuotaStateConflict: (409, "PROJECT_QUOTA_STATE_CONFLICT"),
         ProjectValidationFailed: (422, "PROJECT_VALIDATION_FAILED"),
         ProjectDatabaseUnavailable: (503, "DATABASE_UNAVAILABLE"),
+        QuotaUnavailable: (503, "QUOTA_POLICY_UNAVAILABLE"),
     }
     for error_type, (status_code, code) in mapping.items():
         if isinstance(exc, error_type):
@@ -144,8 +146,15 @@ async def create_project(
     audit=Depends(get_operational_audit_sink),
 ):
     user_id, request_id = identity
-    service = ProjectService(ProjectRepository(session, quota=quota, quota_config=quota_service.config), audit=audit)
     try:
+        service = ProjectService(
+            ProjectRepository(
+                session,
+                quota=quota,
+                quota_policy=quota_service,
+            ),
+            audit=audit,
+        )
         context = await service.create(user_id, CreateProject(**body.model_dump()), request_id)
         return _response(await service.get(context))
     except DOMAIN_ERRORS as exc:
@@ -165,7 +174,7 @@ async def list_projects(
 ):
     user_id, request_id = identity
     try:
-        page: ProjectPage = await ProjectService(ProjectRepository(session, quota_config=quota_service.config)).list(
+        page: ProjectPage = await ProjectService(ProjectRepository(session, quota_policy=quota_service)).list(
             user_id,
             query=query,
             pinned=pinned,
@@ -182,7 +191,10 @@ async def list_projects(
 async def _context_service(project_id: uuid.UUID, identity: tuple[uuid.UUID, str], session: AsyncSession, quota_service, *, audit=None):
     user_id, request_id = identity
     context = await resolve_project_context(session, user_id, project_id, request_id)
-    return context, ProjectService(ProjectRepository(session, quota_config=quota_service.config), audit=audit)
+    return context, ProjectService(
+        ProjectRepository(session, quota_policy=quota_service),
+        audit=audit,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)

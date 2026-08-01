@@ -15,6 +15,7 @@ M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 FINAL_REQUIRED_RELATIONS = (
     "projects",
     "project_memberships",
+    "project_default_agents",
     "agents",
     "skills",
     "skill_design_sessions",
@@ -32,6 +33,10 @@ FINAL_REQUIRED_RELATIONS = (
     "run_events",
     "project_usage_ledger",
     "audit_logs",
+    "system_runtime_policy_catalog_state",
+    "system_runtime_policies",
+    "system_runtime_policy_versions",
+    "run_runtime_policy_snapshots",
 )
 
 

@@ -109,7 +109,8 @@ if  [ "$CMD" != "down" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     else
         echo -e "${RED}✗ No config.yaml found.${NC}"
         echo "  Run 'make setup' from the repo root (recommended),"
-        echo "  or 'make config' for the full template, then set the required model API keys."
+        echo "  or 'make config' for the full process template. After startup, configure"
+        echo "  models and encrypted Credentials at /admin/settings/models."
         exit 1
     fi
 else
@@ -386,7 +387,7 @@ if [ "$sandbox_mode" = "aio" ]; then
         exit 1
     fi
     echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
-    echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent).${NC}"
+    echo -e "${YELLOW}  Mounting host Docker socket into Worker (DooD = host root-equivalent).${NC}"
     COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi
 

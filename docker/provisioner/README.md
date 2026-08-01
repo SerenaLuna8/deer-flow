@@ -6,13 +6,13 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ```
 ┌────────────┐  HTTP  ┌─────────────┐  K8s API  ┌──────────────┐
-│  Backend   │ ─────▸ │ Provisioner │ ────────▸ │  Host K8s    │
-│  (gateway/ │        │   :8002     │           │  API Server  │
-│ langgraph) │        └─────────────┘           └──────┬───────┘
+│   Worker   │ ─────▸ │ Provisioner │ ────────▸ │  Host K8s    │
+│            │        │   :8002     │           │  API Server  │
+│            │        └─────────────┘           └──────┬───────┘
 └────────────┘                                          │ creates
                                                         │
                           ┌─────────────┐         ┌────▼─────┐
-                          │   Backend   │ ──────▸ │  Sandbox │
+                          │   Worker    │ ──────▸ │  Sandbox │
                           │ (NodePort   │ or DNS  │  Pod(s)  │
                           │  /ClusterIP)│         └──────────┘
                           └─────────────┘
@@ -20,7 +20,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ### How It Works
 
-1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
+1. **Worker Request**: When the Worker needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
@@ -30,7 +30,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
 
-3. **Service Creation**: A Service is created to expose the Pod. By default this is a NodePort Service for Docker Compose compatibility. Set `SANDBOX_SERVICE_TYPE=ClusterIP` when the backend runs inside the Kubernetes cluster.
+3. **Service Creation**: A Service is created to expose the Pod. The secure application default is `ClusterIP`. Docker Compose explicitly sets `SANDBOX_SERVICE_TYPE=NodePort` because its backend runs outside the Kubernetes cluster.
 
 4. **Access URL**: In NodePort mode, the provisioner returns `http://{NODE_HOST}:{NodePort}`. In ClusterIP mode, it returns a Kubernetes service DNS URL like `http://sandbox-{sandbox_id}-svc.{namespace}.svc.cluster.local:8080`.
 
@@ -59,6 +59,11 @@ Host machine with a running Kubernetes cluster (Docker Desktop K8s, OrbStack, mi
 3. Check "Enable Kubernetes"
 
 ## API Endpoints
+
+`GET /health` is public for service health checks. Every `/api/*` endpoint
+requires an `X-API-Key` header matching `PROVISIONER_API_KEY`. Authentication
+is fail-closed: if `PROVISIONER_API_KEY` is empty or unset, all control API
+requests return `401`.
 
 ### `GET /health`
 Health check endpoint.
@@ -151,7 +156,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
-| `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
+| `PROVISIONER_API_KEY` | empty (control API disabled) | Shared service key required by every `/api/*` request. Configure the same value as `sandbox.provisioner_api_key` in `config.yaml` |
+| `SANDBOX_SERVICE_TYPE` | `ClusterIP` | Service type for sandbox access. Docker Compose explicitly selects `NodePort`; keep `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
@@ -238,32 +244,41 @@ curl http://localhost:8002/health
 
 # Create a sandbox (via provisioner container for internal DNS)
 docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"sandbox_id":"test-001","thread_id":"thread-001","user_id":"user-001"}'
 
 # Check sandbox status
-docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
+docker exec deer-flow-provisioner curl \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes/test-001
 
 # List all sandboxes
-docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes
+docker exec deer-flow-provisioner curl \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes
 
 # Verify Pod and Service in K8s
 kubectl get pod,svc -n deer-flow -l sandbox-id=test-001
 
 # Delete sandbox
-docker exec deer-flow-provisioner curl -X DELETE http://localhost:8002/api/sandboxes/test-001
+docker exec deer-flow-provisioner curl -X DELETE \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes/test-001
 ```
 
-### Verify from Backend Containers
+### Verify from the Worker Container
 
-Once a sandbox is created, the backend containers (gateway, langgraph) can access it:
+Once a sandbox is created, the Worker can access it:
 
 ```bash
 # Get sandbox URL from provisioner
-SANDBOX_URL=$(docker exec deer-flow-provisioner curl -s http://localhost:8002/api/sandboxes/test-001 | jq -r .sandbox_url)
+SANDBOX_URL=$(docker exec deer-flow-provisioner curl -s \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes/test-001 | jq -r .sandbox_url)
 
-# Test from gateway container
-docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
+# Test from Worker container
+docker exec deer-flow-worker curl -s $SANDBOX_URL/v1/sandbox
 ```
 
 ## Troubleshooting

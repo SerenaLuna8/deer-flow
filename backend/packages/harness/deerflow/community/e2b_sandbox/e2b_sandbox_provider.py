@@ -18,7 +18,7 @@ Configuration is read from :class:`SandboxConfig` (which has
           container_path: /home/user/skills
           read_only: true
       environment:                     # forwarded as e2b ``envs`` on create
-        OPENAI_API_KEY: $OPENAI_API_KEY
+        WORKLOAD_PROFILE: batch
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -1010,11 +1011,11 @@ class E2BSandboxProvider(SandboxProvider):
         local provider. The e2b VM has no shared host filesystem, so we
         explicitly pull artifacts back at release time.
 
-        We only mirror files whose host-side counterpart is missing or has a
-        different size — this gives an effective per-file dedup with a single
-        round-trip per release for unchanged trees, and avoids re-downloading
-        large generated files (e.g. PDFs, datasets) on every tool turn that
-        triggers a release.
+        We mirror files whose host-side counterpart is missing or whose size
+        or remote modification time changed. This catches same-size rewrites
+        while avoiding downloads for unchanged entries. It is intentionally
+        still a legacy host-tree sync; project-private output projection and
+        a sandbox-scoped sync manifest remain separate Worker-authority work.
 
         Failures are logged at WARNING level but never raised: artifact
         download is non-critical for sandbox lifecycle, and we already log
@@ -1034,9 +1035,8 @@ class E2BSandboxProvider(SandboxProvider):
         host_targets: dict[str, Path] = {sub: thread_root / sub for sub in self._SYNC_BACK_SUBDIRS}
 
         # Build a single shell command that lists all files in the sync dirs
-        # with size + path, NUL-separated for safe parsing of weird filenames.
-        # find -printf '%s\t%p\0' keeps us to one round-trip regardless of
-        # how many subdirs we mirror.
+        # with size, modification time, and path. Modification time prevents
+        # a same-size rewrite from being mistaken for an unchanged artifact.
         #
         # We list using the *physical* /home/user paths (the bootstrap symlink
         # /mnt/user-data -> /home/user follows transparently), then translate
@@ -1045,7 +1045,7 @@ class E2BSandboxProvider(SandboxProvider):
         # that the path is under ``VIRTUAL_PATH_PREFIX`` (/mnt/user-data) and
         # internally re-resolves it to /home/user via ``_resolve_path``.
         find_targets = " ".join(shlex.quote(f"{home_dir}/{sub}") for sub in self._SYNC_BACK_SUBDIRS)
-        list_cmd = f'for d in {find_targets}; do   [ -d "$d" ] && find "$d" -type f -printf \'%s\\t%p\\0\' 2>/dev/null; done'
+        list_cmd = f'for d in {find_targets}; do   [ -d "$d" ] && find "$d" -type f -printf \'%s\\t%T@\\t%p\\0\' 2>/dev/null; done'
 
         try:
             result = client.commands.run(list_cmd)
@@ -1069,9 +1069,15 @@ class E2BSandboxProvider(SandboxProvider):
             if not entry:
                 continue
             try:
-                size_str, remote_path = entry.split("\t", 1)
+                parts = entry.split("\t", 2)
+                if len(parts) == 3:
+                    size_str, remote_mtime_str, remote_path = parts
+                    remote_mtime_ns = int(Decimal(remote_mtime_str) * 1_000_000_000)
+                else:
+                    size_str, remote_path = entry.split("\t", 1)
+                    remote_mtime_ns = None
                 remote_size = int(size_str)
-            except ValueError:
+            except (InvalidOperation, ValueError):
                 logger.debug("e2b sync: unparseable entry %r", entry)
                 continue
 
@@ -1103,7 +1109,10 @@ class E2BSandboxProvider(SandboxProvider):
             _sub, host_path, virtual_path = sub_match
 
             try:
-                if host_path.exists() and host_path.stat().st_size == remote_size:
+                host_stat = host_path.stat()
+                same_size = host_stat.st_size == remote_size
+                same_version = remote_mtime_ns is None or host_stat.st_mtime_ns == remote_mtime_ns
+                if same_size and same_version:
                     skipped += 1
                     continue
             except OSError:
@@ -1124,6 +1133,11 @@ class E2BSandboxProvider(SandboxProvider):
                 host_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = host_path.with_name(host_path.name + ".e2bsync.tmp")
                 tmp_path.write_bytes(data)
+                if remote_mtime_ns is not None:
+                    os.utime(
+                        tmp_path,
+                        ns=(remote_mtime_ns, remote_mtime_ns),
+                    )
                 tmp_path.replace(host_path)
                 synced += 1
             except OSError as e:

@@ -45,7 +45,7 @@ import {
   projectThreadDeleteLandingPath,
 } from "./project-thread-delete-dialog";
 import { ProjectThreadRenameDialog } from "./project-thread-rename-dialog";
-import { useMainProjectChat } from "./use-main-project-chat";
+import { useProjectNewChat } from "./use-project-new-chat";
 
 export function filterProjectConversationThreads(
   threads: AgentThread[],
@@ -255,7 +255,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
   const threadsQuery = useInfiniteThreads();
   const deleteThread = useDeleteThread(privateWork);
   const renameThread = useRenameThread(privateWork);
-  const mainChat = useMainProjectChat(project);
+  const newChat = useProjectNewChat(project);
   const [search, setSearch] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentThread | null>(null);
@@ -285,7 +285,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
 
   const openNewConversation = () => {
     setMobileOpen(false);
-    void mainChat.startMainChat();
+    void newChat.startNewChat();
   };
 
   const confirmDelete = async () => {
@@ -346,7 +346,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
       canDelete={canDelete}
       canRename={canRename}
       entryEnabled={entryEnabled}
-      isCreating={mainChat.isCreating || mainChat.isLoading}
+      isCreating={newChat.isCreating || newChat.isLoading}
       filteredThreads={filteredThreads}
       project={project}
       search={search}

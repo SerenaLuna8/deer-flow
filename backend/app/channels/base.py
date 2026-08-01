@@ -140,6 +140,7 @@ class Channel(ABC):
         *,
         msg_type: InboundMessageType = InboundMessageType.CHAT,
         thread_ts: str | None = None,
+        provider_delivery_id: str | None = None,
         files: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> InboundMessage:
@@ -151,6 +152,7 @@ class Channel(ABC):
             text=text,
             msg_type=msg_type,
             thread_ts=thread_ts,
+            provider_delivery_id=provider_delivery_id,
             files=files or [],
             metadata=metadata or {},
         )

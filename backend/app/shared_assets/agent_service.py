@@ -203,7 +203,7 @@ class AgentService:
         row = AgentVersionRow(
             agent_id=asset.id,
             version_number=1,
-            workflow_status=WorkflowStatus.PUBLISHED.value,
+            workflow_status=WorkflowStatus.DRAFT.value,
             description=payload.description,
             agents_instructions=payload.agents_instructions,
             soul=payload.soul,
@@ -227,6 +227,8 @@ class AgentService:
             payload.skill_version_ids,
             payload.mcp_version_ids,
         )
+        record.row.workflow_status = WorkflowStatus.PUBLISHED.value
+        await session.flush()
         asset.current_published_version_id = record.row.id
         asset.version += 1
         await session.flush()
@@ -613,6 +615,7 @@ class AgentService:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: AgentRepository) -> None:
+            await repository.ensure_not_current_project_default(actor, asset_id)
             asset = await repository.get_project_asset(
                 actor,
                 asset_id,
@@ -762,6 +765,7 @@ class AgentService:
         expected_asset_version: int,
     ) -> AgentAssetView:
         async def operation(repository: AgentRepository) -> AgentAssetView:
+            await repository.ensure_not_current_project_default(actor, asset_id)
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
             if asset.status != "active":

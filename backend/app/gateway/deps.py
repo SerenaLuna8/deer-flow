@@ -90,6 +90,50 @@ def get_config() -> AppConfig:
         raise HTTPException(status_code=503, detail="Configuration not available") from None
 
 
+async def get_current_agent_runtime_config(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> AppConfig:
+    """Overlay the current database-backed agent policy for a new request.
+
+    Gateway-only auxiliary calls (input polish and suggestions) are not Run
+    executions, so they intentionally use the latest committed policy instead
+    of a Run snapshot. Missing or invalid policy state fails closed; migrated
+    values must never fall back to process YAML.
+    """
+
+    from app.system_runtime_settings import (
+        AgentRuntimePolicyValue,
+        RuntimePolicySection,
+    )
+    from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
+
+    materializer = getattr(
+        request.app.state,
+        "system_runtime_policy_materializer",
+        None,
+    )
+    try:
+        if materializer is None:
+            raise SystemRuntimePolicyUnavailable
+        policy = await materializer.materialize_current(
+            RuntimePolicySection.AGENT_RUNTIME,
+        )
+        if not isinstance(policy, AgentRuntimePolicyValue):
+            raise SystemRuntimePolicyUnavailable
+        return config.with_runtime_policy(policy)
+    except SystemRuntimePolicyUnavailable:
+        request_id = get_current_trace_id() or generate_trace_id()
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "RUNTIME_POLICY_UNAVAILABLE",
+                "message": "Runtime policy unavailable",
+                "request_id": request_id,
+            },
+        ) from None
+
+
 async def project_session() -> AsyncIterator[AsyncSession]:
     """Yield the request-scoped project session or fail closed before routing."""
     from deerflow.persistence.engine import get_session_factory
@@ -152,6 +196,7 @@ async def gateway_platform_runtime(
         sf = get_session_factory()
         from app.quotas.integration import ProjectQuotaEnforcer
         from app.quotas.service import QuotaService
+        from app.quotas.system_policy import SystemQuotaPolicyReader
         from app.reliability.owner_refs import AuditHmacKeyring
         from deerflow.config.quota_config import QuotaConfig
 
@@ -176,6 +221,7 @@ async def gateway_platform_runtime(
             sf,
             quota_config,
             source_ref_hasher=audit_keyring,
+            current_policy_reader=SystemQuotaPolicyReader(),
         )
         project_quota_enforcer = ProjectQuotaEnforcer(quota_service)
         app.state.project_quota_service = quota_service
@@ -194,12 +240,52 @@ async def gateway_platform_runtime(
         from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
         from app.private_work.thread_service import PrivateThreadService
-        from app.shared_assets.model_refs import ConfiguredModelRefResolver
+        from app.system_runtime_settings import (
+            SystemRuntimePolicyMaterializer,
+            SystemRuntimePolicyService,
+        )
+        from app.system_settings import (
+            SystemModelCatalogService,
+            SystemModelMaterializer,
+        )
         from deerflow.config.mcp_security_config import McpSecurityConfig
         from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
 
-        model_ref_resolver = ConfiguredModelRefResolver(config)
+        model_catalog = SystemModelCatalogService(sf)
+        model_materializer = SystemModelMaterializer(sf)
+        app.state.system_model_catalog = model_catalog
+        app.state.system_model_materializer = model_materializer
+        runtime_policy_service = SystemRuntimePolicyService(
+            sf,
+            audit_service,
+        )
+        app.state.system_runtime_policy_service = runtime_policy_service
+        app.state.system_runtime_policy_materializer = SystemRuntimePolicyMaterializer(sf)
+        from app.gateway.system_model_callers import (
+            DatabaseOneshotModelCaller,
+        )
+        from app.shared_assets.agent_design_generation import (
+            AgentDesignGenerationService,
+        )
+        from app.shared_assets.skill_design_generation import (
+            SkillDesignGenerationService,
+        )
+
+        app.state.agent_design_generation_service = AgentDesignGenerationService(
+            model_caller=DatabaseOneshotModelCaller(
+                app_config=config,
+                materializer=model_materializer,
+                run_name="agent_design_generation",
+            ),
+        )
+        app.state.skill_design_generation_service = SkillDesignGenerationService(
+            model_caller=DatabaseOneshotModelCaller(
+                app_config=config,
+                materializer=model_materializer,
+                run_name="skill_design_generation",
+            ),
+        )
         raw_mcp_security = getattr(config, "mcp_security", None)
         if isinstance(raw_mcp_security, McpSecurityConfig):
             mcp_security = raw_mcp_security
@@ -214,6 +300,7 @@ async def gateway_platform_runtime(
             sf,
             quota=project_quota_enforcer,
             quota_config=quota_config,
+            quota_policy=quota_service,
         )
         app.state.private_thread_service = PrivateThreadService(
             sf,
@@ -222,7 +309,8 @@ async def gateway_platform_runtime(
         )
         app.state.private_run_admission_service = PrivateRunAdmissionService(
             sf,
-            model_ref_resolver=model_ref_resolver,
+            model_catalog=model_catalog,
+            runtime_policy=runtime_policy_service,
             endpoint_policy=mcp_endpoint_policy,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
@@ -269,7 +357,8 @@ async def gateway_platform_runtime(
         app.state.automation_dispatcher = AutomationDispatcher(
             sf,
             max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
-            model_ref_resolver=model_ref_resolver,
+            model_catalog=model_catalog,
+            runtime_policy=runtime_policy_service,
             endpoint_policy=mcp_endpoint_policy,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
@@ -287,6 +376,7 @@ async def gateway_platform_runtime(
             app.state.private_thread_service,
             app.state.private_run_event_store,
             endpoint_policy=mcp_endpoint_policy,
+            model_materializer=model_materializer,
         )
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
@@ -317,6 +407,23 @@ get_private_run_event_store: Callable[[Request], RunEventStore] = _require(
     "Private run event store",
 )
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
+get_system_model_catalog = _require(
+    "system_model_catalog",
+    "System model catalog",
+)
+get_system_runtime_policy_service = _require(
+    "system_runtime_policy_service",
+    "System runtime policy service",
+)
+
+get_system_runtime_policy_materializer = _require(
+    "system_runtime_policy_materializer",
+    "System runtime policy materializer",
+)
+get_system_model_materializer = _require(
+    "system_model_materializer",
+    "System model materializer",
+)
 
 
 def _automation_state_dependency(

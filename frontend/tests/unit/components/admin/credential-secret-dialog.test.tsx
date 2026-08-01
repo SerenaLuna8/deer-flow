@@ -45,6 +45,7 @@ import {
   submitCredentialSecretForm,
   type CredentialSecretFieldRow,
 } from "@/components/admin/assets/admin-asset-dialogs";
+import { I18nProvider } from "@/core/i18n/context";
 
 const SECRET_SENTINEL = "credential-secret-sentinel-7f4a";
 
@@ -160,20 +161,22 @@ describe("CredentialSecretDialog multi-field writes", () => {
 
   test("prefills replacement field names only and never renders secret values", () => {
     const html = renderToStaticMarkup(
-      <CredentialSecretDialog
-        mode="replace"
-        open
-        expectedVersion={3}
-        pending={false}
-        errorMessage={null}
-        initialFields={[
-          { group: "env", field: "GITHUB_TOKEN" },
-          { group: "headers", field: "Authorization" },
-          { group: "oauth", field: "refresh_token" },
-        ]}
-        onOpenChange={rs.fn()}
-        onReplace={rs.fn()}
-      />,
+      <I18nProvider initialLocale="zh-CN">
+        <CredentialSecretDialog
+          mode="replace"
+          open
+          expectedVersion={3}
+          pending={false}
+          errorMessage={null}
+          initialFields={[
+            { group: "env", field: "GITHUB_TOKEN" },
+            { group: "headers", field: "Authorization" },
+            { group: "oauth", field: "refresh_token" },
+          ]}
+          onOpenChange={rs.fn()}
+          onReplace={rs.fn()}
+        />
+      </I18nProvider>,
     );
 
     expect(html).toContain('value="GITHUB_TOKEN"');
@@ -185,17 +188,19 @@ describe("CredentialSecretDialog multi-field writes", () => {
 
   test("keeps history unavailability separate from write progress", () => {
     const html = renderToStaticMarkup(
-      <CredentialSecretDialog
-        mode="replace"
-        open
-        expectedVersion={3}
-        pending={false}
-        disabled
-        errorMessage="版本结构暂时无法加载。"
-        onRetry={rs.fn()}
-        onOpenChange={rs.fn()}
-        onReplace={rs.fn()}
-      />,
+      <I18nProvider initialLocale="zh-CN">
+        <CredentialSecretDialog
+          mode="replace"
+          open
+          expectedVersion={3}
+          pending={false}
+          disabled
+          errorMessage="版本结构暂时无法加载。"
+          onRetry={rs.fn()}
+          onOpenChange={rs.fn()}
+          onReplace={rs.fn()}
+        />
+      </I18nProvider>,
     );
 
     expect(html).toContain("版本结构暂时无法加载。");

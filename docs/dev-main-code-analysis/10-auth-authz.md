@@ -23,10 +23,13 @@
 2. `main` 的通用 `AuthorizationProvider`/RBAC 可以作为“项目 capability 未表达的策略维度”
    参考，例如全局 route、tool/model 可见性或外部策略属性；它不能替代 ProjectContext，
    也不能让客户端 runtime context 成为项目权限来源。
-3. `main` 的大小写不敏感邮箱修复是 `dev` 的确认风险：当前查询和唯一索引均大小写敏感。
-4. `main` 的关闭本地自助注册开关值得移植；当前 `dev` `/register` 始终开放。
-5. “保持登录”是产品能力，不是安全缺陷。若移植，只复用 cookie policy，不得退回
-   `main` 的纯 token-version、SQLite 会话模型；`dev` 的 durable `sid` session 必须保留。
+3. `main` 的大小写不敏感邮箱修复是移植前 `dev` 的确认风险；当前工作树已经在 PostgreSQL
+   repository、ORM 和 `full_schema.sql` 落地 canonical email，详见第 16 节。
+4. 当前工作树已经移植可关闭的本地自助注册开关，并让 setup-status 与前端 fail closed；
+   first-admin 初始化保持独立。
+5. “保持登录”是产品能力，不是认证 authority。当前工作树只复用 cookie policy，
+   没有退回 `main` 的纯 token-version、SQLite 会话模型，`dev` 的 durable `sid` session
+   完整保留。
 6. 任何邮箱唯一性 schema 变化必须写入唯一 `full_schema.sql` 并按“新空库重建”生命周期处理，
    不能新增增量 migration 或在运行时修表。
 
@@ -35,6 +38,10 @@
 - 共同祖先：`3be3969f8fc3f2d2b6d36ef5c26fa5593d916f2a`
 - `main`：`e317f7b8d9b2afb4c3925812d4774da602c9f8f3`
 - `dev`：`8a91e95799c9b345d9540c7e201b33c603e7870c`
+
+> **阅读口径**：第 2–15 节记录上述提交上的移植前源码分析，不代表当前工作树仍然缺少
+> 对应能力。当前工作树已经按可移植落点完成的内容、明确未移植的内容、自动化验证和真实
+> 浏览器证据统一记录在第 16 节。
 
 ## 2. 源码地图
 
@@ -152,7 +159,7 @@ access_token cookie
 
 因此旧设备的 token 即使还在有效期内，也会同时被 token version 和 session row 拒绝。
 
-### 3.4 Cookie 和 CSRF
+### 3.4 移植前 Cookie 和 CSRF
 
 当前 `dev` `_set_session_cookie()`：
 
@@ -353,7 +360,7 @@ client `metadata/config/context` 中同名字段必须继续被剥离。
 - update/OIDC provisioning 也走同一规则；
 - 对历史可能重复记录使用确定性 order/limit，避免 `scalar_one` 崩溃。
 
-### 7.2 当前 `dev`
+### 7.2 移植前 `dev`
 
 当前代码：
 
@@ -382,7 +389,7 @@ PostgreSQL 默认比较下，`User@Example.com` 和 `user@example.com` 可以是
 当前项目不支持旧数据库增量升级。不能增加 migration 或运行时修复；已有业务库需要按项目
 既定流程迁到新空库，而不是在线改 index。
 
-## 8. 本地自助注册开关：确认缺失
+## 8. 本地自助注册开关：移植前确认缺失
 
 `main@09e25b8a` 增加：
 
@@ -411,7 +418,7 @@ auth.local.allow_registration: bool = true
 
 默认值是否保持 `true` 是兼容性决策；关闭时 initialize/管理员显式建号路径不能一起被关掉。
 
-## 9. Keep me signed in：产品能力
+## 9. Keep me signed in：移植前产品能力
 
 `main@a028dfd5` 的 `resolve_session_cookie_policy()` 按用户意图和部署环境决定：
 
@@ -477,15 +484,15 @@ auth.local.allow_registration: bool = true
 
 ## 12. 确认缺失、风险与已替代
 
-### 12.1 已确认
+### 12.1 移植前已确认
 
 - `dev` 邮箱查询/唯一索引大小写敏感；
 - `dev` 没有关闭 local registration 的部署开关；
 - `dev` 没有 remember-me 用户选择；
 - `dev` 没有通用 AuthorizationProvider。
 
-其中前两项是值得处理的安全/部署能力；remember-me 是产品项；通用 provider 是否需要取决于
-是否存在 Project capability 之外的真实策略需求。
+其中前三项已经在当前工作树按第 16 节的边界实现；通用 provider 仍取决于是否存在
+Project capability 之外的真实策略需求，因此没有为了“看起来完整”而移植。
 
 ### 12.2 已替代或更强
 
@@ -495,13 +502,17 @@ auth.local.allow_registration: bool = true
 - `dev` PostgreSQL rate-limit 可跨进程/Pod；
 - `dev` strict error mapping 避免项目私有资源枚举。
 
-### 12.3 待产品/架构决定
+### 12.3 移植前待产品/架构决定
 
 - generic Authz provider 要保护哪些非项目或额外资源；
 - RBAC 与 Project capability 的优先关系；建议任何 deny 都能收紧，不能扩大；
 - remember-me 默认值；
 - registration gate 默认 true 还是 false；
 - 邮箱规范是 lowercase functional index 还是 `citext`。
+
+当前工作树已经选择 remember-me 默认 `true`、registration gate 默认 `true` 和
+lowercase functional index；generic provider 的真实资源与 deny 合并规则仍未定义，因此明确
+不移植。
 
 ## 13. 禁止直接合并
 
@@ -569,3 +580,168 @@ auth.local.allow_registration: bool = true
 
 通过这组矩阵后，才能认为 Auth、Project Authz 和可选通用策略三层没有被混成一个可伪造的
 `role` 字段。
+
+## 16. 当前工作树移植执行记录
+
+### 16.1 实际可移植落点
+
+本轮不是把 `main` 的认证目录整体复制到 `dev`，而是把四组可独立验证的行为落到
+`dev` 现有 PostgreSQL session、ProjectContext 和前端 account/project cache 边界中：
+
+1. **大小写不敏感的唯一邮箱身份**
+   - 新增 `app.gateway.auth.email.normalize_email()`，统一执行 `strip + lowercase`；
+   - `SQLUserRepository` 在 create、lookup、update 前规范化邮箱，lookup 使用
+     `lower(users.email)`，并对可能存在的旧重复数据保持确定性顺序；
+   - register、local login、change-password/change-email 和 OIDC provisioning 最终都经过
+     同一 PostgreSQL repository；OIDC identity/admin 邮箱复用 canonical helper，allowed
+     domain 也执行对应的 `strip + lowercase` 规范；项目邀请域原有的同语义比较继续保留；
+   - ORM 与唯一 `full_schema.sql` 同步使用唯一 functional index
+     `ix_users_email ON users (lower(email))`；
+   - 并发 create/update 的数据库唯一冲突映射回稳定的重复邮箱错误，不向客户端暴露 SQL；
+   - schema catalog signature 与 canonical digest 随完整 schema 更新。
+
+2. **可关闭的本地自助注册**
+   - `auth.local.allow_registration` 默认 `true`；
+   - 关闭后 `POST /api/v1/auth/register` 在 rate-limit 和账号创建之前返回结构化
+     `403 registration_disabled`；
+   - `GET /api/v1/auth/setup-status` 的公开严格契约为
+     `{needs_setup: boolean, registration_enabled: boolean}`；
+   - setup-status 只缓存较稳定的 `needs_setup` 数据库结果，每次响应重新读取
+     `registration_enabled`，配置从允许切为关闭时不会被旧 cache 隐藏；
+   - Auth、Local、OIDC 和每个 OIDC provider 的 Pydantic 配置均
+     `extra="forbid"`；安全字段拼错会在配置加载时失败，而不是退回默认允许；
+   - first-admin `/initialize` 不受自助注册开关影响；OIDC 的受控 provisioning 也没有被错误地
+     绑定到这个 local register gate；
+   - 前端在 setup-status 检查中、不可用、响应畸形或明确关闭时一律不开放普通注册，并提供
+     不把失败伪装成“可注册”的不可用/重试状态。
+
+3. **保持登录的 cookie policy**
+   - local login 表单发送 `remember_me`；register、initialize 发送同名 JSON boolean；
+     change-password 可显式发送，省略时沿用当前 preference cookie；
+   - OIDC login query 把选择写入签名 state，callback 使用已校验的 state 恢复 cookie policy；
+   - `remember_me=false` 时 access、CSRF 和 preference cookie 都是 browser-session cookie；
+   - `remember_me=true` 时，HTTPS 与 localhost HTTP 的 `Max-Age` 等于配置的 token lifetime；
+     普通公网 HTTP 默认仍是 session cookie；
+   - 只有 operator 显式设置
+     `auth.local.allow_insecure_persistent_cookie=true`，公网明文 HTTP 才允许持久 cookie；
+   - access cookie 仍为 `HttpOnly + SameSite=Lax`，CSRF 仍为 double-submit；middleware
+     根据“本次响应是否实际签发 session cookie”统一重发 CSRF，因此 login、register、
+     initialize、change-password 与 OIDC callback 的 secure/lifetime 都和 access policy 对齐；
+   - logout 先撤销当前 PostgreSQL durable `sid`，并删除 access、CSRF、preference 三个
+     cookie；即使 durable revoke 暂时失败并返回 503，也仍删除本浏览器 cookie；
+   - remember-me 只决定浏览器是否持久保存 cookie，不替换 JWT 中的 `sid`、PostgreSQL
+     session row、token-version 或密码变更后的 revoke-all。
+
+4. **前端身份与项目授权回归边界**
+   - User、setup-status 与 OIDC provider response 使用 strict Zod contract；
+   - client 与 SSR `/auth/me` 都只有明确 401 才判定未认证并清除身份/account cache；
+     网络错误、5xx、403 或畸形 200 被视为 availability failure；
+   - `refreshUser()` 返回 `authenticated | unauthenticated | unavailable` 判别联合。OIDC
+     callback 对 unavailable 显示可重试状态而不是伪报 SSO 失败；forced setup 也不会把瞬时
+     refresh 故障误判为 authoritative logout；
+   - `/workspace`、`/projects/*`、`/admin/*` 的未认证跳转统一保留经过校验的 pathname/query；
+     client-side 跳转还保留不会发送到 server 的 fragment；auth probe/submit 有超时并在
+     supersession/unmount 时 abort；
+   - 浏览器 storage 只保存 remember preference 和可选邮箱，不保存密码、JWT、CSRF 或
+     durable session 标识；
+   - 项目私有授权继续完全由 server-issued ProjectContext、capability、owner scope 与
+     side-effect revalidation 决定。outsider 404、当前成员缺 capability 403、客户端伪造
+     role/project/capability 无效的语义没有被 generic role 替换。
+
+### 16.2 明确未移植
+
+以下 `main` 实现没有进入当前工作树：
+
+- SQLite user repository 或 memory/sqlite persistence；
+- 没有 durable `sid` 的 stateless JWT session；
+- legacy `owner_check` 和全局 role 代替 Project membership；
+- system-admin 自动绕过 Project membership；
+- generic `AuthorizationProvider`、旧 Gateway route permission 或 tool RBAC。
+
+最后一项当前没有一个 Project capability 之外的具体、可验证 policy 目标。为避免配置被
+Pydantic 接受后实际忽略形成 fail-open 假象，配置 schema version 32 把旧顶层
+`authorization:` 设为 tombstone：直接加载时失败，`make config-upgrade` 会删除该已不支持字段。
+将来只有在先定义真实受保护资源、deny 合并规则、Worker 重校验和端到端测试后，才能单独引入
+通用 provider；它只能收紧现有项目授权，不能扩大权限。
+
+### 16.3 schema 和部署契约
+
+- `config.example.yaml` 当前 `config_version` 为 32，并记录
+  `auth.local.allow_registration` 与
+  `auth.local.allow_insecure_persistent_cookie`；
+- `lower(email)` 唯一索引属于完整 schema 变化。项目没有增量 migration，也不能在运行时
+  `ALTER` 旧业务库；
+- 已存在的本地或部署数据库必须换成新空目标后运行唯一入口 `make setup-db`。在完成空库重建前，
+  旧数据库上的 Gateway schema readiness 失败是预期的 fail-closed 行为，不是可绕过警告。
+
+### 16.4 当前自动化验证
+
+当前工作树已经完成以下自动化验证：
+
+- 修复后的完整后端：`7400 passed, 1012 skipped`；
+- 固定 20 文件 M1–M7 真实 PostgreSQL gate：
+  `270 passed, 0 failed, 0 skipped`；
+- 新增模块 10 真实 PostgreSQL 聚焦测试：`7 passed, 152 deselected`；
+- Auth 独立复审集合：`220 passed`；核心组合 `194 passed`；非 PostgreSQL 集合
+  `94 passed`；
+- 修复后的完整前端：`188 files, 1344 passed`；
+- `pnpm check` 通过；
+- `pnpm build` 通过，静态页面 `78/78`；
+- `make check-db` 通过，schema marker 为 `full_schema_v1`；
+- mixed-case register/login/duplicate、registration gate/setup-status、initialize
+  独立性、remember cookie 三种 transport policy、logout 全 cookie 删除、OIDC state、
+  ProjectContext、PrivateWorkContext 与 private Run authorization 均包含在上述门禁中；
+- 真实 PostgreSQL baseline 用并发大小写变体 insert 验证 functional unique index 只准入一行；
+- 相关后端文件 Ruff format/check 通过。
+
+独立审查发现的 Auth config typo fail-open、change-password CSRF lifetime、setup-status
+registration cache、OIDC canonicalization、SSR 403、`refreshUser` 状态混淆、前端错误码和
+strict E2E mock 均已修复并补测试。前端结构化错误码现在包含 `registration_disabled` 与
+`rate_limited`；E2E user/setup-status mock 也满足 strict public schema；审查指出的 5 个
+`prefer-optional-chain` lint 错误已经清理。
+
+独立后端和前端复核均未发现剩余 P0/P1/P2 阻塞项。
+
+审查另记录一个既存初始化恢复风险：system-admin row 与 default project 不在同一事务；后者失败
+会留下“已有 admin、无默认项目”的部分状态。它不是本轮从 `main` 移植的 session/Authz
+回归，但仍应在后续初始化生命周期工作中定义正式恢复契约，不能把重复 `/initialize`
+（该入口会因已有 admin 拒绝）当成恢复路径。该项被明确接受为当前模块的**非阻塞既存风险**：
+本轮没有改写初始化事务边界，空库真实 setup 和浏览器 initialize 已成功，模块 10 的
+canonical email、registration、session 与 Project Authz 验收不依赖失败恢复路径。后续若改动
+初始化生命周期，必须先为这一场景定义可重复、可审计的恢复契约。
+
+### 16.5 真实浏览器与权限边界验收
+
+数据库已按 full-schema 生命周期删除并重建，随后启动完整 Gateway、Worker、Scheduler、
+Frontend 与 Nginx 服务。真实浏览器和 HTTP/数据库交叉验收按顺序完成：
+
+- `[x]` 浏览器创建首个管理员和默认项目；
+- `[x]` 使用全大写邮箱登录成功，工作空间显示同一规范化小写账号；
+- `[x]` 大小写变体重复注册显示稳定的重复邮箱错误；
+- `[x]` 真实 login/initialize 页面显示并提交 remember 开关；
+- `[x]` 临时关闭 registration 后，UI 不显示普通注册入口，direct API 返回结构化
+  `403 registration_disabled`；恢复配置并重启后注册入口恢复；
+- `[x]` 带 query 的私有工作空间在明确 401 后跳回登录并保留安全返回路径；
+- `[x]` outsider 请求已存在项目返回 `404 PROJECT_NOT_FOUND`；
+- `[x]` 通过邀请加入的 Viewer 不显示管理入口，修改项目返回
+  `403 PROJECT_FORBIDDEN`；
+- `[x]` 同一请求伪造 project role、capability 和 system role 请求头后仍返回
+  `403 PROJECT_FORBIDDEN`；
+- `[x]` 精确撤销测试账号 durable session 后，已有浏览器访问私有项目被送回登录页；
+- `[x]` 同一会话完成四轮真实 DeepSeek V4 Pro 调用：第三轮正确读取前两轮结果；
+  完整服务重启后第四轮仍返回
+  `RESTART-CONTEXT-PASS | prior=CONTEXT-CHAIN-PASS`；
+- `[x]` PostgreSQL 交叉检查四个 Run 均为 `success`，finalization 均为 `complete`，
+  job 均为 `succeeded`，每轮 `llm_call_count=1`、`stream.end=1`。
+
+实际证据保存在
+[`evidence/10-auth-authz/`](evidence/10-auth-authz/README.md)：
+
+- [`01-uppercase-login-workspace-redacted.jpg`](evidence/10-auth-authz/01-uppercase-login-workspace-redacted.jpg)；
+- [`02-real-model-context-after-restart-redacted.jpg`](evidence/10-auth-authz/02-real-model-context-after-restart-redacted.jpg)；
+- [`03-login-remember-ui.jpg`](evidence/10-auth-authz/03-login-remember-ui.jpg)。
+
+access、CSRF、preference Cookie 的 session/Max-Age、change-password 切换和 logout
+删除属于自动化 HTTP `Set-Cookie` 契约验证，未把浏览器内部 Cookie 存储读取伪装成截图证据。
+
+模块 10 范围内的完整门禁、独立代码审查和真实浏览器验收均无阻塞，状态为**已完成**。

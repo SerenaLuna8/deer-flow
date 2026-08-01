@@ -13,6 +13,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import { CREDENTIAL_PAYLOAD_GROUPS } from "@/core/shared-assets";
 import type {
   AssetListKind,
@@ -49,6 +51,9 @@ type CredentialFieldInputErrorCode =
 
 type CredentialFieldInputTarget = "form" | "group" | "field" | "value";
 
+type CredentialValidationCopy =
+  Translations["adminAssets"]["dialogs"]["validation"];
+
 const CREDENTIAL_FIELD_ERROR_MESSAGES: Record<
   CredentialFieldInputErrorCode,
   string
@@ -61,13 +66,29 @@ const CREDENTIAL_FIELD_ERROR_MESSAGES: Record<
   empty_value: "请输入凭据值。",
 };
 
+function credentialFieldErrorMessage(
+  code: CredentialFieldInputErrorCode,
+  copy?: CredentialValidationCopy,
+): string {
+  if (!copy) return CREDENTIAL_FIELD_ERROR_MESSAGES[code];
+  return {
+    empty_fields: copy.emptyFields,
+    unsupported_group: copy.unsupportedGroup,
+    empty_field: copy.emptyField,
+    field_too_long: copy.fieldTooLong,
+    duplicate_field: copy.duplicateField,
+    empty_value: copy.emptyValue,
+  }[code];
+}
+
 export class CredentialFieldInputError extends Error {
   constructor(
     readonly code: CredentialFieldInputErrorCode,
     readonly rowId: string | null,
     readonly target: CredentialFieldInputTarget,
+    copy?: CredentialValidationCopy,
   ) {
-    super(CREDENTIAL_FIELD_ERROR_MESSAGES[code]);
+    super(credentialFieldErrorMessage(code, copy));
     this.name = "CredentialFieldInputError";
   }
 }
@@ -93,9 +114,15 @@ function isCredentialPayloadGroup(
 export function buildCredentialPayload(
   rows: readonly CredentialSecretFieldRow[],
   form: FormData,
+  validationCopy?: CredentialValidationCopy,
 ): CredentialPayload {
   if (rows.length === 0) {
-    throw new CredentialFieldInputError("empty_fields", null, "form");
+    throw new CredentialFieldInputError(
+      "empty_fields",
+      null,
+      "form",
+      validationCopy,
+    );
   }
 
   const payload: Partial<
@@ -105,24 +132,49 @@ export function buildCredentialPayload(
 
   for (const row of rows) {
     if (!isCredentialPayloadGroup(row.group)) {
-      throw new CredentialFieldInputError("unsupported_group", row.id, "group");
+      throw new CredentialFieldInputError(
+        "unsupported_group",
+        row.id,
+        "group",
+        validationCopy,
+      );
     }
     const payloadField = row.field.trim();
     if (!payloadField) {
-      throw new CredentialFieldInputError("empty_field", row.id, "field");
+      throw new CredentialFieldInputError(
+        "empty_field",
+        row.id,
+        "field",
+        validationCopy,
+      );
     }
     if (payloadField.length > 255) {
-      throw new CredentialFieldInputError("field_too_long", row.id, "field");
+      throw new CredentialFieldInputError(
+        "field_too_long",
+        row.id,
+        "field",
+        validationCopy,
+      );
     }
     const duplicateKey = `${row.group}\u0000${payloadField}`;
     if (seen.has(duplicateKey)) {
-      throw new CredentialFieldInputError("duplicate_field", row.id, "field");
+      throw new CredentialFieldInputError(
+        "duplicate_field",
+        row.id,
+        "field",
+        validationCopy,
+      );
     }
     seen.add(duplicateKey);
 
     const secretValue = entry(form.get(credentialValueInputName(row.id)));
     if (!secretValue) {
-      throw new CredentialFieldInputError("empty_value", row.id, "value");
+      throw new CredentialFieldInputError(
+        "empty_value",
+        row.id,
+        "value",
+        validationCopy,
+      );
     }
     const section = (payload[row.group] ??= {});
     Object.defineProperty(section, payloadField, {
@@ -141,6 +193,7 @@ export function submitCredentialSecretForm({
   rows,
   form,
   expectedVersion,
+  validationCopy,
   clear,
   onCreate,
   onReplace,
@@ -149,11 +202,12 @@ export function submitCredentialSecretForm({
   rows: readonly CredentialSecretFieldRow[];
   form: FormData;
   expectedVersion: number | undefined;
+  validationCopy?: CredentialValidationCopy;
   clear: () => void;
   onCreate?: (input: CreateCredentialInput) => void;
   onReplace?: (input: ReplaceCredentialInput) => void;
 }) {
-  const payload = buildCredentialPayload(rows, form);
+  const payload = buildCredentialPayload(rows, form, validationCopy);
   if (mode === "create") {
     const input: CreateCredentialInput = {
       name: field(form, "name").trim(),
@@ -253,15 +307,24 @@ function encodeBase64(value: string): string {
   return window.btoa(binary);
 }
 
-export function skillMarkdownTemplate(assetSlug: string): string {
+export function skillMarkdownTemplate(
+  assetSlug: string,
+  copy: {
+    description: string;
+    instructions: string;
+  } = {
+    description: "Describe when and how to use this skill.",
+    instructions: "Add instructions for this skill here.",
+  },
+): string {
   return `---
 name: ${assetSlug}
-description: Describe when and how to use this skill.
+description: ${copy.description}
 ---
 
 # ${assetSlug}
 
-Add instructions for this skill here.
+${copy.instructions}
 `;
 }
 
@@ -282,16 +345,19 @@ export function CreateAssetDialog({
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: { slug: string; display_name: string }) => void;
 }) {
+  const { t } = useI18n();
   const label = KIND_LABEL[kind];
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent closeLabel={t.adminOperations.ui.close}>
         <DialogHeader>
-          <DialogTitle>创建 {label}</DialogTitle>
+          <DialogTitle>
+            {t.adminAssets.dialogs.createAssetTitle(label)}
+          </DialogTitle>
           <DialogDescription>
             {scope === "project" && kind === "skills"
-              ? "创建后会自动生成 SKILL.md 草稿版本（已填入基础模板），Skill 默认停用。"
-              : `先创建${scope === "system" ? "系统级" : "项目级"}资产，再在资产中创建并发布版本。`}
+              ? t.adminAssets.dialogs.skillCreationDescription
+              : t.adminAssets.dialogs.assetCreationDescription(scope)}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -306,11 +372,11 @@ export function CreateAssetDialog({
           }}
         >
           <label className="grid gap-2 text-sm">
-            名称
+            {t.adminAssets.dialogs.name}
             <Input name="display_name" required maxLength={120} />
           </label>
           <label className="grid gap-2 text-sm">
-            资产标识
+            {t.adminAssets.dialogs.assetSlug}
             <Input
               name="slug"
               required
@@ -318,10 +384,10 @@ export function CreateAssetDialog({
               maxLength={63}
               pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
               placeholder="lowercase-slug"
-              title="使用 3–63 位小写字母、数字和单个连字符"
+              title={t.adminAssets.dialogs.slugTitle}
             />
             <span className="text-muted-foreground text-xs">
-              3–63 位小写字母、数字或连字符；创建后作为稳定标识使用。
+              {t.adminAssets.dialogs.slugHelp}
             </span>
           </label>
           {errorMessage && (
@@ -331,7 +397,9 @@ export function CreateAssetDialog({
           )}
           <DialogFooter>
             <Button type="submit" disabled={pending}>
-              {pending ? "创建中…" : "创建"}
+              {pending
+                ? t.adminAssets.common.creating
+                : t.adminAssets.common.create}
             </Button>
           </DialogFooter>
         </form>
@@ -341,25 +409,33 @@ export function CreateAssetDialog({
 }
 
 export function SkillVersionFields({ assetSlug }: { assetSlug: string }) {
+  const { t } = useI18n();
   return (
     <>
       <dl className="bg-muted/35 grid gap-3 rounded-lg p-3 text-sm sm:grid-cols-2">
         <div>
-          <dt className="text-muted-foreground text-xs">文件路径</dt>
+          <dt className="text-muted-foreground text-xs">
+            {t.adminAssets.dialogs.filePath}
+          </dt>
           <dd className="mt-1 font-mono">SKILL.md</dd>
         </div>
         <div>
-          <dt className="text-muted-foreground text-xs">媒体类型</dt>
+          <dt className="text-muted-foreground text-xs">
+            {t.adminAssets.dialogs.mediaType}
+          </dt>
           <dd className="mt-1 font-mono">text/markdown</dd>
         </div>
       </dl>
       <label className="grid gap-2 text-sm">
-        文件内容
+        {t.adminAssets.dialogs.fileContent}
         <Textarea
           name="content"
           required
           rows={12}
-          defaultValue={skillMarkdownTemplate(assetSlug)}
+          defaultValue={skillMarkdownTemplate(assetSlug, {
+            description: t.adminAssets.dialogs.skillTemplateDescription,
+            instructions: t.adminAssets.dialogs.skillTemplateInstructions,
+          })}
         />
       </label>
     </>
@@ -367,20 +443,21 @@ export function SkillVersionFields({ assetSlug }: { assetSlug: string }) {
 }
 
 export function McpVersionFields() {
+  const { t } = useI18n();
   return (
     <>
       <label className="grid gap-2 text-sm">
-        描述
+        {t.adminAssets.dialogs.description}
         <Textarea name="description" />
       </label>
       <label className="grid gap-2 text-sm">
-        传输方式
+        {t.adminAssets.dialogs.transport}
         <select
           name="transport"
           defaultValue="sse"
           className="border-input bg-background h-9 rounded-md border px-3 text-sm"
         >
-          <option value="sse">服务器推送（sse）</option>
+          <option value="sse">{t.adminAssets.dialogs.sseTransport}</option>
           <option value="http">HTTP</option>
         </select>
       </label>
@@ -393,45 +470,46 @@ export function McpVersionFields() {
           placeholder="https://mcp.example.com"
         />
         <span className="text-muted-foreground text-xs">
-          该地址由 Worker 访问，须填写平台批准的精确 HTTPS 地址。
+          {t.adminAssets.dialogs.workerUrlHelp}
         </span>
       </label>
       <p className="text-muted-foreground text-xs">
-        实际超时由平台控制，版本中的兼容值不可在此修改。
+        {t.adminAssets.dialogs.timeoutHelp}
       </p>
       <div className="border-border/70 space-y-3 rounded-lg border p-3">
-        <p className="text-sm font-medium">Credential 槽位（可选）</p>
+        <p className="text-sm font-medium">
+          {t.adminAssets.dialogs.credentialSlotOptional}
+        </p>
         <p className="text-muted-foreground text-xs">
-          创建槽位后，本版本只能通过提交和批准流程发布。
+          {t.adminAssets.dialogs.slotPublicationHelp}
         </p>
         <label className="grid gap-2 text-sm">
-          槽位名称
+          {t.adminAssets.dialogs.slotName}
           <Input
             name="slot_name"
             maxLength={63}
             pattern="[a-z][a-z0-9._-]{0,62}"
             placeholder="api-token"
-            title="以小写字母开头，只能使用小写字母、数字、点、下划线或连字符"
+            title={t.adminAssets.dialogs.slotNameTitle}
           />
           <span className="text-muted-foreground text-xs">
-            以小写字母开头，最多 63 位；可使用数字、点、下划线和连字符。
+            {t.adminAssets.dialogs.slotNameHelp}
           </span>
         </label>
         <label className="grid gap-2 text-sm">
-          用途
+          {t.adminAssets.dialogs.purpose}
           <Input name="slot_purpose" />
         </label>
-        <p className="text-sm">凭据字段分组：请求头（headers）</p>
+        <p className="text-sm">{t.adminAssets.dialogs.credentialHeaderGroup}</p>
         <label className="grid gap-2 text-sm">
-          必需字段（逗号或换行分隔）
+          {t.adminAssets.dialogs.requiredFields}
           <Textarea
             name="slot_fields"
             placeholder="Authorization"
             maxLength={2048}
           />
           <span className="text-muted-foreground text-xs">
-            填写所选分组中 Credential
-            必须包含的字段名；多个字段用逗号或换行分隔。
+            {t.adminAssets.dialogs.requiredFieldsHelp}
           </span>
         </label>
       </div>
@@ -443,6 +521,13 @@ export function versionInput(
   kind: VersionedKind,
   form: FormData,
   expectedAssetVersion: number,
+  validationCopy: {
+    unsupportedMcpTransport: string;
+    missingMcpUrl: string;
+  } = {
+    unsupportedMcpTransport: "新 MCP 版本仅支持 SSE 或 HTTP",
+    missingMcpUrl: "SSE 或 HTTP 传输必须填写 URL",
+  },
 ): VersionAuthoringInput {
   if (kind === "skills") {
     return {
@@ -460,11 +545,11 @@ export function versionInput(
   const slotFields = list(form.get("slot_fields"));
   const transport = field(form, "transport", "sse");
   if (!isMcpRuntimeTransport(transport)) {
-    throw new Error("新 MCP 版本仅支持 SSE 或 HTTP");
+    throw new Error(validationCopy.unsupportedMcpTransport);
   }
   const url = field(form, "url").trim();
   if (!url) {
-    throw new Error("SSE 或 HTTP 传输必须填写 URL");
+    throw new Error(validationCopy.missingMcpUrl);
   }
   return {
     description: field(form, "description"),
@@ -509,11 +594,17 @@ export function CreateVersionDialog({
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: VersionAuthoringInput) => void;
 }) {
+  const { t } = useI18n();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent
+        closeLabel={t.adminOperations.ui.close}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+      >
         <DialogHeader>
-          <DialogTitle>创建 {KIND_LABEL[kind]} 版本</DialogTitle>
+          <DialogTitle>
+            {t.adminAssets.dialogs.createVersionTitle(KIND_LABEL[kind])}
+          </DialogTitle>
           <DialogDescription>{asset.display_name}</DialogDescription>
         </DialogHeader>
         <form
@@ -525,6 +616,11 @@ export function CreateVersionDialog({
                 kind,
                 new FormData(event.currentTarget),
                 asset.version,
+                {
+                  unsupportedMcpTransport:
+                    t.adminAssets.dialogs.unsupportedMcpTransport,
+                  missingMcpUrl: t.adminAssets.dialogs.missingMcpUrl,
+                },
               ),
             );
           }}
@@ -541,7 +637,9 @@ export function CreateVersionDialog({
           )}
           <DialogFooter>
             <Button type="submit" disabled={pending}>
-              {pending ? "创建中…" : "创建版本"}
+              {pending
+                ? t.adminAssets.common.creatingVersion
+                : t.adminAssets.common.createVersion}
             </Button>
           </DialogFooter>
         </form>
@@ -575,6 +673,7 @@ export function CredentialSecretDialog({
   onCreate?: (input: CreateCredentialInput) => void;
   onReplace?: (input: ReplaceCredentialInput) => void;
 }) {
+  const { t } = useI18n();
   const fieldIdPrefix = useId();
   const nextFieldId = useRef(0);
   const [formKey, setFormKey] = useState(0);
@@ -612,13 +711,18 @@ export function CredentialSecretDialog({
         onOpenChange(next);
       }}
     >
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent
+        closeLabel={t.adminOperations.ui.close}
+        className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"
+      >
         <DialogHeader>
           <DialogTitle>
-            {mode === "create" ? "创建 Credential" : "替换凭据"}
+            {mode === "create"
+              ? t.adminAssets.dialogs.secretCreateTitle
+              : t.adminAssets.dialogs.secretReplaceTitle}
           </DialogTitle>
           <DialogDescription>
-            凭据值只用于本次加密写入，提交后不会回显。
+            {t.adminAssets.dialogs.secretDescription}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -638,6 +742,7 @@ export function CredentialSecretDialog({
                 rows,
                 form,
                 expectedVersion,
+                validationCopy: t.adminAssets.dialogs.validation,
                 clear: () => {
                   event.currentTarget.reset();
                   resetForm();
@@ -657,11 +762,11 @@ export function CredentialSecretDialog({
           {mode === "create" && (
             <>
               <label className="grid gap-2 text-sm">
-                名称
+                {t.adminAssets.dialogs.name}
                 <Input name="display_name" required maxLength={120} />
               </label>
               <label className="grid gap-2 text-sm">
-                Credential 标识
+                {t.adminAssets.dialogs.credentialSlug}
                 <Input
                   name="name"
                   required
@@ -671,7 +776,7 @@ export function CredentialSecretDialog({
                 />
               </label>
               <label className="grid gap-2 text-sm">
-                类型
+                {t.adminAssets.common.type}
                 <Input
                   name="credential_type"
                   required
@@ -692,10 +797,10 @@ export function CredentialSecretDialog({
                   id="credential-fields-title"
                   className="text-sm font-medium"
                 >
-                  凭据字段
+                  {t.adminAssets.dialogs.credentialFields}
                 </h3>
                 <p className="text-muted-foreground text-xs">
-                  可添加多个环境变量、请求头或 OAuth 字段；每个值仅写入一次。
+                  {t.adminAssets.dialogs.credentialFieldsHelp}
                 </p>
               </div>
               <Button
@@ -712,7 +817,7 @@ export function CredentialSecretDialog({
                   ]);
                 }}
               >
-                添加字段
+                {t.adminAssets.dialogs.addField}
               </Button>
             </div>
             <div className="space-y-3">
@@ -722,7 +827,7 @@ export function CredentialSecretDialog({
                   className="border-border/70 bg-muted/15 grid gap-3 rounded-xl border p-3 sm:grid-cols-[10rem_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end"
                 >
                   <label className="grid gap-2 text-sm">
-                    分组
+                    {t.adminAssets.dialogs.group}
                     <select
                       name={credentialGroupInputName(row.id)}
                       value={row.group}
@@ -732,7 +837,7 @@ export function CredentialSecretDialog({
                         event.currentTarget.setCustomValidity("");
                         if (!isCredentialPayloadGroup(event.target.value)) {
                           event.currentTarget.setCustomValidity(
-                            CREDENTIAL_FIELD_ERROR_MESSAGES.unsupported_group,
+                            t.adminAssets.dialogs.validation.unsupportedGroup,
                           );
                           return;
                         }
@@ -744,13 +849,17 @@ export function CredentialSecretDialog({
                         );
                       }}
                     >
-                      <option value="env">环境变量（env）</option>
-                      <option value="headers">请求头（headers）</option>
+                      <option value="env">
+                        {t.adminAssets.dialogs.envGroup}
+                      </option>
+                      <option value="headers">
+                        {t.adminAssets.dialogs.headersGroup}
+                      </option>
                       <option value="oauth">OAuth</option>
                     </select>
                   </label>
                   <label className="grid gap-2 text-sm">
-                    字段名
+                    {t.adminAssets.dialogs.fieldName}
                     <Input
                       name={credentialFieldInputName(row.id)}
                       required
@@ -772,7 +881,7 @@ export function CredentialSecretDialog({
                     />
                   </label>
                   <label className="grid gap-2 text-sm">
-                    凭据值
+                    {t.adminAssets.dialogs.credentialValue}
                     <Input
                       name={credentialValueInputName(row.id)}
                       required
@@ -794,14 +903,14 @@ export function CredentialSecretDialog({
                       disabled ||
                       fieldsOutOfSync
                     }
-                    aria-label={`移除字段 ${index + 1}`}
+                    aria-label={t.adminAssets.dialogs.removeField(index + 1)}
                     onClick={() =>
                       setRows((current) =>
                         current.filter((item) => item.id !== row.id),
                       )
                     }
                   >
-                    移除
+                    {t.adminAssets.dialogs.remove}
                   </Button>
                 </div>
               ))}
@@ -819,7 +928,7 @@ export function CredentialSecretDialog({
                   variant="outline"
                   onClick={onRetry}
                 >
-                  重新加载
+                  {t.adminAssets.common.reload}
                 </Button>
               )}
             </div>
@@ -830,10 +939,10 @@ export function CredentialSecretDialog({
               disabled={pending || disabled || fieldsOutOfSync}
             >
               {pending
-                ? "写入中…"
+                ? t.adminAssets.dialogs.writing
                 : mode === "create"
-                  ? "加密写入"
-                  : "替换凭据"}
+                  ? t.adminAssets.dialogs.encryptWrite
+                  : t.adminAssets.common.replaceCredential}
             </Button>
           </DialogFooter>
         </form>
@@ -855,15 +964,14 @@ export function CredentialRevokeDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent closeLabel={t.adminOperations.ui.close}>
         <DialogHeader>
-          <DialogTitle>确认撤销 Credential</DialogTitle>
+          <DialogTitle>{t.adminAssets.dialogs.revokeTitle}</DialogTitle>
           <DialogDescription>
-            此操作不可恢复。撤销“{credentialName}”后，Credential
-            的所有版本与相关 active Grant 将在同一事务中失效，MCP
-            详情不再显示为已授权。
+            {t.adminAssets.dialogs.revokeDescription(credentialName)}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -873,7 +981,7 @@ export function CredentialRevokeDialog({
             disabled={pending}
             onClick={() => onOpenChange(false)}
           >
-            取消
+            {t.adminAssets.dialogs.cancel}
           </Button>
           <Button
             type="button"
@@ -881,7 +989,9 @@ export function CredentialRevokeDialog({
             disabled={pending}
             onClick={onConfirm}
           >
-            {pending ? "撤销中…" : "确认永久撤销"}
+            {pending
+              ? t.adminAssets.dialogs.revoking
+              : t.adminAssets.dialogs.confirmRevoke}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -902,16 +1012,14 @@ export function CredentialGrantMigrationDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent closeLabel={t.adminOperations.ui.close}>
         <DialogHeader>
-          <DialogTitle>迁移 Credential 兼容引用</DialogTitle>
+          <DialogTitle>{t.adminAssets.dialogs.migrateTitle}</DialogTitle>
           <DialogDescription>
-            替换 Credential 只会创建新版本，不会自动轮换既有
-            MCP Grant 或 Skill 环境变量绑定。系统将仅在字段结构完全兼容时，
-            把“{credentialName}”仍固定到旧版本的有效引用原子迁移到当前版本；
-            任一引用不兼容都会整体拒绝。
+            {t.adminAssets.dialogs.migrateDescription(credentialName)}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -921,10 +1029,12 @@ export function CredentialGrantMigrationDialog({
             disabled={pending}
             onClick={() => onOpenChange(false)}
           >
-            取消
+            {t.adminAssets.dialogs.cancel}
           </Button>
           <Button type="button" disabled={pending} onClick={onConfirm}>
-            {pending ? "迁移中…" : "确认迁移引用"}
+            {pending
+              ? t.adminAssets.dialogs.migrating
+              : t.adminAssets.dialogs.confirmMigrate}
           </Button>
         </DialogFooter>
       </DialogContent>

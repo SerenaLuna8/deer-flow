@@ -881,7 +881,7 @@ tui = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.4.0" },
-    { name = "agent-sandbox", specifier = ">=0.0.19" },
+    { name = "agent-sandbox", specifier = ">=0.0.30" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "boxlite", marker = "extra == 'boxlite'", specifier = ">=0.9.7" },
     { name = "croniter", specifier = ">=6.0.0" },

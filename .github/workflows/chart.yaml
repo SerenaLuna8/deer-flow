@@ -4,9 +4,8 @@ name: Publish Helm Chart
 # container images (see container.yaml). Triggers on the same `v*` tags.
 #
 # On pull requests touching the chart or config.example.yaml, `validate-chart`
-# runs lint + template render + a config_version drift check (the chart's
-# embedded config_version must not lag config.example.yaml) so a broken or
-# stale chart fails the PR, not the release.
+# runs lint + template render + process-topology, sandbox exposure, and exact
+# config-version checks so a broken or stale chart fails the PR, not release.
 #
 # Users then install with:
 #   helm install deer-flow oci://ghcr.io/${{ owner }}/deer-flow --version <ver>
@@ -20,6 +19,9 @@ on:
       - "deploy/helm/deer-flow/**"
       - "config.example.yaml"
       - ".github/workflows/chart.yaml"
+      - "scripts/check_config_version.sh"
+      - "scripts/check_chart_sandbox_service.sh"
+      - "scripts/check_chart_runtime_topology.sh"
 
 jobs:
   validate-chart:
@@ -37,32 +39,21 @@ jobs:
 
       # ubuntu-latest ships with helm 3 preinstalled - no setup-helm action needed.
       - name: Lint chart
-        run: helm lint deploy/helm/deer-flow
+        run: >-
+          helm lint deploy/helm/deer-flow
+          --set-string postgresql.external.databaseUrl=postgresql://postgres:test@db:5432/deerflow
       - name: Validate templates render
-        run: helm template deer-flow deploy/helm/deer-flow --include-crds >/dev/null
+        run: >-
+          helm template deer-flow deploy/helm/deer-flow --include-crds
+          --set-string postgresql.external.databaseUrl=postgresql://postgres:test@db:5432/deerflow
+          >/dev/null
 
-      # The chart's `config:` block embeds a config_version that must not fall
-      # behind config.example.yaml. A stale version is silent in-cluster (the
-      # image ships no example to compare against, so _check_config_version
-      # never warns) but means the chart's config is authored against an older
-      # schema. Bump it in values.yaml and the README example. config_version
-      # gates no runtime behavior - it only drives the outdated-warning - so a
-      # bare version bump needs no field changes.
-      - name: config_version drift check
-        run: |
-          set -eu
-          example=$(grep -E '^config_version:[[:space:]]+[0-9]+' config.example.yaml | head -1 | awk '{print $2}')
-          chart=$(awk '/^config:[[:space:]]*\|/{f=1; next} f && /^[[:space:]]+config_version:[[:space:]]+[0-9]+/ {print $2; exit}' deploy/helm/deer-flow/values.yaml)
-          echo "config.example.yaml config_version=$example"
-          echo "chart values.yaml     config_version=$chart"
-          if [ -z "$example" ] || [ -z "$chart" ]; then
-            echo "::error::could not parse config_version from one of the files"
-            exit 1
-          fi
-          if [ "$chart" -lt "$example" ]; then
-            echo "::error::chart config_version ($chart) is behind config.example.yaml ($example). Bump 'config_version' in deploy/helm/deer-flow/values.yaml (and the README example) to $example."
-            exit 1
-          fi
+      - name: Validate Gateway, Worker, and Scheduler ownership
+        run: bash scripts/check_chart_runtime_topology.sh
+      - name: Validate sandbox Service exposure
+        run: bash scripts/check_chart_sandbox_service.sh
+      - name: Validate exact config schema version
+        run: bash scripts/check_config_version.sh
 
   verify-versions:
     # Gate the release: every version source must match the v* tag. A forgotten

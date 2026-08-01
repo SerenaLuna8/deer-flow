@@ -1,3 +1,4 @@
+import { currentBrowserReturnPath } from "@/core/auth/private-return-path";
 import { buildLoginUrl } from "@/core/auth/types";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -90,7 +91,11 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    window.location.href = buildLoginUrl(window.location.pathname);
+    if (typeof window !== "undefined") {
+      window.location.href = buildLoginUrl(
+        currentBrowserReturnPath(window.location),
+      );
+    }
     throw new AuthRequiredError();
   }
 

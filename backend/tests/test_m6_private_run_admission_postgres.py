@@ -17,6 +17,7 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.inbound_dedupe import PrivateRunInboundDelivery
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
     PrivateRunAdmissionService,
@@ -287,6 +288,9 @@ async def test_inbound_revoke_between_resolve_and_admission_persists_nothing(
                 PrivateRunCreate(run_id=run_id),
                 server_context=PrivateRunAdmissionServerContext(
                     inbound_authority=authority,
+                    inbound_delivery=PrivateRunInboundDelivery(
+                        "delivery-revoked-before-admission",
+                    ),
                 ),
             )
             return {"run_id": admitted.run.run_id}
@@ -301,6 +305,7 @@ async def test_inbound_revoke_between_resolve_and_admission_persists_nothing(
                     workspace_id="workspace-a",
                     topic_id="topic-a",
                     text="hello",
+                    provider_delivery_id=("delivery-revoked-before-admission"),
                 )
             )
         )

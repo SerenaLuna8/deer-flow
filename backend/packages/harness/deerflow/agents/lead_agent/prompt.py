@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.subagents_config import clamp_subagent_concurrency
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
@@ -259,13 +260,17 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
 
     lines = []
     for name in available_names:
+        escaped_name = html.escape(name, quote=False)
         if name in builtin_descriptions:
-            lines.append(f"- **{name}**: {builtin_descriptions[name]}")
+            lines.append(f"- **{escaped_name}**: {builtin_descriptions[name]}")
         else:
             config = get_subagent_config(name, app_config=app_config)
             if config is not None:
-                desc = config.description.split("\n")[0].strip()  # First line only for brevity
-                lines.append(f"- **{name}**: {desc}")
+                desc = html.escape(
+                    config.description.split("\n")[0].strip(),
+                    quote=False,
+                )
+                lines.append(f"- **{escaped_name}**: {desc}")
 
     return "\n".join(lines)
 
@@ -279,7 +284,7 @@ def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None
     Returns:
         Formatted subagent section string.
     """
-    n = max_concurrent
+    n = clamp_subagent_concurrency(max_concurrent)
     available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     bash_available = "bash" in available_names
 
@@ -550,6 +555,10 @@ You: "Deploying to staging..." [proceed]
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
+- When the user explicitly asks you to create or write a file, that file is a final deliverable
+- This includes a source-code file, script, configuration, or document
+- Write the deliverable directly to `/mnt/user-data/outputs/<filename>` or copy the completed workspace version there
+- For example, write `/mnt/user-data/outputs/QuickSort.java`, then call `present_files` before the final response
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
 {acp_section}
 </working_directory>
@@ -891,7 +900,7 @@ def apply_prompt_template(
     exact_skills_container_path: str | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = max_concurrent_subagents
+    n = clamp_subagent_concurrency(max_concurrent_subagents)
     subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled

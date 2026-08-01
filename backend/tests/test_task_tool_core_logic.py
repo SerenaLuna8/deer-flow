@@ -18,10 +18,12 @@ from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
+    SUBAGENT_MODEL_NAME_KEY,
     SUBAGENT_RESULT_BRIEF_KEY,
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STOP_REASON_KEY,
+    SUBAGENT_TOKEN_USAGE_KEY,
 )
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -253,6 +255,26 @@ def test_task_result_command_derives_content_from_status_payload():
     assert len(capped.additional_kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
     assert capped.additional_kwargs[SUBAGENT_STOP_REASON_KEY] == "token_capped"
 
+    completed_with_runtime_metadata = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-completed-metadata",
+            status="completed",
+            result="done",
+            model_name="claude-3-7-sonnet",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+        )
+    )
+    assert completed_with_runtime_metadata.additional_kwargs[SUBAGENT_MODEL_NAME_KEY] == "claude-3-7-sonnet"
+    assert completed_with_runtime_metadata.additional_kwargs[SUBAGENT_TOKEN_USAGE_KEY] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
+
 
 def test_task_result_command_carries_loop_capped_from_real_loop_detection():
     """Real-path (#3875 Phase 2, ggnnggez review): drive the actual
@@ -326,6 +348,16 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     oauth attribution)."""
     runtime = _make_runtime()
     runtime.context["channel_user_id"] = "ou_group_sender_1"
+    runtime.context["private_scope"] = object()
+    issued_attribution = {
+        "user_id": "trusted-user",
+        "user_role": "runner",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "is_subagent": False,
+        "authz_attributes": {"project_role": "runner"},
+    }
+    runtime.context["__guardrail_attribution"] = issued_attribution
     captured = {}
 
     class DummyExecutor:
@@ -358,6 +390,8 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     message = _task_tool_message(output)
     assert message.content == "Task Succeeded. Result: done"
     assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
+    assert captured["executor_kwargs"]["guardrail_attribution"] == issued_attribution
+    assert captured["executor_kwargs"]["guardrail_attribution"] is not issued_attribution
 
 
 def test_task_tool_forwards_private_prompt_bundle_and_runtime_skills_outside_metadata(
@@ -895,6 +929,15 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     events = []
     captured = {}
     get_available_tools = MagicMock(return_value=["tool-a", "tool-b"])
+    usage_records = [
+        {
+            "source_run_id": "sub-run",
+            "caller": "subagent:general-purpose",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+        }
+    ]
 
     class DummyExecutor:
         def __init__(self, **kwargs):
@@ -908,11 +951,16 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     # Simulate two polling rounds: first running (with one message), then completed.
     responses = iter(
         [
-            _make_result(FakeSubagentStatus.RUNNING, ai_messages=[{"id": "m1", "content": "phase-1"}]),
+            _make_result(
+                FakeSubagentStatus.RUNNING,
+                ai_messages=[{"id": "m1", "content": "phase-1"}],
+                token_usage_records=usage_records,
+            ),
             _make_result(
                 FakeSubagentStatus.COMPLETED,
                 ai_messages=[{"id": "m1", "content": "phase-1"}, {"id": "m2", "content": "phase-2"}],
                 result="all done",
+                token_usage_records=usage_records,
             ),
         ]
     )
@@ -951,7 +999,15 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert all(event["model_name"] == "ark-model" for event in events)
+    assert events[1]["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
     assert events[-1]["result"] == "all done"
+    assert message.additional_kwargs[SUBAGENT_MODEL_NAME_KEY] == "ark-model"
+    assert message.additional_kwargs[SUBAGENT_TOKEN_USAGE_KEY]["total_tokens"] == 120
 
 
 def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
@@ -2050,7 +2106,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
 
-    _run_task_tool(
+    output = _run_task_tool(
         runtime=runtime,
         description="test",
         prompt="do work",
@@ -2065,6 +2121,10 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
         "output_tokens": 130,
         "total_tokens": 430,
     }
+    assert terminal_events[0]["model_name"] == "ark-model"
+    message = _task_tool_message(output)
+    assert message.additional_kwargs[SUBAGENT_MODEL_NAME_KEY] == "ark-model"
+    assert message.additional_kwargs[SUBAGENT_TOKEN_USAGE_KEY]["total_tokens"] == 430
 
 
 def test_terminal_event_usage_none_when_no_records(monkeypatch):

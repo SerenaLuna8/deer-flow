@@ -256,6 +256,18 @@ def test_apply_prompt_template_includes_relative_path_guidance() -> None:
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in rendered
 
 
+def test_explicitly_requested_files_are_presented_as_final_deliverables() -> None:
+    rendered = prompt_module.apply_prompt_template(
+        app_config=_prompt_config(),
+        exact_soul="",
+        exact_skills=(),
+    )
+
+    assert "When the user explicitly asks you to create or write a file" in rendered
+    assert "source-code file" in rendered
+    assert "call `present_files` before the final response" in rendered
+
+
 def test_apply_prompt_template_threads_explicit_config_to_subagents(
     monkeypatch,
 ) -> None:
@@ -294,6 +306,29 @@ def test_apply_prompt_template_threads_explicit_config_to_subagents(
 
     assert "**researcher**: Research agent" in rendered
     assert "**bash**" not in rendered
+
+
+def test_apply_prompt_template_uses_clamped_subagent_limit_in_all_reminders(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        prompt_module,
+        "get_available_subagent_names",
+        lambda **_kwargs: ["general-purpose"],
+    )
+
+    rendered = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=99,
+        app_config=_prompt_config(),
+        exact_soul="",
+        exact_skills=(),
+    )
+
+    assert "HARD CONCURRENCY LIMIT: MAXIMUM 4 `task` CALLS PER RESPONSE" in rendered
+    assert "HARD LIMIT: max 4 `task` calls per response" in rendered
+    assert "NEVER launch more than 4 `task` calls in one response" in rendered
+    assert "max 99 `task` calls" not in rendered
 
 
 def test_build_acp_section_uses_explicit_config_without_global_read(

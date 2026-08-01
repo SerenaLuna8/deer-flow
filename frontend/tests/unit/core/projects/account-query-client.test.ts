@@ -1,9 +1,12 @@
 import { describe, expect, test, rs } from "@rstest/core";
 
+import { runAbortableAdminModelMutation } from "@/core/admin-settings/models";
 import {
   createAccountQueryClient,
   transitionAccountQueries,
 } from "@/core/auth/account-query-client";
+
+const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 
 describe("account query client", () => {
   test.each(["u2", null])(
@@ -69,6 +72,72 @@ describe("account query client", () => {
     await transitionAccountQueries(client, "u1", "u1");
     expect(clear).not.toHaveBeenCalled();
     expect(client.getQueryData(["account", "u1"])).toBe("same-account");
+  });
+
+  test("aborts privileged work and clears cache when a same-account role changes", async () => {
+    const client = createAccountQueryClient();
+    const clear = rs.spyOn(client, "clear");
+    let querySignal: AbortSignal | undefined;
+    let mutationSignal: AbortSignal | undefined;
+    client.setQueryData(
+      ["account", ACCOUNT_ID, "admin", "settings", "models"],
+      ["private-admin-model-config"],
+    );
+    const pendingQuery = client
+      .fetchQuery({
+        queryKey: [
+          "account",
+          ACCOUNT_ID,
+          "admin",
+          "settings",
+          "models",
+          "pending",
+        ],
+        queryFn: ({ signal }) => {
+          querySignal = signal;
+          return new Promise<string>(() => undefined);
+        },
+      })
+      .catch(() => undefined);
+    const pendingMutation = runAbortableAdminModelMutation(
+      ACCOUNT_ID,
+      (signal) =>
+        new Promise<never>((_resolve, reject) => {
+          mutationSignal = signal;
+          signal.addEventListener(
+            "abort",
+            () =>
+              reject(
+                Object.assign(new Error("Aborted"), {
+                  name: "AbortError",
+                }),
+              ),
+            { once: true },
+          );
+        }),
+    );
+    const mutationResult = pendingMutation.catch((error: unknown) => error);
+    await Promise.resolve();
+
+    await transitionAccountQueries(client, ACCOUNT_ID, ACCOUNT_ID, {
+      previousSystemRole: "system_admin",
+      nextSystemRole: "user",
+    });
+
+    expect(querySignal?.aborted).toBe(true);
+    expect(mutationSignal?.aborted).toBe(true);
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(
+      client.getQueryData([
+        "account",
+        ACCOUNT_ID,
+        "admin",
+        "settings",
+        "models",
+      ]),
+    ).toBeUndefined();
+    await pendingQuery;
+    await expect(mutationResult).resolves.toMatchObject({ name: "AbortError" });
   });
 
   test("force-clears a same-account cache for logout", async () => {

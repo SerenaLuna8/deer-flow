@@ -1,5 +1,9 @@
 # 09. Gateway API 模块：旧 RunManager 增量与项目私有 Gateway 对照
 
+> 本文第 1–14 节保留 `main@e317f7b8` 与当时 `dev@8a91e957` 的历史源码分析。
+> 第 15 节起记录当前 `dev@785be51341c1` 工作树的实际移植结果；历史章节中的“缺口”与
+> “计划”不能替代当前实现和当前 checkout 的验证证据。
+
 ## 1. 分析边界与结论
 
 本文分析 `main@e317f7b8` 在 Gateway 线程、Run、SSE、replay、并发和错误处理上的最终实现，
@@ -497,3 +501,145 @@ Run `updated_at - created_at` 的墙钟时间，每个 Run 只放在最后一条
 
 只有在这组矩阵通过后，才能说某个 `main` 行为已经按 `dev` 架构移植；仅让 legacy
 `/api/threads` 测试通过不构成验收。
+
+## 15. 当前 worktree 的实际移植结果
+
+### 15.1 可信 durable trace，而不是客户端 metadata trace
+
+当前实现新增独立的 `origin_trace_id` authority：
+
+```text
+TraceMiddleware / internal admission
+  -> PrivateRunAdmissionServerContext.origin_trace_id
+  -> runs.origin_trace_id
+  -> jobs.origin_trace_id
+  -> Worker claim / mark-running / heartbeat / handler / settlement
+  -> run.admitted + run.terminal audit request HMAC
+```
+
+精确不变量：
+
+1. 客户端 `metadata`、`config`、`context` 中的 `origin_trace_id` 与
+   `deerflow_trace_id` 会递归剥离，不能选择 authority；
+2. 可执行 Run 的 `origin_trace_id` 非空，Run 与 Job 必须相等；
+3. 数据库用 `(project_id, owner_user_id, run_id, origin_trace_id)` 复合外键防止错配，
+   repository、executor 和 Worker 再做运行时校验；
+4. 同 `run_id` 的等价重试保留首次准入 trace，不被下一次 HTTP trace 覆盖；
+5. Worker 在 graph、模型、工具和副作用之前绑定持久 trace；缺失或错配先失败；
+6. retention job 没有 Run trace；
+7. 内部 correlation 不受展示开关影响；`logging.enhance.enabled=false` 只禁止向外部
+   Langfuse metadata 注入 `deerflow_trace_id`，Worker ContextVar、Subagent、Memory 和
+   audit authority 仍使用可信值；
+8. public Run response、metadata/config、浏览器 Query cache 和 audit payload 都不返回
+   raw `origin_trace_id`，审计只保存 domain-separated HMAC。
+
+主要落点：
+
+- `backend/app/private_work/{context,http_runtime,run_admission,run_repository}.py`
+- `backend/app/reliability/{jobs,execution}.py`
+- `backend/app/worker/{app,service}.py`
+- `backend/app/audit/sinks.py`
+- `backend/packages/harness/deerflow/persistence/{run/model,jobs/model,jobs/sql}.py`
+- `backend/packages/harness/deerflow/persistence/full_schema.sql`
+- `backend/packages/harness/deerflow/{tracing/metadata,runtime/runs/worker,client}.py`
+
+### 15.2 Thread 并发契约
+
+本次没有把 `main` 的 insert-race 幂等 200 直接搬入项目私有接口，而是验证并固定
+`dev` 的显式并发语义：
+
+- 同 scope、同显式 UUID 的两个独立 HTTP create 请求使用独立数据库会话同时提交：
+  一个返回 201，一个返回稳定 409；最终只有一个 Thread 和一个 root checkpoint；
+- 两个请求使用同一 `expected_version` 并发 rename：
+  一个返回 200，一个返回 409；版本只增加一次，标题等于获胜请求，不发生 silent merge。
+
+真实 PostgreSQL 测试位于固定 release gate 的
+`backend/tests/integration/test_m4_private_work_postgres.py`。
+
+### 15.3 PostgreSQL BIGINT 与公开 API bounds
+
+以下数据库整数输入统一限制为 `0..9223372036854775807`（版本号从 1 开始）：
+
+- Thread search `offset`；
+- Thread patch/delete `expected_version`；
+- Run list `offset`；
+- ready upload list `offset`。
+
+超界在进入 repository 前返回稳定 422 `PRIVATE_WORK_INVALID`。OpenAPI 同时标注
+`format: int64` 和字符串扩展 `x-postgres-bigint-maximum`，避免 JSON Schema 数值在
+JavaScript 中舍入。四个 REST message/event feed 的 `seq`、`before_seq`、`after_seq`
+继续使用 canonical 十进制字符串，拒绝负号、加号、空白、前导零和溢出，前端从不转成
+JavaScript `number`。
+
+### 15.4 Run catalog 全量分页
+
+前端不再信任 LangGraph SDK `runs.list()` 的默认 10 条：
+
+- 以显式 `limit/offset` 拉取完整 newest-first catalog；
+- 逐页转入严格 Zod public Run schema，未知 `origin_trace_id`、authority/private 字段、
+  非法枚举或畸形页全部拒绝；
+- 传递当前 scope 的 `AbortSignal`；
+- concurrent offset drift 的重复 Run ID 可去重；
+- full page 零推进、持续新增的无界 full page、页数/offset 上限都 fail closed；
+- message body 仍按 Run 懒加载，不把全部消息一次性拉入内存。
+
+实现与测试：
+
+- `frontend/src/core/threads/hooks.ts`
+- `frontend/tests/unit/core/threads/run-pagination.test.ts`
+
+### 15.5 ready upload catalog 全量分页
+
+Gateway 的 upload list 现在接受 `limit=1..100` 和 signed-BIGINT `offset`，repository 在
+稳定 `(logical_path, version, id)` 顺序后应用 offset/limit。只有安全的 full page 才返回
+`X-Next-Offset`，并由 Gateway CORS 显式暴露。
+
+前端以 100 条一页读取完整目录，严格校验行与响应头，转发 AbortSignal，并对重复 ID、
+不推进 offset、未知字段和最大页数安全失败。真实 PostgreSQL 测试覆盖 101 行跨三次请求
+无遗漏、无重复；前端测试覆盖完整分页与恶意不推进响应。
+
+主要落点：
+
+- `backend/app/gateway/{app,routers/private_work}.py`
+- `backend/app/private_work/file_service.py`
+- `backend/packages/harness/deerflow/persistence/private_work/file_repository.py`
+- `frontend/src/core/uploads/api.ts`
+
+## 16. 当前 checkout 验证记录
+
+### 16.1 已完成的确定性门禁
+
+| 层 | 当前结果 |
+| --- | --- |
+| backend 完整 pytest（未提供 `POSTGRES_TEST_URL`） | 7387 passed，1003 skipped |
+| trace/Worker/Client/Subagent/Memory 相关单元测试 | 337 passed，1 skipped |
+| trace 固定 gate 节点 `test_m6_audit_integration_postgres.py` | 29 passed |
+| API bounds、upload pagination、Thread concurrency 聚焦 PG | 27 passed |
+| 根 Makefile 固定 20 文件 PostgreSQL release gate | 269 passed，0 failed，0 skipped |
+| 前端完整单元测试 | 181 files，1317 passed |
+| 前端 `pnpm check` | passed |
+| 前端 production build | passed，78 routes generated |
+| Ruff 聚焦 format/check 与 `git diff --check` | passed |
+
+完整 trace PostgreSQL 链已并入根 Makefile 固定 20 文件中的
+`backend/tests/test_m6_audit_integration_postgres.py`；没有把 gate 扩为 21 文件，原独立
+重复测试已删除。该节点覆盖伪造剥离、首次 trace 幂等、Run/Job 持久一致性、复合外键、
+lease 过期 reclaim、真实 Worker handler/settlement 和 admission/terminal audit 同 HMAC。
+
+### 16.2 当前 checkout 的真实验收证据
+
+下列项目全部由当前代码重新执行，没有复用 07/08 的历史截图：
+
+| 验收项 | 当前结果与证据 |
+| --- | --- |
+| 三轮 UI 模型上下文、重命名与刷新 | PASS；[`01-multi-round-renamed-refresh.png`](evidence/09-gateway-api/01-multi-round-renamed-refresh.png) |
+| 同源浏览器 API：外部 trace gate、BIGINT、Run/Upload pagination | 7/7 PASS；[`02-live-api-matrix.png`](evidence/09-gateway-api/02-live-api-matrix.png) |
+| 第四轮真实 API 模型 Run | `success`，durable message 含 `M09-TRACE-R4` |
+| Gateway/Worker 两次重启后的 durable history/replay | R1–R4 与短标题全部恢复；[`03-restart-replay.png`](evidence/09-gateway-api/03-restart-replay.png) |
+| Run/Job/audit trace 只读交叉核验 | 4/4 全部一致；[`database-evidence.md`](evidence/09-gateway-api/database-evidence.md) |
+| 101 个真实 upload 跨页 | `100 → 1`，无遗漏/重复，101 个夹具精确清理 |
+| 根 Makefile 固定 20 文件 PostgreSQL gate | 269 passed，0 failed，0 skipped |
+| 第二轮独立复审 | 无 P0/P1/P2，无阻塞 |
+
+09 已满足封板条件，可以进入 10；后续修改这些 runtime/API 边界时仍须重新运行当前
+checkout 的对应门禁，历史结果不自动继承。

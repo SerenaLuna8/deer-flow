@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Mapping
 
+import httpx
 import pytest
-from sqlalchemy import text
+from fastapi import FastAPI, HTTPException, Request
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 from support.m4_private_work import (
     LANGGRAPH_CHECKPOINT_TABLES,
     PRIVATE_PERSISTENCE_TABLES,
@@ -14,27 +18,43 @@ from support.m4_private_work import (
 )
 
 from app.channels.store import ChannelStore
+from app.gateway.deps import private_work_context, require_project_private_open
+from app.gateway.routers.private_work import router
 from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.authorization import (
     PrivateRunAuthorizationBoundary,
     PrivateRunAuthorizationService,
 )
 from app.private_work.connection_service import ProjectConnectionService
+from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkForbidden,
     PrivateWorkNotFound,
+    PrivateWorkUnavailable,
 )
 from app.private_work.file_service import PrivateFileService
 from app.private_work.file_streaming import PrivateFileStreamer
+from app.private_work.inbound_dedupe import PrivateRunInboundDelivery
 from app.private_work.memory_service import PrivateMemoryService
-from app.private_work.run_admission import PrivateRunAdmissionService
+from app.private_work.run_admission import (
+    PrivateRunAdmissionServerContext,
+    PrivateRunAdmissionService,
+    PrivateRunInboundAuthority,
+)
 from app.private_work.run_repository import PrivateRunCreate
-from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.private_work.thread_repository import (
+    PrivateThreadRecord,
+    PrivateThreadRepository,
+    ThreadAgentRef,
+)
+from app.private_work.thread_service import PrivateThreadService
 from app.projects.context import ProjectContext
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.reliability.owner_refs import AuditHmacKeyring
-from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.binding_service import BindingService
+from app.shared_assets.bootstrap import bootstrap_system_assets
+from app.shared_assets.models import AssetKind, AssetSelection, SkillArchiveFile
 from app.shared_assets.skill_service import CreateSkill, SkillService
 from deerflow.agents.memory.storage import create_empty_memory
 from deerflow.config.quota_config import QuotaConfig
@@ -45,12 +65,136 @@ from deerflow.persistence.channel_connections import (
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.private_work.file_repository import PrivateFileRepository
 from deerflow.persistence.private_work.model import PrivateArtifactRow
+from deerflow.persistence.projects import ProjectDefaultAgentRow
+from deerflow.persistence.shared_assets import (
+    AgentRow,
+    AgentVersionSkillRefRow,
+    ProjectSystemAgentBindingRow,
+    SkillVersionRow,
+)
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 
 async def _payload_chunks(payload: bytes):
     yield payload
+
+
+class _TwoPartyGate:
+    """Release exactly two concurrent HTTP handlers from one rendezvous."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+        self.arrivals = 0
+
+    async def rendezvous(self) -> None:
+        async with self._lock:
+            self.arrivals += 1
+            if self.arrivals == 2:
+                self._ready.set()
+        await asyncio.wait_for(self._ready.wait(), timeout=10)
+
+
+class _SynchronizedThreadService(PrivateThreadService):
+    def __init__(
+        self,
+        scenario: M4ReleaseScenario,
+        *,
+        create_gate: _TwoPartyGate | None = None,
+        patch_gate: _TwoPartyGate | None = None,
+    ) -> None:
+        self._source_session_factory = scenario.seed.factory
+        self.session_ids: set[int] = set()
+        super().__init__(
+            self._recorded_session,
+            scenario.project_checkpointer,
+        )
+        self._create_gate = create_gate
+        self._patch_gate = patch_gate
+
+    def _recorded_session(self) -> AsyncSession:
+        session = self._source_session_factory()
+        self.session_ids.add(id(session))
+        return session
+
+    async def create(
+        self,
+        context: PrivateWorkContext,
+        *,
+        thread_id: str,
+        agent: ThreadAgentRef,
+        display_name: str | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> PrivateThreadRecord:
+        if self._create_gate is not None:
+            await self._create_gate.rendezvous()
+        return await super().create(
+            context,
+            thread_id=thread_id,
+            agent=agent,
+            display_name=display_name,
+            metadata=metadata,
+        )
+
+    async def patch(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        expected_version: int,
+        display_name: str | None,
+    ) -> PrivateThreadRecord:
+        if self._patch_gate is not None:
+            await self._patch_gate.rendezvous()
+        return await super().patch(
+            context,
+            thread_id,
+            expected_version=expected_version,
+            display_name=display_name,
+        )
+
+
+def _thread_http_app(
+    scenario: M4ReleaseScenario,
+    service: PrivateThreadService,
+) -> FastAPI:
+    app = FastAPI()
+    app.include_router(router)
+    app.state.private_thread_service = service
+    app.state.project_scoped_checkpointer = scenario.project_checkpointer
+
+    async def context_override(
+        project_id: uuid.UUID,
+        request: Request,
+    ) -> PrivateWorkContext:
+        del request
+        if project_id != scenario.seed.owner_a.project_id:
+            raise HTTPException(status_code=404)
+        return scenario.seed.owner_a
+
+    app.dependency_overrides[private_work_context] = context_override
+    app.dependency_overrides[require_project_private_open] = lambda: None
+    return app
+
+
+async def _thread_http_request(
+    app: FastAPI,
+    project_id: uuid.UUID,
+    method: str,
+    suffix: str,
+    *,
+    body: dict[str, object],
+) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        return await client.request(
+            method,
+            f"/api/projects/{project_id}/private-work{suffix}",
+            json=body,
+        )
 
 
 @pytest.mark.postgres
@@ -84,6 +228,361 @@ async def test_owner_creates_project_and_system_agent_threads(
         assert {item.thread_id for item in await scenario.thread_service.search(scenario.seed.owner_a)} == {
             "release-project-thread",
             "release-system-thread",
+        }
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_create_resolves_project_default_main_and_explicit_override(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    try:
+        await bootstrap_system_assets(scenario.seed.factory)
+        async with scenario.seed.factory() as session:
+            main_agent = (
+                await session.execute(
+                    select(AgentRow).where(
+                        AgentRow.source_key == "builtin:agent:project-assistant",
+                    )
+                )
+            ).scalar_one()
+            assert main_agent.current_published_version_id is not None
+            main_skill_dependencies = tuple(
+                (
+                    await session.execute(
+                        select(
+                            SkillVersionRow.skill_id,
+                            AgentVersionSkillRefRow.skill_version_id,
+                        )
+                        .join(
+                            SkillVersionRow,
+                            SkillVersionRow.id == AgentVersionSkillRefRow.skill_version_id,
+                        )
+                        .where(
+                            AgentVersionSkillRefRow.agent_version_id == main_agent.current_published_version_id,
+                        )
+                    )
+                ).all()
+            )
+
+        project_actor = ProjectContext(
+            user_id=scenario.seed.owner_a.user_id,
+            project_id=scenario.seed.owner_a.project_id,
+            membership_id=scenario.seed.owner_a.membership_id,
+            role=scenario.seed.owner_a.role,
+            capabilities=scenario.seed.owner_a.capabilities,
+            membership_version=scenario.seed.owner_a.membership_version,
+            request_id=scenario.seed.owner_a.request_id,
+        )
+        binding_service = BindingService(scenario.seed.factory)
+        for skill_id, skill_version_id in main_skill_dependencies:
+            await binding_service.enable(
+                project_actor,
+                AssetSelection(
+                    kind=AssetKind.SKILL,
+                    asset_id=skill_id,
+                    version_id=skill_version_id,
+                ),
+            )
+        await binding_service.enable(
+            project_actor,
+            AssetSelection(
+                kind=AssetKind.AGENT,
+                asset_id=main_agent.id,
+                version_id=main_agent.current_published_version_id,
+            ),
+        )
+
+        app = _thread_http_app(scenario, scenario.thread_service)
+
+        main_response = await _thread_http_request(
+            app,
+            scenario.seed.owner_a.project_id,
+            "POST",
+            "/threads",
+            body={"thread_id": str(uuid.uuid4()), "display_name": "Main fallback"},
+        )
+        assert main_response.status_code == 201
+        assert main_response.json()["agent_asset_id"] == str(main_agent.id)
+        assert main_response.json()["agent_scope"] == "system"
+
+        async with scenario.seed.factory() as session:
+            async with session.begin():
+                session.add(
+                    ProjectDefaultAgentRow(
+                        project_id=scenario.seed.owner_a.project_id,
+                        agent_asset_id=scenario.seed.project_agent_id,
+                        revision=1,
+                        created_by_user_id=str(scenario.seed.owner_a.user_id),
+                        updated_by_user_id=str(scenario.seed.owner_a.user_id),
+                    )
+                )
+
+        default_response = await _thread_http_request(
+            app,
+            scenario.seed.owner_a.project_id,
+            "POST",
+            "/threads",
+            body={"thread_id": str(uuid.uuid4()), "display_name": "Configured default"},
+        )
+        assert default_response.status_code == 201
+        assert default_response.json()["agent_asset_id"] == str(scenario.seed.project_agent_id)
+        assert default_response.json()["agent_scope"] == "project"
+
+        explicit_response = await _thread_http_request(
+            app,
+            scenario.seed.owner_a.project_id,
+            "POST",
+            "/threads",
+            body={
+                "thread_id": str(uuid.uuid4()),
+                "agent_asset_id": str(scenario.seed.system_agent_id),
+                "agent_scope": "system",
+                "display_name": "Explicit Main override",
+            },
+        )
+        assert explicit_response.status_code == 201
+        assert explicit_response.json()["agent_asset_id"] == str(scenario.seed.system_agent_id)
+        assert explicit_response.json()["agent_scope"] == "system"
+
+        async with scenario.seed.factory() as session:
+            async with session.begin():
+                agent = await session.get(AgentRow, scenario.seed.project_agent_id)
+                assert agent is not None
+                agent.status = "suspended"
+
+        unavailable_response = await _thread_http_request(
+            app,
+            scenario.seed.owner_a.project_id,
+            "POST",
+            "/threads",
+            body={"thread_id": str(uuid.uuid4()), "display_name": "Unavailable default"},
+        )
+        assert unavailable_response.status_code == 409
+        assert unavailable_response.json()["detail"] == {
+            "code": "DEFAULT_AGENT_UNAVAILABLE",
+            "message": "The project default Agent is unavailable.",
+            "request_id": scenario.seed.owner_a.request_id,
+        }
+
+        async with scenario.seed.factory() as session:
+            async with session.begin():
+                selection = await session.get(
+                    ProjectDefaultAgentRow,
+                    scenario.seed.owner_a.project_id,
+                )
+                assert selection is not None
+                selection.agent_asset_id = None
+                selection.revision += 1
+                binding = await session.get(
+                    ProjectSystemAgentBindingRow,
+                    (
+                        scenario.seed.owner_a.project_id,
+                        main_agent.id,
+                    ),
+                )
+                assert binding is not None
+                binding.enabled = False
+                binding.version += 1
+
+        unavailable_main_response = await _thread_http_request(
+            app,
+            scenario.seed.owner_a.project_id,
+            "POST",
+            "/threads",
+            body={"thread_id": str(uuid.uuid4()), "display_name": "Unavailable Main"},
+        )
+        assert unavailable_main_response.status_code == 409
+        assert unavailable_main_response.json()["detail"] == {
+            "code": "DEFAULT_AGENT_UNAVAILABLE",
+            "message": "The project default Agent is unavailable.",
+            "request_id": scenario.seed.owner_a.request_id,
+        }
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_same_scope_concurrent_explicit_thread_create_has_one_winner(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    try:
+        gate = _TwoPartyGate()
+        service = _SynchronizedThreadService(
+            scenario,
+            create_gate=gate,
+        )
+        app = _thread_http_app(
+            scenario,
+            service,
+        )
+        thread_id = uuid.uuid4()
+        request_base = {
+            "thread_id": str(thread_id),
+            "agent_asset_id": str(scenario.seed.project_agent_id),
+            "agent_scope": "project",
+            "metadata": {"contract": "concurrent-create"},
+        }
+
+        responses = await asyncio.gather(
+            _thread_http_request(
+                app,
+                scenario.seed.owner_a.project_id,
+                "POST",
+                "/threads",
+                body={**request_base, "display_name": "Concurrent create A"},
+            ),
+            _thread_http_request(
+                app,
+                scenario.seed.owner_a.project_id,
+                "POST",
+                "/threads",
+                body={**request_base, "display_name": "Concurrent create B"},
+            ),
+        )
+
+        assert gate.arrivals == 2
+        assert len(service.session_ids) == 2
+        assert sorted(response.status_code for response in responses) == [201, 409]
+        winner = next(response for response in responses if response.status_code == 201)
+        conflict = next(response for response in responses if response.status_code == 409)
+        assert conflict.json()["detail"]["code"] == "PRIVATE_WORK_CONFLICT"
+
+        async with scenario.seed.factory() as session:
+            thread_rows = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                        SELECT display_name, version
+                        FROM threads_meta
+                        WHERE project_id=:project_id
+                          AND owner_user_id=:owner_user_id
+                          AND thread_id=:thread_id
+                        """
+                        ),
+                        {
+                            "project_id": scenario.seed.owner_a.project_id,
+                            "owner_user_id": str(scenario.seed.owner_a.user_id),
+                            "thread_id": str(thread_id),
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            root_checkpoint_count = await session.scalar(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM checkpoints
+                    WHERE thread_id=:thread_id
+                      AND checkpoint_ns=''
+                    """
+                ),
+                {"thread_id": str(thread_id)},
+            )
+
+        assert len(thread_rows) == 1
+        assert thread_rows[0]["display_name"] == winner.json()["display_name"]
+        assert thread_rows[0]["version"] == 1
+        assert root_checkpoint_count == 1
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_same_version_concurrent_thread_rename_has_one_winner(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(migrated_postgres_database_url)
+    try:
+        thread_id = uuid.uuid4()
+        created = await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=str(thread_id),
+            agent=ThreadAgentRef(
+                scenario.seed.project_agent_id,
+                "project",
+            ),
+            display_name="Before concurrent rename",
+        )
+        assert created.version == 1
+
+        gate = _TwoPartyGate()
+        service = _SynchronizedThreadService(
+            scenario,
+            patch_gate=gate,
+        )
+        app = _thread_http_app(
+            scenario,
+            service,
+        )
+        responses = await asyncio.gather(
+            _thread_http_request(
+                app,
+                scenario.seed.owner_a.project_id,
+                "PATCH",
+                f"/threads/{thread_id}",
+                body={
+                    "expected_version": 1,
+                    "display_name": "Concurrent rename A",
+                },
+            ),
+            _thread_http_request(
+                app,
+                scenario.seed.owner_a.project_id,
+                "PATCH",
+                f"/threads/{thread_id}",
+                body={
+                    "expected_version": 1,
+                    "display_name": "Concurrent rename B",
+                },
+            ),
+        )
+
+        assert gate.arrivals == 2
+        assert len(service.session_ids) == 2
+        assert sorted(response.status_code for response in responses) == [200, 409]
+        winner = next(response for response in responses if response.status_code == 200)
+        conflict = next(response for response in responses if response.status_code == 409)
+        assert conflict.json()["detail"]["code"] == "PRIVATE_WORK_CONFLICT"
+
+        async with scenario.seed.factory() as session:
+            final_row = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                        SELECT display_name, version
+                        FROM threads_meta
+                        WHERE project_id=:project_id
+                          AND owner_user_id=:owner_user_id
+                          AND thread_id=:thread_id
+                        """
+                        ),
+                        {
+                            "project_id": scenario.seed.owner_a.project_id,
+                            "owner_user_id": str(scenario.seed.owner_a.user_id),
+                            "thread_id": str(thread_id),
+                        },
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert final_row["version"] == 2
+        assert final_row["display_name"] == winner.json()["display_name"]
+        assert final_row["display_name"] in {
+            "Concurrent rename A",
+            "Concurrent rename B",
         }
     finally:
         await scenario.close()
@@ -225,6 +724,290 @@ async def test_channel_store_is_postgres_scoped_and_multi_process_safe(
             )
             is None
         )
+    finally:
+        await scenario.close()
+
+
+def _inbound_server_context(
+    *,
+    connection_id: str,
+    topic_id: str,
+    delivery_id: str,
+) -> PrivateRunAdmissionServerContext:
+    return PrivateRunAdmissionServerContext(
+        inbound_authority=PrivateRunInboundAuthority(
+            connection_id=connection_id,
+            provider="slack",
+            external_account_id="release-channel-user",
+            workspace_id="release-workspace",
+            external_conversation_id="release-conversation",
+            external_topic_id=topic_id,
+        ),
+        inbound_delivery=PrivateRunInboundDelivery(delivery_id),
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_channel_delivery_is_atomically_deduped_across_admission_instances(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(
+        migrated_postgres_database_url,
+    )
+    thread_id = "release-channel-delivery-dedupe"
+    try:
+        await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(
+                scenario.seed.project_agent_id,
+                "project",
+            ),
+        )
+        repository = ChannelConnectionRepository(scenario.seed.factory)
+        connection = await repository.upsert_connection(
+            scope=scenario.seed.owner_a_scope,
+            provider="slack",
+            external_account_id="release-channel-user",
+            workspace_id="release-workspace",
+        )
+        assert await repository.set_thread_id(
+            scope=scenario.seed.owner_a_scope,
+            connection_id=connection["id"],
+            provider="slack",
+            external_conversation_id="release-conversation",
+            external_topic_id="release-topic",
+            thread_id=thread_id,
+        )
+        server_context = _inbound_server_context(
+            connection_id=connection["id"],
+            topic_id="release-topic",
+            delivery_id="Release-Delivery-Opaque",
+        )
+
+        first, second = await asyncio.gather(
+            PrivateRunAdmissionService(scenario.seed.factory).admit(
+                scenario.seed.owner_a,
+                thread_id,
+                PrivateRunCreate(run_id=str(uuid.uuid4())),
+                server_context=server_context,
+            ),
+            PrivateRunAdmissionService(scenario.seed.factory).admit(
+                scenario.seed.owner_a,
+                thread_id,
+                PrivateRunCreate(run_id=str(uuid.uuid4())),
+                server_context=server_context,
+            ),
+        )
+
+        assert first.run.run_id == second.run.run_id
+        assert sorted(
+            (
+                first.inbound_delivery_replay,
+                second.inbound_delivery_replay,
+            )
+        ) == [False, True]
+        async with scenario.seed.factory() as session:
+            counts = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM channel_inbound_deliveries
+                         WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM runs
+                         WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM jobs
+                         WHERE run_id IN (
+                           SELECT run_id FROM runs
+                           WHERE thread_id=:thread_id
+                         )),
+                        (SELECT count(*) FROM run_asset_versions
+                         WHERE thread_id=:thread_id)"""
+                    ),
+                    {"thread_id": thread_id},
+                )
+            ).one()
+            stored_digest = await session.scalar(
+                text(
+                    """SELECT provider_delivery_digest
+                    FROM channel_inbound_deliveries
+                    WHERE thread_id=:thread_id"""
+                ),
+                {"thread_id": thread_id},
+            )
+        assert tuple(counts) == (1, 1, 1, 1)
+        assert (
+            stored_digest
+            == PrivateRunInboundDelivery(
+                "Release-Delivery-Opaque",
+            ).digest
+        )
+        assert stored_digest != "Release-Delivery-Opaque"
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_same_provider_delivery_id_isolated_by_conversation_topic(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(
+        migrated_postgres_database_url,
+    )
+    try:
+        repository = ChannelConnectionRepository(scenario.seed.factory)
+        connection = await repository.upsert_connection(
+            scope=scenario.seed.owner_a_scope,
+            provider="slack",
+            external_account_id="release-channel-user",
+            workspace_id="release-workspace",
+        )
+        admitted = []
+        for topic_id in ("release-topic-a", "release-topic-b"):
+            thread_id = f"release-channel-{topic_id}"
+            await scenario.thread_service.create(
+                scenario.seed.owner_a,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(
+                    scenario.seed.project_agent_id,
+                    "project",
+                ),
+            )
+            assert await repository.set_thread_id(
+                scope=scenario.seed.owner_a_scope,
+                connection_id=connection["id"],
+                provider="slack",
+                external_conversation_id="release-conversation",
+                external_topic_id=topic_id,
+                thread_id=thread_id,
+            )
+            admitted.append(
+                await PrivateRunAdmissionService(
+                    scenario.seed.factory,
+                ).admit(
+                    scenario.seed.owner_a,
+                    thread_id,
+                    PrivateRunCreate(run_id=str(uuid.uuid4())),
+                    server_context=_inbound_server_context(
+                        connection_id=connection["id"],
+                        topic_id=topic_id,
+                        delivery_id="shared-provider-delivery",
+                    ),
+                )
+            )
+
+        assert admitted[0].run.run_id != admitted[1].run.run_id
+        assert not any(result.inbound_delivery_replay for result in admitted)
+        async with scenario.seed.factory() as session:
+            count = await session.scalar(
+                text(
+                    """SELECT count(*)
+                    FROM channel_inbound_deliveries
+                    WHERE connection_id=:connection_id"""
+                ),
+                {"connection_id": connection["id"]},
+            )
+        assert count == 2
+    finally:
+        await scenario.close()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_channel_delivery_binding_rolls_back_with_failed_admission_hooks(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await M4ReleaseScenario.create(
+        migrated_postgres_database_url,
+    )
+    thread_id = "release-channel-delivery-rollback"
+
+    class FailingAudit:
+        async def run_admitted(
+            self,
+            session,
+            context,
+            run,
+            job,
+        ) -> None:
+            assert session.in_transaction()
+            assert run.job_id == job.job_id
+            raise PrivateWorkUnavailable(context.request_id)
+
+    try:
+        await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(
+                scenario.seed.project_agent_id,
+                "project",
+            ),
+        )
+        repository = ChannelConnectionRepository(scenario.seed.factory)
+        connection = await repository.upsert_connection(
+            scope=scenario.seed.owner_a_scope,
+            provider="slack",
+            external_account_id="release-channel-user",
+            workspace_id="release-workspace",
+        )
+        assert await repository.set_thread_id(
+            scope=scenario.seed.owner_a_scope,
+            connection_id=connection["id"],
+            provider="slack",
+            external_conversation_id="release-conversation",
+            external_topic_id="release-topic",
+            thread_id=thread_id,
+        )
+        server_context = _inbound_server_context(
+            connection_id=connection["id"],
+            topic_id="release-topic",
+            delivery_id="release-delivery-rollback",
+        )
+        failed_run_id = str(uuid.uuid4())
+        with pytest.raises(PrivateWorkUnavailable):
+            await PrivateRunAdmissionService(
+                scenario.seed.factory,
+                audit=FailingAudit(),
+            ).admit(
+                scenario.seed.owner_a,
+                thread_id,
+                PrivateRunCreate(run_id=failed_run_id),
+                server_context=server_context,
+            )
+
+        async with scenario.seed.factory() as session:
+            counts = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM channel_inbound_deliveries
+                         WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM runs
+                         WHERE thread_id=:thread_id),
+                        (SELECT count(*) FROM jobs
+                         WHERE run_id=:run_id),
+                        (SELECT count(*) FROM run_asset_versions
+                         WHERE thread_id=:thread_id)"""
+                    ),
+                    {
+                        "thread_id": thread_id,
+                        "run_id": failed_run_id,
+                    },
+                )
+            ).one()
+        assert tuple(counts) == (0, 0, 0, 0)
+
+        retried = await PrivateRunAdmissionService(
+            scenario.seed.factory,
+        ).admit(
+            scenario.seed.owner_a,
+            thread_id,
+            PrivateRunCreate(run_id=str(uuid.uuid4())),
+            server_context=server_context,
+        )
+        assert retried.inbound_delivery_replay is False
     finally:
         await scenario.close()
 

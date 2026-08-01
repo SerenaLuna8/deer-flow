@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from sqlalchemy import text
 from support.m4_private_threads import seed_m4_thread_database
 
 from app.private_work.context import PrivateWorkContext
+from app.private_work.inbound_dedupe import DuplicateInboundDelivery
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
     PersistedRunSnapshot,
@@ -66,6 +68,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
         multitask_strategy="reject",
         metadata={"safe": "value"},
         kwargs={"input": {"messages": []}},
+        origin_trace_id=context.request_id,
         error=None,
         model_name="exact-model",
         created_at=now,
@@ -84,6 +87,7 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
             run_id=run_id,
             idempotency_key=private_run_idempotency_key(run_id),
             status="queued",
+            origin_trace_id=context.request_id,
         ),
     )
     captured = None
@@ -145,7 +149,11 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
     }
     assert captured.kwargs["stream_mode"] == ["values"]
     assert captured.kwargs["stream_subgraphs"] is False
-    assert captured_server_context is None
+    assert isinstance(
+        captured_server_context,
+        PrivateRunAdmissionServerContext,
+    )
+    assert captured_server_context.origin_trace_id == context.request_id
     assert record.run_id == run_id
     assert record.status is RunStatus.pending
     assert record.task is None
@@ -168,6 +176,29 @@ async def test_gateway_private_run_is_admission_only_and_strips_client_authority
         PrivateRunAdmissionServerContext,
     )
     assert captured_server_context.non_interactive is True
+    assert captured_server_context.origin_trace_id == context.request_id
+
+    class ReplayAdmission:
+        async def admit(
+            self,
+            passed_context,
+            thread_id,
+            request,
+            *,
+            server_context=None,
+        ):
+            del passed_context, thread_id, request, server_context
+            return replace(admitted, inbound_delivery_replay=True)
+
+    with pytest.raises(DuplicateInboundDelivery):
+        await http_runtime.start_private_run(
+            body,
+            "private-thread",
+            SimpleNamespace(),
+            context,
+            run_id=run_id,
+            admission_service=ReplayAdmission(),
+        )
 
 
 @pytest.mark.postgres

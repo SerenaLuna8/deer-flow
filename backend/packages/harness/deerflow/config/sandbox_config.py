@@ -110,5 +110,9 @@ class SandboxConfig(BaseModel):
             "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
         ),
     )
+    provisioner_api_key: str | None = Field(
+        default=None,
+        description=("API key sent as X-API-Key to the Provisioner service. It must match PROVISIONER_API_KEY in the Provisioner process; the Provisioner rejects every /api/* request when its key is unset or mismatched."),
+    )
 
     model_config = ConfigDict(extra="allow")

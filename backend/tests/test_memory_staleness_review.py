@@ -10,7 +10,6 @@ Covers:
 """
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
@@ -235,11 +234,14 @@ class TestApplyUpdatesStaleness:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=10),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(
+                max_facts=100,
+                staleness_max_removals_per_cycle=10,
+            ),
+        )
 
         assert len(result["facts"]) == 1
         assert result["facts"][0]["id"] == "fact_keep"
@@ -270,11 +272,14 @@ class TestApplyUpdatesStaleness:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=2),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(
+                max_facts=100,
+                staleness_max_removals_per_cycle=2,
+            ),
+        )
 
         # 5 - 2 = 3 facts remain; the 2 lowest-confidence removed
         assert len(result["facts"]) == 3
@@ -298,11 +303,11 @@ class TestApplyUpdatesStaleness:
             "staleFactsToRemove": [],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(max_facts=100),
+        )
 
         assert len(result["facts"]) == 1
 
@@ -318,11 +323,11 @@ class TestApplyUpdatesStaleness:
             # no staleFactsToRemove key
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(max_facts=100),
+        )
 
         assert len(result["facts"]) == 1
 
@@ -344,11 +349,14 @@ class TestApplyUpdatesStaleness:
             "staleFactsToRemove": [{"id": "fact_stale", "reason": "old"}],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=10),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(
+                max_facts=100,
+                staleness_max_removals_per_cycle=10,
+            ),
+        )
 
         assert len(result["facts"]) == 1
         assert result["facts"][0]["id"] == "fact_keep"
@@ -375,9 +383,10 @@ class TestApplyUpdatesStaleness:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(
                 max_facts=100,
                 staleness_review_enabled=True,
                 staleness_age_days=90,
@@ -385,8 +394,7 @@ class TestApplyUpdatesStaleness:
                 staleness_max_removals_per_cycle=10,
                 staleness_protected_categories=["correction"],
             ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        )
 
         # fact_stale removed, fact_correction kept (protected)
         assert len(result["facts"]) == 1
@@ -413,9 +421,10 @@ class TestApplyUpdatesStaleness:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(
                 max_facts=100,
                 staleness_review_enabled=True,
                 staleness_age_days=90,
@@ -423,8 +432,7 @@ class TestApplyUpdatesStaleness:
                 staleness_max_removals_per_cycle=10,
                 staleness_protected_categories=["correction"],
             ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        )
 
         # fact_stale removed, fact_fresh kept (not in candidate set)
         assert len(result["facts"]) == 1
@@ -452,9 +460,10 @@ class TestApplyUpdatesStaleness:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
+        result = updater._apply_updates(
+            current_memory,
+            update_data,
+            memory_config=_memory_config(
                 max_facts=100,
                 staleness_review_enabled=False,
                 staleness_age_days=90,
@@ -462,8 +471,7 @@ class TestApplyUpdatesStaleness:
                 staleness_max_removals_per_cycle=10,
                 staleness_protected_categories=["correction"],
             ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        )
 
         # Guardrail runs regardless of feature flag:
         # fact_stale is a valid candidate (200 days old) → removed

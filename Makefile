@@ -153,7 +153,7 @@ install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
-	@cd frontend && pnpm install
+	@$(PYTHON) ./scripts/pnpm.py install
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="

@@ -1,12 +1,10 @@
 """Shared config + gateway-drive helpers for the record/replay e2e.
 
 Record (``scripts/record_gateway.py`` + ``scripts/build_fixture_from_jsonl.py``)
-and replay (``tests/test_replay_golden.py``)
-MUST drive the gateway through an identical, prompt-affecting config — otherwise
-the system prompt differs and the recorded input hashes never match on replay.
-Centralising the config builder + drive loop here makes that identity hold by
-construction; only the ``models[].use`` block differs (real model vs
-``ReplayChatModel``).
+and replay (``tests/test_replay_golden.py``) MUST drive the gateway through an
+identical prompt-affecting process config. Model definitions and Agent runtime
+policy are PostgreSQL-owned; the replay setup below seeds those authorities in
+the disposable test database rather than reviving removed YAML settings.
 """
 
 from __future__ import annotations
@@ -21,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 from support.project_agent_factory import create_project_agent_from_design
 
@@ -38,28 +37,11 @@ MODE_CONTEXT: dict[str, tuple[bool, bool, bool]] = {
     "ultra": (True, True, True),
 }
 
-# The replay model block: same model NAME as recording (so nothing in the prompt
-# shifts), only ``use`` swapped to the deterministic replay provider.
-REPLAY_MODEL_BLOCK = """\
-  - name: scenario-model
-    display_name: Scenario Model
-    use: replay_provider:ReplayChatModel
-    model: replay
-    supports_thinking: true"""
+_REPLAY_ADMIN_ID = uuid.UUID("5fb66f7d-5655-54df-a7da-66066c114f17")
 
 
-def real_model_block(model: str) -> str:
-    return f"""\
-  - name: scenario-model
-    display_name: Scenario Model
-    use: langchain_openai:ChatOpenAI
-    model: {model}
-    api_key: $OPENAI_API_KEY
-    base_url: $OPENAI_API_BASE"""
-
-
-def build_config_yaml(*, model_block: str, home: Path) -> str:
-    """Full gateway config. Only ``model_block`` varies between record/replay.
+def build_config_yaml(*, home: Path) -> str:
+    """Build the current, non-database process config for record/replay.
 
     Everything that shapes the system prompt is pinned so record, replay, and CI
     produce byte-identical prompts regardless of the machine:
@@ -67,12 +49,11 @@ def build_config_yaml(*, model_block: str, home: Path) -> str:
     - skills — pointed at an empty ``<home>/skills`` so filesystem skills (incl.
       gitignored custom skills present only on a dev box) never leak into the
       prompt. Project MCP assets are absent from the admitted test Run.
-    - memory / summarization — disabled (background, non-deterministic timing)
+    - model catalog / memory / summarization — PostgreSQL-owned and prepared by
+      ``prepare_replay_runtime_catalog`` for replay.
     """
     return f"""\
 log_level: warning
-models:
-{model_block}
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 skills:
@@ -91,18 +72,219 @@ tools:
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool
-# Memory + summarization make background / debounced model calls whose timing is
-# non-deterministic; disable them so record and replay see the same model-call
-# set. Title stays enabled, but the default title.model_name: null path is a
-# local state update rather than a recorded model call.
-memory:
-  enabled: false
-  injection_enabled: false
-summarization:
-  enabled: false
 database:
   url: $DATABASE_URL
 """
+
+
+def _validated_replay_database_url(
+    database_url: str | None,
+    *,
+    required_prefix: str = "deerflow_test_",
+) -> str:
+    """Resolve one disposable PostgreSQL URL before any replay mutation."""
+    from sqlalchemy.engine import make_url
+
+    resolved_url = database_url or os.environ.get("DATABASE_URL")
+    if not resolved_url:
+        raise RuntimeError("DATABASE_URL is required for replay database setup")
+    try:
+        parsed = make_url(resolved_url)
+    except Exception:
+        raise RuntimeError("replay database setup requires a valid PostgreSQL URL") from None
+    if parsed.get_backend_name() != "postgresql" or not parsed.database or not parsed.database.startswith(required_prefix):
+        raise RuntimeError(f"replay database setup requires {required_prefix}* PostgreSQL database")
+    if resolved_url.startswith("postgresql://"):
+        return resolved_url.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+    return resolved_url
+
+
+def install_replay_model_adapter() -> None:
+    """Point the credential-free ``codex_cli`` test model at ReplayChatModel.
+
+    The override lives only in replay Gateway/Worker processes. The database
+    still contains a supported, credential-free provider adapter, so the test
+    harness does not add a test implementation to the production allowlist.
+    """
+    from app.system_settings import validation
+
+    validation.PROVIDER_ADAPTERS["codex_cli"] = validation.ProviderAdapterSpec(
+        "replay_provider:ReplayChatModel",
+        False,
+    )
+
+
+@contextmanager
+def replay_model_adapter() -> Iterator[None]:
+    """Temporarily install the replay adapter in an in-process test."""
+    from app.system_settings import validation
+
+    original = validation.PROVIDER_ADAPTERS["codex_cli"]
+    install_replay_model_adapter()
+    try:
+        yield
+    finally:
+        validation.PROVIDER_ADAPTERS["codex_cli"] = original
+
+
+async def prepare_replay_runtime_catalog(
+    database_url: str | None = None,
+) -> None:
+    """Idempotently seed the PostgreSQL authorities needed by replay.
+
+    The caller must point at a disposable, fully initialized DeerFlow database.
+    ``scenario-model`` becomes the default model, while memory and summarization
+    are disabled to remove background/debounced model calls from the fixture.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.audit.models import resolve_system_audit_context
+    from app.audit.service import AuditService
+    from app.reliability.owner_refs import AuditHmacKeyring
+    from app.system_runtime_settings.bootstrap import (
+        bootstrap_system_runtime_policies,
+    )
+    from app.system_runtime_settings.models import (
+        AgentRuntimePolicyValue,
+        RuntimePolicySection,
+    )
+    from app.system_runtime_settings.service import SystemRuntimePolicyService
+    from app.system_settings.models import CreateSystemModel
+    from app.system_settings.service import SystemModelCatalogService
+    from deerflow.persistence.user.model import UserRow
+
+    resolved_url = _validated_replay_database_url(database_url)
+
+    engine = create_async_engine(resolved_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await bootstrap_system_runtime_policies(session_factory)
+        async with session_factory() as session, session.begin():
+            admin = await session.get(
+                UserRow,
+                str(_REPLAY_ADMIN_ID),
+                with_for_update=True,
+            )
+            if admin is None:
+                session.add(
+                    UserRow(
+                        id=str(_REPLAY_ADMIN_ID),
+                        email="replay-runtime-admin@example.invalid",
+                        password_hash=None,
+                        system_role="system_admin",
+                        oauth_provider=None,
+                        oauth_id=None,
+                        needs_setup=False,
+                        token_version=0,
+                    )
+                )
+                await session.flush()
+            elif admin.system_role != "system_admin":
+                raise RuntimeError("replay runtime principal is not a system admin")
+
+        audit_context = resolve_system_audit_context(
+            SimpleNamespace(
+                id=_REPLAY_ADMIN_ID,
+                system_role="system_admin",
+            ),
+            request_id="replay-runtime-catalog",
+        )
+        model_catalog = SystemModelCatalogService(session_factory)
+        catalog = await model_catalog.list_models(audit_context)
+        matches = tuple(item for item in catalog.items if item.logical_name == "scenario-model")
+        if len(matches) > 1:
+            raise RuntimeError("replay scenario model catalog is ambiguous")
+        if matches:
+            model = matches[0]
+            version = model.current_version
+            if model.status != "active" or version.provider_adapter != "codex_cli" or version.provider_model != "replay" or version.settings or not version.supports_thinking or version.credential_id is not None:
+                raise RuntimeError("existing scenario-model is not replay-compatible")
+        else:
+            model = await model_catalog.create_model(
+                audit_context,
+                CreateSystemModel(
+                    logical_name="scenario-model",
+                    display_name="Scenario Model",
+                    description="Deterministic record/replay test model",
+                    status="active",
+                    provider_adapter="codex_cli",
+                    provider_model="replay",
+                    settings={},
+                    supports_thinking=True,
+                    supports_reasoning_effort=False,
+                    supports_vision=False,
+                    credential_id=None,
+                    credential_version_id=None,
+                    credential_env_key=None,
+                ),
+            )
+            catalog = await model_catalog.list_models(audit_context)
+
+        if catalog.default_model_config_id != model.id:
+            await model_catalog.set_default(
+                audit_context,
+                model.id,
+                expected_catalog_revision=catalog.catalog_revision,
+            )
+
+        runtime_policy = SystemRuntimePolicyService(
+            session_factory,
+            AuditService(
+                session_factory,
+                AuditHmacKeyring.from_environment(),
+            ),
+        )
+        policies = await runtime_policy.list_policies(audit_context)
+        current = policies.sections[RuntimePolicySection.AGENT_RUNTIME]
+        value = current.value
+        if not isinstance(value, AgentRuntimePolicyValue):
+            raise RuntimeError("agent runtime policy is unavailable for replay")
+        desired = value.model_copy(
+            update={
+                "summarization": value.summarization.model_copy(
+                    update={"enabled": False},
+                ),
+                "memory": value.memory.model_copy(
+                    update={
+                        "enabled": False,
+                        "search_enabled": False,
+                        "injection_enabled": False,
+                    },
+                ),
+            },
+        )
+        if desired != value:
+            await runtime_policy.update_policy(
+                audit_context,
+                RuntimePolicySection.AGENT_RUNTIME,
+                expected_revision=current.revision,
+                value=desired,
+            )
+    finally:
+        await engine.dispose()
+
+
+async def bootstrap_replay_test_database(
+    database_url: str | None = None,
+) -> None:
+    """Install the test schema only into an explicitly named replay database."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from deerflow.persistence.bootstrap import bootstrap_schema
+
+    resolved_url = _validated_replay_database_url(
+        database_url,
+        required_prefix="deerflow_test_replay_",
+    )
+    engine = create_async_engine(resolved_url)
+    try:
+        await bootstrap_schema(engine)
+    finally:
+        await engine.dispose()
 
 
 def prepare_hermetic_skills(home: Path) -> None:
@@ -112,7 +294,7 @@ def prepare_hermetic_skills(home: Path) -> None:
 
 
 @contextmanager
-def replay_worker() -> Iterator[None]:
+def replay_worker(*, replay_adapter: bool = True) -> Iterator[None]:
     """Run the real independent Worker and wait for durable readiness."""
     backend_root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
@@ -123,11 +305,17 @@ def replay_worker() -> Iterator[None]:
         environment.get("PYTHONPATH", ""),
     )
     environment["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
+    command = [sys.executable, "-m", "app.worker.app"]
+    if replay_adapter:
+        command = [
+            sys.executable,
+            str(backend_root / "tests" / "replay_worker_process.py"),
+        ]
     process = subprocess.Popen(
-        [sys.executable, "-m", "app.worker.app"],
+        command,
         cwd=backend_root,
         env=environment,
-        stdout=subprocess.PIPE,
+        stdout=None,
         stderr=subprocess.STDOUT,
         text=True,
     )
@@ -142,8 +330,7 @@ def replay_worker() -> Iterator[None]:
         deadline = time.monotonic() + 20
         while True:
             if process.poll() is not None:
-                output = process.stdout.read() if process.stdout is not None else ""
-                raise RuntimeError(f"replay Worker exited before readiness: {output[-2000:]}")
+                raise RuntimeError(f"replay Worker exited before readiness: status={process.returncode}")
             with psycopg.connect(database_url) as connection:
                 ready = connection.execute(
                     """

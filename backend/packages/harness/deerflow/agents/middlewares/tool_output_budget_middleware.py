@@ -1,7 +1,7 @@
 """Middleware that enforces a per-result budget on tool outputs.
 
 Oversized tool results are persisted to disk and replaced with a compact
-preview containing a file reference.  When disk persistence is
+typed synopsis containing a file reference.  When disk persistence is
 unavailable the middleware falls back to head+tail truncation so the
 model context is never blown by a single large tool return.
 """
@@ -13,7 +13,7 @@ import logging
 import os
 import shlex
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
 
@@ -21,10 +21,14 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.file_authority import require_private_file_authority
+from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 if TYPE_CHECKING:
@@ -218,6 +222,29 @@ def _externalize_to_sandbox(
     return virtual_path
 
 
+async def _externalize_with_authority(
+    content: str,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    storage_subdir: str,
+    authority: object,
+) -> str | None:
+    """Persist a private Run result through its app-owned file authority."""
+
+    if os.path.isabs(storage_subdir) or ".." in storage_subdir:
+        return None
+    filename = _build_externalized_filename(
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+    )
+    relative_path = f"{storage_subdir}/{filename}"
+    writer = getattr(authority, "write_internal", None)
+    if not callable(writer):
+        raise RuntimeError("Private file authority is unavailable")
+    return await writer(relative_path, content.encode("utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # Preview / fallback builders
 # ---------------------------------------------------------------------------
@@ -231,24 +258,14 @@ def _build_preview(
     head_chars: int,
     tail_chars: int,
 ) -> str:
-    """Build a preview with a file reference for externalized output."""
-    total = len(content)
-    head_end = _snap_to_line_boundary(content, min(head_chars, total))
-    tail_start = max(head_end, total - tail_chars)
-    tail_start_snapped = _snap_to_line_boundary(content, tail_start)
-    if tail_start_snapped > head_end:
-        tail_start = tail_start_snapped
-
-    head = content[:head_end]
-    tail = content[tail_start:] if tail_start < total else ""
-
-    omitted = total - len(head) - len(tail)
-    ref = f"\n\n[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens). Use read_file with start_line and end_line to access specific sections. {omitted} chars omitted from this preview.]\n\n"
-
-    parts = [head, ref]
-    if tail:
-        parts.append(tail)
-    return "".join(parts)
+    """Build a typed synopsis preview with a file reference for externalized output."""
+    return render_tool_output_preview(
+        content,
+        tool_name=tool_name,
+        virtual_path=virtual_path,
+        head_chars=head_chars,
+        tail_chars=tail_chars,
+    )
 
 
 def _build_fallback(
@@ -310,6 +327,15 @@ def _resolve_outputs_path(request: ToolCallRequest) -> str | None:
         return None
     outputs_path = thread_data.get("outputs_path")
     return outputs_path if isinstance(outputs_path, str) else None
+
+
+def _runtime_context(request: ToolCallRequest) -> object | None:
+    runtime = getattr(request, "runtime", None)
+    return getattr(runtime, "context", None)
+
+
+def _is_private_runtime_context(context: object | None) -> bool:
+    return isinstance(context, Mapping) and "private_scope" in context
 
 
 def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
@@ -432,6 +458,65 @@ def _budget_content(
     return None
 
 
+async def _budget_private_content(
+    content: str,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    authority: object,
+    config: ToolOutputConfig,
+) -> str | None:
+    """Apply the budget without ever treating a virtual path as a host path."""
+
+    threshold = config.tool_overrides.get(
+        tool_name,
+        config.externalize_min_chars,
+    )
+    if threshold <= 0 and config.fallback_max_chars <= 0:
+        return None
+    if len(content) <= threshold and len(content) <= config.fallback_max_chars:
+        return None
+
+    if threshold > 0 and len(content) > threshold:
+        try:
+            virtual_path = await _externalize_with_authority(
+                content,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                storage_subdir=config.storage_subdir,
+                authority=authority,
+            )
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            logger.exception("Private tool-output externalization failed; falling back to inline truncation")
+            virtual_path = None
+        if virtual_path is not None:
+            logger.info(
+                "Externalized private %s output (%d chars) to %s",
+                tool_name,
+                len(content),
+                virtual_path,
+            )
+            return _build_preview(
+                content,
+                tool_name=tool_name,
+                virtual_path=virtual_path,
+                head_chars=config.preview_head_chars,
+                tail_chars=config.preview_tail_chars,
+            )
+
+    if config.fallback_max_chars > 0 and len(content) > config.fallback_max_chars:
+        return _build_fallback(
+            content,
+            tool_name=tool_name,
+            max_chars=config.fallback_max_chars,
+            head_chars=config.fallback_head_chars,
+            tail_chars=config.fallback_tail_chars,
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Result patchers
 # ---------------------------------------------------------------------------
@@ -545,6 +630,72 @@ def _patch_result(
     return dc_replace(result, update={**update, "messages": new_messages})
 
 
+async def _patch_tool_message_with_authority(
+    msg: ToolMessage,
+    config: ToolOutputConfig,
+    authority: object,
+) -> ToolMessage:
+    tool_name = msg.name or "unknown"
+    if tool_name in config.exempt_tools:
+        return msg
+    text = _message_text(msg.content)
+    if text is None:
+        return msg
+    replacement = await _budget_private_content(
+        text,
+        tool_name=tool_name,
+        tool_call_id=msg.tool_call_id or "",
+        authority=authority,
+        config=config,
+    )
+    if replacement is None:
+        return msg
+    update: dict[str, Any] = {"content": replacement}
+    if getattr(msg, "response_metadata", None):
+        update["response_metadata"] = dict(msg.response_metadata)
+    if getattr(msg, "additional_kwargs", None):
+        update["additional_kwargs"] = dict(msg.additional_kwargs)
+    return msg.model_copy(update=update)
+
+
+async def _patch_result_with_authority(
+    result: ToolMessage | Command,
+    config: ToolOutputConfig,
+    authority: object,
+) -> ToolMessage | Command:
+    if isinstance(result, ToolMessage):
+        return await _patch_tool_message_with_authority(
+            result,
+            config,
+            authority,
+        )
+    update = getattr(result, "update", None)
+    if not isinstance(update, dict):
+        return result
+    messages = update.get("messages")
+    if not isinstance(messages, list):
+        return result
+    new_messages: list[Any] = []
+    changed = False
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            patched = await _patch_tool_message_with_authority(
+                message,
+                config,
+                authority,
+            )
+            changed = changed or patched is not message
+            new_messages.append(patched)
+        else:
+            new_messages.append(message)
+    if not changed:
+        return result
+    return dc_replace(
+        result,
+        update={**update, "messages": new_messages},
+    )
+
+
 def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list[Any] | None:
     """Apply budget to historical ToolMessages in a model request. Returns ``None`` if unchanged.
 
@@ -601,6 +752,11 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
+        if _is_private_runtime_context(_runtime_context(request)):
+            # Project execution is Worker-owned and async-only. Reject before
+            # a synchronous handler can perform a side effect or return an
+            # unbounded result.
+            raise AuthorizationRevoked
         result = handler(request)
         if not self._config.enabled:
             return result
@@ -616,11 +772,27 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
+        runtime_context = _runtime_context(request)
+        authority = None
+        if self._config.enabled:
+            # Resolve the server-owned authority before a private tool can
+            # perform any side effect. Discovering a missing authority only
+            # after the handler returned would be too late to fail closed.
+            authority = require_private_file_authority(
+                runtime_context,
+                method="write_internal",
+            )
         result = await handler(request)
         if not self._config.enabled:
             return result
         if not _needs_budget(result, self._config):
             return result
+        if authority is not None:
+            return await _patch_result_with_authority(
+                result,
+                self._config,
+                authority,
+            )
         outputs_path = _resolve_outputs_path(request)
         # _resolve_sandbox only touches runtime.state and the provider's
         # in-memory sandbox registry, so it is safe to call on the event

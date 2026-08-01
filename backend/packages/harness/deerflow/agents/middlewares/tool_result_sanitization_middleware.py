@@ -9,15 +9,17 @@ a forged ``<system-reminder>`` block (or a ``--- END USER INPUT ---`` marker) an
 have it reach the model as authoritative framework context.
 
 This middleware narrows that gap by applying the *same* structural
-neutralization (``neutralize_untrusted_tags``) to the results of the first-party
-network tools, so a fetched ``<system-reminder>`` is escaped to
-``&lt;system-reminder&gt;`` exactly like it would be in direct user input. It
-deliberately targets only the remote-content tools: local tool output (bash,
-file reads) is left untouched so legitimate code/log content is never mangled.
+neutralization (``neutralize_untrusted_tags``) to first-party network-tool
+results, Worker-registered project-private MCP proxy results, and canonical
+upload reads. A fetched ``<system-reminder>`` is escaped to
+``&lt;system-reminder&gt;`` exactly like it would be in direct user input.
+Other local tool output (for example bash and ordinary file reads) is left
+untouched so legitimate code and log content is never mangled.
 
-Scope note: matching is a name-based allowlist, so MCP-provided remote-content
-tools registered under other names are not yet covered — see
-``_REMOTE_CONTENT_TOOL_NAMES``.
+Scope note: built-in network tools use a name allowlist; project-private MCP
+tools use server-owned registered-tool metadata, never model-supplied tool-call
+metadata. Non-private MCP tools under arbitrary names are not broadened by that
+provenance rule.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
+from pathlib import PurePosixPath
 from typing import override
 
 from langchain.agents import AgentState
@@ -36,24 +39,39 @@ from langgraph.types import Command
 logger = logging.getLogger(__name__)
 
 # Tool names whose results are attacker-influenceable remote content. All
-# first-party web providers normalize to these three names (see
-# community/*/tools.py), so the set stays provider-agnostic.
+# first-party web providers normalize to these names (see community/*/tools.py),
+# so the set stays provider-agnostic.
 #
-# Known limitation: the gate is name-based. An MCP server may expose a
-# remote-content tool under an arbitrary name (e.g. ``fetch_url`` /
-# ``scrape_page``); its results are equally untrusted but are NOT matched here,
-# so they reach the model unneutralized. A name heuristic (matching
+# Worker-created project-private MCP proxies are covered separately through
+# registered-tool provenance in ``_should_sanitize``. Non-private MCP tools
+# under arbitrary names are not matched here. A name heuristic (matching
 # fetch/search/crawl substrings) is intentionally avoided because it would also
-# mangle legitimate *local* tool output (e.g. a ``file_search`` result). Robust
-# MCP coverage should tag remote-content tools via metadata at registration
-# rather than by name; tracked as a follow-up.
+# mangle legitimate local output such as ``file_search`` results.
 _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
     {
+        "web_capture",
         "web_fetch",
         "web_search",
         "image_search",
     }
 )
+
+_UPLOADS_VIRTUAL_PREFIX = ("/", "mnt", "user-data", "uploads")
+
+
+def _is_registered_upload_read(request: ToolCallRequest) -> bool:
+    """Trust only the canonical read tool plus a canonical uploads path."""
+
+    from deerflow.sandbox.tools import read_file_tool
+
+    if getattr(request, "tool", None) is not read_file_tool:
+        return False
+    args = request.tool_call.get("args")
+    path = args.get("path") if isinstance(args, dict) else None
+    if not isinstance(path, str):
+        return False
+    parsed = PurePosixPath(path)
+    return ".." not in parsed.parts and parsed.parts[:4] == _UPLOADS_VIRTUAL_PREFIX
 
 
 def _neutralize_content(content: object) -> object:
@@ -102,30 +120,39 @@ def _sanitize_result(result: ToolMessage | Command) -> ToolMessage | Command:
     update = getattr(result, "update", None)
     if isinstance(update, dict):
         messages = update.get("messages")
-        if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
-            new_messages = [_sanitize_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages]
+        if isinstance(messages, ToolMessage):
+            new_messages = _sanitize_tool_message(messages)
             if new_messages != messages:
                 return dc_replace(result, update={**update, "messages": new_messages})
+        elif isinstance(messages, (list, tuple)) and any(isinstance(message, ToolMessage) for message in messages):
+            sanitized = tuple(_sanitize_tool_message(message) if isinstance(message, ToolMessage) else message for message in messages)
+            new_messages = list(sanitized) if isinstance(messages, list) else sanitized
+            if new_messages != messages:
+                return dc_replace(
+                    result,
+                    update={**update, "messages": new_messages},
+                )
     return result
 
 
 class ToolResultSanitizationMiddleware(AgentMiddleware[AgentState]):
     """Escape injection/framework tags in remote tool results before the model sees them.
 
-    Results of the first-party network tools (``web_fetch`` / ``web_search`` /
-    ``image_search``) are rewritten; every other tool's output is returned
-    unchanged. Mirrors the user-input guardrail so untrusted remote content and
-    untrusted user input receive the same structural neutralization.
+    Results of first-party network tools, Worker-registered project-private MCP
+    proxies, and canonical upload reads are rewritten. Other tool output is
+    returned unchanged. This mirrors the user-input guardrail so untrusted
+    indirect content and direct user input receive the same structural
+    neutralization.
 
-    Scope is a name-based allowlist (``_REMOTE_CONTENT_TOOL_NAMES``): it reliably
-    covers the built-in web tools without false positives on local tools. It does
-    NOT cover MCP-provided remote-content tools registered under other names —
-    see the note on ``_REMOTE_CONTENT_TOOL_NAMES`` for why a name heuristic is
-    avoided and the metadata-tagging follow-up.
+    Built-in web tools are recognized by ``_REMOTE_CONTENT_TOOL_NAMES``.
+    Project-private MCP tools are recognized from the actual registered tool
+    object, not model-controlled tool-call metadata.
     """
 
     def _should_sanitize(self, request: ToolCallRequest) -> bool:
-        return request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES
+        from deerflow.tools.mcp_metadata import is_private_mcp_tool
+
+        return request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES or is_private_mcp_tool(getattr(request, "tool", None)) or _is_registered_upload_read(request)
 
     @override
     def wrap_tool_call(

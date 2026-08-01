@@ -379,7 +379,7 @@ class DeerFlowTUI(App):
             models = []
         options = [(m["name"], (m.get("display_name") or m["name"])) for m in models if m.get("name")]
         if not options:
-            self._dispatch(SystemMessage("No models configured.", tone="error"))
+            self._dispatch(SystemMessage("No active models. Ask a platform administrator to configure one in System Settings.", tone="error"))
             return
 
         def on_choice(choice: str | None) -> None:

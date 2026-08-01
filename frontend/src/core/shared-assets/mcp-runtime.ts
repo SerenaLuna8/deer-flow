@@ -10,10 +10,43 @@ export type ScopedMcpVersion = {
   version: McpAssetVersion;
 };
 
+export type McpRuntimeBlockMessages = {
+  unsupportedProjectTransport: string;
+  unsupportedSystemTransport: string;
+  missingProjectUrl: string;
+  invalidProjectUrl: string;
+  projectOAuth: string;
+  projectHeadersOnly: string;
+  missingSystemCommand: string;
+  missingSystemUrl: string;
+  systemEnvOnly: string;
+  systemRemoteCredentialsOnly: string;
+};
+
 export const UNSUPPORTED_MCP_VERSION_MESSAGE =
   "当前仅支持 SSE 或 HTTP。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
 export const UNSUPPORTED_SYSTEM_MCP_VERSION_MESSAGE =
   "当前 Private runtime 仅支持 stdio、SSE 或 HTTP。此系统历史版本可以查看，但不能绑定或用于 Agent。";
+
+const DEFAULT_RUNTIME_BLOCK_MESSAGES: McpRuntimeBlockMessages = {
+  unsupportedProjectTransport: UNSUPPORTED_MCP_VERSION_MESSAGE,
+  unsupportedSystemTransport: UNSUPPORTED_SYSTEM_MCP_VERSION_MESSAGE,
+  missingProjectUrl:
+    "当前传输方式缺少 URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+  invalidProjectUrl:
+    "当前 Project MCP 需要无凭据、无查询参数的绝对 HTTPS URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+  projectOAuth:
+    "当前 Project MCP 不支持版本内 OAuth 配置。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+  projectHeadersOnly:
+    "当前 Project MCP Credential 槽位仅支持 headers。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+  missingSystemCommand:
+    "当前 stdio 系统 MCP 缺少 command，不能绑定或用于 Agent。",
+  missingSystemUrl: "当前远程系统 MCP 缺少 URL，不能绑定或用于 Agent。",
+  systemEnvOnly:
+    "当前 stdio 系统 MCP Credential 槽位仅支持 env，不能绑定或用于 Agent。",
+  systemRemoteCredentialsOnly:
+    "当前远程系统 MCP Credential 槽位仅支持 headers 或 oauth，不能绑定或用于 Agent。",
+};
 
 export function isMcpRuntimeTransport(
   transport: string,
@@ -49,6 +82,7 @@ function isProjectRemoteMcpUrl(value: string): boolean {
 export function mcpVersionRuntimeBlockReason(
   version: Pick<McpAssetVersion, "definition" | "credential_slots">,
   scope: AssetScope,
+  messages: McpRuntimeBlockMessages = DEFAULT_RUNTIME_BLOCK_MESSAGES,
 ): string | null {
   const transport = version.definition.transport;
   const credentialSchemas = [
@@ -58,23 +92,23 @@ export function mcpVersionRuntimeBlockReason(
 
   if (scope === "project") {
     if (!isMcpRuntimeTransport(transport)) {
-      return UNSUPPORTED_MCP_VERSION_MESSAGE;
+      return messages.unsupportedProjectTransport;
     }
     if (!version.definition.url?.trim()) {
-      return "当前传输方式缺少 URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
+      return messages.missingProjectUrl;
     }
     if (!isProjectRemoteMcpUrl(version.definition.url)) {
-      return "当前 Project MCP 需要无凭据、无查询参数的绝对 HTTPS URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
+      return messages.invalidProjectUrl;
     }
     if (Object.keys(version.definition.oauth).length > 0) {
-      return "当前 Project MCP 不支持版本内 OAuth 配置。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
+      return messages.projectOAuth;
     }
     if (
       credentialSchemas.some(
         (sections) => sections.length !== 1 || sections[0] !== "headers",
       )
     ) {
-      return "当前 Project MCP Credential 槽位仅支持 headers。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
+      return messages.projectHeadersOnly;
     }
     return null;
   }
@@ -82,16 +116,16 @@ export function mcpVersionRuntimeBlockReason(
   if (
     !(SYSTEM_MCP_RUNTIME_TRANSPORTS as readonly string[]).includes(transport)
   ) {
-    return UNSUPPORTED_SYSTEM_MCP_VERSION_MESSAGE;
+    return messages.unsupportedSystemTransport;
   }
   if (transport === "stdio" && !version.definition.command?.trim()) {
-    return "当前 stdio 系统 MCP 缺少 command，不能绑定或用于 Agent。";
+    return messages.missingSystemCommand;
   }
   if (
     (transport === "sse" || transport === "http") &&
     !version.definition.url?.trim()
   ) {
-    return "当前远程系统 MCP 缺少 URL，不能绑定或用于 Agent。";
+    return messages.missingSystemUrl;
   }
   const allowedCredentialSection =
     transport === "stdio" ? new Set(["env"]) : new Set(["headers", "oauth"]);
@@ -103,8 +137,8 @@ export function mcpVersionRuntimeBlockReason(
     )
   ) {
     return transport === "stdio"
-      ? "当前 stdio 系统 MCP Credential 槽位仅支持 env，不能绑定或用于 Agent。"
-      : "当前远程系统 MCP Credential 槽位仅支持 headers 或 oauth，不能绑定或用于 Agent。";
+      ? messages.systemEnvOnly
+      : messages.systemRemoteCredentialsOnly;
   }
   return null;
 }

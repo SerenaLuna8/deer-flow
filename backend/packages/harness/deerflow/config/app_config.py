@@ -1,14 +1,20 @@
 import hashlib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationInfo,
+    model_validator,
+)
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
@@ -39,14 +45,13 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.worker_config import WorkerConfig
 
-load_dotenv()
-
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 LEGACY_CONFIG_TOMBSTONES = frozenset(
     {
         "agents_api",
+        "authorization",
         "run_events",
         "stream_bridge",
         "extensions",
@@ -75,6 +80,88 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
         "quotas.max_mcp_calls_daily_limit",
     }
 )
+
+YAML_CONFIG_TOMBSTONES = frozenset({"models"})
+
+DATABASE_RUNTIME_POLICY_PATHS = frozenset(
+    {
+        "input_polish.enabled",
+        "input_polish.max_chars",
+        "input_polish.model_name",
+        "loop_detection.enabled",
+        "loop_detection.hard_limit",
+        "loop_detection.max_tracked_threads",
+        "loop_detection.tool_freq_hard_limit",
+        "loop_detection.tool_freq_overrides",
+        "loop_detection.tool_freq_warn",
+        "loop_detection.warn_threshold",
+        "loop_detection.window_size",
+        "max_recursion_limit",
+        "memory.debounce_seconds",
+        "memory.enabled",
+        "memory.fact_confidence_threshold",
+        "memory.guaranteed_categories",
+        "memory.guaranteed_token_budget",
+        "memory.injection_enabled",
+        "memory.max_facts",
+        "memory.max_injection_tokens",
+        "memory.model_name",
+        "memory.search_enabled",
+        "memory.staleness_age_days",
+        "memory.staleness_max_removals_per_cycle",
+        "memory.staleness_min_candidates",
+        "memory.staleness_protected_categories",
+        "memory.staleness_review_enabled",
+        "memory.token_counting",
+        "read_before_write.enabled",
+        "safety_finish_reason.enabled",
+        "subagents.max_total_per_run",
+        "suggestions.enabled",
+        "summarization.enabled",
+        "summarization.keep",
+        "summarization.model_name",
+        "summarization.skill_file_read_tool_names",
+        "summarization.trigger",
+        "summarization.trim_tokens_to_summarize",
+        "title.enabled",
+        "title.max_chars",
+        "title.max_words",
+        "title.model_name",
+        "token_budget.enabled",
+        "token_budget.hard_stop_threshold",
+        "token_budget.max_input_tokens",
+        "token_budget.max_output_tokens",
+        "token_budget.max_tokens",
+        "token_budget.warn_threshold",
+        "token_usage.enabled",
+        "tool_output.enabled",
+        "tool_output.exempt_tools",
+        "tool_output.externalize_min_chars",
+        "tool_output.fallback_head_chars",
+        "tool_output.fallback_max_chars",
+        "tool_output.fallback_tail_chars",
+        "tool_output.preview_head_chars",
+        "tool_output.preview_tail_chars",
+        "tool_output.tool_overrides",
+        "tool_search.auto_promote_top_k",
+        "tool_search.enabled",
+    }
+)
+
+# These leaves are authoritative PostgreSQL system settings. They remain valid
+# for programmatic Run-policy overlays, but accepting them from config.yaml
+# would create two competing sources of truth.
+DATABASE_RUNTIME_YAML_PATH_TOMBSTONES = DATABASE_RUNTIME_POLICY_PATHS | frozenset(
+    {
+        "auth.local.allow_registration",
+        "quotas.default_concurrent_run_limit",
+        "quotas.default_mcp_calls_daily_limit",
+        "quotas.default_member_limit",
+        "quotas.default_storage_bytes_limit",
+        "quotas.warning_threshold",
+    }
+)
+DATABASE_RUNTIME_YAML_TOP_LEVEL_TOMBSTONES = frozenset(path.split(".", 1)[0] for path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES)
 
 DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES = frozenset(
     {
@@ -108,13 +195,13 @@ class LoggingConfig(BaseModel):
 def is_trace_correlation_enabled(config: Any) -> bool:
     """Return ``True`` when ``logging.enhance.enabled`` is set on *config*.
 
-    Single source of truth for the request-trace-correlation gate, shared by
-    the Gateway ``TraceMiddleware`` and the embedded ``DeerFlowClient`` so
-    the two entry points cannot drift on when ``deerflow_trace_id`` is
-    emitted (Langfuse metadata) and when a request-level trace id is bound
-    at all. Accepts any object exposing ``logging.enhance.enabled`` via
-    ``getattr`` chains (``AppConfig``, ``SimpleNamespace`` fixtures, etc.);
-    missing intermediate attributes silently degrade to ``False``.
+    Single source of truth for externally observable request correlation:
+    Gateway response headers/log enrichment and Langfuse
+    ``deerflow_trace_id`` metadata. Trusted Worker ``origin_trace_id``
+    authority remains bound internally even when this returns ``False``.
+    Accepts any object exposing ``logging.enhance.enabled`` via ``getattr``
+    chains (``AppConfig``, ``SimpleNamespace`` fixtures, etc.); missing
+    intermediate attributes silently degrade to ``False``.
     """
     logging_config = getattr(config, "logging", None)
     enhance = getattr(logging_config, "enhance", None)
@@ -233,10 +320,7 @@ class AppConfig(BaseModel):
     )
     quotas: QuotaConfig = Field(
         default_factory=QuotaConfig,
-        description=format_field_description(
-            "quotas",
-            field_doc="Platform defaults and warning policy for project quota enforcement.",
-        ),
+        description=("Compatibility shape for database-backed platform quota defaults and warning policy. Authoritative checks materialize the latest committed system quota policy inside their transaction."),
     )
     # Name -> config lookup tables, (re)built after validation by
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
@@ -248,27 +332,48 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def reject_removed_legacy_config(cls, value: object) -> object:
+    def reject_removed_legacy_config(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
         if isinstance(value, Mapping):
             unsupported_middlewares = set(DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES.intersection(value))
             if unsupported_middlewares:
                 raise ValueError("DYNAMIC_MIDDLEWARE_CONFIG_UNSUPPORTED: " + ",".join(sorted(unsupported_middlewares)))
             removed = set(LEGACY_CONFIG_TOMBSTONES.intersection(value))
+            if info.context and info.context.get("config_source") == "yaml":
+                removed.update(YAML_CONFIG_TOMBSTONES.intersection(value))
             for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
                 section, key = field_path.split(".", 1)
                 section_value = value.get(section)
                 if isinstance(section_value, Mapping) and key in section_value:
                     removed.add(field_path)
+            if info.context and info.context.get("config_source") == "yaml":
+                for field_path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES:
+                    current: object = value
+                    parts = field_path.split(".")
+                    for part in parts[:-1]:
+                        if not isinstance(current, Mapping) or part not in current:
+                            break
+                        current = current[part]
+                    else:
+                        if isinstance(current, Mapping) and parts[-1] in current:
+                            removed.add(field_path)
             if removed:
                 raise ValueError(f"LEGACY_CONFIG_REMOVED: {','.join(sorted(removed))}")
         return value
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_null_config_sections(cls, data: Any) -> Any:
+    def _drop_null_config_sections(
+        cls,
+        data: Any,
+        info: ValidationInfo,
+    ) -> Any:
         """Treat a present-but-null config section as absent so its default applies.
 
-        Commenting out every entry under a top-level YAML key — e.g. ``models:``
+        Commenting out every entry under a top-level YAML key — e.g. ``tools:``
         (a list) or ``memory:`` (an object), with only comments beneath it as
         shipped throughout ``config.example.yaml`` — makes PyYAML parse the value
         as ``None``. Without this, the documented ``cp config.example.yaml
@@ -285,7 +390,8 @@ class AppConfig(BaseModel):
             copied_data = dict(data)
             if "checkpointer" in copied_data:
                 raise ValueError("the independent checkpointer configuration has been removed; configure database.url instead")
-            return {key: value for key, value in copied_data.items() if value is not None or key in LEGACY_CONFIG_TOMBSTONES}
+            yaml_source = bool(info.context and info.context.get("config_source") == "yaml")
+            return {key: value for key, value in copied_data.items() if value is not None or key in LEGACY_CONFIG_TOMBSTONES or (yaml_source and key in (YAML_CONFIG_TOMBSTONES | DATABASE_RUNTIME_YAML_TOP_LEVEL_TOMBSTONES))}
         return data
 
     @classmethod
@@ -336,12 +442,10 @@ class AppConfig(BaseModel):
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
-        result = cls.model_validate(config_data)
-        if not result.models:
-            logger.warning(
-                "No models are configured in %s. Add at least one entry under `models:` (see the commented examples in config.example.yaml) or run `make setup`.",
-                resolved_path,
-            )
+        result = cls.model_validate(
+            config_data,
+            context={"config_source": "yaml"},
+        )
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result
@@ -414,7 +518,7 @@ class AppConfig(BaseModel):
     def resolve_env_variables(cls, config: Any) -> Any:
         """Recursively resolve environment variables in the config.
 
-        Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
+        Environment variables are resolved using the `os.getenv` function. Example: $DATABASE_URL
 
         Args:
             config: The config to resolve environment variables in.
@@ -470,6 +574,75 @@ class AppConfig(BaseModel):
             The model config if found, otherwise None.
         """
         return self._models_by_name.get(name)
+
+    def with_runtime_models(
+        self,
+        models: Sequence[ModelConfig],
+    ) -> "AppConfig":
+        """Return an isolated config carrying database-materialized models.
+
+        Model definitions are no longer accepted from ``config.yaml``. The
+        application layer resolves an exact PostgreSQL catalog version,
+        decrypts its bound Credential only at the execution boundary, and
+        injects the resulting ``ModelConfig`` objects through this helper.
+        The source infrastructure config remains secret-free and unchanged.
+        """
+
+        if any(not isinstance(model, ModelConfig) for model in models):
+            raise TypeError("runtime models must be ModelConfig instances")
+        runtime = self.model_copy(deep=True)
+        runtime.models = [model.model_copy(deep=True) for model in models]
+        runtime._build_name_indexes()
+        return runtime
+
+    def with_runtime_policy(self, policy: object) -> "AppConfig":
+        """Return an isolated config with one admitted runtime-policy overlay.
+
+        The database policy models intentionally expose only the runtime-owned
+        leaves.  A recursive merge preserves deployment-owned siblings such as
+        ``title.prompt_template`` and ``tool_output.storage_subdir`` while the
+        final ``AppConfig`` validation keeps every nested bound authoritative.
+        """
+
+        if isinstance(policy, Mapping):
+            raw_policy = dict(policy)
+        else:
+            model_dump = getattr(policy, "model_dump", None)
+            if not callable(model_dump):
+                raise TypeError("runtime policy must be a mapping or Pydantic model")
+            raw_policy = model_dump(mode="python")
+        if not isinstance(raw_policy, Mapping):
+            raise TypeError("runtime policy must materialize to a mapping")
+
+        supplied_paths: set[str] = set()
+        for section, value in raw_policy.items():
+            if isinstance(value, Mapping):
+                supplied_paths.update(f"{section}.{leaf}" for leaf in value)
+            else:
+                supplied_paths.add(str(section))
+        if supplied_paths - DATABASE_RUNTIME_POLICY_PATHS:
+            raise ValueError(
+                "runtime policy contains a deployment-owned runtime policy field",
+            )
+
+        def merge(
+            base: dict[str, object],
+            overlay: Mapping[str, object],
+        ) -> dict[str, object]:
+            merged = dict(base)
+            for key, value in overlay.items():
+                current = merged.get(key)
+                if isinstance(current, Mapping) and isinstance(value, Mapping):
+                    merged[key] = merge(dict(current), value)
+                else:
+                    merged[key] = value
+            return merged
+
+        data = merge(
+            self.model_dump(mode="python"),
+            raw_policy,
+        )
+        return type(self).model_validate(data)
 
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
