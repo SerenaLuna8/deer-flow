@@ -724,6 +724,9 @@ class JobAuditMetadata(_AuditMetadata):
         "automation_run",
         "retention_purge",
         "mcp_discovery",
+        "memory_extract",
+        "memory_consolidate",
+        "memory_retention_purge",
     ]
     public_error_code: StrictStr | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
     attempt_count: StrictInt = Field(ge=0, le=20)

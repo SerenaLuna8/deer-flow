@@ -243,6 +243,9 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
       memory: z
         .object({
           enabled: z.boolean(),
+          pipeline_mode: z.enum(["off", "shadow", "consolidate", "v2"]),
+          consolidation_interval_minutes: boundedInteger(15, 1_440),
+          candidate_retention_days: boundedInteger(1, 365),
           search_enabled: z.boolean(),
           debounce_seconds: boundedInteger(1, 300),
           model_name: logicalModelNameSchema.nullable(),

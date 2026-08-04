@@ -1,7 +1,7 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：待执行
+- 状态：执行中（PR1、PR2 已完成）
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
@@ -107,7 +107,7 @@ Thread 摘要只帮助当前 Thread 延续任务，不作为长期记忆候选�
 - PostgreSQL 仍是唯一权威存储；
 - 复用现有 `jobs`、Worker lease、heartbeat、retry 和 dead 状态；
 - 不增加第二套任务状态机；
-- 当前 `dev` 使用 `full_schema_v1`；加入完整 Memory v2 表后一次性升级为 `full_schema_v2`；
+- 分支基线 `dev` 使用 `full_schema_v1`；PR2 加入完整 Memory v2 表后一次性升级为 `full_schema_v2`；
 - 仓库不提供增量迁移，因此旧数据库不能执行临时 `ALTER` 或手工改 marker；
 - PostgreSQL 测试只使用随机 `deerflow_test_*`，不连接正常开发数据库；
 - 是否重建正常开发数据库必须单独确认，不能由测试命令顺带执行。
@@ -158,6 +158,17 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 ```
 
 不得跳过检查点 A 直接进入 PR5。
+
+### 5.1 执行记录
+
+| 阶段 | 状态 | 提交 | 当前检出验证 |
+|---|---|---|---|
+| PR1 | 完成 | `29bbf77d` | 旧 Memory 聚焦测试 45 passed；随机 PostgreSQL 1 passed |
+| PR2 | 完成 | 本次 PR2 提交 | 后端全量 714 passed、27 skipped；随机 PostgreSQL 5 passed、0 skipped；前端全量 121 passed；Python lint/format 与前端 lint/typecheck 通过 |
+| PR3 | 待执行 | — | 仅允许在 PR2 提交且工作区干净后开始 |
+
+PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
+`shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
 
 ## 6. PR1：修复现有 Memory 正确性问题
 

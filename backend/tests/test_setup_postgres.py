@@ -212,7 +212,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
 
     async def bootstrap(_engine):
         calls.append("orm")
-        return "full_schema_v1"
+        return "full_schema_v2"
 
     async def langgraph(_database_url):
         calls.append("langgraph")
@@ -253,7 +253,7 @@ async def test_bootstrap_existing_runs_orm_before_langgraph_and_disposes(monkeyp
             "postgresql://owner:private-password@localhost/deerflow_test_1_abc",
             default_model_bootstrap=bootstrap_material,
         )
-        == "full_schema_v1"
+        == "full_schema_v2"
     )
     assert calls == [
         "lock:enter",
@@ -328,7 +328,7 @@ async def test_bootstrap_existing_rejects_unknown_schema_without_mutation(monkey
         await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
 
     assert str(exc_info.value).startswith("M7_RECREATE_REQUIRED:")
-    assert "full_schema_v1" in str(exc_info.value)
+    assert "full_schema_v2" in str(exc_info.value)
     assert "重建目标数据库" in str(exc_info.value)
     assert "private-password" not in str(exc_info.value)
     engine.dispose.assert_awaited_once()
@@ -712,7 +712,7 @@ async def test_bootstrap_cleanup_failure_is_sanitized(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_two_concurrent_setup_calls_continue_to_bootstrap(monkeypatch) -> None:
     ensure = AsyncMock(side_effect=[True, False])
-    bootstrap = AsyncMock(return_value="full_schema_v1")
+    bootstrap = AsyncMock(return_value="full_schema_v2")
     monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
     monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
     args = (
@@ -822,7 +822,7 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
 
     assert {first.created, second.created} == {True, False}
     assert first.database == second.database == database
-    assert first.revision == second.revision == "full_schema_v1"
+    assert first.revision == second.revision == "full_schema_v2"
     assert await setup_postgres.ensure_database(admin_url, database, owner_name=owner) is False
 
     admin_connection = await setup_postgres.asyncpg.connect(setup_postgres._asyncpg_url(admin_url))

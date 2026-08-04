@@ -14,6 +14,22 @@ class MemoryConfig(BaseModel):
         default=True,
         description="Whether to enable memory mechanism",
     )
+    pipeline_mode: Literal["off", "shadow", "consolidate", "v2"] = Field(
+        default="off",
+        description="Memory v2 pipeline mode; off keeps the legacy pipeline only",
+    )
+    consolidation_interval_minutes: int = Field(
+        default=120,
+        ge=15,
+        le=1440,
+        description="Interval for admitting candidate consolidation jobs",
+    )
+    candidate_retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Days to retain terminal candidate bodies",
+    )
     search_enabled: bool = Field(
         default=True,
         description=("Expose the read-only memory_search tool to private project Runs. The Worker supplies scope and authorization; the model supplies only query/category/top_k."),

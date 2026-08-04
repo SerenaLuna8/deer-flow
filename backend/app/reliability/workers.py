@@ -11,7 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.jobs.model import WorkerNodeRow
 
-_JOB_CAPABILITIES = frozenset({"private_run", "automation_run", "retention_purge", "mcp_discovery"})
+_JOB_CAPABILITIES = frozenset(
+    {
+        "private_run",
+        "automation_run",
+        "retention_purge",
+        "mcp_discovery",
+        "memory_extract",
+        "memory_consolidate",
+        "memory_retention_purge",
+    }
+)
 
 
 class WorkerRegistry:

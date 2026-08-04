@@ -428,6 +428,10 @@ export interface Translations {
         private_run: string;
         automation_run: string;
         retention_purge: string;
+        mcp_discovery: string;
+        memory_extract: string;
+        memory_consolidate: string;
+        memory_retention_purge: string;
       };
       retrySafety: {
         safe: string;

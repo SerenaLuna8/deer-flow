@@ -26,6 +26,9 @@ JobType = Literal[
     "automation_run",
     "retention_purge",
     "mcp_discovery",
+    "memory_extract",
+    "memory_consolidate",
+    "memory_retention_purge",
 ]
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
@@ -55,6 +58,7 @@ class EnqueueJob:
     run_id: str | None
     occurrence_id: str | None
     max_attempts: int
+    namespace: str | None = None
     origin_trace_id: str | None = None
     retry_safety: RetrySafety = "safe"
     priority: int = 0
@@ -69,6 +73,9 @@ class EnqueueJob:
             "automation_run",
             "retention_purge",
             "mcp_discovery",
+            "memory_extract",
+            "memory_consolidate",
+            "memory_retention_purge",
         }:
             raise ValueError("unsupported job type")
         if _SHA256_HEX.fullmatch(self.idempotency_key) is None:
@@ -95,6 +102,13 @@ class EnqueueJob:
             raise ValueError(
                 "mcp_discovery requires project owner authority without Run or occurrence",
             )
+        elif self.job_type in {"memory_extract", "memory_consolidate", "memory_retention_purge"}:
+            if self.scope.owner_user_id is None or self.run_id is not None or self.occurrence_id is not None:
+                raise ValueError(f"{self.job_type} requires owner authority without Run or occurrence")
+            if not self.namespace or len(self.namespace) > 255:
+                raise ValueError(f"{self.job_type} requires a bounded namespace")
+        if self.job_type not in {"memory_extract", "memory_consolidate", "memory_retention_purge"} and self.namespace is not None:
+            raise ValueError(f"{self.job_type} does not accept a memory namespace")
         normalized_trace_id = normalize_trace_id(self.origin_trace_id)
         if self.job_type in {"private_run", "automation_run"}:
             if normalized_trace_id is None:
@@ -115,6 +129,7 @@ class JobClaim:
     occurrence_id: str | None
     retry_safety: RetrySafety
     cancel_requested: bool
+    namespace: str | None = None
     origin_trace_id: str | None = None
 
 
@@ -312,6 +327,7 @@ class JobRepository:
             and row.owner_user_id == request.scope.owner_user_id
             and row.run_id == request.run_id
             and row.automation_occurrence_id == request.occurrence_id
+            and row.namespace == request.namespace
             and row.predecessor_dead_job_id == request.predecessor_dead_job_id
             and row.origin_trace_id == request.origin_trace_id
             and row.max_attempts == request.max_attempts
@@ -331,6 +347,7 @@ class JobRepository:
                 job_type=request.job_type,
                 project_id=request.scope.project_id,
                 owner_user_id=request.scope.owner_user_id,
+                namespace=request.namespace,
                 run_id=request.run_id,
                 automation_occurrence_id=request.occurrence_id,
                 predecessor_dead_job_id=request.predecessor_dead_job_id,
@@ -544,6 +561,9 @@ class JobRepository:
                 "automation_run",
                 "retention_purge",
                 "mcp_discovery",
+                "memory_extract",
+                "memory_consolidate",
+                "memory_retention_purge",
             }
         )
         if not job_types:
@@ -700,6 +720,7 @@ class JobRepository:
                 occurrence_id=row.automation_occurrence_id,
                 retry_safety=row.retry_safety,
                 cancel_requested=False,
+                namespace=row.namespace,
                 origin_trace_id=row.origin_trace_id,
             )
         return None
@@ -1142,6 +1163,7 @@ class JobRepository:
                 and existing_successor.job_type == predecessor.job_type
                 and existing_successor.run_id == predecessor.run_id
                 and existing_successor.automation_occurrence_id == predecessor.automation_occurrence_id
+                and existing_successor.namespace == predecessor.namespace
                 and existing_successor.origin_trace_id == predecessor.origin_trace_id
                 and existing_successor.status == "queued"
                 and existing_successor.attempt_count == 0
@@ -1157,6 +1179,7 @@ class JobRepository:
             run_id=predecessor.run_id,
             occurrence_id=predecessor.automation_occurrence_id,
             max_attempts=max_attempts,
+            namespace=predecessor.namespace,
             retry_safety="safe",
             priority=predecessor.priority,
             predecessor_dead_job_id=predecessor.id,

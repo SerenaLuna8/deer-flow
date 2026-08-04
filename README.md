@@ -133,7 +133,7 @@ Scheduler 和 Worker。
 
 ### 3. 初始化 PostgreSQL
 
-`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v1`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY` 与 Credential keyring，把原示例中的 DeepSeek V4 Pro 配置及加密 `model_api_key` Credential 写入 PostgreSQL，并将模型设为 active/default；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v2`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY` 与 Credential keyring，把原示例中的 DeepSeek V4 Pro 配置及加密 `model_api_key` Credential 写入 PostgreSQL，并将模型设为 active/default；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 在根目录 .env 中配置 DATABASE_URL、POSTGRES_ADMIN_URL、
@@ -143,7 +143,7 @@ make setup-db
 make check-db
 ```
 
-`make check-db` 只读校验 `full_schema_v1` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
+`make check-db` 只读校验 `full_schema_v2` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 

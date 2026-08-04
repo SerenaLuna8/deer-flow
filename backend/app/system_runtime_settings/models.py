@@ -140,6 +140,9 @@ class SummarizationPolicy(_PolicyModel):
 
 class MemoryPolicy(_PolicyModel):
     enabled: bool = True
+    pipeline_mode: Literal["off", "shadow", "consolidate", "v2"] = "off"
+    consolidation_interval_minutes: int = Field(default=120, ge=15, le=1_440)
+    candidate_retention_days: int = Field(default=30, ge=1, le=365)
     search_enabled: bool = True
     debounce_seconds: int = Field(default=30, ge=1, le=300)
     model_name: ModelName | None = None

@@ -511,6 +511,10 @@ export const enUS: Translations = {
         private_run: "Project chat run",
         automation_run: "Automation run",
         retention_purge: "Retention purge",
+        mcp_discovery: "MCP tool discovery",
+        memory_extract: "Memory extraction",
+        memory_consolidate: "Memory consolidation",
+        memory_retention_purge: "Memory retention purge",
       },
       retrySafety: {
         safe: "Safe to retry",

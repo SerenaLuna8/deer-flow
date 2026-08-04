@@ -21,7 +21,7 @@ from deerflow.persistence.final_schema_contract import (
     verify_m7_catalog,
 )
 
-CURRENT_SCHEMA_REVISION = "full_schema_v1"
+CURRENT_SCHEMA_REVISION = "full_schema_v2"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
@@ -40,7 +40,7 @@ class M7RecreateRequired(RuntimeError):
     code = "M7_RECREATE_REQUIRED"
 
     def __init__(self) -> None:
-        super().__init__("M7_RECREATE_REQUIRED: nonempty database is not the exact full_schema_v1 catalog and must be recreated")
+        super().__init__(f"M7_RECREATE_REQUIRED: nonempty database is not the exact {CURRENT_SCHEMA_REVISION} catalog and must be recreated")
 
 
 class SchemaSetupRequired(RuntimeError):
@@ -70,7 +70,7 @@ async def classify_database(
 ) -> Literal["empty", "current"]:
     """Classify a database without mutation.
 
-    Only an empty schema or the exact ``full_schema_v1`` catalog is accepted.
+    Only an empty schema or the exact current full-schema catalog is accepted.
     Every other nonempty schema requires explicit recreation.
     """
 
@@ -118,7 +118,7 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
 
 def _read_full_schema_sql() -> str:
     payload = _FULL_SCHEMA_PATH.read_text(encoding="utf-8")
-    expected_marker = "INSERT INTO alembic_version (version_num) VALUES ('full_schema_v1');"
+    expected_marker = f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');"
     if not payload.startswith("BEGIN;\n") or not payload.rstrip().endswith("COMMIT;") or payload.count(expected_marker) != 1 or "-- Running upgrade" in payload or "UPDATE alembic_version" in payload:
         raise RuntimeError("full schema SQL snapshot is invalid")
     return payload

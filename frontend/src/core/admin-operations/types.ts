@@ -146,6 +146,18 @@ export const adminProjectPageSchema = z
 
 const publicErrorCodeSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u);
 
+export const ADMIN_JOB_TYPES = [
+  "private_run",
+  "automation_run",
+  "retention_purge",
+  "mcp_discovery",
+  "memory_extract",
+  "memory_consolidate",
+  "memory_retention_purge",
+] as const;
+
+export const adminJobTypeSchema = z.enum(ADMIN_JOB_TYPES);
+
 export const adminJobSchema = z
   .object({
     job_id: z.string().uuid(),
@@ -157,7 +169,7 @@ export const adminJobSchema = z
       .max(63)
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
     project_display_name: z.string().min(1).max(120),
-    job_type: z.enum(["private_run", "automation_run", "retention_purge"]),
+    job_type: adminJobTypeSchema,
     status: z.enum([
       "queued",
       "leased",
@@ -226,9 +238,7 @@ export const jobFiltersSchema = z
         "dead",
       ])
       .optional(),
-    type: z
-      .enum(["private_run", "automation_run", "retention_purge"])
-      .optional(),
+    type: adminJobTypeSchema.optional(),
   })
   .strict();
 

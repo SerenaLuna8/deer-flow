@@ -261,7 +261,7 @@ async def _bootstrap_existing(
         raise PostgresSetupError(str(exc)) from None
     except M7RecreateRequired as exc:
         primary_error = exc
-        raise PostgresSetupError("M7_RECREATE_REQUIRED: 非空目标库不是完整的 full_schema_v1；请显式重建目标数据库") from None
+        raise PostgresSetupError(f"M7_RECREATE_REQUIRED: 非空目标库不是完整的 {CURRENT_SCHEMA_REVISION}；请显式重建目标数据库") from None
     except SchemaSetupRequired as exc:
         primary_error = exc
         raise PostgresSetupError("DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`") from None

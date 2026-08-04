@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAdminJobs, useSafeRequeue } from "@/core/admin-operations/api";
 import {
+  ADMIN_JOB_TYPES,
   jobFiltersSchema,
   type AdminJobFilters,
   type AdminJobPage,
@@ -456,17 +457,11 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
               <option value="">
                 {t.adminOperations.jobs.filters.allTypes}
               </option>
-              {["private_run", "automation_run", "retention_purge"].map(
-                (value) => (
-                  <option key={value} value={value}>
-                    {
-                      t.adminOperations.jobs.types[
-                        value as keyof typeof t.adminOperations.jobs.types
-                      ]
-                    }
-                  </option>
-                ),
-              )}
+              {ADMIN_JOB_TYPES.map((value) => (
+                <option key={value} value={value}>
+                  {t.adminOperations.jobs.types[value]}
+                </option>
+              ))}
             </select>
           </label>
           <div className="flex flex-wrap gap-1 sm:col-span-2 lg:ml-auto">

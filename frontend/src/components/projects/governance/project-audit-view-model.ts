@@ -212,6 +212,16 @@ const VALUE_LABELS: Record<string, LocalizedLabel> = {
   private_run: { "zh-CN": "项目对话运行", "en-US": "Project chat run" },
   automation_run: { "zh-CN": "自动化运行", "en-US": "Automation run" },
   retention_purge: { "zh-CN": "保留期清理", "en-US": "Retention purge" },
+  mcp_discovery: { "zh-CN": "MCP 工具发现", "en-US": "MCP tool discovery" },
+  memory_extract: { "zh-CN": "记忆提取", "en-US": "Memory extraction" },
+  memory_consolidate: {
+    "zh-CN": "记忆整理",
+    "en-US": "Memory consolidation",
+  },
+  memory_retention_purge: {
+    "zh-CN": "记忆保留期清理",
+    "en-US": "Memory retention purge",
+  },
   completed: { "zh-CN": "已完成", "en-US": "Completed" },
   failed: { "zh-CN": "失败", "en-US": "Failed" },
   cancelled: { "zh-CN": "已取消", "en-US": "Cancelled" },

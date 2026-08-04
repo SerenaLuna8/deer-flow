@@ -19,7 +19,7 @@ from app.system_runtime_settings.models import (
     RuntimePolicyValue,
 )
 
-RUNTIME_POLICY_SCHEMA_VERSION = 1
+RUNTIME_POLICY_SCHEMA_VERSION = 2
 MAX_RUNTIME_POLICY_BYTES = 32 * 1024
 _SECRET_KEY = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"

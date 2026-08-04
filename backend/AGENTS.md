@@ -69,7 +69,7 @@ does not acquire the Scheduler ownership lock or start polling.
 ## PostgreSQL full-schema initialization
 
 `full_schema.sql` is the only complete application-schema source. The exact current marker is
-`full_schema_v1`; there is no Alembic revision chain or incremental upgrade path.
+`full_schema_v2`; there is no Alembic revision chain or incremental upgrade path.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the named
 empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
@@ -622,6 +622,14 @@ batch failures are re-buffered in original order and must retain the server-issu
 PostgreSQL is the only project Memory authority. Every row remains bound to
 `project_id + owner_user_id + namespace`; the harness must not derive these coordinates from
 model arguments, request payloads, ambient user state, or a replaceable Memory backend.
+
+The `full_schema_v2` snapshot reserves the complete staged Memory v2 contract: Source Batch and
+Item, Extraction/Consolidation Generation, Candidate, versioned Fact/Evidence, derived Summary,
+Suppression, and per-Run Context Snapshot rows, plus the `memory_extract`,
+`memory_consolidate`, and `memory_retention_purge` Job types. `memory.pipeline_mode` is frozen in
+the existing Run runtime-policy snapshot and defaults to `off`. Until the later pipeline PRs
+register handlers and switch recall, these tables remain dormant and the v1 read/write path below
+continues to serve production Memory.
 
 Private Lead Agent Runs may expose the async, read-only `memory_search` tool when
 `memory.enabled` and `memory.search_enabled` are both true. Its model-visible arguments are only

@@ -36,6 +36,7 @@ class JobRow(Base):
     job_type: Mapped[str] = mapped_column(String(32), nullable=False)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(36))
+    namespace: Mapped[str | None] = mapped_column(String(255))
     run_id: Mapped[str | None] = mapped_column(String(64))
     automation_occurrence_id: Mapped[str | None] = mapped_column(String(64))
     predecessor_dead_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
@@ -66,6 +67,20 @@ class JobRow(Base):
             "project_id",
             "owner_user_id",
             name="uq_jobs_id_project_owner",
+        ),
+        UniqueConstraint(
+            "id",
+            "project_id",
+            "owner_user_id",
+            "run_id",
+            name="uq_jobs_id_project_owner_run",
+        ),
+        UniqueConstraint(
+            "id",
+            "project_id",
+            "owner_user_id",
+            "namespace",
+            name="uq_jobs_id_project_owner_namespace",
         ),
         UniqueConstraint(
             "predecessor_dead_job_id",
@@ -102,7 +117,7 @@ class JobRow(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery')",
+            "job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_extract', 'memory_consolidate', 'memory_retention_purge')",
             name="ck_jobs_type",
         ),
         CheckConstraint(
@@ -115,8 +130,14 @@ class JobRow(Base):
             "(job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) "
             "OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) "
             "OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
-            "OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)",
+            "OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
+            "OR (job_type IN ('memory_extract', 'memory_consolidate', 'memory_retention_purge') AND owner_user_id IS NOT NULL "
+            "AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)",
             name="ck_jobs_authority_shape",
+        ),
+        CheckConstraint(
+            "(job_type IN ('memory_extract', 'memory_consolidate', 'memory_retention_purge')) = (namespace IS NOT NULL)",
+            name="ck_jobs_memory_namespace",
         ),
         Index("ix_jobs_claim", "status", "available_at", priority.desc(), "created_at"),
         Index(
@@ -147,6 +168,7 @@ class JobAttemptRow(Base):
 
     __table_args__ = (
         UniqueConstraint("job_id", "attempt_number", name="uq_job_attempts_number"),
+        UniqueConstraint("id", "job_id", name="uq_job_attempts_id_job"),
         CheckConstraint("attempt_number >= 1", name="ck_job_attempts_number"),
         CheckConstraint(
             "outcome IS NULL OR outcome IN ('succeeded', 'retry', 'cancelled', 'failed', 'lease_lost', 'dead')",

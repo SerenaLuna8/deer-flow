@@ -9,6 +9,20 @@ from deerflow.persistence.private_work.memory_repository import (
     PrivateMemoryRepository,
     PrivateMemoryVersionConflict,
 )
+from deerflow.persistence.private_work.memory_v2_model import (
+    MemoryCandidateRow,
+    MemoryConsolidationGenerationRow,
+    MemoryContextSummaryRow,
+    MemoryExtractionGenerationRow,
+    MemoryFactEvidenceRow,
+    MemoryFactRevisionRow,
+    MemoryFactRow,
+    MemorySourceBatchRow,
+    MemorySourceItemRow,
+    MemorySuppressionRow,
+    RunMemoryContextItemRow,
+    RunMemoryContextSnapshotRow,
+)
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
@@ -21,6 +35,16 @@ from deerflow.persistence.private_work.model import (
 )
 
 __all__ = [
+    "MemoryCandidateRow",
+    "MemoryConsolidationGenerationRow",
+    "MemoryContextSummaryRow",
+    "MemoryExtractionGenerationRow",
+    "MemoryFactEvidenceRow",
+    "MemoryFactRevisionRow",
+    "MemoryFactRow",
+    "MemorySourceBatchRow",
+    "MemorySourceItemRow",
+    "MemorySuppressionRow",
     "PrivateArtifactRow",
     "PrivateFileChunkRow",
     "PrivateFileRow",
@@ -32,6 +56,8 @@ __all__ = [
     "PrivateMemoryRepository",
     "PrivateMemoryVersionConflict",
     "RunAssetVersionRow",
+    "RunMemoryContextItemRow",
+    "RunMemoryContextSnapshotRow",
     "RunMcpGrantSnapshotRow",
     "RunSkillCredentialSnapshotRow",
     "UserProjectMemoryFactRow",

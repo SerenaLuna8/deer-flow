@@ -161,6 +161,7 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             RuntimePolicySection.AGENT_RUNTIME,
         ).model_dump(mode="python")
         updated_value["max_recursion_limit"] = 77
+        updated_value["memory"]["pipeline_mode"] = "shadow"
         updated = await service.update_policy(
             context,
             RuntimePolicySection.AGENT_RUNTIME,
@@ -191,21 +192,23 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
         assert locked_v1.policy_version_id != locked_v2.policy_version_id
         assert locked_v1.value.max_recursion_limit == 1_000
         assert locked_v2.value.max_recursion_limit == 77
+        assert locked_v1.value.memory.pipeline_mode == "off"
+        assert locked_v2.value.memory.pipeline_mode == "shadow"
         materializer = SystemRuntimePolicyMaterializer(factory)
-        assert (
-            await materializer.materialize_run_snapshot(
-                project_id=project_id,
-                owner_user_id=str(admin_id),
-                run_id=run_one,
-            )
-        ).max_recursion_limit == 1_000
-        assert (
-            await materializer.materialize_run_snapshot(
-                project_id=project_id,
-                owner_user_id=str(admin_id),
-                run_id=run_two,
-            )
-        ).max_recursion_limit == 77
+        materialized_v1 = await materializer.materialize_run_snapshot(
+            project_id=project_id,
+            owner_user_id=str(admin_id),
+            run_id=run_one,
+        )
+        materialized_v2 = await materializer.materialize_run_snapshot(
+            project_id=project_id,
+            owner_user_id=str(admin_id),
+            run_id=run_two,
+        )
+        assert materialized_v1.max_recursion_limit == 1_000
+        assert materialized_v2.max_recursion_limit == 77
+        assert materialized_v1.memory.pipeline_mode == "off"
+        assert materialized_v2.memory.pipeline_mode == "shadow"
 
         async with factory() as session:
             snapshots = tuple(

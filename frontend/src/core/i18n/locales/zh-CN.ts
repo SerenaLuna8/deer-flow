@@ -492,6 +492,10 @@ export const zhCN: Translations = {
         private_run: "项目对话运行",
         automation_run: "自动化运行",
         retention_purge: "保留期清理",
+        mcp_discovery: "MCP 工具发现",
+        memory_extract: "记忆提取",
+        memory_consolidate: "记忆整理",
+        memory_retention_purge: "记忆保留期清理",
       },
       retrySafety: {
         safe: "可安全重试",

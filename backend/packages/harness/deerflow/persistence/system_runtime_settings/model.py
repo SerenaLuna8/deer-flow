@@ -278,6 +278,16 @@ class RunRuntimePolicySnapshotRow(Base):
             name="fk_run_runtime_policy_snapshots_exact_policy",
             ondelete="RESTRICT",
         ),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "run_id",
+            "section",
+            "policy_version_id",
+            "schema_version",
+            "payload_checksum",
+            name="uq_run_runtime_policy_snapshots_exact",
+        ),
         Index(
             "ix_run_runtime_policy_snapshots_private_run",
             project_id,

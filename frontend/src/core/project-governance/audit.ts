@@ -112,7 +112,15 @@ const runFilesFinalizedMetadataSchema = z
   .strict();
 const jobMetadataSchema = z
   .object({
-    job_type: z.enum(["private_run", "automation_run", "retention_purge"]),
+    job_type: z.enum([
+      "private_run",
+      "automation_run",
+      "retention_purge",
+      "mcp_discovery",
+      "memory_extract",
+      "memory_consolidate",
+      "memory_retention_purge",
+    ]),
     public_error_code: publicErrorCodeSchema.nullable().optional(),
     attempt_count: z.number().int().min(0).max(20),
     retry_safety: z.enum(["safe", "unknown", "unsafe"]),
