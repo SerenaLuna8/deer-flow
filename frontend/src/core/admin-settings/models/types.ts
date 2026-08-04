@@ -167,10 +167,7 @@ const thinkingSchema = z
 const extraBodySchema = z
   .object({
     thinking: thinkingSchema.optional(),
-    reasoning: z
-      .object({ effort: reasoningEffortSchema })
-      .strict()
-      .optional(),
+    reasoning: z.object({ effort: reasoningEffortSchema }).strict().optional(),
     reasoning_format: z.literal("deepseek-style").optional(),
     chat_template_kwargs: z
       .object({
@@ -199,9 +196,7 @@ function thinkingTransitionSchema(enabled: boolean) {
         : new Set(["disabled"]);
       const profiles = [value.thinking, value.extra_body?.thinking];
       if (
-        profiles.some(
-          (profile) => profile && !expectedTypes.has(profile.type),
-        )
+        profiles.some((profile) => profile && !expectedTypes.has(profile.type))
       ) {
         context.addIssue({
           code: z.ZodIssueCode.custom,

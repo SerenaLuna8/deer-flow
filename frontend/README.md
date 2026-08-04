@@ -21,22 +21,22 @@ make dev
 
 ## 主要路由
 
-| 路由                                   | 用途                  |
-| -------------------------------------- | --------------------- |
+| 路由                                   | 用途                         |
+| -------------------------------------- | ---------------------------- |
 | `/`                                    | 按登录状态进入登录页或工作区 |
-| `/login`、`/setup`                     | 登录和首次账户初始化  |
-| `/workspace`                           | 多项目工作区          |
-| `/projects/[project_slug]`             | 项目主页              |
-| `/projects/[project_slug]/chats/*`     | 项目 Thread 与 Run    |
-| `/projects/[project_slug]/agents`      | 项目 Agent            |
-| `/projects/[project_slug]/skills`      | 项目 Skill            |
-| `/projects/[project_slug]/mcp`         | 项目 MCP              |
-| `/projects/[project_slug]/credentials` | 项目 Credential       |
-| `/projects/[project_slug]/automations` | 项目 Automation       |
-| `/projects/[project_slug]/memory`      | 项目 Memory           |
-| `/projects/[project_slug]/members`     | 项目成员              |
-| `/admin/*`                             | system admin 平台治理 |
-| `/[lang]/docs/*`、`/blog/*`            | 静态文档与博客内容    |
+| `/login`、`/setup`                     | 登录和首次账户初始化         |
+| `/workspace`                           | 多项目工作区                 |
+| `/projects/[project_slug]`             | 项目主页                     |
+| `/projects/[project_slug]/chats/*`     | 项目 Thread 与 Run           |
+| `/projects/[project_slug]/agents`      | 项目 Agent                   |
+| `/projects/[project_slug]/skills`      | 项目 Skill                   |
+| `/projects/[project_slug]/mcp`         | 项目 MCP                     |
+| `/projects/[project_slug]/credentials` | 项目 Credential              |
+| `/projects/[project_slug]/automations` | 项目 Automation              |
+| `/projects/[project_slug]/memory`      | 项目 Memory                  |
+| `/projects/[project_slug]/members`     | 项目成员                     |
+| `/admin/*`                             | system admin 平台治理        |
+| `/[lang]/docs/*`、`/blog/*`            | 静态文档与博客内容           |
 
 ## 目录
 
@@ -52,11 +52,10 @@ frontend/
 │   └── styles/              # 全局样式
 ├── tests/
 │   ├── unit/                # Rstest 单元测试
-│   ├── e2e/                 # 确定性动态模式 Playwright E2E
-│   ├── e2e-static/          # 静态构建 Playwright E2E
-│   ├── e2e-real-backend/    # Replay Gateway 全栈回放
-│   └── e2e-record/          # 人工录制 Replay fixture
-├── public/                  # 静态资源和确定性演示 fixture
+│   ├── e2e/                 # 核心项目路由 Playwright E2E
+│   ├── e2e-static/          # 核心静态边界 E2E
+│   └── e2e-real-backend/    # 单场景 Replay Gateway 全栈回放
+├── public/                  # 静态资源
 ├── scripts/                 # 前端辅助脚本
 └── package.json
 ```

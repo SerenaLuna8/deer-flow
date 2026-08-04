@@ -15,10 +15,7 @@ import {
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
-import {
-  useProjectAssets,
-  type ProjectAssetList,
-} from "@/core/shared-assets";
+import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";
 import type { AgentThread } from "@/core/threads";
 
 export type ProjectChatRouteScope = Omit<ScopedChatRouteScope, "privateWork">;

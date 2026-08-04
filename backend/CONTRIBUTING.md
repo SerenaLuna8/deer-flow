@@ -8,7 +8,7 @@ Read [AGENTS.md](AGENTS.md) before changing backend code.
 uv sync
 make format
 make lint
-make test
+POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
 ```
 
 Features and bug fixes use TDD. PostgreSQL integration tests create random disposable databases and must never point at a business database.
@@ -31,4 +31,4 @@ New system assets are published through admin services; project assets are creat
 
 ## Verification
 
-Run focused tests while developing, then backend format/lint/full tests and the root PostgreSQL gate when the change affects persistence, authorization, jobs, streams, quotas, audit, retries, or restart behavior.
+Run focused tests while developing, then backend format/lint and the complete core suite. The core suite includes real PostgreSQL tests and must use a disposable maintenance instance with zero skips.

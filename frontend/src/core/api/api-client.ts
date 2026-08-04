@@ -165,18 +165,16 @@ export function clearReconnectRun(
 
 export type CompatibleClientOptions = {
   apiUrl?: string;
-  isMock?: boolean;
   runMetadataStorage?: RunMetadataStorage;
   durableRunStreams?: boolean;
 };
 
 export function createCompatibleClient({
   apiUrl: configuredApiUrl,
-  isMock,
   runMetadataStorage,
   durableRunStreams = false,
 }: CompatibleClientOptions = {}): LangGraphClient {
-  const apiUrl = configuredApiUrl ?? getLangGraphBaseURL(isMock);
+  const apiUrl = configuredApiUrl ?? getLangGraphBaseURL();
   console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
     apiUrl,

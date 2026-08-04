@@ -34,7 +34,7 @@ export function AgentBuilderResumeBanner({
           <Link
             key={session.id}
             href={agentBuilderSessionPath(projectSlug, session.id)}
-            className="bg-background hover:border-foreground/20 focus-visible:ring-ring flex min-h-12 items-center gap-3 rounded-xl border px-4 py-3 outline-none transition-colors focus-visible:ring-2"
+            className="bg-background hover:border-foreground/20 focus-visible:ring-ring flex min-h-12 items-center gap-3 rounded-xl border px-4 py-3 transition-colors outline-none focus-visible:ring-2"
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm font-medium">

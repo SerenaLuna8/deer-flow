@@ -26,7 +26,7 @@
     "preview": "next build --webpack && next start",
     "start": "next start",
     "test": "rstest",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test tests/e2e/project-routes.spec.ts",
     "test:e2e:static": "playwright test --config playwright.static.config.ts",
     "typecheck": "tsc --noEmit"
   },

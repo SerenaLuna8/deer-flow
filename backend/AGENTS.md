@@ -57,8 +57,7 @@ Run backend-only commands from `backend/`:
 make gateway
 make worker
 make scheduler
-make test
-make test-blocking-io
+POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
 make lint
 make format
 make check-db
@@ -94,19 +93,20 @@ relations, and whether setup or operator intervention is required without printi
 or full connection URLs. Manual stamping, automatic repair, automatic deletion, and destructive
 reset are unsupported.
 
-### Release PostgreSQL gate
+### Backend core tests
 
-The root `Makefile` variable `PROJECT_FOUNDATION_POSTGRES_TESTS` is the sole ordered
-20-file M1-M7 PostgreSQL release list. Run it only against a disposable maintenance instance:
+The backend suite is intentionally small and protects the main client, authentication,
+Gateway/Worker stream, sandbox/path, Credential/MCP, Human Input, and PostgreSQL paths.
+Run the complete set only against a disposable PostgreSQL maintenance instance:
 
 ```bash
-POSTGRES_TEST_URL="postgresql://.../postgres" make test-project-foundation-postgres
+POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
 ```
 
 The URL must have create/drop/terminate authority for random `deerflow_test_*`
 databases. It must never be a production URL or the ordinary application
-URL. Missing `POSTGRES_TEST_URL` fails before pytest collection; selected tests must report
-zero skips.
+URL. Missing `POSTGRES_TEST_URL` fails before pytest collection; the complete core suite must
+report zero skips. Focused non-database tests may still be run directly with `uv run pytest`.
 
 ## Repository layout
 
@@ -824,21 +824,20 @@ Common commands:
 
 ```bash
 uv run pytest tests/test_<feature>.py -q
-uv run pytest -q
-uv run pytest tests/blocking_io -q
+POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
 uvx ruff format --check .
 uvx ruff check .
 ```
 
-`tests/blocking_io/` runs business code under strict Blockbuster detection. Production async
-paths must offload synchronous filesystem/subprocess work and await cancellation-settled cleanup.
-Test doubles belong under `tests/support/`; do not add a production persistence or execution
-fallback to make a test easier.
+Production async paths must offload synchronous filesystem/subprocess work and await
+cancellation-settled cleanup. `make detect-blocking-io` remains a static review aid. Test doubles
+belong under `tests/support/`; do not add a production persistence or execution fallback to make
+a test easier.
 
 Python is 3.12+, Ruff uses double quotes and a 240-character line limit, and all public/domain
 interfaces should use precise types. Keep public errors stable and free of SQL, connection,
 credential, private resource, and exception detail.
 
-Historical pass counts do not certify the current checkout. The current zero-skip PostgreSQL gate
-is `make test-project-foundation-postgres` from the repository root. It runs the ordered 20-file
-M1-M7 foundation list against owned random `deerflow_test_*` databases.
+Historical pass counts do not certify the current checkout. The complete current core suite is
+`POSTGRES_TEST_URL=... make test` from the repository root. Its database cases use owned random
+`deerflow_test_*` databases and must finish with zero skips.

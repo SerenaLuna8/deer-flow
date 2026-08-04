@@ -9,7 +9,7 @@ ActWeave 后端由 FastAPI Gateway、独立 Worker 和可选独立 Scheduler 组
 - `app/projects/`：项目、成员、资产、配额和审计。
 - `app/automations/`：项目 Automation definition/occurrence。
 - `packages/harness/deerflow/`：Agent harness、middleware、tools 与持久化模型。
-- `tests/`：单元、集成和真实 PostgreSQL 发布门禁。
+- `tests/`：精简后的业务核心与真实 PostgreSQL 核心测试。
 
 ## 权威边界
 
@@ -22,7 +22,7 @@ uv sync
 make gateway
 make worker
 make scheduler
-make test
+POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
 make lint
 make format
 ```

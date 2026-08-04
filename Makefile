@@ -6,33 +6,12 @@
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
 	setup-db check-db reconcile-usage rotate-credentials import-project-skills \
-	test test-project-foundation-postgres print-project-foundation-postgres-tests \
+	test \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
 	docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway up down
 
 BACKEND_UV_RUN = cd backend && uv run
-PROJECT_FOUNDATION_POSTGRES_TESTS = \
-	tests/test_m7_final_baseline_postgres.py \
-	tests/test_m7_asset_bootstrap_postgres.py \
-	tests/integration/test_project_isolation_postgres.py \
-	tests/integration/test_m2_project_governance_postgres.py \
-	tests/integration/test_m3_shared_assets_postgres.py \
-	tests/integration/test_m3_mcp_credentials_postgres.py \
-	tests/integration/test_m4_private_work_postgres.py \
-	tests/integration/test_m5_project_automation_postgres.py \
-	tests/test_m6_process_readiness.py \
-	tests/test_m6_job_repository_postgres.py \
-	tests/test_m6_durable_stream_postgres.py \
-	tests/test_m6_quota_service_postgres.py \
-	tests/test_m6_audit_redaction.py \
-	tests/test_m6_audit_integration_postgres.py \
-	tests/test_m6_retention_purge_postgres.py \
-	tests/test_m6_worker_crash_recovery_postgres.py \
-	tests/test_m6_gateway_reconnect_process.py \
-	tests/test_m7_process_boundary.py \
-	tests/test_m7_source_absence.py \
-	tests/test_m7_release_gate_postgres.py
 
 # Detect OS for Windows compatibility
 ifeq ($(OS),Windows_NT)
@@ -84,8 +63,7 @@ help:
 	@echo "  make import-project-skills ARGS=...   显式导入 Project Skill"
 	@echo ""
 	@echo "测试："
-	@echo "  make test                             运行 M1-M7 PostgreSQL 发布门禁"
-	@echo "  make test-project-foundation-postgres 运行 M1-M7 PostgreSQL 发布门禁"
+	@echo "  POSTGRES_TEST_URL=... make test       运行后端核心测试（含真实 PostgreSQL）"
 	@echo "  make detect-thread-boundaries         检查异步和线程边界"
 	@echo "  make detect-blocking-io               检查后端阻塞 IO"
 	@echo ""
@@ -100,13 +78,8 @@ help:
 	@echo "  make down                             停止 Compose 容器"
 
 # Tests
-test: test-project-foundation-postgres
-
-test-project-foundation-postgres:
-	@cd backend && DEER_FLOW_RELEASE_GATE_LABEL=M1-M7 uv run python tests/support/release_gate_plugin.py $(PROJECT_FOUNDATION_POSTGRES_TESTS) -ra
-
-print-project-foundation-postgres-tests:
-	@echo $(PROJECT_FOUNDATION_POSTGRES_TESTS)
+test:
+	@$(MAKE) -C backend test
 
 # Configuration and diagnostics
 setup:

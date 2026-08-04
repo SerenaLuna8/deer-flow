@@ -7,7 +7,7 @@ No unscoped read or mutation path exists.
 from __future__ import annotations
 
 import pytest
-from support.m4_private_threads import seed_m4_thread_database
+from support.private_thread_seed import seed_private_thread_database
 
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.persistence.run import RunRepository
@@ -16,7 +16,7 @@ from deerflow.runtime.events.store.db import DbRunEventStore
 
 
 async def _seed_private_data(database_url):
-    seed = await seed_m4_thread_database(database_url)
+    seed = await seed_private_thread_database(database_url)
     thread_repo = ThreadMetaRepository(seed.factory)
     run_repo = RunRepository(seed.factory)
     for thread_id, scope in (

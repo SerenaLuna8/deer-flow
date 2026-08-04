@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This is the source of truth for ActWeave frontend work. The repository-level
-[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide owns the final M7
+[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide owns the current
 project-first routes, authorization, cache isolation, and frontend gates.
 
 ## Stack and commands
@@ -21,9 +21,9 @@ pnpm build:production
 pnpm build:static
 ```
 
-`pnpm check` runs lint and type checking. The M7 production Playwright gate writes to
-`test-results/m7-production`; the static gate builds into `.next-static` and writes to
-`test-results/m7-static`, so normal and static artifacts cannot be reused accidentally.
+`pnpm check` runs lint and type checking. The production Playwright gate writes to
+`test-results/core-production`; the static gate builds into `.next-static` and writes to
+`test-results/core-static`, so normal and static artifacts cannot be reused accidentally.
 `pnpm test:e2e` runs the deterministic dynamic-mode Chromium suite without a live model.
 
 ## Final route model
@@ -572,9 +572,9 @@ unmount abort the recognizer before stale transcripts can cross scope.
 - Use `@/*` aliases and `cn()` for conditional Tailwind classes.
 - Runtime responses use strict Zod schemas and reject unknown authority/private fields,
   including the server-only Run `origin_trace_id`; no Query cache may retain it.
-- Unit tests live under `tests/unit/`. Deterministic browser tests live under
-  `tests/e2e/` and `tests/e2e-static/`; Replay full-stack tests live under
-  `tests/e2e-real-backend/`, and manual fixture recording under `tests/e2e-record/`.
+- The small unit core lives under `tests/unit/`. One deterministic project-route browser test,
+  two static-boundary tests, and one real-backend Replay test live under `tests/e2e/`,
+  `tests/e2e-static/`, and `tests/e2e-real-backend/` respectively.
 - Features and fixes follow TDD: add the failing test, observe the expected failure, implement
   the minimal change, and rerun focused plus full affected gates.
 

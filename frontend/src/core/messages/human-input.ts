@@ -482,8 +482,7 @@ export function inferLegacyHumanInputControlMessageIndexes(
       .find((requestId) => !answeredRequestIds.has(requestId));
 
   for (const [messageIndex, message] of messages.entries()) {
-    const explicitlyHidden =
-      message.additional_kwargs?.hide_from_ui === true;
+    const explicitlyHidden = message.additional_kwargs?.hide_from_ui === true;
     const request = extractHumanInputRequest(message);
     if (
       !explicitlyHidden &&

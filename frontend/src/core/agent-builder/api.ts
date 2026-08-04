@@ -116,7 +116,7 @@ async function request<TSchema extends z.ZodType>(
     const message =
       typeof detail === "string"
         ? detail
-        : detail?.message ?? "Agent 设计请求失败";
+        : (detail?.message ?? "Agent 设计请求失败");
     throw new AgentBuilderApiError(
       response.status,
       safeCode(response.status),
@@ -153,11 +153,9 @@ export function listAgentBuilderSessions(
   projectId: string,
   signal?: AbortSignal,
 ) {
-  return request(
-    baseURL(projectId),
-    agentBuilderSessionListResponseSchema,
-    { signal },
-  );
+  return request(baseURL(projectId), agentBuilderSessionListResponseSchema, {
+    signal,
+  });
 }
 
 export function getAgentBuilderSession(

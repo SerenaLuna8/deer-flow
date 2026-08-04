@@ -418,11 +418,7 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
       const preserveRunId =
         preservedRunIds.has(identity) &&
         typeof Reflect.get(selectedMessage, "run_id") !== "string";
-      if (
-        !preserveDuration &&
-        !preserveReasoningDuration &&
-        !preserveRunId
-      ) {
+      if (!preserveDuration && !preserveReasoningDuration && !preserveRunId) {
         return selectedMessage;
       }
       return {

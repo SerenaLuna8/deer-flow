@@ -14,11 +14,7 @@ export default async function ProjectAgentsPage({
     agent_id?: string | string[];
   }>;
 }) {
-  const {
-    intent,
-    intent_id: intentId,
-    agent_id: agentId,
-  } = await searchParams;
+  const { intent, intent_id: intentId, agent_id: agentId } = await searchParams;
   const selectedAsset = assetIdSchema.safeParse(agentId);
   return (
     <ProjectAgentsAssetPage

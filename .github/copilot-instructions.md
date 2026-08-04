@@ -12,8 +12,8 @@
 - 保留 PostgreSQL-only、project-first、Gateway admission / Worker execution 边界。
 - 私有资源必须同时受 account、project、membership 和 owner context 约束；不使用 PostgreSQL RLS。
 - 行为变更必须配套测试；文档和配置变更必须同步当前入口文档。
-- 后端使用 `cd backend && make lint && make test`；前端使用 `cd frontend && pnpm check && pnpm test`。
-- 真实 PostgreSQL 门禁只能使用显式 `POSTGRES_TEST_URL` 指向的可丢弃测试实例。
+- 后端使用 `cd backend && make lint`，完整核心测试使用 `POSTGRES_TEST_URL=... make test`；前端使用 `cd frontend && pnpm check && pnpm test`。
+- 核心套件中的真实 PostgreSQL 测试只能使用显式 `POSTGRES_TEST_URL` 指向的可丢弃测试实例，并保持 0 skip。
 - 不提交 `config.yaml`、`.env`、Credential、数据库连接信息或运行期私有数据。
 
 根级全栈命令和当前目录结构见 [`README.md`](../README.md) 与 `make help`。

@@ -6,7 +6,7 @@ import uuid
 import pytest
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from support.m4_private_threads import seed_m4_thread_database
+from support.private_thread_seed import seed_private_thread_database
 
 from app.private_work.checkpoint_state import (
     bind_scoped_checkpoint_state,
@@ -365,7 +365,7 @@ async def test_run_admission_persists_gateway_authorized_visibility(
     migrated_postgres_database_url: str,
     checkpoint_mode: str,
 ) -> None:
-    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
     thread_id = f"human-input-{uuid.uuid4()}"
     raw_checkpointer = InMemorySaver()
     scoped_checkpointer = ProjectScopedCheckpointer(raw_checkpointer, seed.factory)

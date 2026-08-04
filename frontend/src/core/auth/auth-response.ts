@@ -5,10 +5,7 @@ export type AuthMeResult =
   | { type: "unauthenticated" }
   | { type: "unavailable" };
 
-export type PostAuthRefreshAction =
-  | "complete"
-  | "redirect-login"
-  | "retry";
+export type PostAuthRefreshAction = "complete" | "redirect-login" | "retry";
 
 /**
  * Only an explicit 401 proves that the browser identity is gone. Network

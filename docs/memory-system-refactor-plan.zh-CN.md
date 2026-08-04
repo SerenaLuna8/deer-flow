@@ -667,7 +667,7 @@ Markdown 可以作为导出和查看格式，但不能成为服务器权威数�
 - 明确 `sourceError` 是正式持久化字段还是删除该 contract，不能继续在 PostgreSQL round-trip 中静默丢失；
 - 冻结 Thread/Run retention 与长期 evidence 的 RESTRICT、断链、source-erased 和 hard-forget 语义；
 - 明确当前 `namespace` 是兼容/隔离坐标；Phase 0–3 不新增用户可见的多 Memory Space 产品；
-- 修正仍把 DB-owned Memory leaf 放入 YAML 的过期测试，包括 `test_project_memory_tools.py` 的示例 `memory.search_enabled` 和 `test_runtime_lifecycle_e2e.py` 的 `memory.enabled`；
+- 删除仍把 DB-owned Memory leaf 放入 YAML 的过期断言，并将旧 `test_runtime_lifecycle_e2e.py` 唯一有效的 Gateway Store wiring 断言迁入现行应用 wiring 测试；
 - 增加现有队列成功、失败、冲突和积压指标。
 
 退出标准：
@@ -995,16 +995,15 @@ Markdown 可以作为导出和查看格式，但不能成为服务器权威数�
 
 ```bash
 cd backend
-uv run pytest -q
 uvx ruff check .
 uvx ruff format --check .
 ```
 
-真实 PostgreSQL gate 使用专用测试管理库，由测试创建随机数据库：
+完整核心套件使用专用 PostgreSQL 测试管理库，由测试创建随机数据库（从仓库根目录运行）：
 
 ```bash
 POSTGRES_TEST_URL="$MEMORY_TEST_POSTGRES_URL" \
-  make test-project-foundation-postgres
+  make test
 ```
 
 迁移目标只能执行只读检查和独立 verifier，例如：
@@ -1031,7 +1030,7 @@ pnpm build
 
 发布证据必须保存 commit、schema marker/digest、命令、退出码、0 skip 结果、迁移 manifest、verifier 报告、质量评测、故障恢复和回滚演练结果。容器、Helm/Kubernetes、外部模型、Sandbox 和 tracing 仍需分别验证，不能用源码单测代替。
 
-真实 PostgreSQL Memory gate 应加入根 `Makefile` 的唯一 `PROJECT_FOUNDATION_POSTGRES_TESTS` 有序来源；不要新建一套重复的 CI workflow。
+真实 PostgreSQL Memory 用例应加入现有后端核心套件，通过根 `make test` 运行；不要新建一套重复的 CI workflow。
 
 ## 16. 可观测性
 

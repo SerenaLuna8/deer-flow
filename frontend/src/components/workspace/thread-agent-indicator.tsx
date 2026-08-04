@@ -59,7 +59,9 @@ export function ThreadAgentIndicator({
   if (!identity) return null;
 
   const label =
-    identity.available && identity.displayName ? identity.displayName : "不可用";
+    identity.available && identity.displayName
+      ? identity.displayName
+      : "不可用";
   return (
     <span
       className={cn(
@@ -73,7 +75,7 @@ export function ThreadAgentIndicator({
       <BotIcon aria-hidden className="size-3.5 shrink-0" />
       <span className="shrink-0">Agent</span>
       <span aria-hidden>·</span>
-      <span className="truncate text-foreground">{label}</span>
+      <span className="text-foreground truncate">{label}</span>
     </span>
   );
 }

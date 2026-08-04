@@ -119,8 +119,8 @@ patch, or reuse the old schema. Runtime startup and `make check-db` are read-onl
 never create, upgrade, repair, or delete database objects.
 
 Release readiness is checkout-sensitive. Historical milestone evidence does not certify the
-current worktree; run the current focused gates, including the M1-M7 PostgreSQL foundation gate
-when persistence or runtime boundaries change.
+current worktree; run the current focused gates, including the real PostgreSQL core tests when
+persistence or runtime boundaries change.
 Docker Compose, Kubernetes/Helm, browsers, model providers, and Sandbox modes require separate
 target-environment validation.
 
@@ -152,7 +152,7 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Backend test suite
+POSTGRES_TEST_URL=... make test  # Backend core suite from the repository root
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
@@ -184,19 +184,14 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
-- **PostgreSQL release gate** — root `Makefile` 的 `PROJECT_FOUNDATION_POSTGRES_TESTS`
-  是固定 20 文件 M1–M7 真实 PostgreSQL gate 的唯一有序来源；覆盖 M7 baseline/bootstrap、M2–M5
-  runtime integration、M6 process/job/stream/quota/audit/retention，以及真实 Gateway/Scheduler/Worker
-  lease、Worker-only graph、Gateway restart cursor 和跨 account/project/owner 隔离。生产 source-absence
-  gate 只扫描 app/harness/scripts/frontend runtime/nginx roots，历史 docs/tests 不参与；已移除 config
-  key 只允许出现在精确 validator allowlist。每个数据库测试只创建
-  随机 `deerflow_test_*` 数据库。Release evidence 必须通过
-  `POSTGRES_TEST_URL=... make test-project-foundation-postgres` 运行并保持 0 skip；跨平台 Python runner 和
-  `.github/workflows/project-saas-release-gates.yml` 会在变量缺失时于 pytest 前硬失败。
-- **Consolidated deterministic CI** — `.github/workflows/project-saas-release-gates.yml` 是后端完整
-  pytest（已递归收集 `tests/blocking_io/`）、固定 20 文件 M1-M7 PostgreSQL 门禁、前端单元测试、确定性
-  Chromium E2E、构建与安全检查的唯一 CI 编排。不要为这些命令再新增独立重复 workflow；Replay E2E、
-  发布、容器、Helm Chart 和版本检查仍保持专用 workflow。
+- **PostgreSQL core tests** — `POSTGRES_TEST_URL=... make test` 运行精简后的后端核心集合，
+  其中保留真实 PostgreSQL 初始化/只读校验、Project Repository、系统运行配置、Human Input
+  与跨 owner 隔离用例。每个数据库测试只创建随机 `deerflow_test_*` 数据库，绝不连接业务库；
+  缺少测试 URL 时入口在 pytest 前失败，完整核心运行必须保持 0 skip。
+- **Consolidated core CI** — `.github/workflows/project-saas-release-gates.yml` 统一运行后端核心
+  测试、真实 PostgreSQL 核心用例、前端核心单元测试、少量确定性 Chromium E2E、格式和安全检查。
+  不要为这些命令再新增重复 workflow；Replay E2E、发布、容器、Helm Chart 和版本检查仍使用专用
+  workflow。该核心集合用于快速保护主路径，不代表外部模型、浏览器矩阵或部署环境的完整认证。
 - **Single full-schema initialization** — `full_schema.sql` 是唯一完整 PostgreSQL schema
   来源，当前精确 marker 为 `full_schema_v1`。`make setup-db` 只接受空库，并在同一次显式初始化中
   安装完整 schema、builtin catalog、LangGraph schema 与 default project。仓库不提供增量升级；

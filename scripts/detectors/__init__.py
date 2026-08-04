@@ -1,0 +1,1 @@
+"""Static repository analysis detectors."""

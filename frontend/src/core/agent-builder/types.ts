@@ -77,11 +77,7 @@ const humanInputRequestSchema = z
     title: z.string().optional(),
     question: z.string().trim().min(1),
     context: z.string().nullable().optional(),
-    input_mode: z.enum([
-      "free_text",
-      "single_choice",
-      "choice_with_other",
-    ]),
+    input_mode: z.enum(["free_text", "single_choice", "choice_with_other"]),
     options: z.array(humanInputOptionSchema).optional(),
   })
   .strict()
@@ -228,9 +224,7 @@ export type AgentBuilderProgressItem = z.infer<
   typeof agentBuilderProgressItemSchema
 >;
 export type AgentBuilderMessage = z.infer<typeof agentBuilderMessageSchema>;
-export type AgentBuilderBlueprint = z.infer<
-  typeof agentBuilderBlueprintSchema
->;
+export type AgentBuilderBlueprint = z.infer<typeof agentBuilderBlueprintSchema>;
 export type AgentBuilderSession = z.infer<typeof agentBuilderSessionSchema>;
 export type AgentBuilderSessionSummary = z.infer<
   typeof agentBuilderSessionSummarySchema
@@ -238,9 +232,7 @@ export type AgentBuilderSessionSummary = z.infer<
 export type CreateAgentBuilderSessionInput = z.input<
   typeof createAgentBuilderSessionInputSchema
 >;
-export type AgentBuilderTurnInput = z.input<
-  typeof agentBuilderTurnInputSchema
->;
+export type AgentBuilderTurnInput = z.input<typeof agentBuilderTurnInputSchema>;
 export type CommitAgentBuilderSessionInput = z.input<
   typeof commitAgentBuilderSessionInputSchema
 >;

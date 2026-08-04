@@ -13,10 +13,7 @@ export function agentBuilderRootKey(accountId: string, projectId: string) {
   ] as const;
 }
 
-export function agentBuilderSessionsKey(
-  accountId: string,
-  projectId: string,
-) {
+export function agentBuilderSessionsKey(accountId: string, projectId: string) {
   return [...agentBuilderRootKey(accountId, projectId), "sessions"] as const;
 }
 

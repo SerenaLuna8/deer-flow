@@ -13,8 +13,8 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Layer 2: drive the REAL frontend against the REAL gateway (replay model, no
- * API key) and assert the browser renders the backend's data correctly.
+ * Drive the real frontend against the real Gateway/Worker Replay boundary and
+ * assert the browser renders the backend's data correctly without an API key.
  *
  * The prompt is read from the same fixture the gateway replays, so the input
  * hash matches and the recorded model turns reproduce deterministically. The
@@ -108,16 +108,20 @@ test.describe("real backend render (replay, no API key)", () => {
     ).not.toBe("");
     expect(
       EXPECTED_SUGGESTION,
-      "fixture should contain a suggestions turn (re-record; the record spec waits for /suggestions)",
+      "fixture should contain a suggestions turn",
     ).not.toBe("");
     const chat = page.locator("#chat");
-    await expect(chat.getByText("hi from replay.", { exact: true })).toBeVisible({
+    await expect(
+      chat.getByText("hi from replay.", { exact: true }),
+    ).toBeVisible({
       timeout: 60_000,
     });
     await expect(
       page.getByRole("link", { name: new RegExp(EXPECTED_TITLE, "i") }),
     ).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("combobox").filter({ hasText: "note.txt" })).toBeVisible();
+    await expect(
+      page.getByRole("combobox").filter({ hasText: "note.txt" }),
+    ).toBeVisible();
     await expect(chat.getByText(EXPECTED_SUGGESTION)).toBeVisible({
       timeout: 30_000,
     });

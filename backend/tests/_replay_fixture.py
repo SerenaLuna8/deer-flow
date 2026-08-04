@@ -1,15 +1,7 @@
-"""Shared config + gateway-drive helpers for the record/replay e2e.
-
-Record (``scripts/record_gateway.py`` + ``scripts/build_fixture_from_jsonl.py``)
-and replay (``tests/test_replay_golden.py``) MUST drive the gateway through an
-identical prompt-affecting process config. Model definitions and Agent runtime
-policy are PostgreSQL-owned; the replay setup below seeds those authorities in
-the disposable test database rather than reviving removed YAML settings.
-"""
+"""Shared process helpers for the deterministic replay browser test."""
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -17,25 +9,8 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-
-from support.project_agent_factory import create_project_agent_from_design
-
-from app.shared_assets.models import AgentPayload
-from deerflow.persistence.engine import get_session_factory
-
-# mode -> (thinking_enabled, is_plan_mode, subagent_enabled). Mirrors the
-# frontend mapping in core/threads/hooks.ts.
-MODE_CONTEXT: dict[str, tuple[bool, bool, bool]] = {
-    "flash": (False, False, False),
-    "thinking": (True, False, False),
-    "pro": (True, True, False),
-    # thinking_enabled mirrors the frontend `context.mode !== "flash"` (hooks.ts),
-    # so ultra is thinking-enabled too.
-    "ultra": (True, True, True),
-}
 
 _REPLAY_ADMIN_ID = uuid.UUID("5fb66f7d-5655-54df-a7da-66066c114f17")
 
@@ -116,19 +91,6 @@ def install_replay_model_adapter() -> None:
         "replay_provider:ReplayChatModel",
         False,
     )
-
-
-@contextmanager
-def replay_model_adapter() -> Iterator[None]:
-    """Temporarily install the replay adapter in an in-process test."""
-    from app.system_settings import validation
-
-    original = validation.PROVIDER_ADAPTERS["codex_cli"]
-    install_replay_model_adapter()
-    try:
-        yield
-    finally:
-        validation.PROVIDER_ADAPTERS["codex_cli"] = original
 
 
 async def prepare_replay_runtime_catalog(
@@ -294,7 +256,7 @@ def prepare_hermetic_skills(home: Path) -> None:
 
 
 @contextmanager
-def replay_worker(*, replay_adapter: bool = True) -> Iterator[None]:
+def replay_worker() -> Iterator[None]:
     """Run the real independent Worker and wait for durable readiness."""
     backend_root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
@@ -305,12 +267,10 @@ def replay_worker(*, replay_adapter: bool = True) -> Iterator[None]:
         environment.get("PYTHONPATH", ""),
     )
     environment["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
-    command = [sys.executable, "-m", "app.worker.app"]
-    if replay_adapter:
-        command = [
-            sys.executable,
-            str(backend_root / "tests" / "replay_worker_process.py"),
-        ]
+    command = [
+        sys.executable,
+        str(backend_root / "tests" / "replay_worker_process.py"),
+    ]
     process = subprocess.Popen(
         command,
         cwd=backend_root,
@@ -357,115 +317,3 @@ def replay_worker(*, replay_adapter: bool = True) -> Iterator[None]:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-
-
-def sse_event_shapes(resp) -> list[dict]:
-    """Reduce an SSE stream to (event name, sorted top-level data keys).
-
-    Snapshots the *shape* of the stream, not volatile values, so the golden is
-    stable across runs while still catching event-sequence / payload-shape drift.
-    """
-    events: list[dict] = []
-    current: str | None = None
-    for line in resp.iter_lines():
-        if line.startswith("event:"):
-            current = line[len("event:") :].strip()
-        elif line.startswith("data:"):
-            raw = line[len("data:") :].strip()
-            try:
-                data = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                data = {"_raw": raw[:200]}
-            events.append({"event": current, "keys": sorted(data.keys()) if isinstance(data, dict) else None})
-    return events
-
-
-def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
-    with replay_worker():
-        return _drive_gateway(app, prompt=prompt, context=context)
-
-
-def _drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
-    """Register -> create project Agent/thread -> stream a private run.
-
-    Auth, project creation, activation, Thread creation, and Run admission use
-    the real Gateway wire path. Deterministic setup creates the complete Agent
-    through the same atomic service seam as Builder commit, avoiding both the
-    removed manual-version API and an extra model call that would alter replay.
-    """
-    from starlette.testclient import TestClient
-
-    with TestClient(app) as client:
-        reg = client.post(
-            "/api/v1/auth/register",
-            json={"email": f"e2e-{uuid.uuid4().hex[:8]}@example.com", "password": "very-strong-password-123"},
-        )
-        assert reg.status_code == 201, reg.text
-        csrf = client.cookies.get("csrf_token")
-        assert csrf, "register must set csrf_token cookie"
-        headers = {"X-CSRF-Token": csrf}
-
-        suffix = uuid.uuid4().hex[:10]
-        project = client.post(
-            "/api/projects",
-            json={"slug": f"replay-{suffix}", "display_name": "Replay project"},
-            headers=headers,
-        )
-        assert project.status_code == 201, project.text
-        project_id = project.json()["id"]
-
-        assert client.portal is not None
-        created = client.portal.call(
-            partial(
-                create_project_agent_from_design,
-                get_session_factory(),
-                user_id=uuid.UUID(reg.json()["id"]),
-                project_id=uuid.UUID(project_id),
-                slug=f"replay-agent-{suffix}",
-                display_name="Replay Agent",
-                payload=AgentPayload(
-                    description="Deterministic gateway replay",
-                    soul="Use the exact project tools to complete the request.",
-                    model_ref="scenario-model",
-                    tool_groups=("file:read", "file:write"),
-                    skill_version_ids=(),
-                    mcp_version_ids=(),
-                ),
-                request_id="replay-agent-setup",
-            ),
-        )
-        asset_id = str(created.asset.id)
-        activated = client.post(
-            f"/api/projects/{project_id}/agents/{asset_id}/activate",
-            json={"expected_asset_version": created.asset.version},
-            headers=headers,
-        )
-        assert activated.status_code == 200, activated.text
-
-        thread_id = str(uuid.uuid4())
-        created = client.post(
-            f"/api/projects/{project_id}/private-work/threads",
-            json={
-                "thread_id": thread_id,
-                "agent_asset_id": asset_id,
-                "agent_scope": "project",
-                "metadata": {},
-            },
-            headers=headers,
-        )
-        assert created.status_code == 201, created.text
-
-        body = {
-            "assistant_id": "lead_agent",
-            "input": {"messages": [{"role": "user", "content": prompt}]},
-            "config": {"recursion_limit": 50},
-            "context": context,
-        }
-        with client.stream(
-            "POST",
-            f"/api/projects/{project_id}/private-work/threads/{thread_id}/runs/stream",
-            json=body,
-            headers=headers,
-        ) as resp:
-            assert resp.status_code == 200, resp.read().decode()
-            return sse_event_shapes(resp)

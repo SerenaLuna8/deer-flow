@@ -49,7 +49,8 @@ export async function throwGatewayApiError(
     const fields =
       Array.isArray(detail.fields) &&
       detail.fields.every(
-        (field): field is string => typeof field === "string" && field.length > 0,
+        (field): field is string =>
+          typeof field === "string" && field.length > 0,
       )
         ? detail.fields
         : [];

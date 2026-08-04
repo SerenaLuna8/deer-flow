@@ -19,9 +19,7 @@ function hasSubagentTag(
   const tags = metadata?.streamMetadata?.tags;
   return (
     Array.isArray(tags) &&
-    tags.some(
-      (tag) => typeof tag === "string" && tag.startsWith("subagent:"),
-    )
+    tags.some((tag) => typeof tag === "string" && tag.startsWith("subagent:"))
   );
 }
 

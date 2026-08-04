@@ -16,10 +16,7 @@ import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { transitionAccountQueries } from "./account-query-client";
-import {
-  classifyAuthMeResponse,
-  type AuthMeResult,
-} from "./auth-response";
+import { classifyAuthMeResponse, type AuthMeResult } from "./auth-response";
 import {
   createAuthIdentityCoordinator,
   type AuthIdentityCoordinator,
@@ -177,10 +174,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
         );
         return result;
       } catch (err) {
-        if (
-          !identityCoordinator.isCurrent(attempt) ||
-          attempt.signal.aborted
-        ) {
+        if (!identityCoordinator.isCurrent(attempt) || attempt.signal.aborted) {
           return null;
         }
         console.warn(

@@ -1555,7 +1555,7 @@ class TestUploads:
             assert names == {"a.txt", "b.txt"}
             sizes = {f["filename"]: f["size"] for f in result["files"]}
             assert sizes == {"a.txt": 1, "b.txt": 2}
-            # M7 exposes downloads only through project-scoped file records.
+            # Downloads are exposed only through project-scoped file records.
             for f in result["files"]:
                 assert "artifact_url" not in f
                 assert f["virtual_path"].startswith("/mnt/user-data/uploads/")
@@ -2580,6 +2580,3 @@ class TestBugListUploadsDeadCode:
             # Read path should NOT create the directory
             assert not non_existent.exists()
             assert result == {"files": [], "count": 0}
-
-
-# File-backed asset mutation invalidation is obsolete because mutation is unavailable.

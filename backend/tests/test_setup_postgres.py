@@ -749,7 +749,6 @@ def test_makefiles_expose_database_targets() -> None:
     for removed in (
         "migrate-db:",
         "--migrate-only",
-        "setup-m4-migration-db:",
         "migrate-sqlite:",
         "migrate-assets:",
         "migrate-private-work:",

@@ -87,9 +87,7 @@ export function AgentBuilderProgress({
               )}
               <span
                 className={
-                  item.status === "running"
-                    ? "text-foreground"
-                    : undefined
+                  item.status === "running" ? "text-foreground" : undefined
                 }
               >
                 {item.label}

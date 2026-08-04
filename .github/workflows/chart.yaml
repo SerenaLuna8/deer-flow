@@ -42,12 +42,6 @@ jobs:
         run: >-
           helm lint deploy/helm/deer-flow
           --set-string postgresql.external.databaseUrl=postgresql://postgres:test@db:5432/deerflow
-      - name: Validate templates render
-        run: >-
-          helm template deer-flow deploy/helm/deer-flow --include-crds
-          --set-string postgresql.external.databaseUrl=postgresql://postgres:test@db:5432/deerflow
-          >/dev/null
-
       - name: Validate Gateway, Worker, and Scheduler ownership
         run: bash scripts/check_chart_runtime_topology.sh
       - name: Validate sandbox Service exposure

@@ -854,8 +854,7 @@ export const zhCN: Translations = {
         "最近一次发现返回的工具目录不符合安全要求。请检查 MCP 服务的工具名称、描述和参数结构后重新测试。",
       discoveryUnavailable:
         "最近一次连接 MCP 服务失败。请检查服务可用性、出口代理和网络配置后重新测试。",
-      stale:
-        "MCP 配置或 Credential 授权已变化，之前的工具目录已过期。请重新测试。",
+      stale: "MCP 配置或凭据绑定已变化，之前的工具目录已过期。请重新测试。",
       refreshFailed: "工具目录刷新失败，当前仍展示上次读取的结果。",
       degradedSuffix: "当前展示上次成功发现的工具。",
       empty: "该服务在最近一次发现中未提供可用工具。",

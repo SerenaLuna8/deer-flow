@@ -10,7 +10,7 @@
 | [API.md](./API.md) | 当前 project-scoped API 路由族和错误契约 |
 | [PATH_EXAMPLES.md](./PATH_EXAMPLES.md) | HTTP、Sandbox 和本地配置路径示例 |
 | [STREAMING.md](./STREAMING.md) | Run stream、durable SSE 与客户端事件处理 |
-| [REPLAY_E2E.md](./REPLAY_E2E.md) | Gateway 录制与确定性 replay E2E |
+| [REPLAY_E2E.md](./REPLAY_E2E.md) | 单场景确定性全栈 Replay E2E |
 
 ## 配置与集成
 
@@ -37,7 +37,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [BLOCKING_IO_DETECTION.md](./BLOCKING_IO_DETECTION.md) | Async/线程边界静态与动态检查 |
+| [BLOCKING_IO_DETECTION.md](./BLOCKING_IO_DETECTION.md) | Async 路径阻塞 IO 静态检查 |
 | [SANDBOX_MEMORY_PROFILING.md](./SANDBOX_MEMORY_PROFILING.md) | Sandbox 内存基线与分析流程 |
 
 ## 权威入口

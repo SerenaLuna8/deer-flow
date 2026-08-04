@@ -29,6 +29,15 @@ from deerflow.persistence.system_runtime_settings import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _audit_hmac_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
+    monkeypatch.setenv(
+        "DEER_FLOW_AUDIT_KEYRING_JSON",
+        '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}',
+    )
+
+
 @pytest.mark.postgres
 @pytest.mark.anyio
 async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(

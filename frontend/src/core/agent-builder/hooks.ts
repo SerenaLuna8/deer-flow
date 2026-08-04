@@ -31,10 +31,7 @@ import type {
   CreateAgentBuilderSessionInput,
 } from "./types";
 
-function useAgentBuilderMutationRunner(
-  accountId: string,
-  projectId: string,
-) {
+function useAgentBuilderMutationRunner(accountId: string, projectId: string) {
   const access = usePrivateWorkAccess();
   if (
     access.scope.accountId !== accountId ||
@@ -68,8 +65,7 @@ function useAgentBuilderMutationRunner(
 export function agentBuilderPollingInterval(
   session: AgentBuilderSession | undefined,
 ) {
-  return session?.status === "generating" ||
-    session?.status === "committing"
+  return session?.status === "generating" || session?.status === "committing"
     ? 1_000
     : false;
 }
@@ -100,8 +96,7 @@ export function useAgentBuilderSession(
       getAgentBuilderSession(projectId, sessionId, signal).then(
         (response) => response.data,
       ),
-    refetchInterval: (query) =>
-      agentBuilderPollingInterval(query.state.data),
+    refetchInterval: (query) => agentBuilderPollingInterval(query.state.data),
   });
 }
 
@@ -141,11 +136,7 @@ export function useSubmitAgentBuilderTurn(
   const queryClient = useQueryClient();
   const { runMutation } = useAgentBuilderMutationRunner(accountId, projectId);
   return useMutation({
-    mutationKey: agentBuilderMutationKey(
-      accountId,
-      projectId,
-      "submit-turn",
-    ),
+    mutationKey: agentBuilderMutationKey(accountId, projectId, "submit-turn"),
     mutationFn: (input: AgentBuilderTurnInput) =>
       runMutation((signal) =>
         submitAgentBuilderTurn(projectId, sessionId, input, signal),

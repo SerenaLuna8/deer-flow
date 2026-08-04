@@ -1,4 +1,4 @@
-"""Start a hermetic *replay* gateway for the full-stack (Layer 2) e2e.
+"""Start a hermetic replay gateway for the core full-stack E2E.
 
 Builds an ephemeral process config, seeds the disposable PostgreSQL model and
 runtime-policy catalogs for ``ReplayChatModel``, then runs uvicorn — no model
@@ -65,27 +65,15 @@ def main() -> int:
     asyncio.run(prepare_replay_runtime_catalog())
 
     import uvicorn
+    from replay_agent_router import router as replay_agent_router
 
-    target: str | object = "app.gateway.app:app"
-    # Test-only: attach the run/message seeder used by the multi-run render-order
-    # e2e (#3352). Imported from tests/ and mounted here only — never in the
-    # production app. Pass the app object (not the import string) so the extra
-    # router is registered before uvicorn serves it.
-    if os.environ.get("DEERFLOW_ENABLE_TEST_SEED") == "1":
-        from seed_runs_router import router as seed_router
+    from app.gateway.app import app as gateway_app
 
-        from app.gateway.app import app as gateway_app
-
-        gateway_app.include_router(seed_router)
-        target = gateway_app
-        print(
-            "[replay-gw] test-only seed router mounted at /api/projects/{project_id}/test-only/seed-runs",
-            flush=True,
-        )
+    gateway_app.include_router(replay_agent_router)
 
     print(f"[replay-gw] config={cfg} fixture={args.fixture} cors={args.cors} port={args.port}", flush=True)
     with replay_worker():
-        uvicorn.run(target, host="127.0.0.1", port=args.port, log_level="warning")
+        uvicorn.run(gateway_app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 

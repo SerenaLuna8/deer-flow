@@ -58,6 +58,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "jobs",
     "mcp_server_versions",
     "mcp_servers",
+    "mcp_tool_discovery_attempts",
     "mcp_version_credential_slots",
     "project_mcp_tool_inventories",
     "project_invitation_rate_limits",

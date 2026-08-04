@@ -272,8 +272,9 @@ def test_auth_disabled_does_not_clobber_valid_session_cookie(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", fake_current_user)
     client = TestClient(_make_app())
+    client.cookies.set("access_token", "valid-session")
 
-    res = client.get("/api/whoami", cookies={"access_token": "valid-session"})
+    res = client.get("/api/whoami")
 
     assert res.status_code == 200
     assert res.json() == {

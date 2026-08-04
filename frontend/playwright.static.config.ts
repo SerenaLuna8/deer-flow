@@ -10,7 +10,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: process.env.CI ? "github" : "html",
-  outputDir: "test-results/m7-static",
+  outputDir: "test-results/core-static",
   timeout: 30_000,
   use: {
     baseURL,

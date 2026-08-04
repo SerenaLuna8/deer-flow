@@ -170,7 +170,7 @@ describe("project shell navigation", () => {
     }
   });
 
-  test("renders implemented M3 asset destinations from shared_assets.read", () => {
+  test("renders implemented asset destinations from shared_assets.read", () => {
     const html = renderShell(adminProject);
 
     for (const label of [

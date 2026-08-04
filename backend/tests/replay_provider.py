@@ -1,5 +1,4 @@
-"""Replay a recorded LLM trace deterministically — the "replay" half of
-record/replay e2e (mirrors open-design's ``mocks/`` golden traces).
+"""Replay a recorded LLM trace for the deterministic browser core test.
 
 A fixture is a JSON file capturing the *real* model calls of one scenario,
 keyed by a normalized hash of the **caller + input** each call received::
@@ -29,22 +28,18 @@ output that was recorded for that input, regardless of order or which middleware
 issued it. The caller name (``lead_agent``, ``middleware:title``,
 ``suggest_agent``, ``subagent:*``, ...) is included so two different model
 callers with the same conversation text do not compete for the same replay
-bucket. That keeps the in-graph, deterministic title call part of the recording;
+bucket. That keeps the in-graph, deterministic title call part of the fixture;
 memory/summarization, by contrast, are disabled in the replay config
 (``_replay_fixture.py``) because their background, debounced timing is not
 reproducible across runs.
 
 Volatile fields (UUID thread/run/user ids, timestamps, dates, tmp/home paths)
-are normalized out before hashing so a recording replays across processes with
-different temp dirs. The same ``hash_messages`` is used by the recorder
-(``scripts/record_gateway.py``) and here, so record and replay agree by
-construction.
+are normalized out before hashing so the committed fixture replays across
+processes with different temporary directories.
 
-This lives in ``tests/`` (not in the publishable ``deerflow-harness`` package),
-matching the repo convention for test-only fakes (cf. ``FakeToolCallingModel`` in
-``_agent_e2e_helpers.py``). In-process tests get ``tests/`` on ``sys.path`` for
-free via pytest; a standalone replay gateway just needs ``PYTHONPATH`` to include
-``backend/tests`` so the config ``use:`` below resolves.
+This lives in ``tests/`` (not in the publishable ``deerflow-harness`` package).
+The standalone replay Gateway includes ``backend/tests`` in ``PYTHONPATH`` so
+the test-only provider resolves.
 
 Point a config model's ``use`` at this class and set the fixture via env::
 
@@ -56,13 +51,10 @@ Point a config model's ``use`` at this class and set the fixture via env::
     DEERFLOW_REPLAY_FIXTURE=/path/to/write_read_file.ultra.json
 
 A cache miss raises loudly with a diagnostic — that is the signal that the
-replayed run diverged from the recording (graph changed, a new volatile field
+replayed run diverged from the fixture (graph changed, a new volatile field
 slipped through normalization, or a non-deterministic tool result changed a
-downstream input). Re-record or extend normalization; never pass silently.
-
-Recording lives outside production code too (``scripts/record_gateway.py`` +
-``scripts/build_fixture_from_jsonl.py``); CI consumes the fixtures through this
-replay side with no API key.
+downstream input). Replace the fixture deliberately or extend normalization;
+never pass silently.
 """
 
 from __future__ import annotations
@@ -91,23 +83,6 @@ _CALLER_NAME_ALIASES = {
     # so keep the run_name and tag in the same replay namespace.
     "title_agent": "middleware:title",
 }
-
-# Process-wide record of replay misses. A miss raises inside the model, but the
-# gateway's LLMErrorHandlingMiddleware swallows it into a normal assistant error
-# message — so the SSE *event shapes* are unchanged and a shape-only golden stays
-# green on a stale fixture. The in-process Layer-1 test inspects this list to fail
-# loud on a miss instead. (Layer-2 already fails on a miss: the recorded turns
-# never render.)
-_replay_misses: list[str] = []
-
-
-def replay_misses() -> list[str]:
-    """Hashes that missed the fixture since the last reset (see ``_replay_misses``)."""
-    return list(_replay_misses)
-
-
-def reset_replay_misses() -> None:
-    _replay_misses.clear()
 
 
 def _normalize_caller(caller: str | None) -> str:
@@ -256,7 +231,7 @@ def hash_input_key(conversation_hash: str, *, caller: str | None) -> str:
     """Namespace a conversation hash by caller identity.
 
     Keeping this as ``hash(caller + legacy_conversation_hash)`` lets existing
-    fixtures migrate without a live-model re-record: their old ``input_hash`` is
+    fixtures migrate without regenerating model output: their old ``input_hash`` is
     exactly the conversation hash.
     """
     payload = json.dumps(
@@ -339,7 +314,6 @@ class ReplayChatModel(BaseChatModel):
             if bucket:
                 key = legacy_key
         if not bucket:
-            _replay_misses.append(key)
             if os.environ.get("DEERFLOW_REPLAY_DEBUG_EXCEPTIONS") == "1":
                 print(
                     f"[replay-provider] miss caller={caller!r} input_hash={key} conversation_hash={legacy_key}",
@@ -415,6 +389,4 @@ __all__ = [
     "hash_input_key",
     "hash_messages",
     "hash_replay_input",
-    "replay_misses",
-    "reset_replay_misses",
 ]

@@ -228,11 +228,11 @@ Recommend the checks matching the touched surface:
 
 | Surface | Suggested validation |
 | --- | --- |
-| Backend API / harness / agents / MCP / skills runtime | `cd backend && make lint && make test` |
-| Blocking IO or async file/network work | `cd backend && make test-blocking-io` or a focused blocking-IO regression |
-| Harness/app boundary | `cd backend && uv run pytest tests/test_harness_boundary.py` |
-| Frontend UI/core | `cd frontend && pnpm format && pnpm lint && pnpm typecheck && BETTER_AUTH_SECRET=local-dev-secret pnpm build && make test` |
-| Front/back thread or SSE contract | backend replay golden and full-stack replay render where feasible |
+| Backend API / harness / agents / MCP / skills runtime | `cd backend && make lint && POSTGRES_TEST_URL=... make test` |
+| Blocking IO or async file/network work | `make detect-blocking-io` plus a focused regression for the changed production path |
+| Harness/app boundary | focused tests for the changed public import or execution boundary |
+| Frontend UI/core | `cd frontend && pnpm format && pnpm check && pnpm test` |
+| Front/back thread or SSE contract | the single full-stack Replay render where feasible |
 | Frontend user workflow | Playwright E2E or browser proof with screenshot/DOM assertion |
 | Docker/sandbox/provisioner | focused backend tests plus Docker/provisioner smoke when feasible |
 | Docs-only | targeted markdown review |

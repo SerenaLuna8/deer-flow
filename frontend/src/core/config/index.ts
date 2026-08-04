@@ -18,7 +18,7 @@ export function getBackendBaseURL() {
   }
 }
 
-export function getLangGraphBaseURL(isMock?: boolean) {
+export function getLangGraphBaseURL() {
   console.log(
     "env.NEXT_PUBLIC_LANGGRAPH_BASE_URL",
     env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
@@ -28,11 +28,6 @@ export function getLangGraphBaseURL(isMock?: boolean) {
       env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
       getBaseOrigin(),
     ).toString();
-  } else if (isMock) {
-    if (typeof window !== "undefined") {
-      return `${window.location.origin}/mock/api`;
-    }
-    return "http://localhost:3000/mock/api";
   } else {
     throw new Error(
       "A project-private API URL is required for the LangGraph-compatible client.",

@@ -257,15 +257,15 @@ deer-flow/
 | `make gateway` / `make worker` / `make scheduler`             | 单独启动后端进程                                        |
 | `make setup-db`                                               | 在空库执行完整 schema 并初始化 PostgreSQL               |
 | `make check-db`                                               | 只读检查 PostgreSQL marker 与必需对象                   |
-| `cd backend && make lint && make test`                        | 后端格式、静态检查与测试                                |
+| `cd backend && make lint`                                    | 后端格式与静态检查                                      |
 | `cd frontend && pnpm check && pnpm test`                      | 前端 lint、类型检查与单元测试                           |
-| `POSTGRES_TEST_URL=... make test-project-foundation-postgres` | 运行 M1-M7 真实 PostgreSQL 门禁；只能使用可丢弃测试实例 |
+| `POSTGRES_TEST_URL=... make test`                             | 运行后端核心测试（含真实 PostgreSQL）；仅限可丢弃实例   |
 
 完整命令列表运行 `make help`。
 
-GitHub Actions 由 `.github/workflows/project-saas-release-gates.yml` 统一执行完整后端测试（包含
-`tests/blocking_io/`）、固定 20 文件 M1-M7 PostgreSQL 门禁、前端单元测试、确定性 Chromium E2E、构建和安全检查。
-Replay E2E、发布、容器、Helm Chart 与版本校验继续使用各自的专用工作流。
+GitHub Actions 由 `.github/workflows/project-saas-release-gates.yml` 统一执行精简后的后端核心测试、
+真实 PostgreSQL 核心用例、前端核心单元测试、少量确定性 Chromium E2E、格式和安全检查。
+单场景 Replay E2E、发布、容器、Helm Chart 与版本校验继续使用各自的专用工作流。
 
 ## 文档
 
