@@ -627,11 +627,21 @@ The `full_schema_v2` snapshot reserves the complete staged Memory v2 contract: S
 Item, Extraction/Consolidation Generation, Candidate, versioned Fact/Evidence, derived Summary,
 Suppression, and per-Run Context Snapshot rows, plus the `memory_extract`,
 `memory_consolidate`, and `memory_retention_purge` Job types. `memory.pipeline_mode` is frozen in
-the existing Run runtime-policy snapshot and defaults to `off`. The Worker now handles
+the existing Run runtime-policy snapshot and defaults to `off`. The Worker handles
 `memory_extract` jobs with the frozen model snapshot, a fixed no-tool/no-tracing extractor, and an
-atomic Candidate-plus-Job settlement. Candidates remain shadow data and never enter recall;
-`memory_consolidate`, `memory_retention_purge`, Fact writes, and the recall switch remain disabled,
-so the v1 read/write path below continues to serve production Memory.
+atomic Candidate-plus-Job settlement. In `consolidate` or `v2` mode, the existing Scheduler admits
+at most one due `memory_consolidate` Job per project/owner/namespace, with 20 Candidates per Job;
+only the Worker calls the fixed no-tool/no-tracing consolidator. The Generation freezes the exact
+runtime-policy revision and model ID/version/checksum, and Candidate decisions plus
+Fact/Revision/Evidence writes settle in one transaction. A safe transient dead Job may receive at
+most one automatic successor for the same frozen Generation; a second dead result stays available
+for operator diagnosis instead of creating an unbounded Job chain. Terminal Candidate bodies are
+erased by `memory_retention_purge` at the exact cutoff frozen on admission while pending Candidates
+remain. Both consolidation and retention lock and recheck the current policy in their settlement
+transaction, so pausing keeps the backlog and cannot commit a Fact or erase Candidate text after
+the pause has linearized.
+Candidates and v2 Facts still never enter recall, so the v1 read/write path below remains the only
+production Memory source until the separate v2 recall switch.
 
 Private Lead Agent Runs may expose the async, read-only `memory_search` tool when
 `memory.enabled` and `memory.search_enabled` are both true. Its model-visible arguments are only

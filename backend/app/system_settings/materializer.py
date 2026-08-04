@@ -53,6 +53,34 @@ class SystemModelMaterializer:
         except (DBAPIError, RuntimeError, SystemModelRepositoryInvariant):
             raise SystemModelMaterializationUnavailable() from None
 
+    async def materialize_exact(
+        self,
+        *,
+        model_config_id: uuid.UUID,
+        model_config_version_id: uuid.UUID,
+        payload_checksum: str,
+    ) -> ModelConfig:
+        try:
+            async with self._session_factory() as session, session.begin():
+                material = await SystemModelRepository(
+                    session,
+                ).lock_exact_material(
+                    model_config_id=model_config_id,
+                    model_config_version_id=model_config_version_id,
+                    payload_checksum=payload_checksum,
+                    load_envelope=True,
+                )
+                if material is None:
+                    raise SystemModelMaterializationUnavailable
+                return await asyncio.to_thread(
+                    self._credential_adapter.materialize,
+                    material,
+                )
+        except SystemModelMaterializationUnavailable:
+            raise
+        except (DBAPIError, RuntimeError, SystemModelRepositoryInvariant):
+            raise SystemModelMaterializationUnavailable() from None
+
     async def materialize_snapshot(
         self,
         *,

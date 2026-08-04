@@ -670,7 +670,7 @@ class MemoryFactEvidenceRow(Base):
         CheckConstraint("trust_class IN ('direct', 'derived', 'untrusted')", name="ck_memory_fact_evidence_trust"),
         CheckConstraint(
             "(source_erased_at IS NULL AND thread_id IS NOT NULL AND run_id IS NOT NULL "
-            "AND run_event_sequence IS NOT NULL AND (source_candidate_id IS NOT NULL OR source_item_id IS NOT NULL)) OR "
+            "AND (source_candidate_id IS NOT NULL OR source_item_id IS NOT NULL)) OR "
             "(source_erased_at IS NOT NULL AND evidence_excerpt IS NULL AND source_candidate_id IS NULL "
             "AND source_item_id IS NULL AND thread_id IS NULL AND run_id IS NULL AND run_event_sequence IS NULL)",
             name="ck_memory_fact_evidence_source_state",

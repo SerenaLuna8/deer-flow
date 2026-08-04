@@ -69,6 +69,30 @@ class SystemRuntimePolicyRepository:
             raise SystemRuntimePolicyRepositoryInvariant
         return policy, version
 
+    async def exact_version(
+        self,
+        section: RuntimePolicySection | str,
+        revision: int,
+        *,
+        for_update: bool = False,
+    ) -> SystemRuntimePolicyVersionRow | None:
+        try:
+            parsed_section = RuntimePolicySection(section)
+        except ValueError:
+            raise SystemRuntimePolicyRepositoryInvariant from None
+        if type(revision) is not int or revision < 1:
+            raise SystemRuntimePolicyRepositoryInvariant
+        statement = select(SystemRuntimePolicyVersionRow).where(
+            SystemRuntimePolicyVersionRow.section == parsed_section.value,
+            SystemRuntimePolicyVersionRow.version_number == revision,
+        )
+        if for_update:
+            statement = statement.with_for_update(
+                read=True,
+                of=SystemRuntimePolicyVersionRow,
+            )
+        return (await self.session.execute(statement)).scalar_one_or_none()
+
     async def list_current(
         self,
     ) -> tuple[tuple[SystemRuntimePolicyRow, SystemRuntimePolicyVersionRow], ...]:

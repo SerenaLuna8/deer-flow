@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import get_args
 
@@ -153,6 +154,7 @@ def test_memory_job_types_share_one_closed_runtime_contract() -> None:
 
     project_id = uuid.uuid4()
     owner_id = str(uuid.uuid4())
+    retention_cutoff = datetime.now(UTC) - timedelta(days=30)
     for job_type in MEMORY_JOB_TYPES:
         request = EnqueueJob(
             job_type=job_type,
@@ -162,6 +164,7 @@ def test_memory_job_types_share_one_closed_runtime_contract() -> None:
             occurrence_id=None,
             max_attempts=3,
             namespace="default",
+            memory_retention_cutoff_at=(retention_cutoff if job_type == "memory_retention_purge" else None),
         )
         assert request.job_type == job_type
         with pytest.raises(ValueError):
@@ -185,6 +188,7 @@ def test_memory_job_types_share_one_closed_runtime_contract() -> None:
                     max_attempts=3,
                     namespace=invalid_namespace,
                 )
+
         for run_id, occurrence_id, origin_trace_id in (
             ("run", None, None),
             (None, "occurrence", None),
@@ -228,6 +232,28 @@ def test_memory_job_types_share_one_closed_runtime_contract() -> None:
 
     with pytest.raises(ValueError):
         EnqueueJob(
+            job_type="memory_retention_purge",
+            scope=JobScope(project_id, owner_id),
+            idempotency_key=_digest("retention:missing-cutoff"),
+            run_id=None,
+            occurrence_id=None,
+            max_attempts=3,
+            namespace="default",
+        )
+    with pytest.raises(ValueError):
+        EnqueueJob(
+            job_type="memory_consolidate",
+            scope=JobScope(project_id, owner_id),
+            idempotency_key=_digest("consolidate:unexpected-cutoff"),
+            run_id=None,
+            occurrence_id=None,
+            max_attempts=3,
+            namespace="default",
+            memory_retention_cutoff_at=retention_cutoff,
+        )
+
+    with pytest.raises(ValueError):
+        EnqueueJob(
             job_type="mcp_discovery",
             scope=JobScope(project_id, owner_id),
             idempotency_key=_digest("mcp-with-memory-namespace"),
@@ -238,24 +264,11 @@ def test_memory_job_types_share_one_closed_runtime_contract() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "job_type",
-    sorted(MEMORY_JOB_TYPES - {"memory_extract"}),
-)
-def test_later_memory_handlers_are_not_registered_in_pr4(job_type: str) -> None:
-    with pytest.raises(ValueError, match="unsupported job type"):
-        WorkerService(
-            None,
-            None,
-            {job_type: object()},
-            WorkerConfig(),
-        )
-
-
-def test_memory_extract_handler_is_registered_in_pr4() -> None:
+@pytest.mark.parametrize("job_type", sorted(MEMORY_JOB_TYPES))
+def test_memory_handlers_are_registered_in_pr5(job_type: str) -> None:
     WorkerService(
         None,
         None,
-        {"memory_extract": object()},
+        {job_type: object()},
         WorkerConfig(),
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint, inspect, text
@@ -215,6 +216,7 @@ async def test_memory_jobs_preserve_owner_and_namespace_through_claim(
                         occurrence_id=None,
                         max_attempts=3,
                         namespace=namespaces[job_type],
+                        memory_retention_cutoff_at=(datetime.now(UTC) - timedelta(days=30) if job_type == "memory_retention_purge" else None),
                     )
                 )
 

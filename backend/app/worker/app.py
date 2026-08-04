@@ -29,6 +29,10 @@ from app.system_runtime_settings.materializer import (
 )
 from app.system_settings import SystemModelMaterializer
 from app.worker.mcp_discovery import McpToolDiscoveryJobHandler
+from app.worker.memory_consolidate import (
+    MemoryConsolidateJobHandler,
+    MemoryRetentionPurgeJobHandler,
+)
 from app.worker.memory_extract import MemoryExtractJobHandler
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
@@ -221,6 +225,20 @@ async def run_worker(
                     session_factory,
                     app_config=config,
                     model_materializer=model_materializer,
+                    runtime_policy_materializer=runtime_policy_materializer,
+                    job_repository_builder=repository_builder,
+                ),
+                "memory_consolidate": MemoryConsolidateJobHandler(
+                    session_factory,
+                    app_config=config,
+                    model_materializer=model_materializer,
+                    runtime_policy_materializer=runtime_policy_materializer,
+                    job_repository_builder=repository_builder,
+                    retry_initial_seconds=config.worker.retry_initial_seconds,
+                    retry_max_seconds=config.worker.retry_max_seconds,
+                ),
+                "memory_retention_purge": MemoryRetentionPurgeJobHandler(
+                    session_factory,
                     runtime_policy_materializer=runtime_policy_materializer,
                     job_repository_builder=repository_builder,
                 ),

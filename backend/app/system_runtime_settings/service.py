@@ -304,15 +304,17 @@ class SystemRuntimePolicyService:
         return await self._admin_operation(issued, operation)
 
     @staticmethod
-    async def lock_agent_runtime_for_admission(
+    async def _agent_runtime_for_admission(
         session: AsyncSession,
+        *,
+        for_update: bool,
     ) -> LockedAgentRuntimePolicy:
         if not isinstance(session, AsyncSession) or not session.in_transaction():
             raise SystemRuntimePolicyRepositoryInvariant
         try:
-            _policy, version = await SystemRuntimePolicyRepository(session).current(
+            policy, version = await SystemRuntimePolicyRepository(session).current(
                 RuntimePolicySection.AGENT_RUNTIME,
-                for_update=True,
+                for_update=for_update,
             )
             canonical = canonical_policy_payload(
                 RuntimePolicySection.AGENT_RUNTIME,
@@ -322,10 +324,11 @@ class SystemRuntimePolicyService:
                 RuntimePolicySection.AGENT_RUNTIME,
                 canonical.value,
             )
-            if canonical.schema_version != int(version.schema_version) or canonical.checksum != version.payload_checksum or not isinstance(value, AgentRuntimePolicyValue):
+            if canonical.schema_version != int(version.schema_version) or canonical.checksum != version.payload_checksum or int(policy.revision) != int(version.version_number) or not isinstance(value, AgentRuntimePolicyValue):
                 raise SystemRuntimePolicyRepositoryInvariant
             return LockedAgentRuntimePolicy(
                 policy_version_id=uuid.UUID(str(version.id)),
+                revision=int(version.version_number),
                 schema_version=canonical.schema_version,
                 payload_checksum=canonical.checksum,
                 value=value,
@@ -334,6 +337,26 @@ class SystemRuntimePolicyService:
             raise
         except (RuntimePolicyInvalid, TypeError, ValueError):
             raise SystemRuntimePolicyRepositoryInvariant from None
+
+    @staticmethod
+    async def read_agent_runtime_for_admission(
+        session: AsyncSession,
+    ) -> LockedAgentRuntimePolicy:
+        """Read one immutable policy revision without retaining a row lock."""
+
+        return await SystemRuntimePolicyService._agent_runtime_for_admission(
+            session,
+            for_update=False,
+        )
+
+    @staticmethod
+    async def lock_agent_runtime_for_admission(
+        session: AsyncSession,
+    ) -> LockedAgentRuntimePolicy:
+        return await SystemRuntimePolicyService._agent_runtime_for_admission(
+            session,
+            for_update=True,
+        )
 
     @staticmethod
     async def admit_run_snapshot(

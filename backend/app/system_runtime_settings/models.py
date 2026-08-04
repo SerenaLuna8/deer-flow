@@ -323,6 +323,7 @@ class RuntimePolicyUpdateResult:
 @dataclass(frozen=True, slots=True)
 class LockedAgentRuntimePolicy:
     policy_version_id: uuid.UUID
+    revision: int
     schema_version: int
     payload_checksum: str
     value: AgentRuntimePolicyValue

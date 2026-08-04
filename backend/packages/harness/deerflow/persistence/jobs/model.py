@@ -45,6 +45,9 @@ class JobRow(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", server_default="queued")
     priority: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0, server_default=text("0"))
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    memory_retention_cutoff_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
@@ -138,6 +141,10 @@ class JobRow(Base):
         CheckConstraint(
             "(job_type IN ('memory_extract', 'memory_consolidate', 'memory_retention_purge')) = (namespace IS NOT NULL)",
             name="ck_jobs_memory_namespace",
+        ),
+        CheckConstraint(
+            "(job_type = 'memory_retention_purge' AND memory_retention_cutoff_at IS NOT NULL AND memory_retention_cutoff_at <= created_at) OR (job_type <> 'memory_retention_purge' AND memory_retention_cutoff_at IS NULL)",
+            name="ck_jobs_memory_retention_cutoff",
         ),
         Index("ix_jobs_claim", "status", "available_at", priority.desc(), "created_at"),
         Index(

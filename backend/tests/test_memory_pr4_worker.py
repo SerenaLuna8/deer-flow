@@ -374,20 +374,18 @@ async def test_memory_extract_handler_rechecks_scope_before_commit() -> None:
     assert repository.finalized[0]["candidates"] == ()
 
 
-def test_worker_service_accepts_only_the_enabled_memory_handler() -> None:
+def test_worker_service_accepts_pr5_memory_handlers() -> None:
     async def handler(_claim, _authority):
         return JobOutcome.succeeded()
 
-    WorkerService(
-        _SessionFactory(),
-        SimpleNamespace(),
-        {"memory_extract": handler},
-        WorkerConfig(),
-    )
-    with pytest.raises(ValueError, match="unsupported job type"):
+    for job_type in (
+        "memory_extract",
+        "memory_consolidate",
+        "memory_retention_purge",
+    ):
         WorkerService(
             _SessionFactory(),
             SimpleNamespace(),
-            {"memory_consolidate": handler},
+            {job_type: handler},
             WorkerConfig(),
         )

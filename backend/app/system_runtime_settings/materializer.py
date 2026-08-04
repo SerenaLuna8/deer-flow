@@ -49,11 +49,14 @@ class SystemRuntimePolicyMaterializer:
     async def materialize_current_in_session(
         session: AsyncSession,
         section: RuntimePolicySection | str,
+        *,
+        for_update: bool = False,
     ) -> RuntimePolicyValue:
         try:
             parsed_section = RuntimePolicySection(section)
             _policy, version = await SystemRuntimePolicyRepository(session).current(
                 parsed_section,
+                for_update=for_update,
             )
             return _materialize_exact(
                 parsed_section,
@@ -80,6 +83,55 @@ class SystemRuntimePolicyMaterializer:
         try:
             async with self._session_factory() as session, session.begin():
                 return await self.materialize_current_in_session(session, section)
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (DBAPIError, RuntimeError):
+            raise SystemRuntimePolicyUnavailable from None
+
+    @staticmethod
+    async def materialize_revision_in_session(
+        session: AsyncSession,
+        section: RuntimePolicySection | str,
+        revision: int,
+    ) -> RuntimePolicyValue:
+        try:
+            parsed_section = RuntimePolicySection(section)
+            version = await SystemRuntimePolicyRepository(session).exact_version(
+                parsed_section,
+                revision,
+            )
+            if version is None or int(version.version_number) != revision:
+                raise SystemRuntimePolicyRepositoryInvariant
+            return _materialize_exact(
+                parsed_section,
+                schema_version=int(version.schema_version),
+                value=dict(version.value),
+                checksum=version.payload_checksum,
+            )
+        except SystemRuntimePolicyUnavailable:
+            raise
+        except (
+            DBAPIError,
+            RuntimeError,
+            RuntimePolicyInvalid,
+            SystemRuntimePolicyRepositoryInvariant,
+            TypeError,
+            ValueError,
+        ):
+            raise SystemRuntimePolicyUnavailable from None
+
+    async def materialize_revision(
+        self,
+        section: RuntimePolicySection | str,
+        revision: int,
+    ) -> RuntimePolicyValue:
+        try:
+            async with self._session_factory() as session, session.begin():
+                return await self.materialize_revision_in_session(
+                    session,
+                    section,
+                    revision,
+                )
         except SystemRuntimePolicyUnavailable:
             raise
         except (DBAPIError, RuntimeError):

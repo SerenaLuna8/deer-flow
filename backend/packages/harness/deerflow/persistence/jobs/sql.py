@@ -63,6 +63,7 @@ class EnqueueJob:
     retry_safety: RetrySafety = "safe"
     priority: int = 0
     available_at: datetime | None = None
+    memory_retention_cutoff_at: datetime | None = None
     predecessor_dead_job_id: uuid.UUID | None = None
 
     def __post_init__(self) -> None:
@@ -88,6 +89,8 @@ class EnqueueJob:
             raise ValueError("priority is outside the smallint range")
         if self.available_at is not None and self.available_at.tzinfo is None:
             raise ValueError("available_at must be timezone-aware")
+        if self.memory_retention_cutoff_at is not None and self.memory_retention_cutoff_at.tzinfo is None:
+            raise ValueError("memory_retention_cutoff_at must be timezone-aware")
         if self.job_type == "private_run":
             if self.scope.owner_user_id is None or not self.run_id or self.occurrence_id is not None:
                 raise ValueError("private_run requires owner and run authority only")
@@ -107,6 +110,10 @@ class EnqueueJob:
                 raise ValueError(f"{self.job_type} requires owner authority without Run or occurrence")
             if not self.namespace or len(self.namespace) > 255:
                 raise ValueError(f"{self.job_type} requires a bounded namespace")
+        if (self.job_type == "memory_retention_purge") != (self.memory_retention_cutoff_at is not None):
+            raise ValueError(
+                "memory_retention_purge requires an exact retention cutoff",
+            )
         if self.job_type not in {"memory_extract", "memory_consolidate", "memory_retention_purge"} and self.namespace is not None:
             raise ValueError(f"{self.job_type} does not accept a memory namespace")
         normalized_trace_id = normalize_trace_id(self.origin_trace_id)
@@ -333,6 +340,7 @@ class JobRepository:
             and row.max_attempts == request.max_attempts
             and row.retry_safety == request.retry_safety
             and row.priority == request.priority
+            and row.memory_retention_cutoff_at == request.memory_retention_cutoff_at
         )
 
     async def _enqueue(self, request: EnqueueJob) -> tuple[uuid.UUID, bool]:
@@ -356,6 +364,7 @@ class JobRepository:
                 status="queued",
                 priority=request.priority,
                 available_at=request.available_at or now,
+                memory_retention_cutoff_at=request.memory_retention_cutoff_at,
                 attempt_count=0,
                 max_attempts=request.max_attempts,
                 retry_safety=request.retry_safety,
@@ -1165,6 +1174,7 @@ class JobRepository:
                 and existing_successor.automation_occurrence_id == predecessor.automation_occurrence_id
                 and existing_successor.namespace == predecessor.namespace
                 and existing_successor.origin_trace_id == predecessor.origin_trace_id
+                and existing_successor.memory_retention_cutoff_at == predecessor.memory_retention_cutoff_at
                 and existing_successor.status == "queued"
                 and existing_successor.attempt_count == 0
                 and existing_successor.retry_safety == "safe"
@@ -1182,6 +1192,7 @@ class JobRepository:
             namespace=predecessor.namespace,
             retry_safety="safe",
             priority=predecessor.priority,
+            memory_retention_cutoff_at=predecessor.memory_retention_cutoff_at,
             predecessor_dead_job_id=predecessor.id,
             origin_trace_id=predecessor.origin_trace_id,
         )
@@ -1199,6 +1210,7 @@ class JobRepository:
                         JobRow.run_id == predecessor.run_id,
                         JobRow.automation_occurrence_id == predecessor.automation_occurrence_id,
                         JobRow.predecessor_dead_job_id == predecessor.id,
+                        JobRow.memory_retention_cutoff_at == predecessor.memory_retention_cutoff_at,
                         JobRow.status == "queued",
                         JobRow.attempt_count == 0,
                         JobRow.retry_safety == "safe",

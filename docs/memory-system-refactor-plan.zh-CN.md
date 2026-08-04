@@ -455,7 +455,8 @@ Hard forget 后正文应不可恢复，因此只能保留 ID、digest 和“已�
 必须区分两种“关闭”：
 
 - 用户或管理员在 Run 准入策略中设置 `memory.enabled=false`：该 Run 不创建 Source Batch/Items，不提取，也不能在以后重新启用时回头学习这段聊天；
-- 运营暂停、Worker 不可用或模型暂时故障：已有 job/backlog 原样保留，不能推进 cursor 或标记完成，恢复后继续使用原来冻结的 contract。
+- 运营暂停：不得推进 Candidate 状态或删除正文；已经领取的整理 Job 在最终策略复验时取消并释放 Candidate 绑定，backlog 原样保留，恢复后按新的当前策略重新冻结 contract。
+- Worker 不可用或模型暂时故障：Candidate 继续绑定原 Generation，由原 Job 有界重试；仅对明确的瞬时错误在进入 dead 后自动创建 safe successor，并原子继承同一个冻结 contract。确定性 contract/output 错误保持 dead，避免无限重试。
 
 现有 `injection_enabled` 和 `search_enabled` 继续分别控制自动注入和显式搜索，不能被 `enabled` 的处理队列语义混在一起。
 
@@ -552,10 +553,10 @@ Quota 不足时 job 应进入有界 deferred/retry 状态或明确终止，不�
 
 切换为正式权威前，必须明确 `memory_extract`/`memory_consolidate` 是否计入用户 token budget、Project quota 或平台成本，不能由 Worker 实现自行决定。
 
-当前基线的持久 token usage 只归属于 Run。PR4 的 Shadow 调用不能伪写入已经完成的来源 Run，
-也不为此增加专用调用账本；检查点 A 先通过评测报告记录模型、调用次数、延迟和供应商侧可得
-成本，并在 PR5 前决定非 Run 调用的正式归属。没有完成该决定时，不得启用 Consolidator 或
-切换 v2 正式召回。
+当前基线的持久 token usage 只归属于 Run。PR4 Extractor 和 PR5 Consolidator 的非 Run 调用在
+本次重构中归为平台成本，不扣用户 token budget，也不占 Project Run quota；不能把它们伪写入
+已经完成的来源 Run，也不为此增加专用调用账本。检查点报告记录模型、调用次数、延迟和供应商侧
+可得成本；若以后需要按用户或 Project 计费，再单独设计持久计量，不在 Worker 中隐式决定。
 
 ## 9. 召回设计
 

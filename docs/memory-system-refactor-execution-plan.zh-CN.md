@@ -1,7 +1,7 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR1—PR4 与检查点 A 已完成，下一阶段 PR5）
+- 状态：执行中（PR1—PR5 与检查点 A 已完成，下一阶段 PR6）
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
@@ -167,7 +167,8 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 | PR2 | 完成 | `7c2a4030` | 后端全量 714 passed、27 skipped；随机 PostgreSQL 5 passed、0 skipped；前端全量 121 passed；Python lint/format 与前端 lint/typecheck 通过 |
 | PR3 | 完成 | `82f111da` | 后端核心门禁 756 passed、0 skipped；PR3 聚焦单元测试 6 passed；PR3 随机 PostgreSQL 9 passed；Python lint/format 通过 |
 | PR4 | 完成 | `22609495` | 后端核心门禁 781 passed、0 skipped；PR4 聚焦单元测试 17 passed；PR4 随机 PostgreSQL 8 passed；Python lint/format 通过 |
-| 检查点 A | 完成 | 本次检查点提交 | 固定样例 64 条/8 Batch；precision 100%；recall 100%；secret、scope、duplicate、batch error 均为 0；PR2—PR4 随机 PostgreSQL 21 passed；后端核心 787 passed、0 skipped |
+| 检查点 A | 完成 | `f25b2a4b` | 固定样例 64 条/8 Batch；precision 100%；recall 100%；secret、scope、duplicate、batch error 均为 0；PR2—PR4 随机 PostgreSQL 21 passed；后端核心 787 passed、0 skipped |
+| PR5 | 完成 | 本次 PR5 提交 | PR5 聚焦单元测试 20 passed；PR2—PR5 与精确版本随机 PostgreSQL 36 passed；后端核心 821 passed、0 skipped；Python lint/format 通过 |
 
 PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
 `shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
@@ -182,8 +183,20 @@ PR4 只注册 `memory_extract`：Worker 从对应 Generation 的 Source Items �
 发生 suppression、权限撤销或 lease 丢失时不会落 Candidate；空结果会正常完成，Candidate 仍不
 进入 v1 召回。PR4 没有创建 Fact、管理 API、Gate、签名或新的调用账本；真实外部模型质量留给
 检查点 A 验证。当前平台的持久 token usage 只归属于 Run，因此 PR4 不把后台 Shadow 调用伪写
-进已经完成的来源 Run。检查点 A 先在结果报告中记录模型、调用次数、延迟和供应商侧可得成本，
-正式启用 Consolidator 前再决定非 Run 调用的持久归属。
+进已经完成的来源 Run。PR4 Extractor 与 PR5 Consolidator 在本次重构中明确归为平台成本：不扣
+用户 token budget、不占 Project Run quota，也不新增专用调用账本；检查点报告只记录模型、
+调用次数、延迟和供应商侧可得成本。以后若需要按用户或 Project 计费，再单独立项。
+
+PR5 复用现有 Scheduler、Worker 和 `jobs`：Scheduler 只按当前策略冻结精确 Policy Revision
+与 Model ID/Version/Checksum，按 `project + owner + namespace` 幂等准入最多 20 条到期
+Candidate；Worker 才执行固定、无工具、无 tracing 的 Consolidator。相同事实只新增 Evidence
+并刷新确认时间，补充和纠正创建新 Revision，证据不足保持 pending，敏感或治理变更标记
+rejected；Candidate 决策、Fact/Revision/Evidence 和 Job 结算处于同一事务。Revision 漂移会回滚
+并由原 Job 有界重试；瞬时错误耗尽尝试后由 Scheduler 最多自动接续一次同一冻结 Generation，确定性错误
+保持 dead；运营暂停会释放未处理绑定且保留 backlog。`memory_retention_purge` 持久化准入时的
+精确截止时间，且只在该截止时间前的 terminal Candidate 上执行；它不依赖整理模型可用。该 Job 只在保留期
+后擦除 terminal Candidate 正文，不处理 pending，也不删除 Fact/Revision/Evidence。PR5 没有新增
+服务、表、签名、调用账本、管理 API 或 v2 Recall，正式召回仍只使用 v1。
 
 ## 6. PR1：修复现有 Memory 正确性问题
 
@@ -391,8 +404,9 @@ project + owner + namespace + run + successful attempt + ordered source item ide
 - Candidate 使用稳定幂等键，重试不会重复写入；
 - Candidate 保存来源 Source Item、类型、内容、置信度和状态；
 - 模型输入输出正文不进入通用日志、audit 或 tracing；
-- 复用现有模型目录和 Credential，不新增专用调用账本；现有持久 token usage 只归属于 Run，
-  PR4 不污染已完成来源 Run，非 Run 调用成本归属在检查点 A 明确后再进入后续阶段。
+- 复用现有模型目录和 Credential，不新增专用调用账本；现有持久 token usage 只归属于 Run；
+  非 Run Extractor/Consolidator 明确归为平台成本，不扣用户 token budget 或 Project Run quota，
+  也不污染已完成来源 Run。
 
 ### 9.3 主要文件
 

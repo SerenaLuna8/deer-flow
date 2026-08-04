@@ -14,7 +14,10 @@ from app.reliability.owner_refs import AuditHmacKeyring
 from app.system_runtime_settings.bootstrap import (
     bootstrap_system_runtime_policies,
 )
-from app.system_runtime_settings.errors import SystemRuntimePolicyConflict
+from app.system_runtime_settings.errors import (
+    SystemRuntimePolicyConflict,
+    SystemRuntimePolicyUnavailable,
+)
 from app.system_runtime_settings.materializer import (
     SystemRuntimePolicyMaterializer,
 )
@@ -190,6 +193,8 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
                 locked_policy=locked_v2,
             )
         assert locked_v1.policy_version_id != locked_v2.policy_version_id
+        assert locked_v1.revision == 1
+        assert locked_v2.revision == 2
         assert locked_v1.value.max_recursion_limit == 1_000
         assert locked_v2.value.max_recursion_limit == 77
         assert locked_v1.value.memory.pipeline_mode == "off"
@@ -209,6 +214,26 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
         assert materialized_v2.max_recursion_limit == 77
         assert materialized_v1.memory.pipeline_mode == "off"
         assert materialized_v2.memory.pipeline_mode == "shadow"
+        exact_v1 = await materializer.materialize_revision(
+            RuntimePolicySection.AGENT_RUNTIME,
+            1,
+        )
+        exact_v2 = await materializer.materialize_revision(
+            RuntimePolicySection.AGENT_RUNTIME,
+            2,
+        )
+        assert exact_v1.max_recursion_limit == 1_000
+        assert exact_v2.max_recursion_limit == 77
+        with pytest.raises(SystemRuntimePolicyUnavailable):
+            await materializer.materialize_revision(
+                RuntimePolicySection.AGENT_RUNTIME,
+                0,
+            )
+        with pytest.raises(SystemRuntimePolicyUnavailable):
+            await materializer.materialize_revision(
+                RuntimePolicySection.AGENT_RUNTIME,
+                99,
+            )
 
         async with factory() as session:
             snapshots = tuple(

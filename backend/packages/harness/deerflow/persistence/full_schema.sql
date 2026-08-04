@@ -50,6 +50,7 @@ CREATE TABLE jobs (
     status VARCHAR(16) DEFAULT 'queued' NOT NULL,
     priority SMALLINT DEFAULT 0 NOT NULL,
     available_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    memory_retention_cutoff_at TIMESTAMP WITH TIME ZONE,
     attempt_count INTEGER DEFAULT 0 NOT NULL,
     max_attempts INTEGER NOT NULL,
     lease_owner_id UUID,
@@ -67,6 +68,7 @@ CREATE TABLE jobs (
     PRIMARY KEY (id),
     CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type IN ('memory_extract', 'memory_consolidate', 'memory_retention_purge') AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
     CONSTRAINT ck_jobs_memory_namespace CHECK ((job_type IN ('memory_extract', 'memory_consolidate', 'memory_retention_purge')) = (namespace IS NOT NULL)),
+    CONSTRAINT ck_jobs_memory_retention_cutoff CHECK ((job_type = 'memory_retention_purge' AND memory_retention_cutoff_at IS NOT NULL AND memory_retention_cutoff_at <= created_at) OR (job_type <> 'memory_retention_purge' AND memory_retention_cutoff_at IS NULL)),
     CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_extract', 'memory_consolidate', 'memory_retention_purge')),
     CONSTRAINT ck_jobs_retry_safety CHECK (retry_safety IN ('safe', 'unknown', 'unsafe')),
     CONSTRAINT ck_jobs_status CHECK (status IN ('queued', 'leased', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'dead')),
@@ -3047,7 +3049,7 @@ CREATE TABLE memory_fact_evidence (
     CONSTRAINT ck_memory_fact_evidence_event_sequence CHECK (run_event_sequence IS NULL OR run_event_sequence >= 0),
     CONSTRAINT ck_memory_fact_evidence_hmac CHECK (source_identity_hmac ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_memory_fact_evidence_trust CHECK (trust_class IN ('direct', 'derived', 'untrusted')),
-    CONSTRAINT ck_memory_fact_evidence_source_state CHECK ((source_erased_at IS NULL AND thread_id IS NOT NULL AND run_id IS NOT NULL AND run_event_sequence IS NOT NULL AND (source_candidate_id IS NOT NULL OR source_item_id IS NOT NULL)) OR (source_erased_at IS NOT NULL AND evidence_excerpt IS NULL AND source_candidate_id IS NULL AND source_item_id IS NULL AND thread_id IS NULL AND run_id IS NULL AND run_event_sequence IS NULL)),
+    CONSTRAINT ck_memory_fact_evidence_source_state CHECK ((source_erased_at IS NULL AND thread_id IS NOT NULL AND run_id IS NOT NULL AND (source_candidate_id IS NOT NULL OR source_item_id IS NOT NULL)) OR (source_erased_at IS NOT NULL AND evidence_excerpt IS NULL AND source_candidate_id IS NULL AND source_item_id IS NULL AND thread_id IS NULL AND run_id IS NULL AND run_event_sequence IS NULL)),
     CONSTRAINT ck_memory_fact_evidence_excerpt_size CHECK (evidence_excerpt IS NULL OR char_length(evidence_excerpt) <= 4000)
 );
 

@@ -150,6 +150,57 @@ class SystemModelRepository:
             envelope=(credential.envelope if credential is not None else None),
         )
 
+    async def lock_exact_material(
+        self,
+        *,
+        model_config_id: uuid.UUID,
+        model_config_version_id: uuid.UUID,
+        payload_checksum: str,
+        load_envelope: bool,
+    ) -> LockedSystemModelMaterial | None:
+        if not isinstance(model_config_id, uuid.UUID) or not isinstance(model_config_version_id, uuid.UUID) or not isinstance(payload_checksum, str) or len(payload_checksum) != 64 or type(load_envelope) is not bool:
+            raise SystemModelRepositoryInvariant
+        model = (
+            await self.session.execute(
+                select(SystemModelConfigRow)
+                .where(
+                    SystemModelConfigRow.id == model_config_id,
+                    SystemModelConfigRow.status == "active",
+                )
+                .with_for_update(read=True, of=SystemModelConfigRow)
+            )
+        ).scalar_one_or_none()
+        version = (
+            await self.session.execute(
+                select(SystemModelConfigVersionRow)
+                .where(
+                    SystemModelConfigVersionRow.id == model_config_version_id,
+                    SystemModelConfigVersionRow.model_config_id == model_config_id,
+                    SystemModelConfigVersionRow.payload_checksum == payload_checksum,
+                )
+                .with_for_update(
+                    read=True,
+                    of=SystemModelConfigVersionRow,
+                )
+            )
+        ).scalar_one_or_none()
+        if model is None or version is None:
+            return None
+        credential = await self.lock_system_credential_reference(
+            version.credential_id,
+            version.credential_version_id,
+            version.credential_env_key,
+            require_current=False,
+            load_envelope=load_envelope,
+        )
+        return LockedSystemModelMaterial(
+            model=model,
+            version=version,
+            credential=(credential.credential if credential is not None else None),
+            credential_version=(credential.version if credential is not None else None),
+            envelope=(credential.envelope if credential is not None else None),
+        )
+
     async def lock_system_credential_reference(
         self,
         credential_id: uuid.UUID | None,

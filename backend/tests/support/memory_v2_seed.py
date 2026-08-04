@@ -44,6 +44,7 @@ async def _install_snapshots(
     *,
     mode: str,
     model_purpose: str,
+    make_policy_current: bool,
 ) -> None:
     owner_id = admitted.run.owner_user_id
     policy_value = default_policy_value(
@@ -90,6 +91,18 @@ async def _install_snapshots(
                 "owner": owner_id,
             },
         )
+        if make_policy_current:
+            await session.execute(
+                text(
+                    """UPDATE system_runtime_policies
+                    SET current_version_id=:version,revision=:revision
+                    WHERE section='agent_runtime'"""
+                ),
+                {
+                    "version": policy_version_id,
+                    "revision": policy_revision,
+                },
+            )
         await session.execute(
             text(
                 """INSERT INTO run_runtime_policy_snapshots
@@ -167,6 +180,7 @@ async def admit_memory_extraction_job(
     messages: list[dict[str, object]],
     mode: str = "shadow",
     model_purpose: str = "lead",
+    make_policy_current: bool = False,
 ):
     if model_purpose not in {"lead", "memory"}:
         raise ValueError("invalid test model purpose")
@@ -198,6 +212,7 @@ async def admit_memory_extraction_job(
         admitted,
         mode=mode,
         model_purpose=model_purpose,
+        make_policy_current=make_policy_current,
     )
 
     source_worker_id = uuid.uuid4()
