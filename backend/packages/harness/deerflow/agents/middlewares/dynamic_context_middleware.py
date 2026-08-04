@@ -58,6 +58,7 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # SystemMessage. Detection reads this instead of regex-parsing message content,
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
+_PROJECT_MEMORY_LOADED_KEY = "project_memory_loaded"
 _SUMMARY_MESSAGE_NAME = "summary"
 _LEGACY_MEMORY = object()
 
@@ -108,6 +109,11 @@ def _last_injected_date(messages: list) -> str | None:
             if date is not None:
                 return date
     return None
+
+
+def _project_memory_loaded(messages: list) -> bool:
+    """Return whether a prior project-memory read completed successfully."""
+    return any(is_dynamic_context_reminder(message) and message.additional_kwargs.get(_PROJECT_MEMORY_LOADED_KEY) is True for message in messages)
 
 
 def _is_user_injection_target(message: object) -> bool:
@@ -205,6 +211,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         memory_content: str | None = None,
         *,
         reminder_date: str | None = None,
+        memory_loaded: bool = False,
     ) -> list[SystemMessage | HumanMessage]:
         """Return messages using the ID-swap technique.
 
@@ -226,6 +233,8 @@ class DynamicContextMiddleware(AgentMiddleware):
         reminder_kwargs = {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True}
         if reminder_date is not None:
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
+        if memory_loaded:
+            reminder_kwargs[_PROJECT_MEMORY_LOADED_KEY] = True
         messages.append(
             SystemMessage(
                 content=reminder_content,
@@ -235,11 +244,17 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
 
         if memory_content:
+            memory_kwargs = {
+                "hide_from_ui": True,
+                _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+            }
+            if memory_loaded:
+                memory_kwargs[_PROJECT_MEMORY_LOADED_KEY] = True
             messages.append(
                 HumanMessage(
                     content=memory_content,
                     id=f"{stable_id}__memory",
-                    additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                    additional_kwargs=memory_kwargs,
                 )
             )
 
@@ -253,11 +268,57 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return messages
 
+    @staticmethod
+    def _make_memory_and_user_messages(
+        original: HumanMessage,
+        memory_content: str,
+    ) -> list[HumanMessage]:
+        """Replace the current user turn with hidden Memory followed by the user."""
+        stable_id = original.id or str(uuid.uuid4())
+        return [
+            HumanMessage(
+                content=memory_content,
+                id=stable_id,
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                    _PROJECT_MEMORY_LOADED_KEY: True,
+                },
+            ),
+            HumanMessage(
+                content=original.content,
+                id=f"{stable_id}__user",
+                name=original.name,
+                additional_kwargs=original.additional_kwargs,
+            ),
+        ]
+
+    @staticmethod
+    def _mark_existing_reminder_memory_loaded(messages: list) -> dict | None:
+        for message in reversed(messages):
+            if not isinstance(message, SystemMessage):
+                continue
+            if not is_dynamic_context_reminder(message):
+                continue
+            if _last_injected_date([message]) is None:
+                continue
+            additional_kwargs = dict(message.additional_kwargs)
+            additional_kwargs[_PROJECT_MEMORY_LOADED_KEY] = True
+            return {
+                "messages": [
+                    message.model_copy(
+                        update={"additional_kwargs": additional_kwargs},
+                    )
+                ]
+            }
+        return None
+
     def _inject(
         self,
         state,
         *,
         memory_block_override: str | None | object = _LEGACY_MEMORY,
+        memory_loaded: bool = False,
     ) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
@@ -299,11 +360,27 @@ class DynamicContextMiddleware(AgentMiddleware):
                 date_reminder,
                 memory_block,
                 reminder_date=current_date,
+                memory_loaded=memory_loaded,
             )
             return {"messages": result_msgs}
 
         if last_date == current_date:
             # ── Same day: nothing to do ──────────────────────────────────────────
+            if memory_loaded:
+                if isinstance(memory_block_override, str) and memory_block_override:
+                    target_idx = next(
+                        (i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])),
+                        None,
+                    )
+                    if target_idx is None:
+                        return None
+                    return {
+                        "messages": self._make_memory_and_user_messages(
+                            messages[target_idx],
+                            memory_block_override,
+                        )
+                    }
+                return self._mark_existing_reminder_memory_loaded(messages)
             return None
 
         # ── Midnight crossed: inject date-update reminder as a SystemMessage ──
@@ -311,7 +388,14 @@ class DynamicContextMiddleware(AgentMiddleware):
         if last_human_idx is None:
             return None
 
-        result_msgs = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder(), reminder_date=current_date)
+        memory_block = memory_block_override if isinstance(memory_block_override, str) and memory_block_override else None
+        result_msgs = self._make_reminder_and_user_messages(
+            messages[last_human_idx],
+            self._build_date_update_reminder(),
+            memory_block,
+            reminder_date=current_date,
+            memory_loaded=memory_loaded,
+        )
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
         return {"messages": result_msgs}
 
@@ -365,7 +449,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         messages = list(state.get("messages", []))
         if not messages:
             return None
-        if _last_injected_date(messages) is not None:
+        if _project_memory_loaded(messages):
             return self._inject(state, memory_block_override=None)
         if type(scope) is not PrivateResourceScope:
             return self._inject(state, memory_block_override=None)
@@ -386,7 +470,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 self._format_project_memory,
                 snapshot.memory,
             )
-            return self._inject(state, memory_block_override=memory_block)
+            return self._inject(
+                state,
+                memory_block_override=memory_block,
+                memory_loaded=True,
+            )
         except Exception:
             logger.exception("DynamicContextMiddleware: failed to load project memory; injecting date only")
             return self._inject(state, memory_block_override=None)

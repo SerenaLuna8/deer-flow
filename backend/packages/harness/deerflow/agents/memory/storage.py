@@ -26,11 +26,11 @@ def utc_now_iso_z() -> str:
     return datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
 
 
-def create_empty_memory() -> dict[str, Any]:
+def create_empty_memory(*, last_updated: str | None = None) -> dict[str, Any]:
     """Create an empty memory structure."""
     return {
         "version": "1.0",
-        "lastUpdated": utc_now_iso_z(),
+        "lastUpdated": utc_now_iso_z() if last_updated is None else last_updated,
         "user": {
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
@@ -158,7 +158,7 @@ class ProjectMemoryStorage:
         context = record.context_summary
         memory = {
             "version": copy.deepcopy(context.get("version", empty["version"])),
-            "lastUpdated": copy.deepcopy(context.get("lastUpdated", empty["lastUpdated"])),
+            "lastUpdated": cls._iso_z(record.updated_at),
             "user": copy.deepcopy(context.get("user", empty["user"])),
             "history": copy.deepcopy(context.get("history", empty["history"])),
             "facts": [cls._fact_json(fact) for fact in record.facts],
@@ -186,15 +186,17 @@ class ProjectMemoryStorage:
         scope: PrivateResourceScope,
         namespace: str,
     ) -> ProjectMemorySnapshot:
-        return await self.create_if_needed(scope=scope, namespace=namespace)
-
-    async def reload(
-        self,
-        *,
-        scope: PrivateResourceScope,
-        namespace: str,
-    ) -> ProjectMemorySnapshot:
-        return await self.load(scope=scope, namespace=namespace)
+        async with self._session_factory() as session, session.begin():
+            record = await PrivateMemoryRepository(session).load(
+                scope=scope,
+                namespace=namespace,
+            )
+        if record is None:
+            return ProjectMemorySnapshot(
+                memory=create_empty_memory(last_updated=""),
+                version=0,
+            )
+        return self._snapshot(record)
 
     async def save(
         self,

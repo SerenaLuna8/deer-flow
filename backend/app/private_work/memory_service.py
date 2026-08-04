@@ -81,15 +81,9 @@ class PrivateMemoryService:
         context: PrivateWorkContext,
         *,
         namespace: str,
-        reload: bool = False,
     ) -> ProjectMemorySnapshot:
         context = await self._require(context, Capability.PRIVATE_WORK_READ_OWN)
         try:
-            if reload:
-                return await self._storage.reload(
-                    scope=context.resource_scope,
-                    namespace=namespace,
-                )
             return await self._storage.load(
                 scope=context.resource_scope,
                 namespace=namespace,
@@ -139,14 +133,6 @@ class PrivateMemoryService:
     ) -> ProjectMemorySnapshot:
         return await self._read(context, namespace=namespace)
 
-    async def reload(
-        self,
-        context: PrivateWorkContext,
-        *,
-        namespace: str = "default",
-    ) -> ProjectMemorySnapshot:
-        return await self._read(context, namespace=namespace, reload=True)
-
     async def export(
         self,
         context: PrivateWorkContext,
@@ -183,7 +169,7 @@ class PrivateMemoryService:
         current = await self._read(context, namespace=namespace)
         if current.version != expected_version:
             raise PrivateWorkConflict(context.request_id)
-        if not isinstance(content, str) or not content.strip():
+        if not isinstance(content, str) or not content.strip() or len(content.strip()) > 10_000:
             raise PrivateWorkInvalid(context.request_id)
         if not isinstance(category, str) or not category.strip() or len(category.strip()) > 32:
             raise PrivateWorkInvalid(context.request_id)
@@ -235,13 +221,13 @@ class PrivateMemoryService:
         if selected is None:
             raise PrivateWorkNotFound(context.request_id)
         if content is not None:
-            if not isinstance(content, str) or not content.strip():
+            if not isinstance(content, str) or not content.strip() or len(content.strip()) > 10_000:
                 raise PrivateWorkInvalid(context.request_id)
             selected["content"] = content.strip()
         if category is not None:
-            if not isinstance(category, str):
+            if not isinstance(category, str) or not category.strip() or len(category.strip()) > 32:
                 raise PrivateWorkInvalid(context.request_id)
-            selected["category"] = category.strip() or "context"
+            selected["category"] = category.strip()
         if confidence is not None:
             if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
                 raise PrivateWorkInvalid(context.request_id)
@@ -265,6 +251,11 @@ class PrivateMemoryService:
         expected_version: int,
     ) -> ProjectMemorySnapshot:
         if fact_id is None:
+            if expected_version == 0:
+                current = await self._read(context, namespace=namespace)
+                if current.version != 0:
+                    raise PrivateWorkConflict(context.request_id)
+                return current
             context = await self._require(context, Capability.PRIVATE_WORK_READ_OWN)
             try:
                 return await self._storage.clear(

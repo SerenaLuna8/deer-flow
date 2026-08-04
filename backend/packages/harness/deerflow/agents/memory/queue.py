@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 ProjectMemoryQueueKey = tuple[str, str, str, str]
+ProjectMemorySerializationKey = tuple[str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,14 @@ class MemoryQueueItem:
             self.scope.owner_user_id,
             self.namespace,
             self.thread_id,
+        )
+
+    @property
+    def serialization_key(self) -> ProjectMemorySerializationKey:
+        return (
+            self.scope.project_id,
+            self.scope.owner_user_id,
+            self.namespace,
         )
 
 
@@ -116,7 +125,10 @@ class ProjectMemoryUpdateQueue:
         self._debounce_seconds = debounce_seconds
         self._pending: dict[ProjectMemoryQueueKey, MemoryQueueItem] = {}
         self._tasks: dict[ProjectMemoryQueueKey, asyncio.Task[None]] = {}
-        self._active: dict[ProjectMemoryQueueKey, tuple[MemoryQueueItem, asyncio.Task[Any]]] = {}
+        self._active: dict[
+            ProjectMemorySerializationKey,
+            tuple[MemoryQueueItem, asyncio.Task[Any]],
+        ] = {}
 
     def enqueue(
         self,
@@ -210,8 +222,8 @@ class ProjectMemoryUpdateQueue:
             langfuse_trace_correlation_enabled=langfuse_trace_correlation_enabled,
         )
         selected = self._pending.get(immediate.key)
-        active = self._active.get(immediate.key)
-        if selected is None and active is not None and active[0].run_id == immediate.run_id:
+        active = self._active.get(immediate.serialization_key)
+        if selected is None and active is not None and active[0].key == immediate.key and active[0].run_id == immediate.run_id:
             return active[0]
         if selected is None or selected.run_id != immediate.run_id:
             selected = immediate
@@ -242,27 +254,32 @@ class ProjectMemoryUpdateQueue:
         except asyncio.CancelledError:
             return
 
-    async def _wait_for_active(self, key: ProjectMemoryQueueKey, *, shield: bool) -> None:
-        active = self._active.get(key)
-        if active is None or active[1] is asyncio.current_task():
-            return
-        waiting = asyncio.gather(active[1], return_exceptions=True)
-        if shield:
-            await asyncio.shield(waiting)
-        else:
-            await waiting
-
     async def _process(self, key: ProjectMemoryQueueKey) -> bool:
-        await self._wait_for_active(key, shield=True)
         current_task = asyncio.current_task()
         if current_task is None:
             raise RuntimeError("project memory processing requires an asyncio task")
-        item = self._pending.pop(key, None)
-        if self._tasks.get(key) is current_task:
-            self._tasks.pop(key, None)
-        if item is None:
+        pending = self._pending.get(key)
+        if pending is None:
+            if self._tasks.get(key) is current_task:
+                self._tasks.pop(key, None)
             return False
-        self._active[key] = (item, current_task)
+        serialization_key = pending.serialization_key
+
+        # Multiple Thread-specific debounce tasks may wake together. Recheck
+        # after every predecessor completes, then claim the aggregate key with
+        # no intervening await so only one model update can run at a time.
+        while True:
+            active = self._active.get(serialization_key)
+            if active is None or active[1] is current_task:
+                item = self._pending.pop(key, None)
+                if self._tasks.get(key) is current_task:
+                    self._tasks.pop(key, None)
+                if item is None:
+                    return False
+                self._active[serialization_key] = (item, current_task)
+                break
+            waiting = asyncio.gather(active[1], return_exceptions=True)
+            await asyncio.shield(waiting)
         try:
             if item.membership_version != item.scope.membership_version:
                 return False
@@ -288,21 +305,36 @@ class ProjectMemoryUpdateQueue:
                 langfuse_trace_correlation_enabled=item.langfuse_trace_correlation_enabled,
             )
         finally:
-            active = self._active.get(key)
+            active = self._active.get(serialization_key)
             if active is not None and active[1] is current_task:
-                self._active.pop(key, None)
+                self._active.pop(serialization_key, None)
 
     async def flush(self, key: ProjectMemoryQueueKey) -> bool:
         task = self._tasks.pop(key, None)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._wait_for_active(key, shield=False)
-        return await self._process(key)
+        try:
+            return await self._process(key)
+        except asyncio.CancelledError:
+            if key in self._pending and key not in self._tasks:
+                self._tasks[key] = asyncio.create_task(self._debounced_flush(key))
+            raise
 
     async def flush_all(self) -> list[bool]:
-        keys = tuple(dict.fromkeys((*self._pending, *self._active)))
-        return [await self.flush(key) for key in keys]
+        keys = tuple(
+            dict.fromkeys(
+                (
+                    *self._pending,
+                    *(active[0].key for active in self._active.values()),
+                )
+            )
+        )
+        try:
+            return [await self.flush(key) for key in keys]
+        except asyncio.CancelledError:
+            await self.clear()
+            raise
 
     async def clear(self) -> None:
         tasks = tuple({*self._tasks.values(), *(active[1] for active in self._active.values())})

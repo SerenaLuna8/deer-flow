@@ -22,11 +22,16 @@ from deerflow.agents.memory.storage import utc_now_iso_z
 from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.models import create_chat_model
+from deerflow.persistence.private_work.memory_repository import (
+    PrivateMemoryVersionConflict,
+)
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.trace_context import request_trace_context
 from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
+
+_MAX_VERSION_CONFLICT_RETRIES = 3
 
 
 def _coerce_source_confidence(fact: dict[str, Any]) -> float:
@@ -430,8 +435,6 @@ class MemoryUpdater:
                 config = memory_config
                 if not config.enabled or not messages:
                     return False
-                snapshot = await storage.load(scope=scope, namespace=namespace)
-                current_memory = snapshot.memory
                 conversation_text = format_conversation_for_update(list(messages))
                 if not conversation_text.strip():
                     return False
@@ -439,24 +442,6 @@ class MemoryUpdater:
                 correction_hint = self._build_correction_hint(
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
-                )
-                staleness_section = ""
-                if config.staleness_review_enabled:
-                    stale_candidates = _select_stale_candidates(current_memory, config)
-                    if len(stale_candidates) >= config.staleness_min_candidates:
-                        staleness_section = _build_staleness_section(
-                            stale_candidates,
-                            config.staleness_age_days,
-                        )
-                prompt = MEMORY_UPDATE_PROMPT.format(
-                    current_memory=json.dumps(
-                        _escape_memory_for_prompt(current_memory),
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                    conversation=conversation_text,
-                    correction_hint=correction_hint,
-                    staleness_review_section=staleness_section,
                 )
                 model_name = self._resolve_model_name(config)
                 invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
@@ -470,32 +455,74 @@ class MemoryUpdater:
                     deerflow_trace_id=deerflow_trace_id,
                     include_deerflow_trace_id=langfuse_trace_correlation_enabled,
                 )
-                response = await asyncio.to_thread(
-                    self._get_model(config, app_config).invoke,
-                    prompt,
-                    config=invoke_config,
-                )
-                update_data = _parse_memory_update_response(response.content)
-                existing_fact_ids = {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
-                updated_memory = self._apply_updates(
-                    copy.deepcopy(current_memory),
-                    update_data,
-                    thread_id,
-                    memory_config=config,
-                )
-                for fact in updated_memory.get("facts", []):
-                    if not isinstance(fact, dict) or fact.get("id") in existing_fact_ids:
+                model = self._get_model(config, app_config)
+
+                for attempt in range(_MAX_VERSION_CONFLICT_RETRIES + 1):
+                    snapshot = await storage.load(scope=scope, namespace=namespace)
+                    current_memory = snapshot.memory
+                    staleness_section = ""
+                    if config.staleness_review_enabled:
+                        stale_candidates = _select_stale_candidates(current_memory, config)
+                        if len(stale_candidates) >= config.staleness_min_candidates:
+                            staleness_section = _build_staleness_section(
+                                stale_candidates,
+                                config.staleness_age_days,
+                            )
+                    prompt = MEMORY_UPDATE_PROMPT.format(
+                        current_memory=json.dumps(
+                            _escape_memory_for_prompt(current_memory),
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        conversation=conversation_text,
+                        correction_hint=correction_hint,
+                        staleness_review_section=staleness_section,
+                    )
+                    response = await asyncio.to_thread(
+                        model.invoke,
+                        prompt,
+                        config=invoke_config,
+                    )
+                    update_data = _parse_memory_update_response(response.content)
+                    existing_fact_ids = {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+                    updated_memory = self._apply_updates(
+                        copy.deepcopy(current_memory),
+                        update_data,
+                        thread_id,
+                        memory_config=config,
+                    )
+                    for fact in updated_memory.get("facts", []):
+                        if not isinstance(fact, dict) or fact.get("id") in existing_fact_ids:
+                            continue
+                        fact["sourceThreadId"] = thread_id
+                        fact["sourceRunId"] = run_id
+                    updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+                    try:
+                        await storage.save(
+                            updated_memory,
+                            scope=scope,
+                            namespace=namespace,
+                            expected_version=snapshot.version,
+                        )
+                    except PrivateMemoryVersionConflict:
+                        if attempt >= _MAX_VERSION_CONFLICT_RETRIES:
+                            logger.warning(
+                                "Project memory update exhausted CAS retries: project=%s owner=%s namespace=%s",
+                                scope.project_id,
+                                scope.owner_user_id,
+                                namespace,
+                            )
+                            return False
+                        logger.info(
+                            "Project memory version changed; recomputing update: project=%s owner=%s namespace=%s attempt=%d",
+                            scope.project_id,
+                            scope.owner_user_id,
+                            namespace,
+                            attempt + 1,
+                        )
                         continue
-                    fact["sourceThreadId"] = thread_id
-                    fact["sourceRunId"] = run_id
-                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-                await storage.save(
-                    updated_memory,
-                    scope=scope,
-                    namespace=namespace,
-                    expected_version=snapshot.version,
-                )
-                return True
+                    return True
+                return False
             except json.JSONDecodeError as exc:
                 logger.warning("Failed to parse LLM response for project memory update: %s", exc)
                 return False

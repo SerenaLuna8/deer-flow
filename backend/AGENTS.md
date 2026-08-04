@@ -639,9 +639,12 @@ neutralized and bounded before returning to the model.
 
 Memory injection remains a hidden low-authority Human message frozen in the Thread checkpoint.
 Do not promote Memory text to System, reload it on every turn, or replace dev's latest-genuine-user
-selection with main's first-user selection. Conversation facts continue to be written passively:
-pre-summarization uses immediate queue admission, normal pending snapshots remain authoritative,
-writes for one project/owner/namespace/thread key are serialized, and Worker shutdown performs a
+selection with main's first-user selection. A missing row is a read-only virtual version `0`; its
+first write uses an atomic version-`0` CAS and creates database version `1`. A failed injection does
+not mark Memory loaded merely because the date reminder succeeded, so a later turn may retry.
+Conversation facts continue to be written passively: pre-summarization uses immediate queue
+admission, normal pending snapshots remain authoritative per Thread, writes are serialized by the
+actual `project_id + owner_user_id + namespace` Memory aggregate, and Worker shutdown performs a
 bounded flush after inflight Runs settle and before registry removal. This process-local queue
 improves graceful shutdown but is not a durable job system.
 

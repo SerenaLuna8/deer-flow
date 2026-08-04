@@ -187,40 +187,70 @@ class PrivateMemoryRepository:
         facts: Sequence[PrivateMemoryFactWrite],
         expected_version: int,
     ) -> PrivateMemoryRecord:
-        if not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 1:
+        if not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 0:
             raise PrivateMemoryInvalid("expected memory version is invalid")
         if not isinstance(context_summary, Mapping):
             raise PrivateMemoryInvalid("memory context summary is invalid")
-        now = datetime.now(UTC)
-        updated = (
-            await self.session.execute(
-                update(UserProjectMemoryRow)
-                .where(
-                    *self._scope_predicates(scope, namespace),
-                    UserProjectMemoryRow.version == expected_version,
-                )
-                .values(
-                    context_summary=dict(context_summary),
-                    version=UserProjectMemoryRow.version + 1,
-                    updated_at=now,
-                )
-                .returning(UserProjectMemoryRow.id)
-            )
-        ).scalar_one_or_none()
-        if updated is None:
-            raise PrivateMemoryVersionConflict("project memory version conflict")
-
-        project_id, owner_user_id = self._coordinates(scope)
-        await self.session.execute(
-            delete(UserProjectMemoryFactRow).where(
-                UserProjectMemoryFactRow.project_id == project_id,
-                UserProjectMemoryFactRow.owner_user_id == owner_user_id,
-                UserProjectMemoryFactRow.memory_id == updated,
-            )
-        )
         for fact in facts:
             if type(fact) is not PrivateMemoryFactWrite:
                 raise PrivateMemoryInvalid("memory fact is invalid")
+
+        project_id, owner_user_id = self._coordinates(scope)
+        namespace = self._namespace(namespace)
+        now = datetime.now(UTC)
+
+        if expected_version == 0:
+            updated = (
+                await self.session.execute(
+                    insert(UserProjectMemoryRow)
+                    .values(
+                        id=uuid.uuid4(),
+                        project_id=project_id,
+                        owner_user_id=owner_user_id,
+                        namespace=namespace,
+                        context_summary=dict(context_summary),
+                        version=1,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=(
+                            UserProjectMemoryRow.project_id,
+                            UserProjectMemoryRow.owner_user_id,
+                            UserProjectMemoryRow.namespace,
+                        )
+                    )
+                    .returning(UserProjectMemoryRow.id)
+                )
+            ).scalar_one_or_none()
+        else:
+            updated = (
+                await self.session.execute(
+                    update(UserProjectMemoryRow)
+                    .where(
+                        *self._scope_predicates(scope, namespace),
+                        UserProjectMemoryRow.version == expected_version,
+                    )
+                    .values(
+                        context_summary=dict(context_summary),
+                        version=UserProjectMemoryRow.version + 1,
+                        updated_at=now,
+                    )
+                    .returning(UserProjectMemoryRow.id)
+                )
+            ).scalar_one_or_none()
+        if updated is None:
+            raise PrivateMemoryVersionConflict("project memory version conflict")
+
+        if expected_version > 0:
+            await self.session.execute(
+                delete(UserProjectMemoryFactRow).where(
+                    UserProjectMemoryFactRow.project_id == project_id,
+                    UserProjectMemoryFactRow.owner_user_id == owner_user_id,
+                    UserProjectMemoryFactRow.memory_id == updated,
+                )
+            )
+        for fact in facts:
             self.session.add(
                 UserProjectMemoryFactRow(
                     id=fact.id,
