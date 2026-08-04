@@ -238,8 +238,11 @@ def test_memory_job_types_share_one_closed_runtime_contract() -> None:
         )
 
 
-@pytest.mark.parametrize("job_type", sorted(MEMORY_JOB_TYPES))
-def test_memory_handlers_are_not_registered_in_pr2(job_type: str) -> None:
+@pytest.mark.parametrize(
+    "job_type",
+    sorted(MEMORY_JOB_TYPES - {"memory_extract"}),
+)
+def test_later_memory_handlers_are_not_registered_in_pr4(job_type: str) -> None:
     with pytest.raises(ValueError, match="unsupported job type"):
         WorkerService(
             None,
@@ -247,3 +250,12 @@ def test_memory_handlers_are_not_registered_in_pr2(job_type: str) -> None:
             {job_type: object()},
             WorkerConfig(),
         )
+
+
+def test_memory_extract_handler_is_registered_in_pr4() -> None:
+    WorkerService(
+        None,
+        None,
+        {"memory_extract": object()},
+        WorkerConfig(),
+    )

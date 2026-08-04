@@ -1,7 +1,7 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR1、PR2 已完成）
+- 状态：执行中（PR1—PR4 已完成，等待检查点 A）
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
@@ -165,7 +165,8 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 |---|---|---|---|
 | PR1 | 完成 | `29bbf77d` | 旧 Memory 聚焦测试 45 passed；随机 PostgreSQL 1 passed |
 | PR2 | 完成 | `7c2a4030` | 后端全量 714 passed、27 skipped；随机 PostgreSQL 5 passed、0 skipped；前端全量 121 passed；Python lint/format 与前端 lint/typecheck 通过 |
-| PR3 | 完成 | 本次 PR3 提交 | 后端核心门禁 756 passed、0 skipped；PR3 聚焦单元测试 6 passed；PR3 随机 PostgreSQL 9 passed；Python lint/format 通过 |
+| PR3 | 完成 | `82f111da` | 后端核心门禁 756 passed、0 skipped；PR3 聚焦单元测试 6 passed；PR3 随机 PostgreSQL 9 passed；Python lint/format 通过 |
+| PR4 | 完成 | 本次 PR4 提交 | 后端核心门禁 781 passed、0 skipped；PR4 聚焦单元测试 17 passed；PR4 随机 PostgreSQL 8 passed；Python lint/format 通过 |
 
 PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
 `shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
@@ -173,6 +174,15 @@ PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调
 执行 PR3 完整门禁时同时修复了两个独立基线问题并单独提交为 `2edcfc6e`：System Skill
 文件重放比较不再依赖 PostgreSQL 排序规则，checkpoint 参数化测试不再共享进程冻结状态。
 该提交没有包含 Memory PR3 功能代码。
+
+PR4 只注册 `memory_extract`：Worker 从对应 Generation 的 Source Items 构造固定 JSON 输入，
+使用来源 Run 冻结的 Memory/Lead 模型版本执行无工具、无正文 tracing 的严格提取，并在同一
+事务中写入稳定 ID 的 pending Candidate、更新 `candidate_committed_at` 和结算 Job。模型调用后
+发生 suppression、权限撤销或 lease 丢失时不会落 Candidate；空结果会正常完成，Candidate 仍不
+进入 v1 召回。PR4 没有创建 Fact、管理 API、Gate、签名或新的调用账本；真实外部模型质量留给
+检查点 A 验证。当前平台的持久 token usage 只归属于 Run，因此 PR4 不把后台 Shadow 调用伪写
+进已经完成的来源 Run。检查点 A 先在结果报告中记录模型、调用次数、延迟和供应商侧可得成本，
+正式启用 Consolidator 前再决定非 Run 调用的持久归属。
 
 ## 6. PR1：修复现有 Memory 正确性问题
 
@@ -380,7 +390,8 @@ project + owner + namespace + run + successful attempt + ordered source item ide
 - Candidate 使用稳定幂等键，重试不会重复写入；
 - Candidate 保存来源 Source Item、类型、内容、置信度和状态；
 - 模型输入输出正文不进入通用日志、audit 或 tracing；
-- 复用现有模型目录、Credential 和 token usage 机制，不新增专用调用账本。
+- 复用现有模型目录和 Credential，不新增专用调用账本；现有持久 token usage 只归属于 Run，
+  PR4 不污染已完成来源 Run，非 Run 调用成本归属在检查点 A 明确后再进入后续阶段。
 
 ### 9.3 主要文件
 

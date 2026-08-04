@@ -217,7 +217,15 @@ class WorkerService:
     ) -> None:
         if not isinstance(config, WorkerConfig):
             raise TypeError("WorkerConfig is required")
-        if not set(handlers).issubset({"private_run", "automation_run", "retention_purge", "mcp_discovery"}):
+        if not set(handlers).issubset(
+            {
+                "private_run",
+                "automation_run",
+                "retention_purge",
+                "mcp_discovery",
+                "memory_extract",
+            }
+        ):
             raise ValueError("worker handlers include an unsupported job type")
         self._factory = repository_factory
         self._repository_builder = repository_builder

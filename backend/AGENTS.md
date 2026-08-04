@@ -627,9 +627,11 @@ The `full_schema_v2` snapshot reserves the complete staged Memory v2 contract: S
 Item, Extraction/Consolidation Generation, Candidate, versioned Fact/Evidence, derived Summary,
 Suppression, and per-Run Context Snapshot rows, plus the `memory_extract`,
 `memory_consolidate`, and `memory_retention_purge` Job types. `memory.pipeline_mode` is frozen in
-the existing Run runtime-policy snapshot and defaults to `off`. Until the later pipeline PRs
-register handlers and switch recall, these tables remain dormant and the v1 read/write path below
-continues to serve production Memory.
+the existing Run runtime-policy snapshot and defaults to `off`. The Worker now handles
+`memory_extract` jobs with the frozen model snapshot, a fixed no-tool/no-tracing extractor, and an
+atomic Candidate-plus-Job settlement. Candidates remain shadow data and never enter recall;
+`memory_consolidate`, `memory_retention_purge`, Fact writes, and the recall switch remain disabled,
+so the v1 read/write path below continues to serve production Memory.
 
 Private Lead Agent Runs may expose the async, read-only `memory_search` tool when
 `memory.enabled` and `memory.search_enabled` are both true. Its model-visible arguments are only

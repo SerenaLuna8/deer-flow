@@ -552,6 +552,11 @@ Quota 不足时 job 应进入有界 deferred/retry 状态或明确终止，不�
 
 切换为正式权威前，必须明确 `memory_extract`/`memory_consolidate` 是否计入用户 token budget、Project quota 或平台成本，不能由 Worker 实现自行决定。
 
+当前基线的持久 token usage 只归属于 Run。PR4 的 Shadow 调用不能伪写入已经完成的来源 Run，
+也不为此增加专用调用账本；检查点 A 先通过评测报告记录模型、调用次数、延迟和供应商侧可得
+成本，并在 PR5 前决定非 Run 调用的正式归属。没有完成该决定时，不得启用 Consolidator 或
+切换 v2 正式召回。
+
 ## 9. 召回设计
 
 ### 9.1 自动注入

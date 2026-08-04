@@ -29,6 +29,7 @@ from app.system_runtime_settings.materializer import (
 )
 from app.system_settings import SystemModelMaterializer
 from app.worker.mcp_discovery import McpToolDiscoveryJobHandler
+from app.worker.memory_extract import MemoryExtractJobHandler
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
@@ -169,13 +170,15 @@ async def run_worker(
                 session_factory,
                 quota=quota_enforcer,
             )
+            model_materializer = SystemModelMaterializer(session_factory)
+            runtime_policy_materializer = SystemRuntimePolicyMaterializer(
+                session_factory,
+            )
             executor = RunAgentPrivateExecutor(
                 session_factory,
                 app_config=config,
-                model_materializer=SystemModelMaterializer(session_factory),
-                runtime_policy_materializer=SystemRuntimePolicyMaterializer(
-                    session_factory,
-                ),
+                model_materializer=model_materializer,
+                runtime_policy_materializer=runtime_policy_materializer,
                 bridge=bridge,
                 project_checkpointer=project_checkpointer,
                 store=store,
@@ -212,6 +215,13 @@ async def run_worker(
                     endpoint_policy=mcp_endpoint_policy,
                     http_client_factory=mcp_http_client_factory,
                     discovery_timeout_seconds=(mcp_security.discovery_timeout_seconds),
+                    job_repository_builder=repository_builder,
+                ),
+                "memory_extract": MemoryExtractJobHandler(
+                    session_factory,
+                    app_config=config,
+                    model_materializer=model_materializer,
+                    runtime_policy_materializer=runtime_policy_materializer,
                     job_repository_builder=repository_builder,
                 ),
             }
