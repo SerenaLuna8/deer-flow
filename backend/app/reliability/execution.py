@@ -32,6 +32,7 @@ from app.private_work.memory_authority import (
     DEFAULT_PRIVATE_MEMORY_NAMESPACE,
     PrivateRunMemoryAuthority,
 )
+from app.private_work.memory_source_admission import MemorySourceAdmissionPort
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
     PersistedRunSnapshot,
@@ -1542,6 +1543,7 @@ class PrivateRunJobHandler:
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunExecutionQuotaPort | None = None,
         audit: PrivateRunExecutionAuditPort | None = None,
+        memory_source_admission: MemorySourceAdmissionPort | None = None,
     ) -> None:
         if retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
             raise ValueError("invalid private Run retry policy")
@@ -1553,6 +1555,7 @@ class PrivateRunJobHandler:
         self._project_checkpointer = project_checkpointer
         self._quota = quota or _NoopPrivateRunExecutionQuota()
         self._audit = audit or _NoopPrivateRunExecutionAudit()
+        self._memory_source_admission = memory_source_admission
         self._snapshots = RunSnapshotRepository(
             session_factory,
             endpoint_policy=endpoint_policy,
@@ -1788,6 +1791,14 @@ class PrivateRunJobHandler:
                         attempt_usage=result.attempt_usage,
                     )
                     settled_run = settlement.run
+                    if settled_run.status == "success" and self._memory_source_admission is not None:
+                        await self._memory_source_admission.admit_successful_run(
+                            session,
+                            scope=locked_scope,
+                            run=settled_run,
+                            source_job_id=claim.job_id,
+                            source_attempt_id=claim.attempt_id,
+                        )
                     if not settlement.run_terminal_published and settled_run.status in {
                         "success",
                         "error",

@@ -13,6 +13,7 @@ from functools import partial
 from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
 from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.memory_source_admission import MemorySourceAdmissionService
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.quotas.system_policy import SystemQuotaPolicyReader
@@ -192,6 +193,10 @@ async def run_worker(
                 endpoint_policy=mcp_endpoint_policy,
                 quota=quota_enforcer,
                 audit=audit_sink,
+                memory_source_admission=MemorySourceAdmissionService(
+                    source_hmac=audit_keyring.memory_source_ref,
+                    job_repository_builder=repository_builder,
+                ),
             )
             active_handlers = {
                 "private_run": private_run_handler,

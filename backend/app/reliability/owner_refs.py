@@ -24,6 +24,7 @@ _QUOTA_SOURCE_DOMAIN = b"deerflow.m6.quota-source-ref-hmac.v1\x00"
 _AUDIT_TARGET_DOMAIN = b"deerflow.m6.audit-target-ref.v1\x00"
 _AUDIT_REQUEST_DOMAIN = b"deerflow.m6.audit-request-ref.v1\x00"
 _CHANNEL_EXTERNAL_DOMAIN = b"deerflow.channel.external-ref.v1\x00"
+_MEMORY_SOURCE_DOMAIN = b"deerflow.memory.source-ref.v1\x00"
 _AUDIT_TARGET_KIND = re.compile(r"[a-z][a-z0-9_]{0,31}")
 _CHANNEL_EXTERNAL_KIND = re.compile(r"(?:group|account|topic)")
 _CHANNEL_PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -53,6 +54,23 @@ class AuditRequestRef:
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.hmac_hex) is None:
             raise ValueError("audit request reference is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySourceRef:
+    key_id: str
+    hmac_hex: str
+
+    def __post_init__(self) -> None:
+        if (
+            _KEY_ID.fullmatch(self.key_id) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                self.hmac_hex,
+            )
+            is None
+        ):
+            raise ValueError("Memory source reference is invalid")
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -202,6 +220,20 @@ class AuditHmacKeyring:
             hashlib.sha256,
         ).hexdigest()
         return AuditRequestRef(hmac_hex=digest)
+
+    def memory_source_ref(self, payload: bytes) -> MemorySourceRef:
+        """Return a domain-separated source digest using the active key."""
+
+        if type(payload) is not bytes or not payload:
+            raise ValueError("Memory source reference requires bytes")
+        return MemorySourceRef(
+            key_id=self.active_key_id,
+            hmac_hex=hmac.new(
+                self._keys[self.active_key_id],
+                _MEMORY_SOURCE_DOMAIN + payload,
+                hashlib.sha256,
+            ).hexdigest(),
+        )
 
     @staticmethod
     def _channel_external_payload(

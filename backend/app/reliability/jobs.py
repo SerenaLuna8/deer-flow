@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -51,6 +52,24 @@ def automation_run_idempotency_key(occurrence_id: str) -> str:
         raise ValueError("occurrence_id is required")
     return hashlib.sha256(
         f"automation_run:{occurrence_id}".encode(),
+    ).hexdigest()
+
+
+def memory_extract_idempotency_key(
+    source_batch_id: uuid.UUID,
+    contract_digest: str,
+) -> str:
+    if (
+        type(source_batch_id) is not uuid.UUID
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            contract_digest,
+        )
+        is None
+    ):
+        raise ValueError("Memory extraction identity is invalid")
+    return hashlib.sha256(
+        f"memory_extract:{source_batch_id}:{contract_digest}".encode(),
     ).hexdigest()
 
 
@@ -223,6 +242,7 @@ __all__ = [
     "JobRequeueForbidden",
     "JobScope",
     "JobType",
+    "memory_extract_idempotency_key",
     "PrivateRunJobRepository",
     "RetrySafety",
     "automation_run_idempotency_key",

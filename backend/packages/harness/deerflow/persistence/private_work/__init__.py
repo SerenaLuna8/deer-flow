@@ -23,6 +23,13 @@ from deerflow.persistence.private_work.memory_v2_model import (
     RunMemoryContextItemRow,
     RunMemoryContextSnapshotRow,
 )
+from deerflow.persistence.private_work.memory_v2_repository import (
+    MemorySourceAdmissionRecord,
+    MemorySourceAdmissionWrite,
+    MemorySourceItemWrite,
+    MemoryV2AdmissionConflict,
+    MemoryV2Repository,
+)
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
@@ -44,7 +51,12 @@ __all__ = [
     "MemoryFactRow",
     "MemorySourceBatchRow",
     "MemorySourceItemRow",
+    "MemorySourceAdmissionRecord",
+    "MemorySourceAdmissionWrite",
+    "MemorySourceItemWrite",
     "MemorySuppressionRow",
+    "MemoryV2AdmissionConflict",
+    "MemoryV2Repository",
     "PrivateArtifactRow",
     "PrivateFileChunkRow",
     "PrivateFileRow",
