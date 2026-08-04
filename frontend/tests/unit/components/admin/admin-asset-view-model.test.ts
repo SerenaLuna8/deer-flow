@@ -68,6 +68,7 @@ describe("admin asset catalog view model", () => {
       modelApiKey: "模型 API 密钥",
       apiKey: "API 密钥",
       token: "访问令牌",
+      mcpAuth: "MCP 认证",
       oauth: "OAuth 授权",
       database: "数据库凭据",
     };
@@ -76,6 +77,7 @@ describe("admin asset catalog view model", () => {
       "模型 API 密钥",
     );
     expect(adminCredentialTypeLabel("token", copy)).toBe("访问令牌");
+    expect(adminCredentialTypeLabel("mcp_auth", copy)).toBe("MCP 认证");
     expect(adminCredentialTypeLabel("vendor_extension", copy)).toBe(
       "vendor_extension",
     );
@@ -90,6 +92,7 @@ describe("admin asset catalog view model", () => {
     const payloadCopy = {
       env: "环境变量 (env)",
       headers: "请求头 (headers)",
+      query: "查询参数 (query)",
       oauth: "OAuth (oauth)",
     };
 
@@ -99,6 +102,9 @@ describe("admin asset catalog view model", () => {
     expect(adminMcpTransportLabel("vendor", transportCopy)).toBe("vendor");
     expect(adminCredentialPayloadGroupLabel("headers", payloadCopy)).toBe(
       "请求头 (headers)",
+    );
+    expect(adminCredentialPayloadGroupLabel("query", payloadCopy)).toBe(
+      "查询参数 (query)",
     );
     expect(adminCredentialPayloadGroupLabel("extension", payloadCopy)).toBe(
       "extension",
@@ -147,7 +153,7 @@ describe("admin asset catalog view model", () => {
       }),
       asset(2, {
         id: "bbbbbbbb-0000-4000-8000-000000000002",
-        display_name: "DeerFlow Docs",
+        display_name: "ActWeave Docs",
         slug: "deerflow-docs",
       }),
     ];

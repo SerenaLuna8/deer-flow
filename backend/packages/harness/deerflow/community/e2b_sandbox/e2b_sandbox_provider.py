@@ -1,4 +1,4 @@
-"""``E2BSandboxProvider`` — DeerFlow :class:`SandboxProvider` for e2b cloud.
+"""``E2BSandboxProvider`` — ActWeave :class:`SandboxProvider` for e2b cloud.
 
 Configuration is read from :class:`SandboxConfig` (which has
 ``extra="allow"``), so any keys below can appear under ``sandbox:`` in
@@ -128,7 +128,7 @@ class E2BSandboxProvider(SandboxProvider):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # Active sandboxes, keyed by DeerFlow-side sandbox id (== e2b id).
+        # Active sandboxes, keyed by ActWeave-side sandbox id (== e2b id).
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id) -> sandbox id for fast in-process lookup.
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
@@ -772,7 +772,7 @@ class E2BSandboxProvider(SandboxProvider):
 
         sandbox_id: str = getattr(client, "sandbox_id", None) or str(uuid.uuid4())[:8]
 
-        # Materialise DeerFlow's virtual path layout (/mnt/user-data/...) inside
+        # Materialise ActWeave's virtual path layout (/mnt/user-data/...) inside
         # the e2b VM. Without this step shell commands the agent emits — which
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
@@ -884,7 +884,7 @@ class E2BSandboxProvider(SandboxProvider):
                 return
 
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
-        """Materialise DeerFlow's virtual path layout inside the e2b VM.
+        """Materialise ActWeave's virtual path layout inside the e2b VM.
 
         The local / docker sandboxes expose ``/mnt/user-data/{workspace,uploads,
         outputs}`` and ``/mnt/acp-workspace`` as writable directories, and the
@@ -1004,7 +1004,7 @@ class E2BSandboxProvider(SandboxProvider):
     ) -> None:
         """Mirror agent artifacts from the e2b VM back to host thread dirs.
 
-        DeerFlow's project-private file and artifact endpoints resolve files
+        ActWeave's project-private file and artifact endpoints resolve files
         against the host-side per-thread ``user-data/`` tree (see
         :meth:`Paths.sandbox_outputs_dir`). LocalSandbox writes there
         directly via path mappings, so the endpoint just works for the

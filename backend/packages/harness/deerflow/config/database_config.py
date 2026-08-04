@@ -27,7 +27,7 @@ class CheckpointDeltaConfig(BaseModel):
 
 
 class DatabaseConfig(BaseModel):
-    """Connection settings shared by DeerFlow persistence and LangGraph."""
+    """Connection settings shared by ActWeave persistence and LangGraph."""
 
     model_config = ConfigDict(extra="forbid")
 

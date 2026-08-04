@@ -23,7 +23,10 @@ _JOB_OWNER_DOMAIN = b"deerflow.m6.job-owner-ref.v1\x00"
 _QUOTA_SOURCE_DOMAIN = b"deerflow.m6.quota-source-ref-hmac.v1\x00"
 _AUDIT_TARGET_DOMAIN = b"deerflow.m6.audit-target-ref.v1\x00"
 _AUDIT_REQUEST_DOMAIN = b"deerflow.m6.audit-request-ref.v1\x00"
+_CHANNEL_EXTERNAL_DOMAIN = b"deerflow.channel.external-ref.v1\x00"
 _AUDIT_TARGET_KIND = re.compile(r"[a-z][a-z0-9_]{0,31}")
+_CHANNEL_EXTERNAL_KIND = re.compile(r"(?:group|account|topic)")
+_CHANNEL_PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 class AuditHmacKeyringInvalid(Exception):
@@ -199,6 +202,83 @@ class AuditHmacKeyring:
             hashlib.sha256,
         ).hexdigest()
         return AuditRequestRef(hmac_hex=digest)
+
+    @staticmethod
+    def _channel_external_payload(
+        identity_kind: str,
+        provider: str,
+        instance_id: uuid.UUID,
+        external_id: str,
+    ) -> bytes:
+        if (
+            type(identity_kind) is not str
+            or _CHANNEL_EXTERNAL_KIND.fullmatch(identity_kind) is None
+            or type(provider) is not str
+            or _CHANNEL_PROVIDER.fullmatch(provider) is None
+            or type(instance_id) is not uuid.UUID
+            or type(external_id) is not str
+            or not external_id
+            or external_id != external_id.strip()
+        ):
+            raise ValueError("channel external reference requires normalized identity")
+        encoded_provider = provider.encode("ascii")
+        encoded_kind = identity_kind.encode("ascii")
+        encoded_external_id = external_id.encode("utf-8")
+        if len(encoded_external_id) > 512:
+            raise ValueError("channel external reference identity is too long")
+        return b"".join(
+            (
+                _CHANNEL_EXTERNAL_DOMAIN,
+                len(encoded_kind).to_bytes(1, "big"),
+                encoded_kind,
+                len(encoded_provider).to_bytes(1, "big"),
+                encoded_provider,
+                instance_id.bytes,
+                len(encoded_external_id).to_bytes(2, "big"),
+                encoded_external_id,
+            )
+        )
+
+    def channel_external_refs(
+        self,
+        identity_kind: str,
+        provider: str,
+        instance_id: uuid.UUID,
+        external_id: str,
+    ) -> tuple[str, ...]:
+        """Return active-first irreversible refs for every retained HMAC key.
+
+        The raw provider identifier remains transient in the channel adapter.
+        Length prefixes keep the payload unambiguous and the dedicated domain
+        prevents a group/account reference from colliding with audit or quota
+        references made with the same retained keyring.
+        """
+
+        payload = self._channel_external_payload(
+            identity_kind,
+            provider,
+            instance_id,
+            external_id,
+        )
+        key_ids = (
+            self.active_key_id,
+            *sorted(set(self._keys) - {self.active_key_id}),
+        )
+        return tuple(hmac.new(self._keys[key_id], payload, hashlib.sha256).hexdigest() for key_id in key_ids)
+
+    def channel_external_ref(
+        self,
+        identity_kind: str,
+        provider: str,
+        instance_id: uuid.UUID,
+        external_id: str,
+    ) -> str:
+        return self.channel_external_refs(
+            identity_kind,
+            provider,
+            instance_id,
+            external_id,
+        )[0]
 
     def __call__(self, payload: bytes) -> QuotaSourceRef:
         return self.quota_source_ref(payload)

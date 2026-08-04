@@ -97,11 +97,11 @@ export const enUS: Translations = {
   welcome: {
     greeting: "Hello, again!",
     description:
-      "Welcome to 🦌 DeerFlow, an open source super agent. With built-in and custom skills, DeerFlow helps you search on the web, analyze data, and generate artifacts like slides, web pages and do almost anything.",
+      "Welcome to 🦌 ActWeave, an open source super agent. With built-in and custom skills, ActWeave helps you search on the web, analyze data, and generate artifacts like slides, web pages and do almost anything.",
 
     createYourOwnSkill: "Create Your Own Skill",
     createYourOwnSkillDescription:
-      "Create your own skill to release the power of DeerFlow. With customized skills,\nDeerFlow can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
+      "Create your own skill to release the power of ActWeave. With customized skills,\nActWeave can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
   },
 
   // Clipboard
@@ -157,7 +157,7 @@ export const enUS: Translations = {
     voiceInputStartLabel: "Dictate with voice",
     voiceInputStopLabel: "Stop voice input",
     voiceInputStart:
-      "Dictate with voice. DeerFlow receives only transcribed text; audio is handled by your browser or system speech service.",
+      "Dictate with voice. ActWeave receives only transcribed text; audio is handled by your browser or system speech service.",
     voiceInputListening: "Listening... Click to stop voice input.",
     voiceInputUnsupported:
       "Voice input is not supported in this browser. Try Chrome or Edge.",
@@ -810,11 +810,16 @@ export const enUS: Translations = {
     common: {
       assetVersion: "Asset revision",
       versionId: "Version UUID",
+      mcpConfigurationId: "Configuration UUID (internal revision)",
       currentPublishedVersion: "Current published version",
+      currentPublishedMcpConfiguration: "Current published configuration",
       updatedAt: "Updated",
       versionHistory: "Version history",
+      mcpConfigurationHistory: "Configuration history",
       versionCount: (count) =>
         `${count} ${count === 1 ? "version" : "versions"}`,
+      mcpConfigurationCount: (count) =>
+        `${count} ${count === 1 ? "configuration" : "configurations"}`,
       credentialMetadata: "Credential metadata",
       details: "Details",
       dangerZone: "Danger zone",
@@ -823,6 +828,7 @@ export const enUS: Translations = {
         modelApiKey: "Model API key",
         apiKey: "API key",
         token: "Access token",
+        mcpAuth: "MCP authentication",
         oauth: "OAuth authorization",
         database: "Database Credential",
       },
@@ -834,6 +840,7 @@ export const enUS: Translations = {
       credentialPayloadGroups: {
         env: "Environment variables (env)",
         headers: "Request headers (headers)",
+        query: "Query parameters (query)",
         oauth: "OAuth (oauth)",
       },
       metadataVersion: "Metadata revision",
@@ -873,6 +880,60 @@ export const enUS: Translations = {
       rejected: "Rejected",
       retired: "Replaced",
       revoked: "Revoked",
+    },
+    mcpToolInventory: {
+      title: "Service tools",
+      description:
+        "Tools most recently discovered safely from this MCP service by a Worker.",
+      toolCount: (count) => `${count} ${count === 1 ? "tool" : "tools"}`,
+      loading: "Loading tool inventory",
+      unpublished:
+        "This configuration is not active yet. Edit it and bind a Project Credential; once active, a Worker will automatically test the service and read its tool inventory.",
+      neverDiscovered:
+        "No tool discovery has completed yet. You can test the service and read its tool inventory now.",
+      testing: "Testing the service and reading tools…",
+      catalogInvalid:
+        "The latest discovery returned an unsafe tool inventory. Check the MCP service tool names, descriptions, and parameter schemas, then test again.",
+      discoveryUnavailable:
+        "The latest connection to the MCP service failed. Check service availability, outbound proxy, and network configuration, then test again.",
+      stale:
+        "The MCP configuration or Credential authorization changed, so the previous tool inventory is stale. Test again.",
+      refreshFailed:
+        "The tool inventory could not be refreshed. The last loaded result is still shown.",
+      degradedSuffix: "The last successfully discovered tools are still shown.",
+      empty:
+        "The service returned no usable tools during its latest discovery.",
+      lastSuccess: "Last successful discovery:",
+      noDescription: "No description",
+      testService: "Test service",
+      retestService: "Test again",
+      testingAction: "Testing…",
+      testFailurePrefix:
+        "The configuration was saved, but the service test failed.",
+      loadErrors: {
+        notFound:
+          "This MCP configuration does not exist or is no longer visible. Close the details and refresh the MCP list.",
+        forbidden:
+          "You do not have permission to view this MCP tool inventory. Ask a project administrator to verify asset read access.",
+        authRequired:
+          "Your session expired. Sign in again to load the tool inventory.",
+        responseInvalid:
+          "The asset service returned an invalid tool inventory, so it was not displayed. Ask an administrator to check Gateway and frontend compatibility.",
+        network:
+          "The asset service is temporarily unavailable. Try again later or contact a platform administrator if the problem continues.",
+        generic:
+          "The tool inventory could not be loaded. Try again later or contact a project administrator if the problem continues.",
+      },
+      testErrors: {
+        notFound:
+          "This MCP configuration does not exist or is no longer visible.",
+        forbidden: "You do not have permission to test this MCP service.",
+        authRequired: "Your session expired. Sign in again before testing.",
+        conflict:
+          "The configuration or test state changed. Refresh and try again.",
+        network: "The test request could not be submitted. Try again later.",
+        generic: "The test request failed to submit. Try again later.",
+      },
     },
     pages: {
       systemEyebrow: "Platform shared assets",
@@ -995,11 +1056,15 @@ export const enUS: Translations = {
     },
     version: {
       none: "No versions have been created.",
+      mcpNone: "No configuration has been saved.",
       selectHint: "Select a version on the left to inspect its details.",
       number: (number) => `Version ${number}`,
+      mcpNumber: (number) => `Configuration #${number}`,
       publish: "Publish version",
+      publishMcp: "Publish configuration",
       submit: "Submit for approval",
       approve: "Approve and publish",
+      approveMcp: "Approve and publish configuration",
       configureGrants: "Configure Credential grants",
     },
     diff: {
@@ -1008,7 +1073,7 @@ export const enUS: Translations = {
       model: "Model",
       toolGroups: "Tool groups",
       skillVersions: "Skill versions",
-      mcpVersions: "MCP versions",
+      mcpVersions: "MCP configurations",
       compatibility: "Compatibility",
       scanDecision: "Scan decision",
       scanAllow: "Allowed",
@@ -1034,20 +1099,22 @@ export const enUS: Translations = {
       field: "Field",
       previous: "Previous version",
       current: "Current version",
+      previousMcpConfiguration: "Previous configuration",
+      currentMcpConfiguration: "Current configuration",
     },
     runtime: {
       unsupportedProjectTransport:
-        "Only SSE and HTTP are supported. This historical version can be viewed but cannot be published, bound, or used by an Agent.",
+        "Only SSE and HTTP are supported. This historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       unsupportedSystemTransport:
-        "The Private runtime supports only stdio, SSE, and HTTP. This historical system version can be viewed but cannot be bound or used by an Agent.",
+        "The Private runtime supports only stdio, SSE, and HTTP. This historical system configuration can be viewed but cannot be bound or used by an Agent.",
       missingProjectUrl:
-        "This transport has no URL. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+        "This transport has no URL. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       invalidProjectUrl:
-        "Project MCP requires an absolute HTTPS URL without credentials or query parameters. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+        "Project MCP requires an absolute HTTP or HTTPS URL without embedded credentials, query parameters, or fragments. The host must be exactly localhost or a canonical IPv4/IPv6 literal; ordinary DNS hostnames are not resolved. localhost is case-insensitive and is treated as 127.0.0.1; for IPv6 loopback, enter [::1] explicitly. The IP must belong to an administrator-configured allowed network range. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       projectOAuth:
-        "Project MCP does not support version-level OAuth configuration. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+        "Project MCP does not support configuration-level OAuth. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       projectHeadersOnly:
-        "Project MCP Credential slots support headers only. The historical version can be viewed but cannot be published, bound, or used by an Agent.",
+        "Project MCP Credential slots support headers or query parameters only. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       missingSystemCommand:
         "This stdio system MCP has no command and cannot be bound or used by an Agent.",
       missingSystemUrl:
@@ -1055,7 +1122,7 @@ export const enUS: Translations = {
       systemEnvOnly:
         "Stdio system MCP Credential slots support env only and cannot otherwise be bound or used by an Agent.",
       systemRemoteCredentialsOnly:
-        "Remote system MCP Credential slots support headers or oauth only and cannot otherwise be bound or used by an Agent.",
+        "Remote system MCP Credential slots support headers, query parameters, or oauth only and cannot otherwise be bound or used by an Agent.",
     },
     dialogs: {
       createAssetTitle: (kind) => `Create ${kind}`,
@@ -1063,12 +1130,30 @@ export const enUS: Translations = {
         "Creates a draft SKILL.md from the starter template. The Skill starts disabled.",
       assetCreationDescription: (scope) =>
         `Create the ${scope === "system" ? "system" : "project"} asset first, then create and publish a version.`,
+      addMcpTitle: "Add MCP",
+      addMcpDescription:
+        "Enter connection and authentication details. Secret values stay encrypted in Project Credentials.",
+      addMcpSubmit: "Add MCP",
+      addAndPublish: "Add and publish",
+      addAndApprove: "Add, bind Credential, and publish",
+      addAndSubmitApproval: "Add and save configuration",
+      retryMcpApproval: "Retry binding and publication",
+      mcpSavedApprovalFailed:
+        "The MCP configuration was saved, but Credential binding and publication did not finish. Retry without creating another MCP.",
+      mcpSavedRetryApprovalOnly:
+        "The MCP is safely saved. Submitting again retries binding and publication only and will not create a duplicate.",
+      addingMcp: "Adding…",
+      editMcpConfigTitle: "Edit configuration",
+      saveMcpConfig: "Save configuration",
+      saveAndPublishMcpConfig: "Save and publish",
+      saveAndApproveMcpConfig: "Save, bind Credential, and publish",
+      saveAndSubmitMcpConfig: "Save configuration",
+      savingMcpConfig: "Saving…",
       name: "Name",
       assetSlug: "Asset slug",
       slugTitle:
         "Use 3–63 lowercase letters, digits, and single hyphen separators",
-      slugHelp:
-        "Use 3–63 lowercase letters, digits, or hyphens. The slug becomes the stable identifier.",
+      slugHelp: "3–63 lowercase letters, digits, or hyphens",
       filePath: "File path",
       mediaType: "Media type",
       fileContent: "File content",
@@ -1077,25 +1162,87 @@ export const enUS: Translations = {
       description: "Description",
       transport: "Transport",
       sseTransport: "Server-sent events (SSE)",
-      workerUrlHelp:
-        "The Worker connects to this exact platform-approved HTTPS endpoint.",
-      timeoutHelp:
-        "The platform controls the effective timeout. The compatibility value cannot be changed here.",
-      credentialSlotOptional: "Credential slot (optional)",
-      slotPublicationHelp:
-        "A version with a Credential slot must use the submit and approval workflow.",
+      httpTransport: "HTTP (Streamable HTTP)",
+      mcpServiceUrl: "MCP service URL",
+      urlQueryRemoved:
+        "Query parameters were removed from the URL and their values will not be saved. Store them securely in a project Credential.",
+      authentication: "Authentication",
+      headerAuthentication: "Request header",
+      queryAuthentication: "Query parameter",
+      noAuthentication: "No authentication",
+      noAuthenticationHelp:
+        "This MCP does not read a Project Credential and can publish immediately.",
+      connectionAndAuthentication: "Connection and authentication",
+      needsProjectCredential: "Needs a project Credential",
       slotName: "Slot name",
       slotNameTitle:
         "Start with a lowercase letter and use only lowercase letters, digits, dots, underscores, or hyphens",
       slotNameHelp:
         "Start with a lowercase letter. Use at most 63 letters, digits, dots, underscores, or hyphens.",
       purpose: "Purpose",
-      credentialHeaderGroup: "Credential field group: headers",
+      credentialFieldGroup: "Credential field group",
       requiredFields: "Required fields (comma or newline separated)",
       requiredFieldsHelp:
         "Enter the field names required in the selected Credential group. Separate multiple fields with commas or new lines.",
+      requestHeaderName: "Request header name",
+      queryParameterName: "Query parameter name",
+      credentialFieldNameTitle:
+        "Enter field names only. Separate multiple fields with commas; do not enter Basic, Bearer, or secret values.",
+      credentialFieldNameHelp:
+        "Enter field names only. Store secret values in a Project Credential; separate multiple fields with commas.",
+      queryGroup: "Query parameters",
       unsupportedMcpTransport: "New MCP versions support SSE or HTTP only",
       missingMcpUrl: "SSE and HTTP transports require a URL",
+      invalidMcpUrl:
+        "Enter an HTTP or HTTPS endpoint reachable by the Worker without embedded credentials, query parameters, or fragments. The host must be exactly localhost or a canonical IPv4/IPv6 literal; ordinary DNS hostnames are not resolved. localhost is case-insensitive and is treated as 127.0.0.1; for IPv6 loopback, enter [::1] explicitly. The IP must belong to an administrator-configured allowed network range. Network ranges are configured at the platform level, not in this form.",
+      mcpUrlQuery:
+        "The URL cannot contain query parameters. Enter the base URL and store the secret through a query Credential slot.",
+      unsupportedMcpCredentialGroup:
+        "Project MCP Credential slots support request headers or query parameters only.",
+      missingMcpCredentialSlotName:
+        "Enter a slot name when Credential fields are provided.",
+      missingMcpCredentialFields:
+        "Enter at least one required field when a slot name is provided.",
+      missingMcpHeaderName:
+        "Enter a request header name, such as Authorization.",
+      missingMcpQueryName: "Enter a query parameter name, such as key.",
+      invalidMcpCredentialFieldName:
+        "Enter only a request header or query parameter name. Do not paste Basic, Bearer, or secret values.",
+      projectCredential: "Project Credential",
+      createProjectCredential: "Create Project Credential",
+      credentialSelectedByAdmin: "A project admin will select a Credential",
+      noCompatibleCredential: "No matching Project Credential",
+      compatibleCredentialsOnly:
+        "Only enabled Credentials whose field structure exactly matches this authentication requirement are shown.",
+      credentialFieldsMatch: "Fields match",
+      adminCompletesApproval:
+        "This account cannot bind Credentials. Save first, then let a project admin bind the Credential and activate the configuration.",
+      safetyPreview: "Safety preview",
+      configurationPreviewReadonly: "Configuration preview (read only)",
+      serviceAddress: "Service address",
+      waitingForServiceAddress: "Waiting for a service address",
+      pendingCredentialSelection: "Waiting for a Project Credential",
+      encryptedRead: "Encrypted read",
+      secretNeverDisplayed:
+        "Credential secrets remain encrypted and never appear in this form or preview.",
+      credentialSource: "Credential source",
+      encryptedProjectCredential: "Project Credential (encrypted)",
+      publicationStatus: "Publication status",
+      publishOnSave: "Publishes immediately after save",
+      publishAfterApproval: "Binds and publishes automatically after save",
+      publicationFlow: "Publication flow",
+      saveMcpStep: "Save the MCP configuration",
+      saveMcpStepDetail:
+        "Connection details and authentication requirements are saved as an immutable configuration.",
+      selectCredentialStep:
+        "Select a Project Credential with an exact field match",
+      selectCredentialStepDetail:
+        "The group, field names, case, and order must match exactly.",
+      approvePublishStep: "Bind the Credential and publish",
+      approvePublishStepDetail:
+        "The MCP configuration becomes active as soon as the Credential is bound.",
+      approvalRunsAfterSave:
+        "After a matching Credential is selected, saving automatically completes binding and publication.",
       createVersionTitle: (kind) => `Create ${kind} version`,
       secretCreateTitle: "Create Credential",
       secretReplaceTitle: "Replace Credential",
@@ -1104,7 +1251,9 @@ export const enUS: Translations = {
       credentialSlug: "Credential slug",
       credentialFields: "Credential fields",
       credentialFieldsHelp:
-        "Add environment, header, or OAuth fields. Each secret value is written once.",
+        "Add environment, header, query, or OAuth fields. Each secret value is written once.",
+      fixedCredentialFieldsHelp:
+        "The Credential type and field structure are fixed by the MCP authentication requirement. Enter only the name, slug, and secret value.",
       addField: "Add field",
       group: "Group",
       envGroup: "Environment (env)",
@@ -1160,19 +1309,19 @@ export const enUS: Translations = {
       approval: {
         configureTitle: "Configure MCP Credential grants",
         configureDescription:
-          "Select current system Credential versions for a published packaged system MCP. This configures slot grants only; it never modifies or republishes the MCP definition.",
+          "Select system Credentials for a published packaged system MCP. This configures slot grants only; it never modifies or republishes the MCP definition.",
         saveGrants: "Save grants",
         configureEmptyOptional:
           "No Credentials are eligible. Optional slots may remain empty to clear existing grants.",
         clearOptionalGrant: "No Credential",
-        publishTitle: "Approve MCP version",
+        publishTitle: "Approve MCP configuration",
         publishDescription:
-          "Select an enabled, currently visible Credential version for each slot. The MCP version is published only after approval succeeds.",
-        approve: "Approve and publish",
+          "Select an enabled, currently visible Credential for each slot. The MCP configuration is published only after approval succeeds.",
+        approve: "Approve and publish configuration",
         publishEmptyOptional:
           "No Credentials are eligible. Optional slots may remain empty for approval.",
         selectCredential: "Select a Credential",
-        currentVersion: "Current version",
+        currentVersion: "Current Credential",
         loadingCredentials: "Loading Credentials…",
         credentialsFailed: "Credentials could not be loaded. Retry.",
         requiredUnavailable:
@@ -1192,6 +1341,10 @@ export const enUS: Translations = {
       conflict: "The asset changed. Refresh and try again.",
       validationFailed:
         "The submitted content does not meet asset requirements.",
+      mcpVersionValidation:
+        "The MCP configuration failed validation. Confirm the transport is HTTP (Streamable HTTP) or SSE; the URL has no embedded credentials, query parameters, or fragments; the host is exactly localhost or a canonical IPv4/IPv6 literal rather than an ordinary DNS hostname; localhost is case-insensitive and is treated as 127.0.0.1, while IPv6 loopback is entered explicitly as [::1]; the IP belongs to an administrator-configured allowed network range; and every Credential slot uses exactly one headers or query group with fields. Network ranges are configured by platform administrators, not in this form. If an administrator just changed the allowed ranges, restart Gateway, Scheduler, and Worker.",
+      mcpCredentialMismatch:
+        "The selected Credential does not satisfy the MCP slot or is no longer active. Its group and field names must exactly match the selected slot schema, including case.",
       storageQuota:
         "The project Skill storage quota is exhausted. Remove unused Skills and try again.",
       storageUnavailable:
@@ -1287,7 +1440,7 @@ export const enUS: Translations = {
     empty: {
       title: "No scheduled tasks yet",
       description:
-        "Create a task and let DeerFlow automatically complete work on schedule.",
+        "Create a task and let ActWeave automatically complete work on schedule.",
       action: "Create your first task",
       filteredTitle: "No tasks match your filters",
       filteredDescription:
@@ -1412,11 +1565,11 @@ export const enUS: Translations = {
     save: "Save agent",
     saving: "Saving agent...",
     saveRequested:
-      "Save requested. DeerFlow is generating and saving an initial version now.",
+      "Save requested. ActWeave is generating and saving an initial version now.",
     saveHint:
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     agentCreatedPendingRefresh:
-      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+      "The agent was created, but ActWeave could not load it yet. Please refresh this page in a moment.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
@@ -1431,13 +1584,13 @@ export const enUS: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "DeerFlow's official website",
-    githubTooltip: "DeerFlow on GitHub",
+    officialWebsite: "ActWeave's official website",
+    githubTooltip: "ActWeave on GitHub",
     settingsAndMore: "Settings and more",
-    visitGithub: "DeerFlow on GitHub",
+    visitGithub: "ActWeave on GitHub",
     reportIssue: "Report an issue",
     contactUs: "Contact us",
-    about: "About DeerFlow",
+    about: "About ActWeave",
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
@@ -1511,20 +1664,20 @@ export const enUS: Translations = {
     saveAndConnect: "Save and connect",
     saveChanges: "Save changes",
     descriptions: {
-      telegram: "Telegram direct messages through your DeerFlow bot.",
+      telegram: "Telegram direct messages through your ActWeave bot.",
       slack: "Slack workspace messages and mentions.",
-      discord: "Discord server messages through your DeerFlow bot.",
-      feishu: "Feishu and Lark messages through your DeerFlow app.",
-      dingtalk: "DingTalk Stream Push messages through your DeerFlow bot.",
-      wechat: "WeChat iLink messages through your DeerFlow bot.",
-      wecom: "WeCom messages through your DeerFlow AI bot.",
+      discord: "Discord server messages through your ActWeave bot.",
+      feishu: "Feishu and Lark messages through your ActWeave app.",
+      dingtalk: "DingTalk Stream Push messages through your ActWeave bot.",
+      wechat: "WeChat iLink messages through your ActWeave bot.",
+      wecom: "WeCom messages through your ActWeave AI bot.",
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
   },
 
   // Page titles (document title)
   pages: {
-    appName: "DeerFlow",
+    appName: "ActWeave",
     chats: "Chats",
     newChat: "New chat",
     untitled: "Untitled",
@@ -1552,7 +1705,7 @@ export const enUS: Translations = {
     writeFile: "Write file",
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
-    skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    skillInstallTooltip: "Install skill and make it available to ActWeave",
   },
 
   humanInput: {
@@ -1569,6 +1722,10 @@ export const enUS: Translations = {
     requiredError: "Fill in all required fields before submitting.",
     requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
+    availableOptions: "Available options",
+    requestedInformation: "Requested information",
+    selected: "Selected",
+    yourAnswer: "Your answer",
     answeredValue: (value: string) => `Answered: ${value}`,
   },
 
@@ -1646,7 +1803,7 @@ export const enUS: Translations = {
     actions: "Actions",
     keyboardShortcuts: "Keyboard Shortcuts",
     keyboardShortcutsDescription:
-      "Navigate DeerFlow faster with keyboard shortcuts.",
+      "Navigate ActWeave faster with keyboard shortcuts.",
     openCommandPalette: "Open Command Palette",
     toggleSidebar: "Toggle Sidebar",
   },
@@ -1654,7 +1811,7 @@ export const enUS: Translations = {
   // Settings
   settings: {
     title: "Settings",
-    description: "Adjust how DeerFlow looks and behaves for you.",
+    description: "Adjust how ActWeave looks and behaves for you.",
     sections: {
       account: "Account",
       appearance: "Appearance",
@@ -1667,7 +1824,7 @@ export const enUS: Translations = {
     },
     memory: {
       title: "Memory",
-      description: "Review and manage what DeerFlow remembers about you.",
+      description: "Review and manage what ActWeave remembers about you.",
       manageMemory: "Data management",
       factCount: (count) => `${count} ${count === 1 ? "fact" : "facts"}`,
       summaryCount: (count) =>
@@ -1678,7 +1835,7 @@ export const enUS: Translations = {
       smartSummaries: "Smart summaries",
       emptyTitle: "No memory yet",
       emptyDescription:
-        "Add a fact or keep chatting so DeerFlow can learn useful context.",
+        "Add a fact or keep chatting so ActWeave can learn useful context.",
       loadErrorTitle: "Memory could not be loaded",
       empty: "No memory data to display.",
       rawJson: "Raw JSON",
@@ -1718,7 +1875,7 @@ export const enUS: Translations = {
       factValidationConfidence: "Confidence must be a number between 0 and 1.",
       noFacts: "No saved facts yet.",
       summaryReadOnly:
-        "DeerFlow maintains these summaries automatically. This section is read-only.",
+        "ActWeave maintains these summaries automatically. This section is read-only.",
       memoryFullyEmpty: "No memory saved yet.",
       factPreviewLabel: "Fact to delete",
       searchPlaceholder: "Search memory",
@@ -1784,7 +1941,7 @@ export const enUS: Translations = {
     channels: {
       title: "Channels",
       description:
-        "Connect IM accounts that can send messages to DeerFlow from outside the browser.",
+        "Connect IM accounts that can send messages to ActWeave from outside the browser.",
       disabled:
         "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
@@ -1795,7 +1952,7 @@ export const enUS: Translations = {
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:
-        "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
+        "Put your agent skill folders under the `/skills/custom` folder under the root folder of ActWeave.",
       emptyButton: "Create Your First Skill",
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
@@ -1819,12 +1976,12 @@ export const enUS: Translations = {
     notification: {
       title: "Notification",
       description:
-        "DeerFlow only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
+        "ActWeave only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
       requestPermission: "Request notification permission",
       deniedHint:
         "Notification permission was denied. You can enable it in your browser's site settings to receive completion alerts.",
       testButton: "Send test notification",
-      testTitle: "DeerFlow",
+      testTitle: "ActWeave",
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
@@ -1838,7 +1995,7 @@ export const enUS: Translations = {
       changePasswordDescription: "Update your account password.",
       ssoPasswordDescription: "Password is managed by your SSO provider.",
       ssoPasswordMessage:
-        "This account signs in with {provider}, so DeerFlow cannot manage or change its password here. Use your SSO provider's account settings instead.",
+        "This account signs in with {provider}, so ActWeave cannot manage or change its password here. Use your SSO provider's account settings instead.",
       currentPassword: "Current password",
       newPassword: "New password",
       confirmNewPassword: "Confirm new password",
@@ -1875,7 +2032,7 @@ export const enUS: Translations = {
     createAdminAccount: "Create admin account",
     adminSetupRequiredTitle: "Administrator setup is required",
     adminSetupRequiredDescription:
-      "DeerFlow needs an administrator account before new regular accounts can be created.",
+      "ActWeave needs an administrator account before new regular accounts can be created.",
     orContinueWith: "Or continue with",
     ssoHint:
       "If your account uses single sign-on, sign in with the option below instead.",

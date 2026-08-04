@@ -116,6 +116,13 @@ async def test_create_rejects_admin_invalid_email_and_non_admin() -> None:
     with pytest.raises(ProjectValidationFailed):
         await service.create(_context(), "member@example.com", ProjectRole.ADMIN, NOW)
     with pytest.raises(ProjectValidationFailed):
+        await service.create(
+            _context(),
+            "member@example.com",
+            ProjectRole.CHANNEL_GUEST,
+            NOW,
+        )
+    with pytest.raises(ProjectValidationFailed):
         await service.create(_context(), "not-an-email", ProjectRole.VIEWER, NOW)
     with pytest.raises(ProjectForbidden):
         await service.create(_context(ProjectRole.EDITOR), "member@example.com", ProjectRole.VIEWER, NOW)

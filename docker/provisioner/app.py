@@ -1,4 +1,4 @@
-"""DeerFlow Sandbox Provisioner Service.
+"""ActWeave Sandbox Provisioner Service.
 
 Dynamically creates and manages per-sandbox Pods in Kubernetes.
 Each ``sandbox_id`` gets its own Pod + Service.  The backend accesses sandboxes
@@ -203,7 +203,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
+app = FastAPI(title="ActWeave Sandbox Provisioner", lifespan=lifespan)
 
 
 @app.middleware("http")

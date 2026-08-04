@@ -219,6 +219,46 @@ class BindingRepository:
             raise AssetValidationFailed(context.request_id)
         return BindingTarget(asset, version)
 
+    async def lock_current_system_mcp_target(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+    ) -> BindingTarget:
+        """Lock one System MCP and resolve its current version under that lock."""
+
+        if not isinstance(context, ProjectContext):
+            raise AssetForbidden(_request_id(context))
+        if not isinstance(asset_id, uuid.UUID):
+            raise AssetValidationFailed(context.request_id)
+        asset_statement = (
+            select(McpServerRow)
+            .where(
+                McpServerRow.id == asset_id,
+                McpServerRow.scope == "system",
+                McpServerRow.project_id.is_(None),
+            )
+            .with_for_update(of=McpServerRow)
+        )
+        asset = (await self.session.execute(asset_statement)).scalar_one_or_none()
+        if asset is None:
+            raise AssetNotFound(context.request_id)
+        current_version_id = asset.current_published_version_id
+        if asset.status != "active" or not isinstance(current_version_id, uuid.UUID):
+            raise AssetValidationFailed(context.request_id)
+        version_statement = (
+            select(McpServerVersionRow)
+            .where(
+                McpServerVersionRow.id == current_version_id,
+                McpServerVersionRow.mcp_server_id == asset_id,
+                McpServerVersionRow.workflow_status == "published",
+            )
+            .with_for_update(of=McpServerVersionRow)
+        )
+        version = (await self.session.execute(version_statement)).scalar_one_or_none()
+        if version is None:
+            raise AssetValidationFailed(context.request_id)
+        return BindingTarget(asset, version)
+
     async def lock_system_version(
         self,
         context: _Actor,

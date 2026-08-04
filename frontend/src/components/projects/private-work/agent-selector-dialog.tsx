@@ -22,14 +22,12 @@ import {
   listProjectAssetVersions,
   projectAssetVersionsKey,
   type EnableSystemBindingInput,
-  type MoveSystemBindingInput,
   type ProjectDefaultAgent,
   type ProjectAssetItem,
   type ProjectAssetList,
   type VersionHistoryResponse,
 } from "@/core/shared-assets";
 import {
-  mcpDependencyRuntimeBlockReason,
   supportedMcpVersionIds,
   type ScopedMcpVersion,
 } from "@/core/shared-assets/mcp-runtime";
@@ -38,13 +36,15 @@ import { uuid } from "@/core/utils/uuid";
 
 import {
   agentMcpDependencyAssessment,
+  isMainProjectAgent,
+  MAIN_PROJECT_AGENT_SLUG,
   useMcpDependencyRuntime,
 } from "../assets/use-mcp-dependency-runtime";
 
 export { projectAgentsStartChatPath };
+export { MAIN_PROJECT_AGENT_SLUG };
 
 export type ExecutableProjectAgent = ProjectAssetItem;
-export const MAIN_PROJECT_AGENT_SLUG = "project-assistant";
 
 export function configurableSystemAgents(
   catalog: ProjectAssetList | undefined,
@@ -54,6 +54,7 @@ export function configurableSystemAgents(
     (item) =>
       item.status === "active" &&
       item.current_published_version_id !== null &&
+      !isMainProjectAgent(item) &&
       item.binding?.enabled !== true &&
       item.capabilities.includes("shared_assets.execute") &&
       item.capabilities.includes("shared_assets.manage_bindings"),
@@ -130,7 +131,10 @@ export function executableProjectAgents(
       (item) => executable(item) && item.current_published_version_id !== null,
     ),
     ...catalog.system_items.filter(
-      (item) => executable(item) && item.binding?.enabled === true,
+      (item) =>
+        executable(item) &&
+        item.current_published_version_id !== null &&
+        (item.binding?.enabled === true || isMainProjectAgent(item)),
     ),
   ];
 }
@@ -142,7 +146,7 @@ export function mainProjectAgent(
   return (
     catalog.system_items.find(
       (item) =>
-        item.slug === MAIN_PROJECT_AGENT_SLUG &&
+        isMainProjectAgent(item) &&
         item.status === "active" &&
         item.current_published_version_id !== null &&
         item.capabilities.includes("shared_assets.execute"),
@@ -190,166 +194,6 @@ export function resolveProjectDefaultAgent(
         status: "unavailable",
         reason: "项目默认 Agent 当前不可用，请联系项目管理员。",
       };
-}
-
-type MainSystemBindingKind = "agent" | "skill" | "mcp";
-
-export type MainDependencyTarget = {
-  item: ProjectAssetItem;
-  versionId: string;
-  versionNumber: number;
-  boundVersionNumber: number | null;
-};
-
-export type MainAgentTarget = {
-  versionId: string;
-  versionNumber: number;
-  boundVersionNumber: number | null;
-};
-
-type EnsureMainSystemAgentBindingsDependencies = {
-  agent: ProjectAssetItem;
-  agentTarget: MainAgentTarget;
-  requiredSkillVersionIds: readonly string[];
-  requiredMcpVersionIds: readonly string[];
-  skillDependencies: readonly MainDependencyTarget[];
-  mcpDependencies: readonly MainDependencyTarget[];
-  mcpVersions?: readonly ScopedMcpVersion[];
-  enableBinding: (
-    kind: MainSystemBindingKind,
-    input: EnableSystemBindingInput,
-  ) => Promise<unknown>;
-  moveBinding: (
-    kind: MainSystemBindingKind,
-    assetId: string,
-    action: "upgrade" | "rollback",
-    input: MoveSystemBindingInput,
-  ) => Promise<unknown>;
-};
-
-function bindingInput(
-  item: ProjectAssetItem,
-  versionId: string,
-): EnableSystemBindingInput {
-  return {
-    asset_id: item.id,
-    version_id: versionId,
-    ...(item.binding ? { expected_binding_version: item.binding.version } : {}),
-  };
-}
-
-async function ensureSystemDependencyBindings(
-  kind: Exclude<MainSystemBindingKind, "agent">,
-  requiredVersionIds: readonly string[],
-  dependencies: readonly MainDependencyTarget[],
-  enableBinding: EnsureMainSystemAgentBindingsDependencies["enableBinding"],
-  moveBinding: EnsureMainSystemAgentBindingsDependencies["moveBinding"],
-) {
-  for (const versionId of requiredVersionIds) {
-    const dependency = dependencies.find(
-      (candidate) => candidate.versionId === versionId,
-    );
-    if (dependency?.item.status !== "active") {
-      throw new Error("Main 的系统依赖尚未就绪");
-    }
-    const { item } = dependency;
-    if (item.scope === "project") continue;
-    if (item.binding?.enabled) {
-      if (item.binding.version_id === versionId) {
-        continue;
-      }
-      if (dependency.boundVersionNumber === null) {
-        throw new Error("Main 的系统依赖绑定版本无法确认");
-      }
-      await moveBinding(
-        kind,
-        item.id,
-        dependency.versionNumber > dependency.boundVersionNumber
-          ? "upgrade"
-          : "rollback",
-        {
-          version_id: versionId,
-          expected_binding_version: item.binding.version,
-        },
-      );
-      continue;
-    }
-    await enableBinding(kind, bindingInput(item, versionId));
-  }
-}
-
-export async function ensureMainSystemAgentBindings({
-  agent,
-  agentTarget,
-  requiredSkillVersionIds,
-  requiredMcpVersionIds,
-  skillDependencies,
-  mcpDependencies,
-  mcpVersions = [],
-  enableBinding,
-  moveBinding,
-}: EnsureMainSystemAgentBindingsDependencies): Promise<boolean> {
-  if (
-    agent.scope !== "system" ||
-    agent.status !== "active" ||
-    agent.current_published_version_id === null ||
-    agentTarget.versionId !== agent.current_published_version_id
-  ) {
-    throw new Error("Main 智能体尚未就绪");
-  }
-  const mcpBlockReason = mcpDependencyRuntimeBlockReason(
-    requiredMcpVersionIds,
-    mcpVersions,
-  );
-  if (mcpBlockReason) throw new Error(mcpBlockReason);
-
-  await ensureSystemDependencyBindings(
-    "skill",
-    requiredSkillVersionIds,
-    skillDependencies,
-    enableBinding,
-    moveBinding,
-  );
-  await ensureSystemDependencyBindings(
-    "mcp",
-    requiredMcpVersionIds,
-    mcpDependencies,
-    enableBinding,
-    moveBinding,
-  );
-  const agentBindingChanged =
-    agent.binding?.enabled !== true ||
-    agent.binding.version_id !== agentTarget.versionId;
-  if (agent.binding?.enabled !== true) {
-    await enableBinding("agent", bindingInput(agent, agentTarget.versionId));
-  } else if (agent.binding.version_id !== agentTarget.versionId) {
-    if (
-      agentTarget.boundVersionNumber === null ||
-      agentTarget.boundVersionNumber === agentTarget.versionNumber
-    ) {
-      throw new Error("Main 智能体绑定版本无法确认");
-    }
-    await moveBinding(
-      "agent",
-      agent.id,
-      agentTarget.versionNumber > agentTarget.boundVersionNumber
-        ? "upgrade"
-        : "rollback",
-      {
-        version_id: agentTarget.versionId,
-        expected_binding_version: agent.binding.version,
-      },
-    );
-  }
-  return (
-    agentBindingChanged ||
-    [...skillDependencies, ...mcpDependencies].some(
-      ({ item, versionId }) =>
-        item.scope === "system" &&
-        (item.binding?.enabled !== true ||
-          item.binding.version_id !== versionId),
-    )
-  );
 }
 
 export function projectThreadAgentSelection(agent: ExecutableProjectAgent) {
@@ -740,7 +584,7 @@ export function ProjectAgentSelectorDialog({
       ),
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         listProjectAssetVersions(project.id, "agents", agent.id, signal),
-      enabled: shouldCheckDependencies,
+      enabled: shouldCheckDependencies && !isMainProjectAgent(agent),
     })),
   });
   const systemAgentHistories = useQueries({
@@ -759,6 +603,7 @@ export function ProjectAgentSelectorDialog({
   const requiredMcpVersionIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [index, agent] of candidateAgents.entries()) {
+      if (isMainProjectAgent(agent)) continue;
       const version = candidateAgentHistories[index]?.data
         ? selectedAgentVersion(agent, candidateAgentHistories[index].data)
         : undefined;

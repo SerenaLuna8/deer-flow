@@ -53,7 +53,7 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "deerflow_trace_id stay coherent. A freshly reloaded AppConfig does not retrigger any of this."
     ),
     "mcp_security": (
-        "Gateway authoring and Run admission, Scheduler admission, and independent Worker MCP clients capture the endpoint allowlist, controlled-egress requirement, and timeout ceilings at process startup; "
+        "Gateway authoring and Run admission, Scheduler admission, and independent Worker MCP clients capture the CIDR network policy, controlled-egress requirement, and timeout ceilings at process startup; "
         "all Gateway, Scheduler, and Worker instances must restart together when mcp_security.* changes."
     ),
     # Not part of the AppConfig Pydantic schema — channel credentials are
@@ -62,8 +62,8 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     # config.yaml edits.
     "channels": ("start_channel_service() is invoked once during startup; the live IM channel clients (Feishu, Slack, Telegram, DingTalk) are not rebuilt when channels.* changes."),
     "channel_connections": (
-        "start_channel_service() wires the final project-connection repository and channel workers once at startup, and the project-connections "
-        "router caches the merged provider config on app.state; channel_connections.* edits need a restart."
+        "The project-connections router caches legacy deployment-provider flags and the Telegram compatibility username on app.state; "
+        "channel_connections.* edits need a Gateway restart. Database-backed project instances reconcile independently from PostgreSQL."
     ),
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, "

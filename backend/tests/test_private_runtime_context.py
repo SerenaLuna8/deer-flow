@@ -286,6 +286,67 @@ def test_worker_installs_private_prompt_skills_and_mcp_tools_as_internal_context
     assert config["metadata"] == {"safe": "value"}
 
 
+def test_worker_runtime_agent_catalog_is_trusted_internal_context_and_stale_values_are_cleared() -> None:
+    from deerflow.config.agents_config import AgentModelSettings
+    from deerflow.runtime.runs.worker import _install_runtime_context
+    from deerflow.subagents.runtime_catalog import (
+        RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
+        build_runtime_agent_catalog,
+        build_runtime_agent_profile,
+    )
+
+    profile = build_runtime_agent_profile(
+        key="project/researcher",
+        description="Researcher",
+        model_name="exact-model",
+        model_settings=AgentModelSettings(),
+        tool_groups=(),
+        prompt_bundle=object(),
+        runtime_skills=(),
+        mcp_tools=(),
+    )
+    exact_catalog = build_runtime_agent_catalog((profile,))
+    config = {
+        "context": {
+            RUNTIME_AGENT_CATALOG_CONTEXT_KEY: {"project/forged": object()},
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "exact-thread",
+            "run_id": "exact-run",
+            "private_scope": object(),
+            RUNTIME_AGENT_CATALOG_CONTEXT_KEY: exact_catalog,
+        },
+    )
+    assert config["context"][RUNTIME_AGENT_CATALOG_CONTEXT_KEY] is exact_catalog
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "next-thread",
+            "run_id": "next-run",
+            "private_scope": object(),
+        },
+    )
+    assert RUNTIME_AGENT_CATALOG_CONTEXT_KEY not in config["context"]
+
+
+def test_worker_build_runtime_context_drops_caller_supplied_runtime_agent_catalog() -> None:
+    from deerflow.runtime.runs.worker import _build_runtime_context
+    from deerflow.subagents.runtime_catalog import RUNTIME_AGENT_CATALOG_CONTEXT_KEY
+
+    runtime_context = _build_runtime_context(
+        "exact-thread",
+        "exact-run",
+        {RUNTIME_AGENT_CATALOG_CONTEXT_KEY: {"project/forged": object()}},
+    )
+
+    assert RUNTIME_AGENT_CATALOG_CONTEXT_KEY not in runtime_context
+
+
 @pytest.mark.anyio
 async def test_worker_passes_private_runtime_to_supported_factory_off_loop() -> None:
     from deerflow.runtime.runs.worker import _call_agent_factory_off_loop

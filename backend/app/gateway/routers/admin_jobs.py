@@ -32,7 +32,12 @@ class AdminJobResponse(BaseModel):
     project_id: uuid.UUID
     project_slug: str = Field(min_length=3, max_length=63, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     project_display_name: str = Field(min_length=1, max_length=120)
-    job_type: Literal["private_run", "automation_run", "retention_purge"]
+    job_type: Literal[
+        "private_run",
+        "automation_run",
+        "retention_purge",
+        "mcp_discovery",
+    ]
     status: Literal[
         "queued",
         "leased",
@@ -107,7 +112,13 @@ async def list_admin_jobs(
         "dead",
     ]
     | None = None,
-    type: Literal["private_run", "automation_run", "retention_purge"] | None = None,
+    type: Literal[
+        "private_run",
+        "automation_run",
+        "retention_purge",
+        "mcp_discovery",
+    ]
+    | None = None,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_system_identity),
     session: AsyncSession = Depends(project_session),
 ) -> AdminJobPageResponse:

@@ -12,12 +12,12 @@ import { Callout } from "nextra/components";
   <strong>Admin → 系统设置 → 模型</strong> 中单独管理，并存储在 PostgreSQL。
 </Callout>
 
-DeerFlow 将基础设施进程配置与数据库治理设置明确分开，使部署可重现、可审计，
+ActWeave 将基础设施进程配置与数据库治理设置明确分开，使部署可重现、可审计，
 并且易于按环境定制。
 
 ## 配置文件位置
 
-DeerFlow 使用以下优先级顺序解析 `config.yaml`：
+ActWeave 使用以下优先级顺序解析 `config.yaml`：
 
 1. 显式传递给 `AppConfig.from_file(config_path)` 的路径。
 2. `DEER_FLOW_CONFIG_PATH` 环境变量。
@@ -67,7 +67,7 @@ tools:
     api_key: $TAVILY_API_KEY
 ```
 
-这是 DeerFlow 实现可插拔性而不硬编码类引用的方式。
+这是 ActWeave 实现可插拔性而不硬编码类引用的方式。
 
 ## 模型 provider 设置
 

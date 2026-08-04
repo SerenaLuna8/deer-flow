@@ -12,9 +12,9 @@ guide rather than expecting full detail here:
 - **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
-## What is DeerFlow
+## What is ActWeave
 
-DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
+ActWeave is a LangGraph-based AI super-agent system with a full-stack architecture. The
 backend runs a "super agent" with sandboxed execution, persistent memory, subagent
 delegation, and extensible tools (built-in, MCP, community), all per-thread isolated. The
 frontend is a Next.js chat UI. External IM platforms (Feishu, Slack, Telegram, Discord,
@@ -59,8 +59,10 @@ deer-flow/
 Runtime config lives at the **repo root**: copy `config.example.yaml` to `config.yaml`.
 `DATABASE_URL` is the only application persistence connection. PostgreSQL owns application
 data, checkpoints, stores, durable jobs, streams, quotas, and audit records.
-The current process-config schema is `config_version: 34`. Model definitions, live Agent
-runtime policy, self-registration policy, project-quota defaults, and provider Credentials are
+The current process-config schema is `config_version: 35`. Version 35 replaces per-URL Project
+MCP endpoint approval with startup-only CIDR networks; Gateway, Scheduler, and every Worker must
+restart together after `mcp_security` changes. Model definitions, live Agent runtime policy,
+self-registration policy, project-quota defaults, and provider Credentials are
 PostgreSQL system settings, not `config.yaml` or ambient runtime provider environment variables.
 System admins manage runtime/auth/quota policy at `/admin/settings/system`; new Runs freeze the
 exact Agent policy while Gateway request-only features read the current committed policy. On an

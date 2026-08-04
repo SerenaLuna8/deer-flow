@@ -20,15 +20,19 @@ import {
   configureAdminMcpCredentialGrants,
   createAdminProjectAsset,
   createAdminProjectAssetVersion,
+  createConfiguredProjectMcp,
   createProjectAsset,
   createProjectAssetVersion,
   deleteProjectAgent,
+  deleteProjectMcp,
   deleteProjectSkill,
   disableAdminProjectSystemBinding,
   disableProjectSystemBinding,
   enableAdminProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
+  getProjectMcpEditableConfiguration,
+  getProjectMcpToolInventory,
   getProjectDefaultAgent,
   getProjectSkillCredentialBindings,
   getProjectSkillVersionFile,
@@ -43,18 +47,20 @@ import {
   listSystemAssetCatalog,
   publishProjectAssetVersion,
   publishAdminProjectAssetVersion,
+  requestProjectMcpToolDiscovery,
   revokeAdminCredential,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
   rollbackAdminProjectSystemBinding,
   setProjectDefaultAgent,
+  syncCurrentProjectSystemMcpBinding,
   submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
+  updateConfiguredProjectMcp,
   updateProjectAgentInstructions,
   updateProjectSkillCredentialBindings,
   upgradeAdminProjectSystemBinding,
   upgradeProjectSystemBinding,
-  type ProjectAssetStatusAction,
 } from "./api";
 import {
   adminAssetKey,
@@ -66,6 +72,8 @@ import {
   projectAssetMutationKey,
   projectAssetVersionsKey,
   projectDefaultAgentKey,
+  projectMcpEditableConfigurationKey,
+  projectMcpToolInventoryKey,
   projectSkillCredentialBindingsKey,
   projectSkillCredentialBindingsMutationKey,
   projectSkillVersionFileKey,
@@ -73,11 +81,13 @@ import {
 } from "./query-keys";
 import type {
   AdminAssetList,
+  AdminProjectAssetStatusAction,
   AdminCredentialList,
   AgentInstructionsInput,
   ApproveMcpInput,
   AssetKind,
   AssetListKind,
+  CreateConfiguredMcpInput,
   CreateAssetInput,
   CredentialRotationStatus,
   ConfigureSystemMcpCredentialGrantsInput,
@@ -86,22 +96,29 @@ import type {
   ExpectedAssetVersionInput,
   MoveSystemBindingInput,
   McpVersionInput,
+  McpToolInventoryResponse,
   ProjectAssetList,
+  ProjectAssetStatusAction,
   ProjectCredentialList,
   ProjectDefaultAgent,
   ProjectDefaultAgentInput,
+  ProjectMcpEditableConfigurationResponse,
   RevokeCredentialInput,
   SkillVersionInput,
   SkillFileForkInput,
   SkillCredentialBindingsInput,
   SkillCredentialBindingsResponse,
   SkillVersionFileContentResponse,
+  SyncCurrentSystemMcpBindingInput,
+  UpdateConfiguredMcpInput,
   VersionHistoryResponse,
 } from "./types";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 type VersionedAssetKind = Exclude<MutableAssetKind, "agents">;
 type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
+
+export const MCP_TOOL_INVENTORY_POLL_INTERVAL_MS = 2_000;
 
 const BINDING_LIST_KIND: Record<AssetKind, MutableAssetKind> = {
   agent: "agents",
@@ -324,11 +341,93 @@ export function useProjectAssetVersions(
   projectId: string,
   kind: AssetListKind,
   assetId: string,
+  enabled = true,
 ) {
   return useQuery<VersionHistoryResponse>({
     queryKey: projectAssetVersionsKey(accountId, projectId, kind, assetId),
     queryFn: ({ signal }) =>
       listProjectAssetVersions(projectId, kind, assetId, signal),
+    enabled,
+  });
+}
+
+export function useProjectMcpToolInventory(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  enabled = true,
+) {
+  return useQuery<McpToolInventoryResponse>({
+    queryKey: projectMcpToolInventoryKey(
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+    ),
+    queryFn: ({ signal }) =>
+      getProjectMcpToolInventory(projectId, assetId, versionId, signal),
+    enabled: enabled && versionId !== "",
+    staleTime: 0,
+    refetchInterval: (query) =>
+      query.state.data?.data.status === "testing"
+        ? MCP_TOOL_INVENTORY_POLL_INTERVAL_MS
+        : false,
+    refetchIntervalInBackground: false,
+  });
+}
+
+export function useProjectMcpEditableConfiguration(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  enabled = true,
+) {
+  return useQuery<ProjectMcpEditableConfigurationResponse>({
+    queryKey: projectMcpEditableConfigurationKey(accountId, projectId, assetId),
+    queryFn: ({ signal }) =>
+      getProjectMcpEditableConfiguration(projectId, assetId, signal),
+    enabled,
+    staleTime: 0,
+  });
+}
+
+export function useRequestProjectMcpToolDiscovery(
+  accountId: string,
+  projectId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "tool-discovery",
+    ),
+    mutationFn: ({
+      assetId,
+      versionId,
+    }: {
+      assetId: string;
+      versionId: string;
+    }) =>
+      runMutation((signal) =>
+        requestProjectMcpToolDiscovery(projectId, assetId, versionId, signal),
+      ),
+    onSuccess: whenActive((_data, { assetId, versionId }) =>
+      queryClient.invalidateQueries({
+        queryKey: projectMcpToolInventoryKey(
+          accountId,
+          projectId,
+          assetId,
+          versionId,
+        ),
+      }),
+    ),
   });
 }
 
@@ -436,6 +535,68 @@ export function useCreateProjectAsset(
     mutationFn: (input: CreateAssetInput) =>
       runMutation((signal) =>
         createProjectAsset(projectId, kind, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useCreateConfiguredProjectMcp(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "add-configured",
+    ),
+    mutationFn: (input: CreateConfiguredMcpInput) =>
+      runMutation((signal) =>
+        createConfiguredProjectMcp(projectId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useUpdateConfiguredProjectMcp(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "update-configured",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: UpdateConfiguredMcpInput;
+    }) =>
+      runMutation((signal) =>
+        updateConfiguredProjectMcp(projectId, assetId, input, signal),
       ),
     onSuccess: whenActive(invalidate),
   });
@@ -817,6 +978,68 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
   });
 }
 
+export function useDeleteProjectMcp(accountId: string, projectId: string) {
+  const queryClient = useQueryClient();
+  const invalidate = useProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "delete",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: ExpectedAssetVersionInput;
+    }) =>
+      runMutation((signal) =>
+        deleteProjectMcp(projectId, assetId, input, signal),
+      ),
+    onSuccess: whenActive(
+      (
+        _data: void,
+        variables: {
+          assetId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) => {
+        queryClient.setQueryData<ProjectAssetList>(
+          projectAssetKey(accountId, projectId, "mcp-servers"),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  project_items: current.project_items.filter(
+                    (item) => item.id !== variables.assetId,
+                  ),
+                }
+              : current,
+        );
+        queryClient.removeQueries({
+          queryKey: projectAssetVersionsKey(
+            accountId,
+            projectId,
+            "mcp-servers",
+            variables.assetId,
+          ),
+        });
+        void invalidate();
+      },
+    ),
+  });
+}
+
 export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
   accountId: string,
   projectId: string,
@@ -830,7 +1053,7 @@ export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
       input,
     }: {
       assetId: string;
-      action: ProjectAssetStatusAction<Kind>;
+      action: AdminProjectAssetStatusAction<Kind>;
       input: ExpectedAssetVersionInput;
     }) =>
       changeAdminProjectAssetStatus(projectId, kind, assetId, action, input),
@@ -1129,6 +1352,40 @@ export function useEnableProjectSystemBinding(
     mutationFn: (input: EnableSystemBindingInput) =>
       runMutation((signal) =>
         enableProjectSystemBinding(projectId, kind, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useSyncCurrentProjectSystemMcpBinding(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectAssetListInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "sync-current-binding",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: SyncCurrentSystemMcpBindingInput;
+    }) =>
+      runMutation((signal) =>
+        syncCurrentProjectSystemMcpBinding(projectId, assetId, input, signal),
       ),
     onSuccess: whenActive(invalidate),
   });

@@ -12,6 +12,8 @@ from deerflow.persistence.shared_assets import (
     ProjectSystemAgentBindingRow,
 )
 
+_BUILTIN_MAIN_AGENT_SOURCE_KEY = "builtin:agent:project-assistant"
+
 
 async def require_executable_agent(
     session: AsyncSession,
@@ -37,19 +39,6 @@ async def require_executable_agent(
             raise PrivateWorkNotFound(context.request_id)
         version_id = asset.current_published_version_id
     elif agent.scope == "system":
-        binding = (
-            await session.execute(
-                select(ProjectSystemAgentBindingRow)
-                .where(
-                    ProjectSystemAgentBindingRow.system_agent_id == agent.asset_id,
-                    ProjectSystemAgentBindingRow.project_id == context.project_id,
-                    ProjectSystemAgentBindingRow.enabled.is_(True),
-                )
-                .with_for_update(read=True, of=ProjectSystemAgentBindingRow)
-            )
-        ).scalar_one_or_none()
-        if binding is None:
-            raise PrivateWorkNotFound(context.request_id)
         asset = (
             await session.execute(
                 select(AgentRow)
@@ -64,7 +53,25 @@ async def require_executable_agent(
         ).scalar_one_or_none()
         if asset is None:
             raise PrivateWorkNotFound(context.request_id)
-        version_id = binding.agent_version_id
+        if asset.source_key == _BUILTIN_MAIN_AGENT_SOURCE_KEY:
+            if asset.current_published_version_id is None:
+                raise PrivateWorkNotFound(context.request_id)
+            version_id = asset.current_published_version_id
+        else:
+            binding = (
+                await session.execute(
+                    select(ProjectSystemAgentBindingRow)
+                    .where(
+                        ProjectSystemAgentBindingRow.system_agent_id == agent.asset_id,
+                        ProjectSystemAgentBindingRow.project_id == context.project_id,
+                        ProjectSystemAgentBindingRow.enabled.is_(True),
+                    )
+                    .with_for_update(read=True, of=ProjectSystemAgentBindingRow)
+                )
+            ).scalar_one_or_none()
+            if binding is None:
+                raise PrivateWorkNotFound(context.request_id)
+            version_id = binding.agent_version_id
     else:
         raise PrivateWorkNotFound(context.request_id)
 

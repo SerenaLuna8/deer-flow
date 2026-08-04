@@ -6,7 +6,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, exists, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
@@ -631,6 +632,107 @@ async def _delete_project_version_leaves(
             return
 
 
+async def purge_project_channel_guest_scope(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+) -> None:
+    """Remove one project's group bindings and unreferenced guest principals.
+
+    Project retention normally enters this boundary after ``purge_private_scope``.
+    The explicit connection cleanup also makes the shared-scope purge safe when a
+    recovery/operator path resumes after the private phase already committed or
+    was skipped.  Human memberships and every other project are out of scope.
+
+    Immutable job, Run, or audit shells may still reference a guest membership or
+    user.  Those governance references win: nested savepoints turn the final
+    membership/user removal into a safe orphan cleanup rather than weakening or
+    deleting retained records.
+    """
+
+    project_uuid = uuid.UUID(str(project_id))
+    guest_memberships = (
+        await session.execute(
+            select(
+                ProjectMembershipRow.id.label("membership_id"),
+                ProjectMembershipRow.user_id,
+            )
+            .where(
+                ProjectMembershipRow.project_id == project_uuid,
+                ProjectMembershipRow.role == "channel_guest",
+            )
+            .order_by(ProjectMembershipRow.user_id, ProjectMembershipRow.id)
+            .with_for_update(of=ProjectMembershipRow)
+        )
+    ).all()
+    guest_user_ids = tuple(sorted({row.user_id for row in guest_memberships}))
+    parameters: dict[str, object] = {"project_id": project_uuid}
+    if guest_user_ids:
+        parameters["guest_user_ids"] = list(guest_user_ids)
+        guest_owner_clause = "owner_user_id = ANY(CAST(:guest_user_ids AS varchar[]))"
+        # OAuth rows are not expected for non-login principals, but deleting
+        # them makes the boundary fail closed if malformed legacy data exists.
+        await session.execute(
+            text(f"DELETE FROM channel_oauth_states WHERE project_id=:project_id AND {guest_owner_clause}"),
+            parameters,
+        )
+        await session.execute(
+            text(f"DELETE FROM channel_conversations WHERE project_id=:project_id AND {guest_owner_clause}"),
+            parameters,
+        )
+        await session.execute(
+            text(f"DELETE FROM channel_connections WHERE project_id=:project_id AND {guest_owner_clause}"),
+            parameters,
+        )
+
+    # Challenges and bindings retain RESTRICT references to Agent rows, so they
+    # must be removed before the shared asset version chains are deleted.
+    await session.execute(
+        text("DELETE FROM project_channel_group_binding_challenges WHERE project_id=:project_id"),
+        parameters,
+    )
+    await session.execute(
+        text("DELETE FROM channel_external_principals WHERE project_id=:project_id"),
+        parameters,
+    )
+    await session.execute(
+        text("DELETE FROM project_channel_group_bindings WHERE project_id=:project_id"),
+        parameters,
+    )
+
+    for row in guest_memberships:
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    delete(ProjectMembershipRow).where(
+                        ProjectMembershipRow.id == row.membership_id,
+                        ProjectMembershipRow.project_id == project_uuid,
+                        ProjectMembershipRow.user_id == row.user_id,
+                        ProjectMembershipRow.role == "channel_guest",
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            # A retained immutable shell still owns this exact membership.
+            continue
+
+    for guest_user_id in guest_user_ids:
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    delete(UserRow).where(
+                        UserRow.id == guest_user_id,
+                        UserRow.principal_type == "channel_guest",
+                        ~exists(select(ProjectMembershipRow.id).where(ProjectMembershipRow.user_id == guest_user_id)),
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            # Audit/governance rows may legitimately retain a pseudonymous
+            # guest principal. Never delete those references or a human user.
+            continue
+
+
 async def purge_project_shared_scope(
     session: AsyncSession,
     *,
@@ -649,6 +751,11 @@ async def purge_project_shared_scope(
         "project_id": project_uuid,
         "purged_at": datetime.now(UTC),
     }
+
+    await purge_project_channel_guest_scope(
+        session,
+        project_id=project_uuid,
+    )
 
     # The default pointer must be removed before project Agent packages can be
     # physically deleted or reduced to retained shells.
@@ -942,5 +1049,6 @@ __all__ = [
     "RetentionPurgeRepository",
     "RetentionPurger",
     "purge_private_scope",
+    "purge_project_channel_guest_scope",
     "retention_purge_id",
 ]

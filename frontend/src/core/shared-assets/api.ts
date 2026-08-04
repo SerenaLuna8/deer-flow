@@ -14,7 +14,9 @@ import {
   assetKindSchema,
   assetListKindSchema,
   assetMutationResponseSchema,
+  configuredMcpResponseSchema,
   createAssetInputSchema,
+  createConfiguredMcpInputSchema,
   createCredentialInputSchema,
   configureSystemMcpCredentialGrantsInputSchema,
   credentialGrantMigrationResponseSchema,
@@ -27,6 +29,8 @@ import {
   enableSystemBindingInputSchema,
   expectedAssetVersionInputSchema,
   moveSystemBindingInputSchema,
+  mcpToolDiscoveryAttemptResponseSchema,
+  mcpToolInventoryResponseSchema,
   mcpVersionHistoryResponseSchema,
   mcpVersionInputSchema,
   mcpVersionResponseSchema,
@@ -35,6 +39,7 @@ import {
   projectCredentialListSchema,
   projectDefaultAgentInputSchema,
   projectDefaultAgentSchema,
+  projectMcpEditableConfigurationResponseSchema,
   projectSkillImportResponseSchema,
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
@@ -46,8 +51,11 @@ import {
   skillVersionInputSchema,
   skillVersionFileContentResponseSchema,
   skillVersionResponseSchema,
+  syncCurrentSystemMcpBindingInputSchema,
   systemBindingSchema,
+  updateConfiguredMcpInputSchema,
   type AdminAssetList,
+  type AdminProjectAssetStatusAction,
   type AdminCredentialList,
   type AgentInstructionsInput,
   type AgentVersionResponse,
@@ -55,7 +63,9 @@ import {
   type AssetKind,
   type AssetListKind,
   type AssetMutationResponse,
+  type ConfiguredMcpResponse,
   type CreateAssetInput,
+  type CreateConfiguredMcpInput,
   type CreateCredentialInput,
   type ConfigureSystemMcpCredentialGrantsInput,
   type CredentialGrantMigrationResponse,
@@ -66,12 +76,16 @@ import {
   type EnableSystemBindingInput,
   type ExpectedAssetVersionInput,
   type MoveSystemBindingInput,
+  type McpToolDiscoveryAttemptResponse,
   type McpVersionInput,
+  type McpToolInventoryResponse,
   type MigrateCredentialGrantsInput,
   type ProjectAssetList,
+  type ProjectAssetStatusAction,
   type ProjectCredentialList,
   type ProjectDefaultAgent,
   type ProjectDefaultAgentInput,
+  type ProjectMcpEditableConfigurationResponse,
   type ProjectSkillImportResponse,
   type ReplaceCredentialInput,
   type RevokeCredentialInput,
@@ -81,18 +95,14 @@ import {
   type SkillFileForkInput,
   type SkillVersionFileContentResponse,
   type SystemBinding,
+  type SyncCurrentSystemMcpBindingInput,
+  type UpdateConfiguredMcpInput,
   type VersionHistoryResponse,
   type VersionResponse,
 } from "./types";
 
 type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
 type VersionedAssetListKind = Exclude<MutableAssetListKind, "agents">;
-export type ProjectAssetStatusAction<Kind extends MutableAssetListKind> =
-  Kind extends "skills"
-    ? "activate" | "suspend"
-    : Kind extends "agents"
-      ? "activate" | "suspend"
-      : "archive" | "suspend";
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
@@ -426,6 +436,169 @@ export async function createProjectAsset(
   return await createAsset(projectAssetUrl(projectId, kind), input, signal);
 }
 
+function configuredMcpResponseSchemaForRequest({
+  projectId,
+  assetId,
+  expectedAssetVersion,
+  credentialSlotNames,
+}: {
+  projectId: string;
+  assetId?: string;
+  expectedAssetVersion?: number;
+  credentialSlotNames: readonly string[];
+}) {
+  return configuredMcpResponseSchema.superRefine((value, context) => {
+    if (value.item.scope !== "project" || value.item.project_id !== projectId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Configured MCP response must belong to the requested project",
+        path: ["item", "project_id"],
+      });
+    }
+    if (assetId !== undefined && value.item.id !== assetId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Configured MCP response must match the requested asset",
+        path: ["item", "id"],
+      });
+    }
+    if (
+      expectedAssetVersion !== undefined &&
+      value.item.version !== expectedAssetVersion + 2
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Configured MCP update must advance the asset revision exactly twice",
+        path: ["item", "version"],
+      });
+    }
+
+    const responseSlotNames = value.version.credential_slots.map(
+      (slot) => slot.name,
+    );
+    if (
+      responseSlotNames.length !== credentialSlotNames.length ||
+      credentialSlotNames.some((name) => !responseSlotNames.includes(name))
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Configured MCP response Credential slots must match the request",
+        path: ["version", "credential_slots"],
+      });
+    }
+
+    const expectedWorkflowStatus =
+      credentialSlotNames.length === 0 ? "published" : "pending_approval";
+    if (value.version.workflow_status !== expectedWorkflowStatus) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Configured MCP response workflow must match the requested Credential slots",
+        path: ["version", "workflow_status"],
+      });
+    }
+  });
+}
+
+function projectMcpEditableConfigurationSchemaForRequest(
+  projectId: string,
+  assetId: string,
+) {
+  return projectMcpEditableConfigurationResponseSchema.superRefine(
+    (value, context) => {
+      if (
+        value.item.project_id !== projectId ||
+        value.item.id !== assetId ||
+        value.version.mcp_server_id !== assetId
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Editable MCP configuration must match the requested Project asset",
+          path: ["item", "id"],
+        });
+      }
+    },
+  );
+}
+
+export async function getProjectMcpEditableConfiguration(
+  projectId: string,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<ProjectMcpEditableConfigurationResponse> {
+  const parsedProjectId = parseInput(assetIdSchema, projectId);
+  const id = parseInput(assetIdSchema, assetId);
+  const response = await request(
+    `${projectAssetUrl(parsedProjectId, "mcp-servers")}/${id}/configured`,
+    { signal },
+  );
+  return parseResponse(
+    response,
+    projectMcpEditableConfigurationSchemaForRequest(parsedProjectId, id),
+  );
+}
+
+export async function createConfiguredProjectMcp(
+  projectId: string,
+  input: CreateConfiguredMcpInput,
+  signal?: AbortSignal,
+): Promise<ConfiguredMcpResponse> {
+  const parsedProjectId = parseInput(assetIdSchema, projectId);
+  const body = parseInput(createConfiguredMcpInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(parsedProjectId, "mcp-servers")}/configured`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(
+    response,
+    configuredMcpResponseSchemaForRequest({
+      projectId: parsedProjectId,
+      credentialSlotNames: (body.credential_slots ?? []).map(
+        (slot) => slot.name,
+      ),
+    }),
+  );
+}
+
+export async function updateConfiguredProjectMcp(
+  projectId: string,
+  assetId: string,
+  input: UpdateConfiguredMcpInput,
+  signal?: AbortSignal,
+): Promise<ConfiguredMcpResponse> {
+  const parsedProjectId = parseInput(assetIdSchema, projectId);
+  const id = parseInput(assetIdSchema, assetId);
+  const body = parseInput(updateConfiguredMcpInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(parsedProjectId, "mcp-servers")}/${id}/configured`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(
+    response,
+    configuredMcpResponseSchemaForRequest({
+      projectId: parsedProjectId,
+      assetId: id,
+      expectedAssetVersion: body.expected_asset_version,
+      credentialSlotNames: (body.credential_slots ?? []).map(
+        (slot) => slot.name,
+      ),
+    }),
+  );
+}
+
 export async function updateProjectAgentInstructions(
   projectId: string,
   assetId: string,
@@ -631,12 +804,7 @@ export function changeProjectAssetStatus<Kind extends MutableAssetListKind>(
   input: ExpectedAssetVersionInput,
   signal?: AbortSignal,
 ) {
-  const validAction =
-    kind === "skills"
-      ? action === "activate" || action === "suspend"
-      : kind === "agents"
-        ? action === "activate" || action === "suspend"
-        : action === "archive" || action === "suspend";
+  const validAction = action === "activate" || action === "suspend";
   if (!validAction) {
     throw new SharedAssetApiError(
       422,
@@ -658,16 +826,14 @@ export function changeAdminProjectAssetStatus<
   projectId: string,
   kind: Kind,
   assetId: string,
-  action: ProjectAssetStatusAction<Kind>,
+  action: AdminProjectAssetStatusAction<Kind>,
   input: ExpectedAssetVersionInput,
   signal?: AbortSignal,
 ) {
   const validAction =
-    kind === "skills"
+    kind === "skills" || kind === "agents"
       ? action === "activate" || action === "suspend"
-      : kind === "agents"
-        ? action === "suspend"
-        : action === "archive" || action === "suspend";
+      : action === "archive" || action === "suspend";
   if (!validAction) {
     throw new SharedAssetApiError(
       422,
@@ -713,6 +879,26 @@ export async function deleteProjectAgent(
   const body = parseInput(expectedAssetVersionInputSchema, input);
   const response = await request(
     `${projectAssetUrl(projectId, "agents")}/${id}`,
+    {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!response.ok) await throwResponseError(response);
+}
+
+export async function deleteProjectMcp(
+  projectId: string,
+  assetId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<void> {
+  const id = parseInput(assetIdSchema, assetId);
+  const body = parseInput(expectedAssetVersionInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "mcp-servers")}/${id}`,
     {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
@@ -791,6 +977,55 @@ export async function listProjectAssetVersions(
     { signal },
   );
   return parseResponse(response, versionHistorySchema(kind));
+}
+
+export async function getProjectMcpToolInventory(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<McpToolInventoryResponse> {
+  const parsedAssetId = parseInput(assetIdSchema, assetId);
+  const parsedVersionId = parseInput(assetIdSchema, versionId);
+  const response = await request(
+    `${projectAssetUrl(projectId, "mcp-servers")}/${parsedAssetId}/versions/${parsedVersionId}/tools`,
+    { signal },
+  );
+  return parseResponse(response, mcpToolInventoryResponseSchema);
+}
+
+export async function requestProjectMcpToolDiscovery(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<McpToolDiscoveryAttemptResponse> {
+  const parsedAssetId = parseInput(assetIdSchema, assetId);
+  const parsedVersionId = parseInput(assetIdSchema, versionId);
+  const response = await request(
+    `${projectAssetUrl(projectId, "mcp-servers")}/${parsedAssetId}/versions/${parsedVersionId}/tool-discovery`,
+    { method: "POST", signal },
+  );
+  return parseResponse(
+    response,
+    mcpToolDiscoveryAttemptResponseSchema.superRefine((value, context) => {
+      if (value.data.mcp_server_id !== parsedAssetId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "MCP tool discovery attempt must match the requested asset",
+          path: ["data", "mcp_server_id"],
+        });
+      }
+      if (value.data.mcp_server_version_id !== parsedVersionId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "MCP tool discovery attempt must match the requested version",
+          path: ["data", "mcp_server_version_id"],
+        });
+      }
+    }),
+  );
 }
 
 export async function listAdminAssetVersions(
@@ -1219,6 +1454,7 @@ async function mutateProjectBinding<T>(
   schema: z.ZodType<T>,
   input: unknown,
   signal?: AbortSignal,
+  responseSchema: z.ZodType<SystemBinding> = systemBindingSchema,
 ): Promise<SystemBinding> {
   const body = parseInput(schema, input);
   const response = await request(url, {
@@ -1227,7 +1463,7 @@ async function mutateProjectBinding<T>(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse(response, systemBindingSchema);
+  return parseResponse(response, responseSchema);
 }
 
 export function enableProjectSystemBinding(
@@ -1241,6 +1477,46 @@ export function enableProjectSystemBinding(
     enableSystemBindingInputSchema,
     input,
     signal,
+  );
+}
+
+export function syncCurrentProjectSystemMcpBinding(
+  projectId: string,
+  assetId: string,
+  input: SyncCurrentSystemMcpBindingInput,
+  signal?: AbortSignal,
+): Promise<SystemBinding> {
+  const parsedProjectId = parseInput(assetIdSchema, projectId);
+  const id = parseInput(assetIdSchema, assetId);
+  const responseSchema = systemBindingSchema.superRefine((value, context) => {
+    if (value.kind !== "mcp") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "MCP sync response must contain an MCP binding",
+        path: ["kind"],
+      });
+    }
+    if (value.project_id !== parsedProjectId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "MCP sync response must match the requested project",
+        path: ["project_id"],
+      });
+    }
+    if (value.asset_id !== id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "MCP sync response must match the requested asset",
+        path: ["asset_id"],
+      });
+    }
+  });
+  return mutateProjectBinding(
+    `${projectBindingUrl(parsedProjectId, "mcp")}/${id}/sync-current`,
+    syncCurrentSystemMcpBindingInputSchema,
+    input,
+    signal,
+    responseSchema,
   );
 }
 

@@ -25,6 +25,7 @@ from app.gateway.deps import (
     get_project_quota_enforcer,
     project_session,
 )
+from app.gateway.public_project_roles import PublicInvitationRole
 from app.gateway.routers.auth import _get_client_ip
 from app.gateway.routers.project_governance import (
     GOVERNANCE_DOMAIN_ERRORS,
@@ -48,7 +49,6 @@ from app.projects.invitation_service import (
     InvitationService,
     hash_invitation_token,
 )
-from app.projects.models import ProjectRole
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 router = APIRouter(tags=["project-invitations"], route_class=GovernanceRoute)
@@ -57,7 +57,7 @@ router = APIRouter(tags=["project-invitations"], route_class=GovernanceRoute)
 class InvitationCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: str
-    role: ProjectRole
+    role: PublicInvitationRole
 
 
 class InvitationVersionRequest(BaseModel):
@@ -74,7 +74,7 @@ class InvitationResponse(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
     invited_email: str
-    role: ProjectRole
+    role: PublicInvitationRole
     status: str
     expires_at: datetime
     version: int
@@ -90,7 +90,7 @@ class RedeemedInvitationResponse(BaseModel):
     project_id: uuid.UUID
     project_slug: str
     membership_id: uuid.UUID
-    role: ProjectRole
+    role: PublicInvitationRole
 
 
 class InvitationClaimResponse(BaseModel):

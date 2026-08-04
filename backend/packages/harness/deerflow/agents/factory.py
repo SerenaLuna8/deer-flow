@@ -1,4 +1,4 @@
-"""Pure-argument factory for DeerFlow agents.
+"""Pure-argument factory for ActWeave agents.
 
 ``create_deerflow_agent`` accepts plain Python arguments — no YAML files, no
 global singletons.  It is the SDK-level entry point sitting between the raw
@@ -78,7 +78,7 @@ def create_deerflow_agent(
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
 ) -> CompiledStateGraph:
-    """Create a DeerFlow agent from plain Python arguments.
+    """Create an ActWeave agent from plain Python arguments.
 
     The factory assembly itself reads no config files.  Some injected runtime
     components (e.g. ``task_tool``) may still depend on global config at

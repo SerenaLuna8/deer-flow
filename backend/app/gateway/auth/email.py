@@ -1,6 +1,6 @@
 """Canonical email identity helpers.
 
-DeerFlow treats an email address as one account identifier across local
+ActWeave treats an email address as one account identifier across local
 password auth, OIDC provisioning, invitations, and administrative setup.
 Keeping the normalization in one dependency-free module prevents those entry
 points from drifting into different collision rules.

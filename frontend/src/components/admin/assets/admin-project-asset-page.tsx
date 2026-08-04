@@ -357,7 +357,7 @@ function AssetDirectoryRows({
     trigger: HTMLButtonElement,
   ) => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   if (items.length === 0) {
     return (
       <DirectoryEmpty
@@ -373,15 +373,18 @@ function AssetDirectoryRows({
         <span>{t.adminAssets.catalog.identifier}</span>
         <span>{t.adminAssets.catalog.lifecycleStatus}</span>
         <span>{t.adminAssets.catalog.publicationStatus}</span>
-        <span>{t.adminAssets.common.assetVersion}</span>
+        <span>
+          {kind === "mcp-servers"
+            ? t.adminAssets.common.updatedAt
+            : t.adminAssets.common.assetVersion}
+        </span>
         <span className="text-right">{t.adminAssets.catalog.actions}</span>
       </div>
       {items.map((item) => {
         const selected = selectedProjectAssetId === item.id;
-        const canCreateVersion = projectAssetCanCreateVersion(
-          kind,
-          projectAssetCanAuthor(item, kind),
-        );
+        const canCreateVersion =
+          kind === "skills" &&
+          projectAssetCanCreateVersion(kind, projectAssetCanAuthor(item, kind));
         const publication = item.current_published_version_id
           ? t.adminAssets.catalog.publishedAvailable
           : t.adminAssets.catalog.unpublished;
@@ -418,9 +421,13 @@ function AssetDirectoryRows({
             </div>
             <div className="min-w-0 text-sm tabular-nums">
               <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                {t.adminAssets.common.assetVersion}
+                {kind === "mcp-servers"
+                  ? t.adminAssets.common.updatedAt
+                  : t.adminAssets.common.assetVersion}
               </span>
-              {item.version}
+              {kind === "mcp-servers"
+                ? new Date(item.updated_at).toLocaleString(locale)
+                : item.version}
             </div>
             <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end">
               {kind !== "agents" ? (
@@ -710,7 +717,7 @@ function MutableAdminProjectAssets({
         projectId={projectId}
         selectedProjectAssetId={selectedProjectAssetId}
         actions={
-          kind !== "agents" ? (
+          kind === "skills" ? (
             <Button type="button" onClick={() => setCreateOpen(true)}>
               <PlusIcon aria-hidden className="size-4" />
               {t.adminAssets.common.createProjectAsset}
@@ -764,7 +771,7 @@ function MutableAdminProjectAssets({
           />
         </AdminSection>
       ) : null}
-      {kind !== "agents" ? (
+      {kind === "skills" ? (
         <CreateAssetDialog
           kind={kind}
           scope="project"
@@ -779,7 +786,7 @@ function MutableAdminProjectAssets({
           onSubmit={(input) => createAsset.mutate(input)}
         />
       ) : null}
-      {versionAsset && kind !== "agents" ? (
+      {versionAsset && kind === "skills" ? (
         <CreateVersionDialog
           kind={kind}
           asset={versionAsset}

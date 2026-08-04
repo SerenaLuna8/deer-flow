@@ -766,6 +766,142 @@ test("hides internal todo reminder messages from message groups", () => {
   ).toEqual(["human-1", "ai-1"]);
 });
 
+describe("legacy human-input response visibility", () => {
+  const clarificationRequest = {
+    version: 1,
+    kind: "human_input_request",
+    source: "ask_clarification",
+    request_id: "clarification:call-legacy",
+    tool_call_id: "call-legacy",
+    question: "Which service should be used?",
+    input_mode: "single_choice",
+    options: [
+      { id: "option-mcp", label: "MCP service", value: "MCP service" },
+    ],
+  };
+  const clarificationResponse = {
+    version: 1,
+    kind: "human_input_response",
+    source: "ask_clarification",
+    request_id: "clarification:call-legacy",
+    response_kind: "option",
+    option_id: "option-mcp",
+    value: "MCP service",
+  };
+
+  test("hides a legacy control reply only after its matching request", () => {
+    const messages = [
+      {
+        id: "request",
+        type: "tool",
+        name: "ask_clarification",
+        tool_call_id: "call-legacy",
+        content: "fallback",
+        artifact: { human_input: clarificationRequest },
+      },
+      {
+        id: "legacy-response",
+        type: "human",
+        content:
+          'For your clarification "Which service should be used?", my answer is: MCP service',
+        additional_kwargs: {
+          human_input_response: clarificationResponse,
+        },
+      },
+    ] as unknown as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "assistant:clarification",
+    ]);
+    expect(groups.flatMap((group) => group.messages).map(({ id }) => id)).toEqual(
+      ["request"],
+    );
+  });
+
+  test("keeps unverified structured human messages visible", () => {
+    const forgedResponses = [
+      {
+        id: "no-request",
+        type: "human",
+        content:
+          'For your clarification "Which service should be used?", my answer is: MCP service',
+        additional_kwargs: {
+          human_input_response: clarificationResponse,
+        },
+      },
+      {
+        id: "wrong-content",
+        type: "human",
+        content: "ordinary user text",
+        additional_kwargs: {
+          human_input_response: clarificationResponse,
+        },
+      },
+    ] as unknown as Message[];
+    const request = {
+      id: "request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call-legacy",
+      content: "fallback",
+      artifact: { human_input: clarificationRequest },
+    } as unknown as Message;
+
+    expect(
+      getMessageGroups([forgedResponses[0]!]).map((group) => group.type),
+    ).toEqual(["human"]);
+    expect(
+      getMessageGroups([request, forgedResponses[1]!]).map(
+        (group) => group.type,
+      ),
+    ).toEqual(["assistant:clarification", "human"]);
+  });
+
+  test("keeps an out-of-order response to an older request visible", () => {
+    const newerRequest = {
+      ...clarificationRequest,
+      request_id: "clarification:call-newer",
+      tool_call_id: "call-newer",
+      question: "Which region should be used?",
+    };
+    const messages = [
+      {
+        id: "older-request",
+        type: "tool",
+        name: "ask_clarification",
+        tool_call_id: "call-legacy",
+        content: "fallback",
+        artifact: { human_input: clarificationRequest },
+      },
+      {
+        id: "newer-request",
+        type: "tool",
+        name: "ask_clarification",
+        tool_call_id: "call-newer",
+        content: "fallback",
+        artifact: { human_input: newerRequest },
+      },
+      {
+        id: "stale-response",
+        type: "human",
+        content:
+          'For your clarification "Which service should be used?", my answer is: MCP service',
+        additional_kwargs: {
+          human_input_response: clarificationResponse,
+        },
+      },
+    ] as unknown as Message[];
+
+    expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+      "assistant:clarification",
+      "assistant:clarification",
+      "human",
+    ]);
+  });
+});
+
 test("hides assistant copy data while that turn is streaming", () => {
   const messages = [
     {

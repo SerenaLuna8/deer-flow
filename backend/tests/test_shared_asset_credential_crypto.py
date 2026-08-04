@@ -49,6 +49,35 @@ def test_encrypts_with_12_byte_nonce_and_bound_aad(monkeypatch: pytest.MonkeyPat
     assert decrypt_credential_payload(envelope, AssetScope.PROJECT, PROJECT_ID, VERSION_ID, keyring) == PAYLOAD
 
 
+def test_accepts_uuid_subclasses_returned_by_database_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DriverUUID(uuid.UUID):
+        pass
+
+    _configure_keyring(monkeypatch)
+    keyring = CredentialKeyring.from_environment()
+    project_id = DriverUUID(str(PROJECT_ID))
+    version_id = DriverUUID(str(VERSION_ID))
+
+    envelope = encrypt_credential_payload(
+        PAYLOAD,
+        AssetScope.PROJECT,
+        project_id,
+        version_id,
+        keyring,
+    )
+
+    assert (
+        decrypt_credential_payload(
+            envelope,
+            AssetScope.PROJECT,
+            project_id,
+            version_id,
+            keyring,
+        )
+        == PAYLOAD
+    )
+
+
 @pytest.mark.parametrize(
     ("scope", "project_id", "version_id"),
     [
@@ -211,7 +240,7 @@ def test_keyring_normalizes_deep_json_recursion_failure(monkeypatch: pytest.Monk
         [],
     ],
 )
-def test_rejects_payload_outside_env_headers_oauth_schema(
+def test_rejects_payload_outside_supported_credential_sections(
     monkeypatch: pytest.MonkeyPatch,
     payload: object,
 ) -> None:

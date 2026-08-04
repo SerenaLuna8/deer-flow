@@ -151,6 +151,22 @@ def test_chart_config_version_and_schema_match_current_example(
     chart_config = yaml.safe_load(values["config"])
 
     assert chart_config["config_version"] == example["config_version"]
+    expected_mcp_security = {
+        "project_remote_allowed_networks": [
+            "127.0.0.0/8",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "::1/128",
+            "fc00::/7",
+        ],
+        "require_egress_proxy": False,
+        "egress_proxy_url": None,
+        "discovery_timeout_seconds": 15,
+        "tool_call_timeout_seconds": 60,
+    }
+    assert example["mcp_security"] == expected_mcp_security
+    assert chart_config["mcp_security"] == expected_mcp_security
     monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:secret@db.invalid/deerflow")
     monkeypatch.setenv("PROVISIONER_API_KEY", "test-provisioner-key")
     AppConfig.model_validate(AppConfig.resolve_env_variables(chart_config))

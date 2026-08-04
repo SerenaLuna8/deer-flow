@@ -97,6 +97,22 @@ async def test_non_admin_cannot_change_or_remove_members(role: ProjectRole) -> N
 
 
 @pytest.mark.asyncio
+async def test_admin_cannot_assign_internal_channel_guest_role() -> None:
+    repository = _repository()
+    service = MembershipService(repository)
+
+    with pytest.raises(ProjectNotFound):
+        await service.change_role(
+            _context(),
+            uuid.uuid4(),
+            ProjectRole.CHANNEL_GUEST,
+            expected_version=1,
+        )
+
+    repository.lock_project_and_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_last_admin_cannot_leave() -> None:
     context = _context()
     repository = _repository()

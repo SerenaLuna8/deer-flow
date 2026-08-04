@@ -1,4 +1,4 @@
-"""Slash-command registry for the DeerFlow TUI (pure).
+"""Slash-command registry for the ActWeave TUI (pure).
 
 Provides one searchable list of TUI-owned built-in commands (``/help``,
 ``/model``, ``/threads`` …).

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,6 +62,32 @@ class ProjectConnectResponse(StrictChannelResponse):
     expires_in: int
 
 
+class ProjectChannelInstanceConfigureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    public_config: dict[str, str] = Field(default_factory=dict)
+    credentials: dict[str, str] = Field(default_factory=dict, repr=False)
+    enabled: bool
+
+
+class ProjectChannelInstanceResponse(StrictChannelResponse):
+    id: uuid.UUID | None
+    provider: str
+    display_name: str
+    status: Literal["unconfigured", "disabled", "stopped", "starting", "running", "error"]
+    enabled: bool
+    configured: bool
+    credential_configured: bool
+    public_config: dict[str, str] = Field(default_factory=dict)
+    updated_at: datetime | None
+    last_error: str | None = None
+
+
+class ProjectChannelInstancesResponse(StrictChannelResponse):
+    instances: list[ProjectChannelInstanceResponse]
+
+
 PROJECT_CONNECTION_PROVIDER_META: dict[str, dict[str, str]] = {
     "telegram": {"display_name": "Telegram", "auth_mode": "deep_link"},
     "slack": {"display_name": "Slack", "auth_mode": "binding_code"},
@@ -85,16 +112,19 @@ PROJECT_CONNECTION_RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 def project_connect_instruction(provider: str, code: str) -> str:
     if provider == "telegram":
-        return f"Send /start {code} to the DeerFlow Telegram bot."
+        return f"Send /start {code} to the ActWeave Telegram bot."
     meta = PROJECT_CONNECTION_PROVIDER_META.get(provider)
     if meta is None:
         raise KeyError(provider)
-    return f"Send /connect {code} to the DeerFlow {meta['display_name']} bot."
+    return f"Send /connect {code} to the ActWeave {meta['display_name']} bot."
 
 
 __all__ = [
     "PROJECT_CONNECTION_PROVIDER_META",
     "PROJECT_CONNECTION_RUNTIME_REQUIREMENTS",
+    "ProjectChannelInstanceConfigureRequest",
+    "ProjectChannelInstanceResponse",
+    "ProjectChannelInstancesResponse",
     "ProjectConnectRequest",
     "ProjectConnectResponse",
     "ProjectConnectionProviderResponse",

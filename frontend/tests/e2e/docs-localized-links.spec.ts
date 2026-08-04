@@ -6,15 +6,28 @@ test.describe("Localized documentation links", () => {
   }) => {
     await page.goto("/en/docs/introduction/core-concepts");
 
-    const card = page.locator("a.nextra-card", { hasText: "Why DeerFlow" });
+    const card = page.locator("a.nextra-card", { hasText: "Why ActWeave" });
     await expect(card).toHaveAttribute(
       "href",
-      "/en/docs/introduction/why-deerflow",
+      "/en/docs/introduction/why-actweave",
     );
 
     await card.click();
-    await expect(page).toHaveURL(/\/en\/docs\/introduction\/why-deerflow$/);
-    await expect(page.locator("main h1")).toContainText("Why DeerFlow");
+    await expect(page).toHaveURL(/\/en\/docs\/introduction\/why-actweave$/);
+    await expect(page.locator("main h1")).toContainText("Why ActWeave");
+  });
+
+  test("keeps the legacy DeerFlow documentation URL available", async ({
+    page,
+  }) => {
+    await page.goto("/en/docs/introduction/why-deerflow");
+
+    await expect(page.locator("main h1")).toContainText(
+      "DeerFlow is now ActWeave",
+    );
+    await expect(
+      page.getByRole("link", { name: "Continue to Why ActWeave" }),
+    ).toHaveAttribute("href", "/en/docs/introduction/why-actweave");
   });
 
   test("keeps Chinese card navigation in the Chinese docs", async ({

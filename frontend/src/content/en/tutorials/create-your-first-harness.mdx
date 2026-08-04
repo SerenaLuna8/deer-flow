@@ -1,19 +1,19 @@
 ---
 title: Create Your First Harness
-description: This tutorial shows you how to use the DeerFlow Harness programmatically — importing and using DeerFlow directly in your Python code rather than through the web interface.
+description: This tutorial shows you how to use the ActWeave Harness programmatically — importing and using ActWeave directly in your Python code rather than through the web interface.
 ---
 
 import { Callout, Steps } from "nextra/components";
 
 # Create Your First Harness
 
-This tutorial shows you how to use the DeerFlow Harness programmatically — importing and using DeerFlow directly in your Python code rather than through the web interface.
+This tutorial shows you how to use the ActWeave Harness programmatically — importing and using ActWeave directly in your Python code rather than through the web interface.
 
 ## Prerequisites
 
 - Python 3.12+
 - `uv` installed
-- DeerFlow repository cloned
+- ActWeave repository cloned
 
 ## Install
 
@@ -23,7 +23,7 @@ uv sync
 ```
 
 <Callout type="info">
-  The full DeerFlow application stores model definitions and encrypted
+  The full ActWeave application stores model definitions and encrypted
   Credentials in PostgreSQL System Settings. This low-level SDK example instead
   constructs one in-memory LangChain model instance directly; it does not
   create or persist an application model definition.

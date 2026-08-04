@@ -16,7 +16,7 @@ _NONCE_BYTES = 12
 _TAG_BYTES = 16
 _MAX_PLAINTEXT_BYTES = 64 * 1024
 _PAYLOAD_SCHEMA_VERSION = 1
-_PAYLOAD_SECTIONS = frozenset({"env", "headers", "oauth"})
+_PAYLOAD_SECTIONS = frozenset({"env", "headers", "oauth", "query"})
 
 
 class CredentialPayloadInvalid(Exception):
@@ -56,14 +56,14 @@ def _aad(version_id: uuid.UUID, scope: AssetScope | str, project_id: uuid.UUID |
         normalized_scope = AssetScope(scope)
     except (TypeError, ValueError):
         raise _CredentialContextInvalid from None
-    if type(version_id) is not uuid.UUID:
+    if not isinstance(version_id, uuid.UUID):
         raise _CredentialContextInvalid
     if normalized_scope is AssetScope.SYSTEM:
         if project_id is not None:
             raise _CredentialContextInvalid
         owner = "system"
     else:
-        if type(project_id) is not uuid.UUID:
+        if not isinstance(project_id, uuid.UUID):
             raise _CredentialContextInvalid
         owner = str(project_id)
     return f"deerflow-credential:v{_PAYLOAD_SCHEMA_VERSION}:{version_id}:{normalized_scope.value}:{owner}".encode("ascii")

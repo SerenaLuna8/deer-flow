@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
@@ -88,7 +88,7 @@ def _local_uri_to_virtual_path(
     Stdio MCP servers run with their cwd and temp dir pinned inside the thread's
     mounted user-data tree (see :func:`_make_session_pool_tool`), so the files
     they produce already live somewhere the sandbox/artifact API can serve — the
-    only thing missing is the virtual prefix the rest of DeerFlow addresses them
+    only thing missing is the virtual prefix the rest of ActWeave addresses them
     by. This performs that purely deterministic host→virtual mapping: no copy, no
     trusted-root list, and no exposure of files outside the thread's own tree.
 
@@ -593,14 +593,35 @@ def _merge_catalog_mcp_secrets(
     for payload in materialized.values():
         if not isinstance(payload, Mapping):
             raise ValueError
-        for section in ("env", "headers"):
+        for section in ("env", "headers", "query"):
             values = payload.get(section)
             if values is None:
                 continue
             if not isinstance(values, Mapping):
                 raise ValueError
-            if values and ((section == "env" and transport != "stdio") or (section == "headers" and transport not in {"http", "sse"})):
+            if values and ((section == "env" and transport != "stdio") or (section in {"headers", "query"} and transport not in {"http", "sse"})):
                 raise AssetCatalogUnavailable("MCP credential section is invalid for transport")
+            if section == "query":
+                if not values:
+                    continue
+                url = merged.get("url")
+                if not isinstance(url, str) or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value for key, value in values.items()):
+                    raise AssetCatalogUnavailable("MCP query credential is invalid for transport")
+                parsed = urlsplit(url)
+                existing = parse_qsl(parsed.query, keep_blank_values=True)
+                existing_names = {name for name, _value in existing}
+                if existing_names.intersection(values):
+                    raise AssetCatalogUnavailable("MCP query credential conflicts with endpoint")
+                merged["url"] = urlunsplit(
+                    (
+                        parsed.scheme,
+                        parsed.netloc,
+                        parsed.path,
+                        urlencode((*existing, *values.items())),
+                        parsed.fragment,
+                    )
+                )
+                continue
             current = dict(merged.get(section) or {})
             current.update({str(key): value for key, value in values.items()})
             merged[section] = current

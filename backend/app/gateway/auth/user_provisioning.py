@@ -26,7 +26,7 @@ async def get_or_provision_oidc_user(
     identity: OIDCIdentity,
     local_provider: LocalAuthProvider,
 ) -> dict:
-    """Resolve an OIDC identity to a DeerFlow user.
+    """Resolve an OIDC identity to an ActWeave user.
 
     Flow:
     1. Look up existing user by (provider, subject)

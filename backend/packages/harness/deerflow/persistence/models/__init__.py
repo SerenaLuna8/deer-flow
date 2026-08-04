@@ -16,12 +16,22 @@ there is no matching entity directory.
 
 from deerflow.persistence.audit import AuditLogRow
 from deerflow.persistence.auth_sessions import AuthSessionRow
+from deerflow.persistence.channel_connections.group_challenge_model import (
+    ProjectChannelGroupBindingChallengeRow,
+)
+from deerflow.persistence.channel_connections.group_model import (
+    ChannelExternalPrincipalRow,
+    ProjectChannelGroupBindingRow,
+)
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
     ChannelCredentialRow,
     ChannelInboundDeliveryRow,
     ChannelOAuthStateRow,
+    ProjectChannelCredentialBindingRow,
+    ProjectChannelInstanceLeaseRow,
+    ProjectChannelInstanceRow,
 )
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
@@ -65,6 +75,8 @@ from deerflow.persistence.shared_assets import (
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
+    McpToolDiscoveryAttemptRow,
+    ProjectMcpToolInventoryRow,
     ProjectSkillCredentialBindingRow,
     ProjectSkillCredentialConfigRow,
     ProjectSystemAgentBindingRow,
@@ -98,8 +110,14 @@ __all__ = [
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
+    "ChannelExternalPrincipalRow",
     "ChannelInboundDeliveryRow",
     "ChannelOAuthStateRow",
+    "ProjectChannelCredentialBindingRow",
+    "ProjectChannelGroupBindingChallengeRow",
+    "ProjectChannelGroupBindingRow",
+    "ProjectChannelInstanceLeaseRow",
+    "ProjectChannelInstanceRow",
     "AgentRow",
     "AgentDesignOperationRow",
     "AgentDesignSessionRow",
@@ -118,6 +136,8 @@ __all__ = [
     "McpCredentialSlotRow",
     "McpServerRow",
     "McpServerVersionRow",
+    "McpToolDiscoveryAttemptRow",
+    "ProjectMcpToolInventoryRow",
     "ProjectInvitationRow",
     "ProjectInvitationRateLimitRow",
     "ProjectDefaultAgentRow",

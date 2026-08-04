@@ -23,13 +23,13 @@ const memory: UserMemory = {
     },
     personalContext: { summary: "", updatedAt: "" },
     topOfMind: {
-      summary: "Redesigning DeerFlow.",
+      summary: "Redesigning ActWeave.",
       updatedAt: "2026-07-10T00:00:00Z",
     },
   },
   history: {
     recentMonths: {
-      summary: "Forked DeerFlow.",
+      summary: "Forked ActWeave.",
       updatedAt: "2026-07-10T00:00:00Z",
     },
     earlierContext: { summary: "", updatedAt: "" },

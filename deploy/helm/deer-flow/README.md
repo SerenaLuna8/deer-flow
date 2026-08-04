@@ -1,4 +1,4 @@
-# DeerFlow Helm Chart
+# ActWeave Helm Chart
 
 This chart deploys the final project-scoped process topology:
 
@@ -83,7 +83,7 @@ manifest and is intended only for controlled environments.
 ## Bundled PostgreSQL is empty by design
 
 `postgresql.enabled=true` creates a single PostgreSQL StatefulSet, not an
-initialized DeerFlow database. There is intentionally no Helm migration hook,
+initialized ActWeave database. There is intentionally no Helm migration hook,
 init container or runtime `create_all`.
 
 For evaluation, install with Gateway and Worker scaled to zero, point the
@@ -188,4 +188,4 @@ helm template deer-flow deploy/helm/deer-flow \
 After installation, verify the final schema first, then confirm that Gateway is
 ready, at least one Worker heartbeat is current, and Scheduler ownership is
 either `disabled` or `owned`. A healthy Gateway without a Worker is not a
-healthy DeerFlow execution topology.
+healthy ActWeave execution topology.

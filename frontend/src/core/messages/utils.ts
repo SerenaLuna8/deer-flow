@@ -1,6 +1,9 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
-import { extractHumanInputRequest } from "@/core/messages/human-input";
+import {
+  extractHumanInputRequest,
+  inferLegacyHumanInputControlMessageIndexes,
+} from "@/core/messages/human-input";
 
 interface GenericMessageGroup<T = string> {
   type: T;
@@ -55,6 +58,8 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
   const groupByToolCallId = new Map<string, MessageGroup>();
   const pendingToolMessagesByCallId = new Map<string, Message[]>();
+  const inferredHiddenHumanInputMessageIndexes =
+    inferLegacyHumanInputControlMessageIndexes(messages);
   const usedGroupIds = new Set<string>();
   let unscopedTurn = 0;
 
@@ -139,7 +144,10 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       unscopedTurn += 1;
     }
 
-    if (isHiddenFromUIMessage(message)) {
+    if (
+      isHiddenFromUIMessage(message) ||
+      inferredHiddenHumanInputMessageIndexes.has(messageIndex)
+    ) {
       continue;
     }
 
@@ -238,6 +246,21 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
   // are intentionally omitted: guessing a nearby group can leak raw tool
   // output into a terminal assistant answer and scramble the conversation.
   return groups;
+}
+
+/**
+ * Returns the transcript-visible projection of a complete ordered message
+ * list, including the strict compatibility rule for legacy clarification
+ * replies whose persisted `hide_from_ui` flag was lost.
+ */
+export function filterUIVisibleMessages(messages: Message[]): Message[] {
+  const inferredHiddenHumanInputMessageIndexes =
+    inferLegacyHumanInputControlMessageIndexes(messages);
+  return messages.filter(
+    (message, messageIndex) =>
+      !isHiddenFromUIMessage(message) &&
+      !inferredHiddenHumanInputMessageIndexes.has(messageIndex),
+  );
 }
 
 export type AssistantTurnDisplay = {

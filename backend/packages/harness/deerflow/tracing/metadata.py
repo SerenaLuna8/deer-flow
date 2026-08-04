@@ -50,7 +50,7 @@ def build_langfuse_trace_metadata(
         model_name: Model name; emitted as ``model:<name>`` in ``langfuse_tags``.
         environment: Deployment env (e.g. ``"production"``); emitted as
             ``env:<value>`` in ``langfuse_tags``.
-        deerflow_trace_id: Optional DeerFlow request trace id; falls back to
+        deerflow_trace_id: Optional ActWeave request trace id; falls back to
             the current request trace context when omitted.
         include_deerflow_trace_id: Whether request correlation may be exposed
             to Langfuse. Internal Worker trace authority remains independent.

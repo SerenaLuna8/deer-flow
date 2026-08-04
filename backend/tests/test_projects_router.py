@@ -80,9 +80,14 @@ def test_project_operation_ids_are_unique() -> None:
 def test_project_openapi_preserves_role_and_capability_enums() -> None:
     schemas = _client().app.openapi()["components"]["schemas"]
     response = schemas["ProjectResponse"]
-    assert response["properties"]["role"]["$ref"].endswith("/ProjectRole")
+    assert response["properties"]["role"]["$ref"].endswith("/PublicProjectRole")
     assert response["properties"]["capabilities"]["items"]["$ref"].endswith("/Capability")
-    assert schemas["ProjectRole"]["enum"] == [role.value for role in ProjectRole]
+    assert schemas["PublicProjectRole"]["enum"] == [
+        "admin",
+        "editor",
+        "runner",
+        "viewer",
+    ]
     assert schemas["Capability"]["enum"] == [capability.value for capability in Capability]
 
 

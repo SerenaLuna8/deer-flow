@@ -896,6 +896,52 @@ async function mockProjectAssets(
       [PROJECT_MCP_ID, mcpVersions],
       [CREDENTIAL_ID, credentialVersions],
     ];
+    const mcpToolInventoryMatch = new RegExp(
+      `/mcp-servers/${PROJECT_MCP_ID}/versions/([^/]+)/tools$`,
+      "u",
+    ).exec(path);
+    if (mcpToolInventoryMatch && method === "GET") {
+      const version = mcpVersions.find(
+        (item) => item.id === mcpToolInventoryMatch[1],
+      );
+      if (version?.workflow_status !== "published") {
+        await json(
+          route,
+          {
+            detail: {
+              code: "asset_not_found",
+              request_id: "request-mcp-tools-not-found",
+            },
+          },
+          404,
+        );
+        return;
+      }
+      await json(route, {
+        data: {
+          status: "ready",
+          tools: [
+            {
+              name: "maps_direction_driving",
+              description: "根据起终点经纬度坐标规划驾车通勤方案",
+            },
+            {
+              name: "maps_around_search",
+              description: "根据关键词和坐标搜索指定范围内的地点",
+            },
+            {
+              name: "maps_weather",
+              description: "根据城市名称查询指定城市的天气",
+            },
+          ],
+          last_attempt_at: "2026-07-14T00:05:00Z",
+          last_success_at: "2026-07-14T00:05:00Z",
+          error_code: null,
+        },
+        request_id: "request-mcp-tools-ready",
+      });
+      return;
+    }
     for (const [id, versions] of histories) {
       if (path.endsWith(`/${id}/versions`) && method === "GET") {
         await json(route, { data: versions, request_id: `history-${id}` });
@@ -1414,13 +1460,25 @@ async function mockProjectAssets(
       path.endsWith(`/api/projects/${PROJECT_ID}/credentials`) &&
       method === "POST"
     ) {
+      const body = request.postDataJSON() as {
+        name: string;
+        display_name: string;
+        credential_type: string;
+        payload: Record<string, Record<string, string>>;
+      };
+      const payloadSchema = Object.fromEntries(
+        Object.entries(body.payload).map(([group, fields]) => [
+          group,
+          Object.keys(fields),
+        ]),
+      ) as CredentialVersion["payload_schema"];
       credential = {
         id: CREDENTIAL_ID,
         scope: "project",
         project_id: PROJECT_ID,
-        name: "github",
-        display_name: "GitHub",
-        credential_type: "token",
+        name: body.name,
+        display_name: body.display_name,
+        credential_type: body.credential_type,
         status: "active",
         current_version_id: CREDENTIAL_VERSION_ID,
         version: 1,
@@ -1436,7 +1494,7 @@ async function mockProjectAssets(
           version_number: 1,
           status: "active",
           payload_schema_version: 1,
-          payload_schema: { env: ["TOKEN"] },
+          payload_schema: payloadSchema,
           supersedes_version_id: null,
           created_by_user_id: "user-1",
           created_at: now,
@@ -2171,9 +2229,7 @@ test("project Credential replace requires explicit grant migration and confirmed
     .getByRole("button", { name: "确认永久撤销" })
     .click();
   await expect(
-    credentialCard
-      .locator('[data-slot="badge"]')
-      .filter({ hasText: "已撤销" }),
+    credentialCard.locator('[data-slot="badge"]').filter({ hasText: "已撤销" }),
   ).toHaveCount(1);
   await expect(
     credentialCard.getByRole("button", { name: "撤销凭据" }),
@@ -2296,11 +2352,18 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
     name: "创建 MCP 版本",
   });
   await mcpVersionDialog.getByLabel("描述").fill("GitHub MCP");
-  await mcpVersionDialog
-    .getByLabel(/URL/u)
-    .fill("https://mcp.example.test/sse");
+  const mcpUrlInput = mcpVersionDialog.getByLabel(/URL/u);
+  await mcpUrlInput.fill(
+    "https://mcp.example.test/mcp?key=browser-secret-sentinel",
+  );
+  await expect(mcpUrlInput).toHaveValue("https://mcp.example.test/mcp");
+  await expect(mcpVersionDialog.getByRole("alert")).toContainText(
+    "已从 URL 中移除查询参数",
+  );
+  await expect(mcpVersionDialog).not.toContainText("browser-secret-sentinel");
   await mcpVersionDialog.getByLabel("槽位名称").fill("github-token");
-  await mcpVersionDialog.getByLabel("必需字段（逗号或换行分隔）").fill("TOKEN");
+  await mcpVersionDialog.getByLabel("凭据字段分组").selectOption("query");
+  await mcpVersionDialog.getByLabel("必需字段（逗号或换行分隔）").fill("key");
   await mcpVersionDialog.getByRole("button", { name: "创建版本" }).click();
   await expect(mcpVersionDialog).toHaveCount(0);
   await expect(mcpSheet.getByRole("button", { name: "发布版本" })).toHaveCount(
@@ -2316,12 +2379,14 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
     .click();
   await page.getByRole("tab", { name: /项目自建/u }).click();
   await page.getByRole("button", { name: "创建凭据" }).click();
-  await page.getByLabel("名称").fill("GitHub");
-  await page.getByLabel("凭据标识").fill("github");
-  await page.getByLabel("类型").fill("token");
-  await page.getByLabel("字段名").fill("TOKEN");
-  await page.getByLabel("凭据值").fill("never-render-this-secret");
-  await page.getByRole("button", { name: "加密写入" }).click();
+  const credentialDialog = page.getByRole("dialog", { name: "创建凭据" });
+  await credentialDialog.getByLabel("名称").fill("GitHub");
+  await credentialDialog.getByLabel("凭据标识").fill("github");
+  await credentialDialog.getByLabel("类型").fill("token");
+  await credentialDialog.getByLabel("分组").selectOption("query");
+  await credentialDialog.getByLabel("字段名").fill("key");
+  await credentialDialog.getByLabel("凭据值").fill("never-render-this-secret");
+  await credentialDialog.getByRole("button", { name: "加密写入" }).click();
   await expect(page.locator("body")).not.toContainText(
     "never-render-this-secret",
   );
@@ -2346,6 +2411,15 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
   await approvalDialog.getByRole("button", { name: "批准并发布" }).click();
   await expect(approvalDialog).toHaveCount(0);
   await expect(mcpSheet.getByText("已发布", { exact: true })).toBeVisible();
+  await expect(mcpSheet.getByText("3 个工具", { exact: true })).toBeVisible();
+  await expect(
+    mcpSheet.getByText("maps_direction_driving", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    mcpSheet.getByText("根据城市名称查询指定城市的天气", { exact: true }),
+  ).toBeVisible();
+  await expect(mcpSheet).toContainText("最近成功发现");
+  await expect(mcpSheet).not.toContainText("browser-secret-sentinel");
   await mcpSheet.getByRole("button", { name: "Close" }).click();
 
   await page
@@ -2358,7 +2432,7 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
     .filter({ hasText: "github" })
     .first();
   await page.getByRole("button", { name: "替换凭据" }).click();
-  await page.getByLabel("字段名").fill("TOKEN");
+  await page.getByLabel("字段名").fill("key");
   await page.getByLabel("凭据值").fill("rotated-secret");
   await page.getByRole("button", { name: "替换凭据" }).last().click();
   await expect(page.locator("body")).not.toContainText("rotated-secret");
@@ -2389,9 +2463,7 @@ test("project asset authoring, approval, Credential safety, and scope switch", a
     .getByRole("button", { name: "确认永久撤销" })
     .click();
   await expect(
-    credentialCard
-      .locator('[data-slot="badge"]')
-      .filter({ hasText: "已撤销" }),
+    credentialCard.locator('[data-slot="badge"]').filter({ hasText: "已撤销" }),
   ).toHaveCount(1);
   await expect(
     credentialCard.getByRole("button", { name: "撤销凭据" }),

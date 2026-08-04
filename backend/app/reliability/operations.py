@@ -38,7 +38,12 @@ JobStatus = Literal[
     "cancelled",
     "dead",
 ]
-JobType = Literal["private_run", "automation_run", "retention_purge"]
+JobType = Literal[
+    "private_run",
+    "automation_run",
+    "retention_purge",
+    "mcp_discovery",
+]
 ProviderHealthStatus = Literal["ready", "degraded", "unavailable"]
 
 

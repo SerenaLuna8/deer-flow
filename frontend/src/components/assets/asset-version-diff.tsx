@@ -114,6 +114,7 @@ export function AssetVersionDiff({
   current: AssetVersion;
 }) {
   const { locale, t } = useI18n();
+  const isMcp = "mcp_server_id" in current;
   const rows = diffRows(
     previous,
     current,
@@ -128,6 +129,7 @@ export function AssetVersionDiff({
       </p>
     );
   }
+  const currentOnly = isMcp && previous === null;
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[36rem] text-left text-xs">
@@ -136,11 +138,17 @@ export function AssetVersionDiff({
             <th className="px-2 py-2 font-medium">
               {t.adminAssets.diff.field}
             </th>
+            {!currentOnly ? (
+              <th className="px-2 py-2 font-medium">
+                {isMcp
+                  ? t.adminAssets.diff.previousMcpConfiguration
+                  : t.adminAssets.diff.previous}
+              </th>
+            ) : null}
             <th className="px-2 py-2 font-medium">
-              {t.adminAssets.diff.previous}
-            </th>
-            <th className="px-2 py-2 font-medium">
-              {t.adminAssets.diff.current}
+              {isMcp
+                ? t.adminAssets.diff.currentMcpConfiguration
+                : t.adminAssets.diff.current}
             </th>
           </tr>
         </thead>
@@ -148,9 +156,11 @@ export function AssetVersionDiff({
           {rows.map((row) => (
             <tr key={row.label} className="border-b last:border-0">
               <th className="px-2 py-2 align-top font-medium">{row.label}</th>
-              <td className="text-muted-foreground px-2 py-2 align-top whitespace-pre-wrap">
-                {row.previous}
-              </td>
+              {!currentOnly ? (
+                <td className="text-muted-foreground px-2 py-2 align-top whitespace-pre-wrap">
+                  {row.previous}
+                </td>
+              ) : null}
               <td className="px-2 py-2 align-top whitespace-pre-wrap">
                 {row.current}
               </td>

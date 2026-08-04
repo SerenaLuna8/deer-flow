@@ -188,7 +188,7 @@ The dependency direction is `app.* -> deerflow.*`. Harness code must never impor
   public responses, logs, or traces.
 - The removed top-level `authorization:` config is a version-32 tombstone, not an enabled
   generic provider. Project authority remains ProjectContext + capability + private owner scope
-  + side-effect revalidation; a future provider may only add a concrete fail-closed restriction,
+  plus side-effect revalidation; a future provider may only add a concrete fail-closed restriction,
   never replace or expand that authority.
 
 ## System asset and Agent execution boundary
@@ -366,8 +366,14 @@ project member with `shared_assets.edit` may hard-delete an unreferenced project
 including every version and dependency-ref row. Any retained Thread, Automation, or exact Run
 snapshot reference rejects deletion with conflict; deletion never cascades into private work.
 Completed private Builder history is retained with a deleted-Agent tombstone. System Agents and
-platform override routes never expose Agent deletion. MCP archive/suspend and Skill
-activate/suspend remain independent. Historical Agent rows already carrying the frozen-schema
+platform override routes never expose Agent deletion. Project MCP lifecycle exposes
+activate/suspend for assets with a current Published version; activation revalidates the exact
+definition and Credential closure. A project member with `shared_assets.edit` may hard-delete an
+unreferenced project MCP package, including its versions, Credential slots, and grants, while any
+Agent-version, exact Run, or grant-snapshot reference rejects deletion with conflict. System and
+platform-override MCP assets never expose deletion. The archive mutation remains only for
+historical/admin compatibility and is not a project UI primary action. Skill activate/suspend
+remains independent. Historical Agent rows already carrying the frozen-schema
 `archived` status remain unreadable to execution; removing the API does not rewrite published
 migrations or historical data.
 Agent version authoring rejects a dependency set containing duplicate Skill slugs across
@@ -379,21 +385,77 @@ project mutation must not stale an exact admitted Run. Secret material never ent
 response, cache, checkpoint, event, repr, log, or audit metadata.
 
 Project MCP execution is fail-closed. Project and admin-project authoring accept only
-`http`/`sse` definitions whose complete HTTPS URL appears in the operator-owned
-`mcp_security.project_remote_allowed_endpoints`; project `stdio`, `streamable_http`, OAuth,
+`http`/`sse` definitions with a secret-free HTTP(S) URL whose IP literal belongs to
+`mcp_security.project_remote_allowed_networks`. Exact `localhost` is deterministically normalized
+to `127.0.0.1` before validation and persistence, so it never depends on a later resolver choice;
+IPv6 loopback callers use `[::1]` explicitly. Every other DNS hostname is rejected because a
+one-time resolution followed by a separate connection would create a DNS-rebinding/TOCTOU gap.
+The defaults cover IPv4 loopback, RFC 1918, IPv6 loopback, and IPv6 ULA; an empty list denies every
+target, while `/0` must be an explicit operator choice. CIDR membership does not restrict a target's
+port, path, or service identity. HTTP carries header/query Credential values in plaintext and is
+only suitable for a trusted isolated network; HTTPS IP literals require a matching IP SAN. With a
+forward proxy, `127.0.0.1` refers to the proxy's network namespace and the proxy must independently
+enforce the intended network boundary. Project `stdio`, `streamable_http`, OAuth,
 literal env/header values, and env/OAuth Credential targets are rejected. Project secrets may
-enter a remote MCP call only through an approved encrypted Credential header slot; authority,
-proxy-authentication, content-length, and other hop-by-hop header names are forbidden. Run
+enter a remote MCP call only through an approved encrypted Credential header or query slot;
+query secrets are appended in Worker memory to the validated secret-free base URL for
+each discovery/tool-call client. The configured base URL itself cannot contain a query/fragment
+delimiter, and runtime validation also prevents a slot from replacing an existing query parameter.
+They necessarily appear in the outbound request-target, so production egress proxies and
+upstream access logs must omit or fully redact query strings. Scoped project MCP clients suppress
+their own `httpx`/`httpcore` transport logs without disabling unrelated HTTP observability.
+Authority, proxy-authentication, content-length, and other hop-by-hop header names are forbidden. Run
 admission takes shared MCP/version locks, rejects historical project `stdio`, and revalidates
 the current definition and Credential-slot closure even when a caller omitted the endpoint
 policy (which fails closed). Worker revalidates every exact project MCP snapshot before
 discovery and every call. Worker injects a no-redirect, `trust_env=false` HTTP client, uses the
-configured controlled egress proxy, and applies separate operator hard timeouts to discovery
-and tool calls.
+controlled egress proxy only when configured, and applies separate operator hard timeouts to
+discovery and tool calls. `require_egress_proxy` defaults to false; deployments may enable it as
+an additional network-policy boundary.
+The member-facing create path is the project-only strict
+`POST /api/projects/{project_id}/mcp-servers/configured` aggregate mutation; it does not accept
+raw JSON, workflow flags, Credential values/IDs, or an expected asset revision. One service
+transaction creates the active MCP row, inserts immutable Draft revision 1, and advances the
+asset revision for both steps. A definition without Credential slots reuses the Draft-to-Published
+transition and advances the current pointer; any declared slot reuses Draft-to-Pending-Approval
+and leaves the pointer empty until a separate authorized approval binds existing project
+Credential versions. Both outcomes return the final asset plus redacted configuration and leave
+the asset at revision 3. The legacy granular asset/revision endpoints remain compatibility
+surfaces, but the project UI must not sequence them for initial creation.
+Project editing uses the strict configured PUT for the exact project MCP and expected asset
+revision. In one transaction it inserts the next internal Draft revision and immediately reuses
+the Published or Pending-Approval transition, so a revision-hidden UI never leaves an unreachable
+Draft. Draft submission/publication and pending approval require the stored `supersedes` pointer
+to equal the asset's locked current pointer; stale branches fail with conflict and cannot replace a
+newer current configuration. System MCP enable/update uses the project-only `sync-current` binding
+mutation. The request never accepts a version ID: after locking project and binding, the service
+locks the System MCP and its current Published revision, validates the full Credential closure,
+then creates, re-enables, or moves the exact binding with optimistic binding revision control.
+Publishing a project MCP without Credential slots atomically enqueues one durable
+`mcp_discovery` Job. A Credential-bearing revision stays pending without a Job; successful
+project approval atomically publishes the exact grant closure and enqueues it. The project-only
+manual discovery POST requires both edit and execute capability and either returns the active
+same-closure attempt or enqueues a new one. Gateway only admits and reads these attempts: the
+Worker revalidates the current project membership, exact version/checksum/grant closure, endpoint
+CIDR policy, and lease immediately before remote initialize/list-tools, and never invokes a tool.
+The Worker atomically settles the Job, attempt, and `project_mcp_tool_inventories` observation.
+That project/version-scoped row carries only bounded provider tool names, sanitized plain-text
+descriptions, stable public failure codes, timestamps, the version payload checksum, and a digest
+of the Credential grant closure. Gateway exposes it only through the project exact-version tools
+GET and never contacts MCP or decrypts Credential material. A changed checksum or grant closure
+makes prior tools stale; an active attempt reports testing, and a failed current attempt may retain
+a matching last success as degraded. Discovery failure does not roll back the published config.
+This inventory is display-only diagnostic state: every Run still performs fresh discovery and
+must never use it as execution authority.
 `mcp_security` is startup-only: update Gateway, Scheduler, and every Worker together. Historical
 immutable versions remain readable with env/header values redacted and Project remote URLs
-reduced to their HTTPS origin; path/query details are never replayed. Unsafe versions are never
-rewritten or silently skipped. Gateway and Scheduler import the neutral
+reduced to their HTTP(S) origin; path/query details are never replayed. Unsafe versions are never
+rewritten or silently skipped. The project-only configured GET is the narrow editing exception:
+it requires `shared_assets.edit`, returns only the latest pending revision on the current lineage
+or the exact current Published revision, revalidates that definition against the current endpoint
+policy, and may then expose its secret-free IP-literal URL path. It never returns query, fragment,
+embedded credentials, literal env/header values, or arbitrary historical paths. Gateway and
+Scheduler import the neutral
 `deerflow.mcp_definition_policy` module so policy validation cannot pull the Agent execution
 graph into either process.
 Packaged System MCP keeps the supported `stdio` env and remote header/OAuth Credential paths.
@@ -441,6 +503,13 @@ resolves the pointer inside the authoritative Gateway transaction, falling back 
 packaged Main Agent when the pointer is unset. Explicit Agent-card creation still supplies both
 fields and wins over the default. A configured but unavailable default fails closed, and neither
 changing the pointer nor clearing it rewrites an existing Thread or Run snapshot.
+Canonical packaged Main is a binding-free project orchestrator. Run admission resolves its
+effective closure from only the entered project: active/current project-owned Agent/Skill/MCP
+assets plus enabled System bindings. Other projects are never eligible. The snapshot persists one
+globally ordered lead -> delegates -> Skills -> MCPs closure; current Main Skill/MCP versions form
+the prefix and delegate-only historical versions follow. Ordinary project and System Agents never
+expand this pool and keep only the Skill/MCP versions explicitly referenced by their exact Agent
+version. Automation admission uses the same closure path as interactive private Runs.
 Run catalogs use stable newest-first `limit/offset` pages. Ready-file catalogs use stable
 `logical_path + version + id` pages and return `X-Next-Offset` only for a safe full page; that
 header is CORS-exposed. Clients must enumerate the complete catalog with an AbortSignal, strict
@@ -501,6 +570,16 @@ falls back to the issuing AI tool call and callback tags, so provider-local call
 leak nested reasoning or tool output into the user conversation. Run-level message counts and
 last-answer summaries are lead-only.
 
+Public Run ingress never trusts client-selected message visibility. A structured
+`human_input_response` may become hidden only inside Run admission after the exact project,
+membership, and Thread locks are held and no active Run conflicts: the Gateway reads the
+transaction-bound materialized checkpoint, requires the latest unanswered server-issued
+`ask_clarification` request, and matches request ID, tool-call ID, response mode, option/value,
+canonical response text, and message-ID uniqueness before adding server-owned
+`hide_from_ui=true`. Forged, stale, already-answered, batched, or non-canonical messages remain
+visible. Existing-Run idempotency may ignore only that one server-owned visibility bit when every
+other request field is identical.
+
 For a streaming lead-Agent model call, `RunJournal` observes the interval from the first
 non-empty reasoning delta to the first visible answer delta. A reasoning-only tool-call step
 closes at that model call's end. The bounded millisecond value is persisted on the selected AI
@@ -508,12 +587,14 @@ message as `additional_kwargs.reasoning_duration_ms`; it is never copied from Ru
 tool/subagent time, another model candidate, or an unobserved non-streaming response. Missing
 observation therefore remains missing rather than inventing a duration.
 
-Subagents inherit the exact admitted Agent profile, but project-authored Agent/Skill/MCP text is
-followed by a final platform security and confidentiality reminder in their single SystemMessage.
-For a private Run, Worker also installs only the exact admitted MCP proxy objects in internal
-runtime context. Delegated Agents disable global MCP/ACP discovery and marshal each proxy call
-back to the owner Worker loop, so the same authorization, grant, Credential, endpoint, and
-side-effect checks run for every delegated invocation. Detached subagent execution preserves
+Main delegates through a Worker-sealed namespaced runtime Agent catalog. Every dynamic Agent gets
+its own exact model snapshot and model settings, Prompt bundle, tool groups, Skill versions, and
+private MCP proxies; it never inherits Main's complete runtime assets and cannot recursively call
+`task`. Project-authored Agent/Skill/MCP text is followed by a final platform security and
+confidentiality reminder in the delegated Agent's single SystemMessage. Worker disables global
+MCP/ACP discovery and marshals each exact proxy call back to the owner Worker loop, so the same
+authorization, grant, Credential, endpoint, and side-effect checks run for every delegated
+invocation. Detached subagent execution preserves
 request identity, authorization, and trace ContextVars but clears the parent LangGraph
 `RunnableConfig` before entering its isolated loop, so raw child model/tool frames cannot leak
 through the lead stream writer. The parent `task` tool's bounded `task_running`/terminal custom
@@ -572,6 +653,7 @@ All private and governance APIs are project-scoped:
   uploads/files, artifacts, token usage, and input polish;
 - `/api/projects/{project_id}/memory` for project-owner Memory;
 - `/api/projects/{project_id}/connections` for project-bound providers and connections;
+- `/api/projects/{project_id}/channel-group-bindings` for Admin-managed project group bindings;
 - `/api/projects/{project_id}/automations` for definitions, manual admission, history, and
   readiness;
 - `/api/projects/{project_id}/agents`, `skills`, `mcp-servers`, and `credentials` for visible
@@ -599,7 +681,20 @@ only a SHA-256 digest; the raw identifier remains transient in adapter/message p
 must not be persisted in delivery metadata. Admission locks the exact connection, conversation,
 and Thread, checks the scoped delivery before the active-Run conflict, and binds a new delivery
 to its Run in the same Run/Job/quota/audit transaction. A duplicate delivery creates no second
-Run or outbound reply; delivery rows have no TTL and are retained with their Run/conversation.
+Run or outbound reply. Delivery rows have no TTL, remain across current conversation-mapping
+rotation, and are retained until their Run or channel connection is deleted by explicit retention.
+
+Project group binding is separate from personal `p2p /connect`. An Admin selects an executable
+Agent and generates one short-lived `/bind-project` command; the provider adapter consumes that
+command in the target group. The persistence/service model is provider-neutral, while the current
+UI and adapter implementation expose Feishu only. Group members need neither an ActWeave login nor
+a personal connection. Each provider sender resolves to a distinct pseudonymous `channel_guest`
+owner; `(group, topic, sender)` may reuse that owner's Thread, but two senders in the same topic
+must never share owner, Thread, Memory, files, Runs, or context. Guest principals cannot
+authenticate, are excluded from public membership/account catalogs and member-quota reconciliation,
+and remain absent from human owner-scoped web Thread catalogs. Admin group-binding APIs return only
+group name, selected Agent, status, and bounded activity time, never message bodies, private-work
+content, or raw provider identifiers.
 
 GitHub does not automatically retry failed webhook deliveries. A transient fan-out failure
 returns 503 so Recent Deliveries and recovery tooling retain an operator-visible failed event
@@ -654,6 +749,10 @@ rows and committed usage ledger rows are append-only.
 
 Retention purge remains a project-governance operation and validates the current pending-deletion
 authority in the same transaction before physically deleting project data.
+It removes project group-binding challenges/bindings, HMAC external-principal mappings, guest
+connections/conversations, and guest-owned private data in dependency order. It may delete only
+unreferenced `channel_guest` memberships and users; human accounts and retained governance
+references remain outside that cleanup.
 
 ## Configuration
 
@@ -663,7 +762,11 @@ deployment-owned prompt/path policy remain supported. Infrastructure configurati
 restart-required. Unknown application extension fields remain allowed where their typed models
 permit them, but removed top-level keys fail validation instead of being ignored.
 
-The current example schema is `config_version: 34`. In addition to the top-level `models:` and
+The current example schema is `config_version: 35`. Version 35 replaces the retired exact
+`mcp_security.project_remote_allowed_endpoints` list with CIDR-based
+`project_remote_allowed_networks`. `make config-upgrade` preserves an old empty endpoint list as
+an empty deny-all network list, but refuses to guess a CIDR for any nonempty endpoint list. In
+addition to the top-level `models:` and
 `authorization:` tombstones, YAML leaves now owned by the PostgreSQL `agent_runtime`, `auth`, and
 `quotas` policy sections are rejected; run `make config-upgrade` to remove them from an older local
 file. Deployment-owned siblings such as `title.prompt_template`,
@@ -686,6 +789,26 @@ Credential.
 
 Secret values must come from environment-backed configuration and must be separated by domain:
 Auth, Credential encryption, audit/quota HMAC, and database passwords cannot reuse material.
+
+Project-managed IM providers are not process-wide `config.yaml` credentials. Gateway stores one
+live `project_channel_instances` row per `project + provider`, pins an exact encrypted project
+Credential version through `project_channel_credential_bindings`, and acquires a fenced
+`project_channel_instance_leases` single-writer lease before starting the adapter. Messages,
+member connections, OAuth states, callbacks, and outbound replies carry the exact
+`channel_instance_id`; provider name alone is never sufficient for a project-managed instance.
+The nullable instance ID on historical connection/state rows is reserved only for the explicit
+deployment-config compatibility path. Admin updates and Secret rotation use the imperative
+project channel API, while members retain separate owner-scoped connect/disconnect authority.
+`channel_connections.*` is reserved for nullable-instance deployment compatibility and must not
+gate listing, readiness, or member binding for an exact database-backed project instance.
+Project group bindings persist only domain-separated HMAC references for group and sender IDs.
+Guest conversation, topic, and provider response-alias rows use the bound group's retained HMAC
+generation as well; raw provider coordinates remain transient for delivery only. Concurrent first
+messages derive one deterministic private Thread ID and converge through database uniqueness rather
+than holding a second advisory-lock connection, so `pool_size=1,max_overflow=0` remains supported.
+Disabling or deleting a binding freezes every derived guest principal and connection; inbound
+admission must fail closed until an enabled binding resolves exact project, instance, Agent, and
+guest-owner authority. Personal `p2p /connect` behavior remains unchanged.
 
 ## Testing and code quality
 

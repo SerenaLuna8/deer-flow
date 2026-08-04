@@ -11,6 +11,7 @@ class Capability(StrEnum):
     PROJECT_ENTER = "project.enter"
     PROJECT_PIN = "project.pin"
     PROJECT_MEMBERS_MANAGE = "project.members.manage"
+    PROJECT_CHANNELS_MANAGE = "project.channels.manage"
     SHARED_ASSETS_READ = "shared_assets.read"
     SHARED_ASSETS_EXECUTE = "shared_assets.execute"
     SHARED_ASSETS_EDIT = "shared_assets.edit"
@@ -63,6 +64,14 @@ PROJECT_ROLE_CAPABILITIES: dict[ProjectRole, frozenset[Capability]] = {
         {
             Capability.PRIVATE_WORK_READ_OWN,
             Capability.SHARED_ASSETS_READ,
+        }
+    ),
+    ProjectRole.CHANNEL_GUEST: frozenset(
+        {
+            Capability.PRIVATE_WORK_CREATE,
+            Capability.PRIVATE_WORK_READ_OWN,
+            Capability.SHARED_ASSETS_READ,
+            Capability.SHARED_ASSETS_EXECUTE,
         }
     ),
 }

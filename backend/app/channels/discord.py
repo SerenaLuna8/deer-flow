@@ -13,6 +13,7 @@ from typing import Any
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.private_work.errors import PrivateWorkError
 
@@ -52,7 +53,7 @@ class DiscordChannel(Channel):
 
         # Session tracking: channel_id -> Discord thread_id (in-memory, persisted to JSON).
         # Uses a dedicated JSON file separate from ChannelStore, which maps IM
-        # conversations to DeerFlow thread IDs — a different concern.
+        # conversations to ActWeave thread IDs — a different concern.
         self._active_threads: dict[str, str] = {}
         # Reverse-lookup set for O(1) thread ID checks (avoids O(n) scan of _active_threads.values()).
         self._active_thread_ids: set[str] = set()
@@ -293,6 +294,12 @@ class DiscordChannel(Channel):
         if self._client.user and message.author.id == self._client.user.id:
             return
 
+        # Provider callbacks run on Discord's loop and can outlive the exact
+        # project-instance lease. Fence before thread creation, typing, or
+        # reactions produce any user-visible effect.
+        if not await self._has_instance_authority():
+            return
+
         guild = message.guild
         if self._allowed_guilds:
             if guild is None or guild.id not in self._allowed_guilds:
@@ -488,6 +495,8 @@ class DiscordChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
+        if not await self._has_instance_authority():
+            return True
         connection_service = self.config.get("connection_service")
         if (self._connection_repo is None and connection_service is None) or not code:
             return False
@@ -512,23 +521,36 @@ class DiscordChannel(Channel):
         }
         if connection_service is not None:
             try:
-                await connection_service.complete_callback("discord", code, user_id, guild_id, **fields)
+                await connection_service.complete_callback(
+                    "discord",
+                    code,
+                    user_id,
+                    guild_id,
+                    channel_instance_id=self.channel_instance_id,
+                    **fields,
+                )
             except PrivateWorkError:
                 await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
                 return True
         else:
-            state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
+            instance_id = persisted_channel_instance_id("discord", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="discord",
+                channel_instance_id=instance_id,
+                state=code,
+            )
             if state is None:
                 await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
                 return True
             await self._connection_repo.upsert_connection(
                 owner_user_id=state["owner_user_id"],
                 provider="discord",
+                channel_instance_id=instance_id,
                 external_account_id=user_id,
                 workspace_id=guild_id,
                 **fields,
             )
-        await self._send_connection_reply(message, "Discord connected to DeerFlow.")
+        await self._send_connection_reply(message, "Discord connected to ActWeave.")
         return True
 
     @staticmethod

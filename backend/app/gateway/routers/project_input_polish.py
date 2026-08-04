@@ -47,8 +47,8 @@ from app.system_settings import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.mcp_definition_policy import (
-    ExactMcpEndpointPolicy,
     McpEndpointPolicy,
+    NetworkMcpEndpointPolicy,
 )
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
@@ -85,7 +85,7 @@ def _clean_rewritten_text(text: str) -> str:
 
 def _build_system_instruction() -> str:
     return (
-        "You are DeerFlow's pre-send prompt optimizer.\n"
+        "You are ActWeave's pre-send prompt optimizer.\n"
         "Rewrite the user's rough draft into a clearer instruction for an AI agent before it is sent.\n"
         "Do not answer the task.\n"
         "Preserve the user's language, intent, entities, file paths, URLs, code blocks, and any leading slash command prefix exactly.\n"
@@ -221,7 +221,7 @@ def project_input_polish_service(request: Request) -> ProjectInputPolishService:
     if isinstance(service, ProjectInputPolishService):
         return service
     endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
-    if not isinstance(endpoint_policy, ExactMcpEndpointPolicy):
+    if not isinstance(endpoint_policy, NetworkMcpEndpointPolicy):
         raise private_work_http_exception(PrivateWorkUnavailable(get_current_trace_id() or generate_trace_id()))
     service = ProjectInputPolishService(
         get_session_factory(),

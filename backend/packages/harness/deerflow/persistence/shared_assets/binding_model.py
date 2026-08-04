@@ -381,9 +381,23 @@ BEGIN
                     JOIN projects project ON project.id = asset.project_id
                     WHERE version.id = OLD.mcp_server_version_id
                       AND asset.scope = 'project'
-                      AND project.status = 'pending_deletion'
-                      AND project.deletion_effective_at IS NOT NULL
-                      AND project.deletion_effective_at <= now()
+                      AND (
+                          (
+                              project.status = 'pending_deletion'
+                              AND project.deletion_effective_at IS NOT NULL
+                              AND project.deletion_effective_at <= now()
+                          )
+                          OR (
+                              project.status = 'active'
+                              AND project.is_suspended IS FALSE
+                              AND asset.status = 'archived'
+                              AND asset.current_published_version_id IS NULL
+                              AND current_setting(
+                                  'deerflow.mcp_hard_delete_asset_id',
+                                  true
+                              ) = asset.id::text
+                          )
+                      )
                 ) INTO purge_allowed;
             END IF;
         ELSE

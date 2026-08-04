@@ -22,6 +22,7 @@ from app.private_work.run_repository import (
     PrivateRunRecord,
     PrivateRunRepository,
 )
+from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.credential_closure import (
     LockedMcpCredentialClosure,
     McpCredentialClosureInvalid,
@@ -29,7 +30,12 @@ from app.shared_assets.credential_closure import (
     lock_mcp_credential_closures,
 )
 from app.shared_assets.model_refs import ExactModelRefResolver, ModelRefResolver
-from app.shared_assets.models import AssetKind, AssetScope, ResolvedAgentSnapshot
+from app.shared_assets.models import (
+    AssetKind,
+    AssetScope,
+    ResolvedAgentSnapshot,
+    ResolvedRunAssetClosure,
+)
 from app.shared_assets.skill_credential_closure import (
     LockedSkillCredentialClosure,
     SkillCredentialClosureInvalid,
@@ -73,6 +79,14 @@ _FORBIDDEN_PERSISTED_KEY_PARTS = (
     "ciphertext",
     "storage_locator",
 )
+
+
+def agent_model_snapshot_purpose(version_id: uuid.UUID) -> str:
+    """Return the stable Run-model purpose for one delegated Agent version."""
+
+    if not isinstance(version_id, uuid.UUID):
+        raise TypeError("Agent version_id must be a UUID")
+    return f"agent.{version_id.hex}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,7 +438,7 @@ class RunSnapshotRepository:
         context: PrivateWorkContext,
         thread_id: str,
         request: PrivateRunCreate,
-        resolved_agent: ResolvedAgentSnapshot,
+        resolved_agent: ResolvedAgentSnapshot | ResolvedRunAssetClosure,
     ) -> PrivateRunRecord:
         context = require_issued_private_work_context(context)
         try:
@@ -453,31 +467,39 @@ class RunSnapshotRepository:
         context: PrivateWorkContext,
         thread_id: str,
         request: PrivateRunCreate,
-        resolved_agent: ResolvedAgentSnapshot,
+        resolved_agent: ResolvedAgentSnapshot | ResolvedRunAssetClosure,
     ) -> PrivateRunRecord:
         """Write a pending run and exact closure in a caller-owned transaction."""
 
         context = require_issued_private_work_context(context)
         if not isinstance(session, AsyncSession) or not session.in_transaction():
             raise PrivateWorkConflict(context.request_id)
-        if type(request) is not PrivateRunCreate or type(resolved_agent) is not ResolvedAgentSnapshot:
+        if type(request) is not PrivateRunCreate or type(resolved_agent) not in (
+            ResolvedAgentSnapshot,
+            ResolvedRunAssetClosure,
+        ):
             raise PrivateWorkConflict(context.request_id)
-        if resolved_agent.kind is not AssetKind.AGENT or resolved_agent.catalog_generation < 0:
+        resolved_closure = resolved_agent if type(resolved_agent) is ResolvedRunAssetClosure else None
+        lead_agent = resolved_closure.lead_agent if resolved_closure is not None else resolved_agent
+        if type(lead_agent) is not ResolvedAgentSnapshot or lead_agent.kind is not AssetKind.AGENT or lead_agent.catalog_generation < 0:
             raise PrivateWorkConflict(context.request_id)
         _reject_secret_bearing_keys(request.metadata, context.request_id)
         _reject_secret_bearing_keys(request.kwargs, context.request_id)
         exact_model_name = (
             self._model_ref_resolver.resolve(
-                resolved_agent.payload.model_ref,
+                lead_agent.payload.model_ref,
             )
             if self._model_catalog is None
             else None
         )
         if self._model_catalog is None and exact_model_name is None:
             raise RunSnapshotAssetStale
+        if self._model_catalog is None and resolved_closure is not None:
+            if any(self._model_ref_resolver.resolve(agent.payload.model_ref) is None for agent in resolved_closure.delegated_agents):
+                raise RunSnapshotAssetStale
         safe_request = replace(
             request,
-            assistant_id=str(resolved_agent.asset_id),
+            assistant_id=str(lead_agent.asset_id),
             status="pending",
             multitask_strategy="reject",
             model_name=exact_model_name,
@@ -487,10 +509,18 @@ class RunSnapshotRepository:
             mcps,
             closures,
             skill_credential_closures,
-        ) = await self.validate_agent_closure_in_session(
-            session,
-            context,
-            resolved_agent,
+        ) = (
+            await self.validate_run_asset_closure_in_session(
+                session,
+                context,
+                resolved_closure,
+            )
+            if resolved_closure is not None
+            else await self.validate_agent_closure_in_session(
+                session,
+                context,
+                lead_agent,
+            )
         )
         locked_runtime_policy: LockedAgentRuntimePolicy | None = None
         if self._runtime_policy is not None:
@@ -530,7 +560,7 @@ class RunSnapshotRepository:
                     thread_id=thread_id,
                     run_id=run.run_id,
                     purpose="lead",
-                    model_ref=resolved_agent.payload.model_ref,
+                    model_ref=lead_agent.payload.model_ref,
                 )
             except (
                 SystemModelConflict,
@@ -541,6 +571,26 @@ class RunSnapshotRepository:
             except SystemModelStorageUnavailable:
                 raise PrivateWorkUnavailable(context.request_id) from None
             exact_model_name = model_snapshot.logical_name
+            if resolved_closure is not None:
+                try:
+                    for delegated_agent in resolved_closure.delegated_agents:
+                        await self._model_catalog.admit_model_snapshot(
+                            session,
+                            project_id=context.project_id,
+                            owner_user_id=str(context.user_id),
+                            thread_id=thread_id,
+                            run_id=run.run_id,
+                            purpose=agent_model_snapshot_purpose(delegated_agent.version_id),
+                            model_ref=delegated_agent.payload.model_ref,
+                        )
+                except (
+                    SystemModelConflict,
+                    SystemModelInvalid,
+                    SystemModelNotFound,
+                ):
+                    raise RunSnapshotAssetStale from None
+                except SystemModelStorageUnavailable:
+                    raise PrivateWorkUnavailable(context.request_id) from None
             if locked_runtime_policy is not None:
                 auxiliary_model_refs = (
                     ("title", locked_runtime_policy.value.title.model_name),
@@ -596,14 +646,32 @@ class RunSnapshotRepository:
                 run_id=run.run_id,
                 asset_kind=AssetKind.AGENT.value,
                 dependency_order=0,
-                asset_scope=resolved_agent.scope.value,
-                asset_id=resolved_agent.asset_id,
-                version_id=resolved_agent.version_id,
-                payload_checksum=resolved_agent.checksum,
-                catalog_generation=resolved_agent.catalog_generation,
+                asset_scope=lead_agent.scope.value,
+                asset_id=lead_agent.asset_id,
+                version_id=lead_agent.version_id,
+                payload_checksum=lead_agent.checksum,
+                catalog_generation=lead_agent.catalog_generation,
             )
         ]
         dependency_order = 1
+        if resolved_closure is not None:
+            for delegated_agent in resolved_closure.delegated_agents:
+                asset_rows.append(
+                    RunAssetVersionRow(
+                        project_id=context.project_id,
+                        owner_user_id=str(context.user_id),
+                        thread_id=thread_id,
+                        run_id=run.run_id,
+                        asset_kind=AssetKind.AGENT.value,
+                        dependency_order=dependency_order,
+                        asset_scope=delegated_agent.scope.value,
+                        asset_id=delegated_agent.asset_id,
+                        version_id=delegated_agent.version_id,
+                        payload_checksum=delegated_agent.checksum,
+                        catalog_generation=lead_agent.catalog_generation,
+                    )
+                )
+                dependency_order += 1
         for asset, version in skills:
             asset_rows.append(
                 RunAssetVersionRow(
@@ -617,7 +685,7 @@ class RunSnapshotRepository:
                     asset_id=asset.id,
                     version_id=version.id,
                     payload_checksum=version.payload_checksum,
-                    catalog_generation=resolved_agent.catalog_generation,
+                    catalog_generation=lead_agent.catalog_generation,
                 )
             )
             dependency_order += 1
@@ -634,7 +702,7 @@ class RunSnapshotRepository:
                     asset_id=asset.id,
                     version_id=version.id,
                     payload_checksum=version.payload_checksum,
-                    catalog_generation=resolved_agent.catalog_generation,
+                    catalog_generation=lead_agent.catalog_generation,
                 )
             )
             dependency_order += 1
@@ -673,6 +741,168 @@ class RunSnapshotRepository:
         await session.flush()
         return run
 
+    @staticmethod
+    def _validate_dependency_snapshots(
+        rows: list[tuple[object, object]],
+        snapshots: tuple[object, ...],
+        *,
+        catalog_generation: int,
+    ) -> None:
+        if len(rows) != len(snapshots):
+            raise RunSnapshotAssetStale
+        for (asset, version), snapshot in zip(rows, snapshots, strict=True):
+            if (
+                getattr(asset, "scope", None) != getattr(getattr(snapshot, "scope", None), "value", None)
+                or getattr(asset, "id", None) != getattr(snapshot, "asset_id", None)
+                or getattr(version, "id", None) != getattr(snapshot, "version_id", None)
+                or getattr(version, "payload_checksum", None) != getattr(snapshot, "checksum", None)
+                or getattr(snapshot, "catalog_generation", None) != catalog_generation
+            ):
+                raise RunSnapshotAssetStale
+
+    @staticmethod
+    def _validate_main_dependency_boundary(
+        closure: ResolvedRunAssetClosure,
+        *,
+        canonical_main: bool,
+    ) -> None:
+        skill_ids = tuple(item.version_id for item in closure.skills)
+        mcp_ids = tuple(item.version_id for item in closure.mcps)
+        main_skill_count = len(closure.main_skill_version_ids)
+        main_mcp_count = len(closure.main_mcp_version_ids)
+        if skill_ids[:main_skill_count] != closure.main_skill_version_ids or mcp_ids[:main_mcp_count] != closure.main_mcp_version_ids:
+            raise RunSnapshotAssetStale
+        if not canonical_main:
+            if (
+                closure.delegated_agents
+                or skill_ids != closure.lead_agent.payload.skill_version_ids
+                or mcp_ids != closure.lead_agent.payload.mcp_version_ids
+                or closure.main_skill_version_ids != skill_ids
+                or closure.main_mcp_version_ids != mcp_ids
+                or len({item.asset_id for item in closure.skills}) != len(closure.skills)
+                or len({item.asset_id for item in closure.mcps}) != len(closure.mcps)
+            ):
+                raise RunSnapshotAssetStale
+            return
+
+        # For each kind and asset_id, the first persisted row belongs to Main's
+        # current pool.  Historical rows may only follow that first row and
+        # must be referenced by at least one delegated Agent.  This invariant
+        # lets Worker reconstruct the Main/delegate boundary without a schema
+        # column while dependency_order remains globally continuous.
+        main_skill_asset_ids = {item.asset_id for item in closure.skills[:main_skill_count]}
+        main_mcp_asset_ids = {item.asset_id for item in closure.mcps[:main_mcp_count]}
+        if len(main_skill_asset_ids) != main_skill_count or len(main_mcp_asset_ids) != main_mcp_count:
+            raise RunSnapshotAssetStale
+
+        skill_by_version = {item.version_id: item for item in closure.skills}
+        mcp_by_version = {item.version_id: item for item in closure.mcps}
+        expected_skill_ids = list(closure.main_skill_version_ids)
+        expected_mcp_ids = list(closure.main_mcp_version_ids)
+        seen_skill_ids = set(expected_skill_ids)
+        seen_mcp_ids = set(expected_mcp_ids)
+        for agent in closure.delegated_agents:
+            for version_id in agent.payload.skill_version_ids:
+                item = skill_by_version.get(version_id)
+                if item is None:
+                    raise RunSnapshotAssetStale
+                if version_id not in seen_skill_ids:
+                    if item.asset_id not in main_skill_asset_ids:
+                        raise RunSnapshotAssetStale
+                    expected_skill_ids.append(version_id)
+                    seen_skill_ids.add(version_id)
+            for version_id in agent.payload.mcp_version_ids:
+                item = mcp_by_version.get(version_id)
+                if item is None:
+                    raise RunSnapshotAssetStale
+                if version_id not in seen_mcp_ids:
+                    if item.asset_id not in main_mcp_asset_ids:
+                        raise RunSnapshotAssetStale
+                    expected_mcp_ids.append(version_id)
+                    seen_mcp_ids.add(version_id)
+        if skill_ids != tuple(expected_skill_ids) or mcp_ids != tuple(expected_mcp_ids):
+            raise RunSnapshotAssetStale
+
+    async def validate_run_asset_closure_in_session(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        closure: ResolvedRunAssetClosure,
+    ) -> tuple[
+        list[tuple[SkillRow, SkillVersionRow]],
+        list[tuple[McpServerRow, McpServerVersionRow]],
+        dict[uuid.UUID, LockedMcpCredentialClosure],
+        dict[uuid.UUID, LockedSkillCredentialClosure],
+    ]:
+        """Lock and validate the complete lead/delegate Run asset closure."""
+
+        context = require_issued_private_work_context(context)
+        if not isinstance(session, AsyncSession) or not session.in_transaction() or type(closure) is not ResolvedRunAssetClosure:
+            raise RunSnapshotAssetStale
+        if closure.lead_agent.catalog_generation > await CatalogStateRepository(session).read_generation():
+            raise RunSnapshotAssetStale
+        lead_asset, _lead_version = await self._agent(
+            session,
+            closure.lead_agent,
+            context.project_id,
+        )
+        agents = (closure.lead_agent, *closure.delegated_agents)
+        if len({item.asset_id for item in agents}) != len(agents) or any(item.catalog_generation != closure.lead_agent.catalog_generation for item in agents):
+            raise RunSnapshotAssetStale
+        await self._validate_dependency_order(session, closure.lead_agent)
+        for delegated_agent in closure.delegated_agents:
+            await self._agent(session, delegated_agent, context.project_id)
+            await self._validate_dependency_order(session, delegated_agent)
+
+        self._validate_main_dependency_boundary(
+            closure,
+            canonical_main=(lead_asset.scope == AssetScope.SYSTEM.value and lead_asset.project_id is None and lead_asset.source_key == "builtin:agent:project-assistant"),
+        )
+        skills = await self._skills(
+            session,
+            tuple(item.version_id for item in closure.skills),
+            context.project_id,
+        )
+        self._validate_dependency_snapshots(
+            skills,
+            closure.skills,
+            catalog_generation=closure.lead_agent.catalog_generation,
+        )
+        try:
+            skill_credential_closures = await lock_skill_credential_closures(
+                session,
+                context.project_id,
+                tuple(
+                    SkillCredentialClosureTarget(
+                        skill_id=uuid.UUID(str(asset.id)),
+                        skill_version_id=uuid.UUID(str(version.id)),
+                    )
+                    for asset, version in skills
+                ),
+                load_envelopes=False,
+                require_required=True,
+            )
+        except SkillCredentialClosureInvalid:
+            raise RunSnapshotAssetStale from None
+        mcps = await self._mcps(
+            session,
+            tuple(item.version_id for item in closure.mcps),
+            context.project_id,
+            endpoint_policy=self._endpoint_policy,
+        )
+        self._validate_dependency_snapshots(
+            mcps,
+            closure.mcps,
+            catalog_generation=closure.lead_agent.catalog_generation,
+        )
+        closures = await self._credential_closures(session, mcps)
+        self._validate_project_mcp_credential_slots(
+            mcps,
+            closures,
+            endpoint_policy=self._endpoint_policy,
+        )
+        return skills, mcps, closures, skill_credential_closures
+
     async def validate_agent_closure_in_session(
         self,
         session: AsyncSession,
@@ -692,6 +922,8 @@ class RunSnapshotRepository:
         if type(resolved_agent) is not ResolvedAgentSnapshot:
             raise RunSnapshotAssetStale
         if resolved_agent.kind is not AssetKind.AGENT or resolved_agent.catalog_generation < 0:
+            raise RunSnapshotAssetStale
+        if resolved_agent.catalog_generation > await CatalogStateRepository(session).read_generation():
             raise RunSnapshotAssetStale
         project_id = context.project_id
         await self._agent(session, resolved_agent, project_id)

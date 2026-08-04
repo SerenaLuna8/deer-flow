@@ -5,7 +5,7 @@ import importlib
 import json
 import uuid
 from base64 import b64encode
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
@@ -16,6 +16,10 @@ from app.projects.context import ProjectContext, resolve_project_context
 from app.shared_assets.bootstrap import bootstrap_system_assets
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound, AssetValidationFailed
+from app.shared_assets.mcp_tool_inventory_repository import (
+    McpToolInventoryRepository,
+    mcp_grant_closure_digest,
+)
 from app.shared_assets.models import WorkflowStatus
 from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.persistence.shared_assets import (
@@ -26,6 +30,7 @@ from deerflow.persistence.shared_assets import (
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
+    ProjectMcpToolInventoryRow,
 )
 
 
@@ -223,6 +228,138 @@ async def test_project_mcp_direct_publish_and_credential_approval_are_scope_safe
             )
         with pytest.raises(AssetNotFound):
             await mcp_service.get(other_admin, protected_asset.id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_project_mcp_tool_inventory_is_scope_safe_monotonic_and_cascades(
+    migrated_postgres_database_url: str,
+) -> None:
+    mcp_module = importlib.import_module("app.shared_assets.mcp_service")
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin = await _seed_project(engine, factory, label="inventory", role="admin")
+    other = await _seed_project(
+        engine,
+        factory,
+        label="inventory-other",
+        role="admin",
+    )
+    service = mcp_module.McpService(
+        factory,
+        endpoint_policy=ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test"})),
+    )
+    try:
+        asset = await service.create_asset(
+            admin,
+            mcp_module.CreateMcpServer("inventory", "Inventory"),
+        )
+        draft = await service.create_version(
+            admin,
+            asset.id,
+            _safe_definition(mcp_module, credential=False),
+            expected_asset_version=1,
+        )
+        published = await service.publish(
+            admin,
+            asset.id,
+            draft.id,
+            expected_asset_version=2,
+        )
+        assert published.workflow_status is WorkflowStatus.PUBLISHED
+
+        grant_digest = mcp_grant_closure_digest(())
+        observed_at = datetime.now(UTC)
+        common = {
+            "project_id": admin.project_id,
+            "mcp_server_id": asset.id,
+            "mcp_server_version_id": draft.id,
+            "payload_checksum": draft.payload_checksum,
+            "grant_digest": grant_digest,
+        }
+        async with factory() as session, session.begin():
+            inventory = McpToolInventoryRepository(session)
+            await inventory.record_success(
+                **common,
+                tools=[
+                    {
+                        "name": "maps_weather",
+                        "description": "Weather by city",
+                    }
+                ],
+                attempted_at=observed_at,
+            )
+            await inventory.record_failure(
+                **common,
+                public_error_code="mcp_discovery_unavailable",
+                attempted_at=observed_at - timedelta(seconds=1),
+            )
+
+        ready = await service.get_tool_inventory(admin, asset.id, draft.id)
+        assert ready.status == "ready"
+        assert [tool.name for tool in ready.tools] == ["maps_weather"]
+        assert ready.last_attempt_at == observed_at
+
+        async with factory() as session, session.begin():
+            await McpToolInventoryRepository(session).record_failure(
+                **common,
+                public_error_code="mcp_discovery_unavailable",
+                attempted_at=observed_at + timedelta(seconds=1),
+            )
+        degraded = await service.get_tool_inventory(admin, asset.id, draft.id)
+        assert degraded.status == "degraded"
+        assert [tool.name for tool in degraded.tools] == ["maps_weather"]
+        assert degraded.error_code == "mcp_discovery_unavailable"
+
+        async with factory() as session, session.begin():
+            await McpToolInventoryRepository(session).record_success(
+                **{**common, "grant_digest": "f" * 64},
+                tools=[
+                    {
+                        "name": "maps_distance",
+                        "description": "Distance between coordinates",
+                    }
+                ],
+                attempted_at=observed_at + timedelta(seconds=2),
+            )
+        stale = await service.get_tool_inventory(admin, asset.id, draft.id)
+        assert stale.status == "stale"
+        assert stale.tools == ()
+
+        async with factory() as session, session.begin():
+            await McpToolInventoryRepository(session).record_success(
+                **common,
+                tools=[],
+                attempted_at=observed_at + timedelta(seconds=3),
+            )
+        empty = await service.get_tool_inventory(admin, asset.id, draft.id)
+        assert empty.status == "ready"
+        assert empty.tools == ()
+
+        with pytest.raises(ValueError):
+            async with factory() as session, session.begin():
+                await McpToolInventoryRepository(session).record_success(
+                    **{**common, "project_id": other.project_id},
+                    tools=[],
+                    attempted_at=observed_at + timedelta(seconds=4),
+                )
+
+        current = await service.get(admin, asset.id)
+        await service.delete(
+            admin,
+            asset.id,
+            expected_asset_version=current.version,
+        )
+        async with factory() as session:
+            stored = await session.get(
+                ProjectMcpToolInventoryRow,
+                {
+                    "project_id": admin.project_id,
+                    "mcp_server_version_id": draft.id,
+                },
+            )
+        assert stored is None
     finally:
         await engine.dispose()
 

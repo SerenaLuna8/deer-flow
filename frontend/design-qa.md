@@ -31,7 +31,7 @@
 - Main workbench: `2.15fr / 1fr` columns with a `16px` gap, matching the reference's approximate `68 / 32` split.
 - Toolbar, fact rows, recent focus, and read-only summaries are grouped into two bordered cards.
 - Desktop fact rows use `44px` vertical padding. The final left card begins at approximately `y=204`, compared with approximately `y=203` in the reference.
-- Card radius, border weight, neutral background, purple active line/link treatment, and icon style use the existing DeerFlow design tokens.
+- Card radius, border weight, neutral background, purple active line/link treatment, and icon style use the existing ActWeave design tokens.
 - Destructive deletion is hidden in the row overflow menu; editing remains a visible direct action.
 
 ## Comparison history
@@ -71,6 +71,6 @@
 
 - P0: none
 - P1: none
-- P2: no blocking mismatch. The live implementation keeps DeerFlow's established type scale and real data, so copy wrapping is denser than the generative reference in a few rows.
+- P2: no blocking mismatch. The live implementation keeps ActWeave's established type scale and real data, so copy wrapping is denser than the generative reference in a few rows.
 
 final result: passed

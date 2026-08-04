@@ -13,7 +13,7 @@ const ASSET_ID = "22222222-2222-4222-8222-222222222222";
 
 function mcpVersion(
   transport: "stdio" | "sse" | "http" | "streamable_http",
-  url: string | null = "https://mcp.example.test",
+  url: string | null = "http://localhost:8771/api/mcp",
 ): Extract<AssetVersion, { mcp_server_id: string }> {
   return {
     id: VERSION_ID,
@@ -67,17 +67,47 @@ describe("MCP runtime compatibility", () => {
   );
 
   test.each([
-    "http://mcp.example.test",
-    "https://user:password@mcp.example.test",
-    "https://mcp.example.test/path?token=opaque",
-    "https://mcp.example.test/path#fragment",
-    "https://localhost/mcp",
-    "https://0x7f.0.0.1/mcp",
-    "not-a-url",
-  ])("blocks an invalid Project remote URL: %s", (url) => {
+    "http://localhost:8771/api/mcp",
+    "http://LocalHost:8771/api/mcp",
+    "https://127.0.0.1:9443/mcp",
+    "http://10.20.30.40/mcp",
+    "http://[::1]:8771/api/mcp",
+    "https://[fd00::1234]/mcp",
+  ])("accepts a Project HTTP(S) URL on localhost or a canonical IP: %s", (url) => {
     expect(
       mcpVersionRuntimeBlockReason(mcpVersion("http", url), "project"),
-    ).toContain("HTTPS URL");
+    ).toBeNull();
+  });
+
+  test.each([
+    "https://user:password@127.0.0.1",
+    "https://127.0.0.1/path?token=opaque",
+    "https://127.0.0.1/path?",
+    "https://127.0.0.1/path#fragment",
+    "https://127.0.0.1/path#",
+    "ftp://127.0.0.1/mcp",
+    "http://localhost:0/mcp",
+    "http://*/mcp",
+    "http://trans-resource:8771/api/mcp",
+    "https://mcp.internal/api/mcp",
+    "https://mcp.example.com/api/mcp",
+    "http://localhost./api/mcp",
+    "http://foo.localhost/api/mcp",
+    "http://127.1/api/mcp",
+    "http://0x7f.0.0.1/api/mcp",
+    "http://0177.0.0.1/api/mcp",
+    "http://[0:0:0:0:0:0:0:1]/api/mcp",
+    "http://[FD00::1234]/api/mcp",
+    "not-a-url",
+  ])("blocks an invalid Project remote URL: %s", (url) => {
+    const reason = mcpVersionRuntimeBlockReason(
+      mcpVersion("http", url),
+      "project",
+    );
+    expect(reason).toContain("HTTP 或 HTTPS URL");
+    expect(reason).toContain("管理员配置的允许网段");
+    expect(reason).not.toContain("完全一致");
+    expect(reason).not.toContain("解析出的目标 IP");
   });
 
   test.each(["stdio", "streamable_http"] as const)(
@@ -85,11 +115,24 @@ describe("MCP runtime compatibility", () => {
     (transport) => {
       expect(
         mcpVersionRuntimeBlockReason(mcpVersion(transport), "project"),
-      ).toContain("此历史版本可以查看，但不能发布、绑定或用于 Agent");
+      ).toContain("此历史配置可以查看，但不能发布、绑定或用于 Agent");
     },
   );
 
-  test("blocks historical remote definitions with OAuth or non-header Credential slots", () => {
+  test("accepts query Credential slots and blocks unsupported Project groups", () => {
+    const querySlotVersion = mcpVersion("http");
+    querySlotVersion.definition.credential_slots = [
+      {
+        name: "api-key",
+        purpose: "Remote query authentication",
+        payload_schema: { query: ["key"] },
+        required: true,
+      },
+    ];
+    expect(
+      mcpVersionRuntimeBlockReason(querySlotVersion, "project"),
+    ).toBeNull();
+
     const oauthVersion = mcpVersion("http");
     oauthVersion.definition.oauth = { client_id: "public-id" };
     expect(mcpVersionRuntimeBlockReason(oauthVersion, "project")).toContain(
@@ -106,7 +149,7 @@ describe("MCP runtime compatibility", () => {
       },
     ];
     expect(mcpVersionRuntimeBlockReason(envSlotVersion, "project")).toContain(
-      "仅支持 headers",
+      "仅支持 headers 或 query",
     );
 
     const customSlotVersion = mcpVersion("sse");
@@ -120,7 +163,7 @@ describe("MCP runtime compatibility", () => {
     ];
     expect(
       mcpVersionRuntimeBlockReason(customSlotVersion, "project"),
-    ).toContain("仅支持 headers");
+    ).toContain("仅支持 headers 或 query");
 
     const persistedSlotVersion = mcpVersion("http");
     persistedSlotVersion.credential_slots = [
@@ -134,7 +177,7 @@ describe("MCP runtime compatibility", () => {
     ];
     expect(
       mcpVersionRuntimeBlockReason(persistedSlotVersion, "project"),
-    ).toContain("仅支持 headers");
+    ).toContain("仅支持 headers 或 query");
   });
 
   test("preserves supported system stdio, OAuth, env, and header capabilities", () => {

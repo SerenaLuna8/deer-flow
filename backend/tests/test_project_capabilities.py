@@ -23,13 +23,20 @@ PRIVATE = {
 
 
 def test_capability_enum_and_role_matrix_are_exact_and_complete() -> None:
-    assert {role.value for role in ProjectRole} == {"admin", "editor", "runner", "viewer"}
+    assert {role.value for role in ProjectRole} == {
+        "admin",
+        "editor",
+        "runner",
+        "viewer",
+        "channel_guest",
+    }
     assert {item.value for item in Capability} == {
         "project.read",
         "project.update",
         "project.enter",
         "project.pin",
         "project.members.manage",
+        "project.channels.manage",
         "shared_assets.read",
         "shared_assets.execute",
         "shared_assets.edit",
@@ -61,11 +68,20 @@ def test_capability_enum_and_role_matrix_are_exact_and_complete() -> None:
         }
     )
     assert capabilities_for(ProjectRole.VIEWER) == frozenset(BASE | {Capability.PRIVATE_WORK_READ_OWN, Capability.SHARED_ASSETS_READ})
+    assert capabilities_for(ProjectRole.CHANNEL_GUEST) == frozenset(
+        {
+            Capability.PRIVATE_WORK_CREATE,
+            Capability.PRIVATE_WORK_READ_OWN,
+            Capability.SHARED_ASSETS_READ,
+            Capability.SHARED_ASSETS_EXECUTE,
+        }
+    )
     assert set().union(*(capabilities_for(role) for role in ProjectRole)) == set(Capability)
     assert all(isinstance(capabilities_for(role), frozenset) for role in ProjectRole)
     admin_only = {
         Capability.PROJECT_UPDATE,
         Capability.PROJECT_MEMBERS_MANAGE,
+        Capability.PROJECT_CHANNELS_MANAGE,
         Capability.SHARED_ASSETS_MANAGE_BINDINGS,
         Capability.MCP_CREDENTIALS_APPROVE,
         Capability.PROJECT_AUDIT_READ,
@@ -79,7 +95,12 @@ def test_capability_enum_and_role_matrix_are_exact_and_complete() -> None:
 def test_only_admin_manages_system_bindings_and_credentials() -> None:
     assert Capability.SHARED_ASSETS_MANAGE_BINDINGS in capabilities_for(ProjectRole.ADMIN)
     assert Capability.MCP_CREDENTIALS_APPROVE in capabilities_for(ProjectRole.ADMIN)
-    for role in (ProjectRole.EDITOR, ProjectRole.RUNNER, ProjectRole.VIEWER):
+    for role in (
+        ProjectRole.EDITOR,
+        ProjectRole.RUNNER,
+        ProjectRole.VIEWER,
+        ProjectRole.CHANNEL_GUEST,
+    ):
         assert Capability.SHARED_ASSETS_MANAGE_BINDINGS not in capabilities_for(role)
         assert Capability.MCP_CREDENTIALS_APPROVE not in capabilities_for(role)
 

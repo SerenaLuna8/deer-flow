@@ -61,6 +61,13 @@ class SystemAssetBinding:
     updated_at: datetime
 
 
+@dataclass(frozen=True)
+class _BindingSyncResult:
+    binding: SystemAssetBinding
+    selection: AssetSelection
+    action: str
+
+
 class BindingService:
     def __init__(
         self,
@@ -131,6 +138,80 @@ class BindingService:
             return tuple(self._view(kind, row) for row in rows)
 
         return await self._execute(actor, operation)
+
+    async def sync_current_mcp(
+        self,
+        actor: ProjectContext,
+        asset_id: uuid.UUID,
+        *,
+        expected_binding_version: int | None = None,
+    ) -> SystemAssetBinding:
+        """Bind one System MCP to the current version resolved under lock."""
+
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        if not isinstance(asset_id, uuid.UUID):
+            raise AssetValidationFailed(actor.request_id)
+        self._require_manage_bindings(actor)
+        expected = None if expected_binding_version is None else self._validate_expected(actor, expected_binding_version)
+
+        async def operation(repository: BindingRepository) -> _BindingSyncResult:
+            await repository.lock_project(actor)
+            existing = await repository.get_binding(
+                actor,
+                AssetKind.MCP,
+                asset_id,
+                for_update=True,
+                required=False,
+            )
+            if existing is None:
+                if expected is not None:
+                    raise AssetConflict(actor.request_id)
+            elif expected is None or existing.version != expected:
+                raise AssetConflict(actor.request_id)
+
+            target = await repository.lock_current_system_mcp_target(
+                actor,
+                asset_id,
+            )
+            selection = AssetSelection(
+                AssetKind.MCP,
+                asset_id,
+                target.version.id,
+            )
+            if existing is not None and existing.enabled and existing.mcp_server_version_id == selection.version_id:
+                raise AssetConflict(actor.request_id)
+            await repository.validate_target_dependencies(actor, selection)
+
+            if existing is None:
+                row = await repository.add_binding(actor, selection)
+                action = "binding.enable"
+            else:
+                was_enabled = existing.enabled
+                existing.mcp_server_version_id = selection.version_id
+                existing.enabled = True
+                existing.version += 1
+                existing.updated_by_user_id = str(actor.user_id)
+                await repository.session.flush()
+                row = existing
+                action = "binding.sync_current" if was_enabled else "binding.enable"
+            return _BindingSyncResult(
+                binding=self._view(AssetKind.MCP, row),
+                selection=selection,
+                action=action,
+            )
+
+        result = await self._execute(
+            actor,
+            operation,
+            governance=lambda session, value: self._record(
+                session,
+                actor,
+                value.selection,
+                value.action,
+            ),
+        )
+        return result.binding
 
     async def upgrade(
         self,

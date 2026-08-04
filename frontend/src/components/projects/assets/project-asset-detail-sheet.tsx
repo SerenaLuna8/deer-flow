@@ -34,62 +34,201 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import type { Capability } from "@/core/projects/types";
 import {
-  useApproveProjectMcpVersion,
   useChangeProjectAssetStatus,
   useDeleteProjectAgent,
+  useDeleteProjectMcp,
   useDeleteProjectSkill,
-  useProjectAssets,
   useProjectAssetVersions,
+  useProjectMcpEditableConfiguration,
   usePublishProjectAssetVersion,
-  useSubmitProjectMcpVersion,
   type AssetListKind,
   type AssetVersion,
   type ProjectAssetItem,
-  type ProjectCredentialList,
+  type ProjectMcpEditableConfigurationResponse,
 } from "@/core/shared-assets";
+import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
-import { McpApprovalDialog } from "./mcp-approval-dialog";
 import {
   projectAssetCanCreateVersion,
   projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
+  projectMcpDeleteErrorMessage,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
 import {
   ProjectAgentDeleteDialog,
+  ProjectMcpDeleteDialog,
   ProjectSkillDeleteDialog,
 } from "./project-skill-delete-dialog";
-import { SystemBindingDialog } from "./system-binding-dialog";
-
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-
-export function projectAssetDetailCanManageSystemBinding(
-  kind: MutableAssetKind,
-  item: ProjectAssetItem,
-): boolean {
-  return (
-    kind === "mcp-servers" &&
-    item.scope === "system" &&
-    item.capabilities.includes("shared_assets.manage_bindings") &&
-    (item.status === "active" || Boolean(item.binding?.enabled))
-  );
-}
 
 export function projectAssetDetailShowsVersionHistory(
   kind: MutableAssetKind,
 ): boolean {
-  return kind !== "agents";
+  return kind === "skills";
+}
+
+export function projectAssetDetailPreferredVersionId(
+  kind: MutableAssetKind,
+  scope: ProjectAssetItem["scope"],
+  versions: readonly Pick<AssetVersion, "id">[],
+  currentPublishedVersionId: string | null,
+): string {
+  if (kind === "mcp-servers") {
+    return (
+      resolveMcpCurrentConfiguration(
+        versions as readonly AssetVersion[],
+        scope,
+        currentPublishedVersionId,
+      ).version?.id ?? ""
+    );
+  }
+  return (
+    versions.find((version) => version.id === currentPublishedVersionId)?.id ??
+    versions[0]?.id ??
+    ""
+  );
+}
+
+export function projectMcpEditableConfigurationEnabled(
+  open: boolean,
+  kind: MutableAssetKind,
+  item: Pick<ProjectAssetItem, "scope" | "capabilities">,
+): boolean {
+  return (
+    open &&
+    kind === "mcp-servers" &&
+    item.scope === "project" &&
+    item.capabilities.includes("shared_assets.edit")
+  );
+}
+
+export function projectAssetEditBaseVersion(
+  kind: MutableAssetKind,
+  selectedVersion: AssetVersion | null,
+  editableConfiguration: ProjectMcpEditableConfigurationResponse | undefined,
+  editableConfigurationSucceeded: boolean,
+): AssetVersion | null {
+  if (kind !== "mcp-servers") return selectedVersion;
+  return editableConfigurationSucceeded
+    ? (editableConfiguration?.version ?? null)
+    : null;
+}
+
+export function projectAssetDetailContentVersion(
+  kind: MutableAssetKind,
+  selectedVersion: AssetVersion | null,
+  editableConfiguration: ProjectMcpEditableConfigurationResponse | undefined,
+  editableConfigurationSucceeded: boolean,
+): AssetVersion | null {
+  if (kind !== "mcp-servers" || !editableConfigurationSucceeded) {
+    return selectedVersion;
+  }
+  return editableConfiguration?.version ?? selectedVersion;
+}
+
+export function projectMcpSystemUsageLabel(
+  item: Pick<ProjectAssetItem, "binding" | "current_published_version_id">,
+): "未启用" | "已启用" | "有配置更新" {
+  if (!item.binding?.enabled) return "未启用";
+  return item.current_published_version_id &&
+    item.binding.version_id !== item.current_published_version_id
+    ? "有配置更新"
+    : "已启用";
 }
 
 export function projectAssetDetailSummaryGridColumns(
   kind: MutableAssetKind,
   scope: ProjectAssetItem["scope"],
 ): string {
-  return kind === "skills" && scope === "system"
+  return kind === "mcp-servers" || (kind === "skills" && scope === "system")
     ? "sm:grid-cols-3"
     : "sm:grid-cols-2";
+}
+
+export function projectAssetDetailVersionTerms(
+  kind: MutableAssetKind,
+  scope: ProjectAssetItem["scope"],
+): {
+  current: string;
+  history: string;
+  edit: string;
+  empty: string;
+} {
+  if (kind === "mcp-servers") {
+    return {
+      current: "当前配置",
+      history: "",
+      edit: "编辑配置",
+      empty: "尚未保存配置。",
+    };
+  }
+  return {
+    current: scope === "system" ? "系统最新发布" : "当前发布",
+    history: "版本",
+    edit: "创建新版本",
+    empty: "尚未创建版本。",
+  };
+}
+
+export function projectAssetDetailRevisionCopy(kind: MutableAssetKind): {
+  label: (number: number) => string;
+  publishedFallback: string;
+  pinnedFallback: string;
+  updateAvailable: string;
+  viewAria: string;
+  loading: string;
+  publish: string;
+  technical: string;
+} {
+  if (kind === "mcp-servers") {
+    return {
+      label: () => "配置",
+      publishedFallback: "已发布",
+      pinnedFallback: "已启用",
+      updateAvailable: "有配置更新",
+      viewAria: "查看配置",
+      loading: "正在加载配置，请稍候",
+      publish: "发布配置",
+      technical: "配置技术信息",
+    };
+  }
+  return {
+    label: (number) => `版本 ${number}`,
+    publishedFallback: "已有发布版本",
+    pinnedFallback: "已固定版本",
+    updateAvailable: "有新版本",
+    viewAria: "查看版本",
+    loading: "正在加载新版本，请稍候",
+    publish: "发布版本",
+    technical: "版本技术信息",
+  };
+}
+
+export function projectAssetDiscardCopy(kind: MutableAssetKind): {
+  title: string;
+  description: string;
+} {
+  if (kind === "agents") {
+    return {
+      title: "放弃未保存的 Agent 设置？",
+      description:
+        "关闭详情会清除四项 Agent 设置的本地修改，已保存设置不会受影响。",
+    };
+  }
+  if (kind === "mcp-servers") {
+    return {
+      title: "放弃未保存的配置修改？",
+      description: "关闭详情会清除当前编辑副本，已保存的 MCP 配置不会受影响。",
+    };
+  }
+  return {
+    title: "放弃未保存的文件修改？",
+    description:
+      "切换版本或关闭详情会清除当前编辑副本，已保存的 Skill 版本不会受影响。",
+  };
 }
 
 export function effectiveAssetVersion(
@@ -147,6 +286,25 @@ export function createProjectAgentDeleteSnapshot(
   });
 }
 
+export type ProjectMcpDeleteSnapshot = Readonly<{
+  assetId: string;
+  mcpName: string;
+  expectedAssetVersion: number;
+  startedAt: number;
+}>;
+
+export function createProjectMcpDeleteSnapshot(
+  item: Pick<ProjectAssetItem, "id" | "display_name" | "version">,
+  startedAt: number,
+): ProjectMcpDeleteSnapshot {
+  return Object.freeze({
+    assetId: item.id,
+    mcpName: item.display_name,
+    expectedAssetVersion: item.version,
+    startedAt,
+  });
+}
+
 export type ProjectAssetVersionRenderContext = {
   accountId: string;
   projectId: string;
@@ -167,6 +325,14 @@ const VERSION_STATUS_LABEL: Record<VersionStatus, string> = {
   retired: "已替换",
   revoked: "已撤销",
 };
+
+export function projectMcpCurrentConfigurationLabel(
+  status: McpVersion["workflow_status"],
+): string {
+  return status === "pending_approval"
+    ? "凭据未绑定 · 尚未生效"
+    : VERSION_STATUS_LABEL[status];
+}
 
 function isMcpVersion(version: AssetVersion): version is McpVersion {
   return "mcp_server_id" in version;
@@ -243,13 +409,16 @@ export function ProjectAssetDetailHeader({
   if (kind === "mcp-servers") {
     return (
       <SheetHeader className="border-border/70 border-b px-6 py-5 pr-12 text-left">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={item.scope === "system" ? "secondary" : "default"}>
-            {item.scope === "system" ? "系统提供" : "项目自建"}
-          </Badge>
-          <AssetStatusBadge status={item.status} />
-        </div>
-        <SheetTitle className="mt-2 text-xl">{item.display_name}</SheetTitle>
+        {item.scope === "system" ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary">系统提供</Badge>
+          </div>
+        ) : null}
+        <SheetTitle
+          className={item.scope === "system" ? "mt-2 text-xl" : "text-xl"}
+        >
+          {item.display_name}
+        </SheetTitle>
         <SheetDescription className="font-mono">{item.slug}</SheetDescription>
       </SheetHeader>
     );
@@ -343,6 +512,49 @@ export function ProjectSkillDetailActions({
   );
 }
 
+export function ProjectMcpDangerZone({
+  actionPending,
+  canDelete,
+  onDelete,
+}: {
+  actionPending: boolean;
+  canDelete: boolean;
+  onDelete: () => void;
+}) {
+  if (!canDelete) return null;
+  return (
+    <section
+      aria-label="危险区"
+      className="border-destructive/35 bg-destructive/5 rounded-xl border p-4"
+    >
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold">危险区</h3>
+          <p className="text-muted-foreground text-sm">
+            永久删除此 MCP 及其配置。此操作不可恢复。
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="destructive"
+          disabled={actionPending}
+          onClick={onDelete}
+        >
+          删除 MCP
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+export function projectAssetLifecycleActionLabel(
+  kind: MutableAssetKind,
+  action: "activate" | "suspend",
+): string {
+  if (action === "suspend") return "停用";
+  return kind === "mcp-servers" ? "重新启用" : "启用";
+}
+
 export function ProjectAssetDetailSheet({
   accountId,
   projectId,
@@ -370,6 +582,7 @@ export function ProjectAssetDetailSheet({
   onCreateVersion: (
     item: ProjectAssetItem,
     selectedVersion: AssetVersion | null,
+    editableMcpConfiguration?: ProjectMcpEditableConfigurationResponse,
   ) => void;
   onDeleted: (assetId: string) => void;
   onVersionCreated: (assetId: string, versionId: string) => void;
@@ -384,35 +597,66 @@ export function ProjectAssetDetailSheet({
   ) => ReactNode;
 }) {
   const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
+  const editableMcpConfigurationEnabled =
+    projectMcpEditableConfigurationEnabled(open, kind, item);
+  const editableMcpConfiguration = useProjectMcpEditableConfiguration(
+    accountId,
+    projectId,
+    item.id,
+    editableMcpConfigurationEnabled,
+  );
   const showsVersionHistory = projectAssetDetailShowsVersionHistory(kind);
+  const showsVersionContent = kind !== "agents";
+  const versionTerms = projectAssetDetailVersionTerms(kind, item.scope);
+  const revisionCopy = projectAssetDetailRevisionCopy(kind);
+  const discardCopy = projectAssetDiscardCopy(kind);
   const publish = usePublishProjectAssetVersion(
     accountId,
     projectId,
     kind === "agents" ? null : kind,
   );
-  const submit = useSubmitProjectMcpVersion(accountId, projectId);
-  const approve = useApproveProjectMcpVersion(accountId, projectId);
   const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
   const deleteSkill = useDeleteProjectSkill(accountId, projectId);
   const deleteAgent = useDeleteProjectAgent(accountId, projectId);
+  const deleteMcp = useDeleteProjectMcp(accountId, projectId);
   const [selectedVersionId, setSelectedVersionId] = useState("");
-  const [bindingOpen, setBindingOpen] = useState(false);
-  const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
-    null,
-  );
   const [versionDirty, setVersionDirty] = useState(false);
   const [versionEditing, setVersionEditing] = useState(false);
   const [skillDeleteSnapshot, setSkillDeleteSnapshot] =
     useState<ProjectSkillDeleteSnapshot | null>(null);
   const [agentDeleteSnapshot, setAgentDeleteSnapshot] =
     useState<ProjectAgentDeleteSnapshot | null>(null);
+  const [mcpDeleteSnapshot, setMcpDeleteSnapshot] =
+    useState<ProjectMcpDeleteSnapshot | null>(null);
   const [discardAction, setDiscardAction] = useState<
     { type: "close" } | { type: "version"; versionId: string } | null
   >(null);
 
   const versions = useMemo(() => history.data?.data ?? [], [history.data]);
+  const mcpConfiguration =
+    kind === "mcp-servers"
+      ? resolveMcpCurrentConfiguration(
+          versions,
+          item.scope,
+          item.current_published_version_id,
+        )
+      : null;
   const selectedVersion =
-    versions.find((version) => version.id === selectedVersionId) ?? null;
+    kind === "mcp-servers"
+      ? (mcpConfiguration?.version ?? null)
+      : (versions.find((version) => version.id === selectedVersionId) ?? null);
+  const editBaseVersion = projectAssetEditBaseVersion(
+    kind,
+    selectedVersion,
+    editableMcpConfiguration.data,
+    editableMcpConfiguration.isSuccess,
+  );
+  const detailContentVersion = projectAssetDetailContentVersion(
+    kind,
+    selectedVersion,
+    editableMcpConfiguration.data,
+    editableMcpConfiguration.isSuccess,
+  );
   const selectedRuntimeBlockReason =
     selectedVersion && isMcpVersion(selectedVersion)
       ? mcpVersionRuntimeBlockReason(selectedVersion, item.scope)
@@ -433,6 +677,22 @@ export function ProjectAssetDetailSheet({
 
   useEffect(() => {
     if (!open || versions.length === 0) return;
+    if (kind === "mcp-servers") {
+      const preferredId = projectAssetDetailPreferredVersionId(
+        kind,
+        item.scope,
+        versions,
+        item.current_published_version_id,
+      );
+      setSelectedVersionId(preferredId);
+      if (
+        requestedVersionId &&
+        versions.some((version) => version.id === requestedVersionId)
+      ) {
+        onRequestedVersionHandled(item.id, requestedVersionId);
+      }
+      return;
+    }
     if (
       requestedVersionId &&
       versions.some((version) => version.id === requestedVersionId)
@@ -441,18 +701,22 @@ export function ProjectAssetDetailSheet({
       onRequestedVersionHandled(item.id, requestedVersionId);
       return;
     }
-    const preferred =
-      versions.find(
-        (version) => version.id === item.current_published_version_id,
-      ) ?? versions[0];
+    const preferredId = projectAssetDetailPreferredVersionId(
+      kind,
+      item.scope,
+      versions,
+      item.current_published_version_id,
+    );
     setSelectedVersionId((current) =>
       versions.some((version) => version.id === current)
         ? current
-        : (preferred?.id ?? ""),
+        : preferredId,
     );
   }, [
     item.current_published_version_id,
     item.id,
+    item.scope,
+    kind,
     onRequestedVersionHandled,
     open,
     requestedVersionId,
@@ -462,12 +726,11 @@ export function ProjectAssetDetailSheet({
   useEffect(() => {
     if (open) return;
     setSelectedVersionId("");
-    setBindingOpen(false);
-    setApprovalVersion(null);
     setVersionDirty(false);
     setVersionEditing(false);
     setSkillDeleteSnapshot(null);
     setAgentDeleteSnapshot(null);
+    setMcpDeleteSnapshot(null);
     setDiscardAction(null);
   }, [open]);
 
@@ -477,11 +740,6 @@ export function ProjectAssetDetailSheet({
 
   const canAuthor =
     item.scope === "project" && projectAssetCanAuthor(item, kind);
-  const canApprove =
-    item.scope === "project" &&
-    item.status === "active" &&
-    item.capabilities.includes("mcp.credentials.approve");
-  const canManageBinding = projectAssetDetailCanManageSystemBinding(kind, item);
   const lifecycleActions =
     item.scope === "project"
       ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
@@ -489,7 +747,7 @@ export function ProjectAssetDetailSheet({
   const canDeleteAsset = projectAssetCanDelete(kind, item);
   const versionActions = useMemo(() => {
     if (
-      !showsVersionHistory ||
+      kind === "agents" ||
       item.scope !== "project" ||
       !selectedVersion ||
       !("workflow_status" in selectedVersion)
@@ -502,27 +760,16 @@ export function ProjectAssetDetailSheet({
       isMcpVersion(selectedVersion) &&
         selectedVersion.credential_slots.length > 0,
     );
-  }, [item.scope, kind, selectedVersion, showsVersionHistory]);
+  }, [item.scope, kind, selectedVersion]);
 
-  const credentialCatalog = useProjectAssets(
-    accountId,
-    projectId,
-    "credentials",
-    approvalVersion !== null && canApprove,
-  );
-  const credentials = credentialCatalog.data as
-    | ProjectCredentialList
-    | undefined;
   const actionPending =
     publish.isPending ||
-    submit.isPending ||
-    approve.isPending ||
     changeStatus.isPending ||
     deleteSkill.isPending ||
-    deleteAgent.isPending;
+    deleteAgent.isPending ||
+    deleteMcp.isPending;
   const versionSelectionPending = requestedVersionId !== null;
-  const actionError =
-    publish.error ?? submit.error ?? approve.error ?? changeStatus.error;
+  const actionError = publish.error ?? changeStatus.error;
   const optimisticSkillStatus =
     kind === "skills" && changeStatus.isPending
       ? changeStatus.variables?.action === "activate"
@@ -591,26 +838,6 @@ export function ProjectAssetDetailSheet({
     }
   }
 
-  async function approveVersion(
-    version: McpVersion,
-    credentialVersions: Record<string, string>,
-  ): Promise<boolean> {
-    if (mcpVersionRuntimeBlockReason(version, item.scope)) return false;
-    try {
-      await approve.mutateAsync({
-        assetId: item.id,
-        versionId: version.id,
-        input: {
-          credential_versions: credentialVersions,
-          expected_asset_version: item.version,
-        },
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   async function confirmSkillDelete() {
     const snapshot = skillDeleteSnapshot;
     if (!snapshot) return;
@@ -645,6 +872,23 @@ export function ProjectAssetDetailSheet({
     }
   }
 
+  async function confirmMcpDelete() {
+    const snapshot = mcpDeleteSnapshot;
+    if (!snapshot) return;
+    try {
+      await deleteMcp.mutateAsync({
+        assetId: snapshot.assetId,
+        input: {
+          expected_asset_version: snapshot.expectedAssetVersion,
+        },
+      });
+      setMcpDeleteSnapshot(null);
+      onDeleted(snapshot.assetId);
+    } catch {
+      // The mutation exposes only its mapped public error inside the dialog.
+    }
+  }
+
   function toggleProjectSkillStatus(checked: boolean) {
     if (kind !== "skills") return;
     const toggleState = projectSkillStatusToggleState(item);
@@ -660,7 +904,7 @@ export function ProjectAssetDetailSheet({
     <>
       <Sheet open={open} onOpenChange={requestOpenChange}>
         <SheetContent
-          className={`w-full gap-0 p-0 ${kind === "skills" || kind === "agents" ? "sm:max-w-[1080px]" : "sm:max-w-[640px]"}`}
+          className={`w-full gap-0 p-0 ${kind === "skills" || kind === "agents" ? "sm:max-w-[1080px]" : kind === "mcp-servers" ? "sm:max-w-[900px]" : "sm:max-w-[640px]"}`}
         >
           <ProjectAssetDetailHeader
             kind={kind}
@@ -672,38 +916,49 @@ export function ProjectAssetDetailSheet({
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="space-y-6 px-6 py-5">
-              {showsVersionHistory ? (
+              {showsVersionContent ? (
                 <section
                   className={`grid gap-3 ${projectAssetDetailSummaryGridColumns(kind, item.scope)}`}
                 >
                   <div className="bg-muted/35 rounded-xl p-4">
                     <p className="text-muted-foreground text-xs">
-                      {item.scope === "system" ? "系统最新发布" : "当前发布"}
+                      {versionTerms.current}
                     </p>
                     <p className="mt-2 text-sm font-medium">
-                      {currentPublished
-                        ? `版本 ${currentPublished.version_number}`
-                        : item.current_published_version_id
-                          ? "已有发布版本"
-                          : "尚未发布"}
+                      {kind === "mcp-servers"
+                        ? mcpConfiguration?.state === "ready" &&
+                          mcpConfiguration.version
+                          ? projectMcpCurrentConfigurationLabel(
+                              mcpConfiguration.version.workflow_status,
+                            )
+                          : mcpConfiguration?.state === "empty"
+                            ? "尚未保存配置"
+                            : "当前配置无法确认"
+                        : currentPublished
+                          ? revisionCopy.label(currentPublished.version_number)
+                          : item.current_published_version_id
+                            ? revisionCopy.publishedFallback
+                            : "尚未发布"}
                     </p>
                   </div>
                   {item.scope === "system" ? (
                     <div className="bg-muted/35 rounded-xl p-4">
                       <p className="text-muted-foreground text-xs">项目使用</p>
                       <p className="mt-2 text-sm font-medium">
-                        {!item.binding
-                          ? "未启用"
-                          : !item.binding.enabled
-                            ? "已从项目停用"
-                            : pinnedVersion
-                              ? `版本 ${pinnedVersion.version_number}${
-                                  item.current_published_version_id !==
-                                  pinnedVersion.id
-                                    ? " · 有新版本"
-                                    : ""
-                                }`
-                              : "已固定版本"}
+                        {kind === "mcp-servers"
+                          ? projectMcpSystemUsageLabel(item)
+                          : !item.binding
+                            ? "未启用"
+                            : !item.binding.enabled
+                              ? "已从项目停用"
+                              : pinnedVersion
+                                ? `${revisionCopy.label(pinnedVersion.version_number)}${
+                                    item.current_published_version_id !==
+                                    pinnedVersion.id
+                                      ? ` · ${revisionCopy.updateAvailable}`
+                                      : ""
+                                  }`
+                                : revisionCopy.pinnedFallback}
                       </p>
                     </div>
                   ) : null}
@@ -713,33 +968,50 @@ export function ProjectAssetDetailSheet({
                       {new Date(item.updated_at).toLocaleString("zh-CN")}
                     </time>
                   </div>
+                  {kind === "mcp-servers" && item.scope === "project" ? (
+                    <div className="bg-muted/35 rounded-xl p-4">
+                      <p className="text-muted-foreground text-xs">状态</p>
+                      <div className="mt-2">
+                        <AssetStatusBadge status={item.status} />
+                      </div>
+                    </div>
+                  ) : null}
                 </section>
               ) : null}
 
-              <div className="flex flex-wrap gap-2">
-                {canManageBinding && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setBindingOpen(true)}
-                  >
-                    {item.binding?.enabled ? "切换版本" : "启用到项目"}
-                  </Button>
-                )}
+              <div className="flex flex-wrap items-center gap-2">
                 {projectAssetCanCreateVersion(kind, canAuthor) && (
                   <Button
                     type="button"
-                    disabled={versionDirty || versionSelectionPending}
+                    disabled={
+                      versionDirty ||
+                      versionSelectionPending ||
+                      (kind === "mcp-servers" &&
+                        !editableMcpConfiguration.isSuccess)
+                    }
                     title={
                       versionDirty
                         ? "请先保存或放弃当前未保存修改"
                         : versionSelectionPending
-                          ? "正在加载新版本，请稍候"
-                          : undefined
+                          ? revisionCopy.loading
+                          : kind === "mcp-servers" &&
+                              editableMcpConfiguration.isLoading
+                            ? "正在加载可编辑配置，请稍候"
+                            : kind === "mcp-servers" &&
+                                editableMcpConfiguration.error
+                              ? "可编辑配置加载失败，请重新打开详情后重试"
+                              : undefined
                     }
-                    onClick={() => onCreateVersion(item, selectedVersion)}
+                    onClick={() => {
+                      if (!editBaseVersion) return;
+                      onCreateVersion(
+                        item,
+                        editBaseVersion,
+                        editableMcpConfiguration.data,
+                      );
+                    }}
                   >
-                    创建新版本
+                    {versionTerms.edit}
                   </Button>
                 )}
                 {lifecycleActions.map((action) => (
@@ -756,13 +1028,7 @@ export function ProjectAssetDetailSheet({
                       })
                     }
                   >
-                    {action === "archive"
-                      ? "归档"
-                      : action === "activate"
-                        ? "启用"
-                        : kind === "agents"
-                          ? "停用"
-                          : "暂停"}
+                    {projectAssetLifecycleActionLabel(kind, action)}
                   </Button>
                 ))}
                 {kind === "skills" ? (
@@ -838,35 +1104,42 @@ export function ProjectAssetDetailSheet({
                 )
               ) : null}
 
-              {showsVersionHistory ? (
+              {showsVersionContent ? (
                 <section className="space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <h2 className="text-sm font-semibold">版本</h2>
-                    {versions.length > 0 && (
-                      <label className="text-muted-foreground flex items-center gap-2 text-xs">
-                        查看
-                        <select
-                          aria-label="查看版本"
-                          value={selectedVersionId}
-                          disabled={versionSelectionPending}
-                          onChange={(event) =>
-                            requestVersionChange(event.target.value)
-                          }
-                          className="border-input bg-background h-8 rounded-md border px-2 text-xs"
-                        >
-                          {versions.map((version) => (
-                            <option key={version.id} value={version.id}>
-                              版本 {version.version_number} ·{" "}
-                              {VERSION_STATUS_LABEL[workflowStatus(version)]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-                  </div>
+                  {showsVersionHistory ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <h2 className="text-sm font-semibold">
+                        {versionTerms.history}
+                      </h2>
+                      {versions.length > 0 && (
+                        <label className="text-muted-foreground flex items-center gap-2 text-xs">
+                          查看
+                          <select
+                            aria-label={revisionCopy.viewAria}
+                            value={selectedVersionId}
+                            disabled={versionSelectionPending}
+                            onChange={(event) =>
+                              requestVersionChange(event.target.value)
+                            }
+                            className="border-input bg-background h-8 rounded-md border px-2 text-xs"
+                          >
+                            {versions.map((version) => (
+                              <option key={version.id} value={version.id}>
+                                {revisionCopy.label(version.version_number)} ·{" "}
+                                {VERSION_STATUS_LABEL[workflowStatus(version)]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </div>
+                  ) : null}
 
                   {history.isLoading ? (
-                    <div className="space-y-3" aria-label="正在加载版本">
+                    <div
+                      className="space-y-3"
+                      aria-label={revisionCopy.loading}
+                    >
                       <Skeleton className="h-8 w-40" />
                       <Skeleton className="h-40 w-full rounded-xl" />
                     </div>
@@ -883,25 +1156,32 @@ export function ProjectAssetDetailSheet({
                         {history.isFetching ? "重试中…" : "重试"}
                       </Button>
                     </div>
+                  ) : kind === "mcp-servers" &&
+                    mcpConfiguration?.state === "unconfirmed" ? (
+                    <p role="alert" className="text-destructive text-sm">
+                      当前配置无法确认
+                    </p>
                   ) : !selectedVersion ? (
                     <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
-                      尚未创建版本。
+                      {versionTerms.empty}
                     </p>
                   ) : (
                     <div className="space-y-5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-lg font-semibold">
-                          版本 {selectedVersion.version_number}
-                        </span>
-                        <AssetStatusBadge
-                          status={workflowStatus(selectedVersion)}
-                        />
-                        <time className="text-muted-foreground ml-auto text-xs">
-                          {new Date(selectedVersion.created_at).toLocaleString(
-                            "zh-CN",
-                          )}
-                        </time>
-                      </div>
+                      {showsVersionHistory ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-lg font-semibold">
+                            {revisionCopy.label(selectedVersion.version_number)}
+                          </span>
+                          <AssetStatusBadge
+                            status={workflowStatus(selectedVersion)}
+                          />
+                          <time className="text-muted-foreground ml-auto text-xs">
+                            {new Date(
+                              selectedVersion.created_at,
+                            ).toLocaleString("zh-CN")}
+                          </time>
+                        </div>
+                      ) : null}
 
                       {item.scope === "project" &&
                         versionActions.length > 0 && (
@@ -922,68 +1202,14 @@ export function ProjectAssetDetailSheet({
                                     (versionDirty
                                       ? "请先保存或放弃当前未保存修改"
                                       : versionSelectionPending
-                                        ? "正在加载新版本，请稍候"
+                                        ? revisionCopy.loading
                                         : undefined)
                                   }
                                   onClick={() =>
                                     publishSelectedVersion(selectedVersion)
                                   }
                                 >
-                                  发布版本
-                                </Button>
-                              )}
-                            {versionActions.includes("submit") &&
-                              canAuthor &&
-                              isMcpVersion(selectedVersion) && (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  disabled={versionActionDisabled(
-                                    actionPending ||
-                                      Boolean(selectedRuntimeBlockReason),
-                                    versionSelectionPending,
-                                  )}
-                                  title={
-                                    selectedRuntimeBlockReason ??
-                                    (versionSelectionPending
-                                      ? "正在加载新版本，请稍候"
-                                      : undefined)
-                                  }
-                                  onClick={() =>
-                                    submit.mutate({
-                                      assetId: item.id,
-                                      versionId: selectedVersion.id,
-                                      input: {
-                                        expected_asset_version: item.version,
-                                      },
-                                    })
-                                  }
-                                >
-                                  提交审批
-                                </Button>
-                              )}
-                            {versionActions.includes("approve") &&
-                              canApprove &&
-                              isMcpVersion(selectedVersion) && (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  disabled={versionActionDisabled(
-                                    actionPending ||
-                                      Boolean(selectedRuntimeBlockReason),
-                                    versionSelectionPending,
-                                  )}
-                                  title={
-                                    selectedRuntimeBlockReason ??
-                                    (versionSelectionPending
-                                      ? "正在加载新版本，请稍候"
-                                      : undefined)
-                                  }
-                                  onClick={() =>
-                                    setApprovalVersion(selectedVersion)
-                                  }
-                                >
-                                  批准并发布
+                                  {revisionCopy.publish}
                                 </Button>
                               )}
                           </div>
@@ -995,34 +1221,28 @@ export function ProjectAssetDetailSheet({
                         </p>
                       ) : null}
 
-                      {isMcpVersion(selectedVersion) &&
-                        selectedVersion.workflow_status ===
-                          "pending_approval" &&
-                        !canApprove && (
-                          <p className="text-muted-foreground rounded-xl border p-4 text-sm">
-                            已提交，正在等待项目 Admin 审批。
-                          </p>
-                        )}
-
                       <div
                         key={selectedVersion.id}
                         className="border-border/70 border-t pt-5"
                       >
-                        {renderVersion?.(selectedVersion, {
-                          accountId,
-                          projectId,
-                          item,
-                          canAuthor: canAuthor && !versionSelectionPending,
-                          editing: versionEditing,
-                          onEditingChange: setVersionEditing,
-                          onDirtyChange: setVersionDirty,
-                          onVersionCreated: handleWorkbenchVersionCreated,
-                        })}
+                        {renderVersion?.(
+                          detailContentVersion ?? selectedVersion,
+                          {
+                            accountId,
+                            projectId,
+                            item,
+                            canAuthor: canAuthor && !versionSelectionPending,
+                            editing: versionEditing,
+                            onEditingChange: setVersionEditing,
+                            onDirtyChange: setVersionDirty,
+                            onVersionCreated: handleWorkbenchVersionCreated,
+                          },
+                        )}
                       </div>
 
                       <details className="border-border/70 rounded-xl border px-4 py-3">
                         <summary className="cursor-pointer text-sm font-medium">
-                          版本技术信息
+                          {revisionCopy.technical}
                         </summary>
                         <dl className="mt-3 grid gap-3 text-xs">
                           {"payload_checksum" in selectedVersion && (
@@ -1049,39 +1269,23 @@ export function ProjectAssetDetailSheet({
               ) : null}
 
               <ErrorNotice error={actionError} />
+
+              {kind === "mcp-servers" ? (
+                <ProjectMcpDangerZone
+                  actionPending={actionPending}
+                  canDelete={canDeleteAsset}
+                  onDelete={() => {
+                    deleteMcp.reset();
+                    setMcpDeleteSnapshot(
+                      createProjectMcpDeleteSnapshot(item, Date.now()),
+                    );
+                  }}
+                />
+              ) : null}
             </div>
           </div>
         </SheetContent>
       </Sheet>
-
-      {bindingOpen && (
-        <SystemBindingDialog
-          accountId={accountId}
-          projectId={projectId}
-          kind={kind}
-          item={item}
-          open
-          onOpenChange={setBindingOpen}
-        />
-      )}
-
-      <McpApprovalDialog
-        version={approvalVersion}
-        open={approvalVersion !== null}
-        pending={approve.isPending}
-        credentials={credentials?.project_items ?? []}
-        credentialScope="project"
-        credentialsLoading={credentialCatalog.isLoading}
-        credentialsError={credentialCatalog.error}
-        approvalError={approve.error}
-        onRetryCredentials={() => void credentialCatalog.refetch()}
-        onOpenChange={(next) => {
-          if (next) return;
-          setApprovalVersion(null);
-          approve.reset();
-        }}
-        onApprove={approveVersion}
-      />
 
       {skillDeleteSnapshot !== null && (
         <ProjectSkillDeleteDialog
@@ -1119,22 +1323,34 @@ export function ProjectAssetDetailSheet({
         />
       )}
 
+      {mcpDeleteSnapshot !== null && (
+        <ProjectMcpDeleteDialog
+          key={`${mcpDeleteSnapshot.assetId}:${mcpDeleteSnapshot.startedAt}`}
+          mcpName={mcpDeleteSnapshot.mcpName}
+          startedAt={mcpDeleteSnapshot.startedAt}
+          pending={deleteMcp.isPending}
+          errorMessage={
+            deleteMcp.error
+              ? projectMcpDeleteErrorMessage(deleteMcp.error)
+              : null
+          }
+          onOpenChange={(next) => {
+            if (next) return;
+            setMcpDeleteSnapshot(null);
+            deleteMcp.reset();
+          }}
+          onConfirm={() => void confirmMcpDelete()}
+        />
+      )}
+
       <Dialog
         open={discardAction !== null}
         onOpenChange={(next) => !next && setDiscardAction(null)}
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>
-              {kind === "agents"
-                ? "放弃未保存的 Agent 设置？"
-                : "放弃未保存的文件修改？"}
-            </DialogTitle>
-            <DialogDescription>
-              {kind === "agents"
-                ? "关闭详情会清除四项 Agent 设置的本地修改，已保存设置不会受影响。"
-                : "切换版本或关闭详情会清除当前编辑副本，已保存的 Skill 版本不会受影响。"}
-            </DialogDescription>
+            <DialogTitle>{discardCopy.title}</DialogTitle>
+            <DialogDescription>{discardCopy.description}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button

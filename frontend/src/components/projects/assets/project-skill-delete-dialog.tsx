@@ -80,6 +80,34 @@ export function ProjectAgentDeleteConfirmation({
   );
 }
 
+export function ProjectMcpDeleteConfirmation({
+  mcpName,
+  remainingSeconds,
+  pending,
+  errorMessage,
+  onCancel,
+  onConfirm,
+}: {
+  mcpName: string;
+  remainingSeconds: number;
+  pending: boolean;
+  errorMessage: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <ProjectAssetDeleteConfirmation
+      assetKind="MCP"
+      assetName={mcpName}
+      remainingSeconds={remainingSeconds}
+      pending={pending}
+      errorMessage={errorMessage}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
 function ProjectAssetDeleteConfirmation({
   assetKind,
   assetName,
@@ -89,7 +117,7 @@ function ProjectAssetDeleteConfirmation({
   onCancel,
   onConfirm,
 }: {
-  assetKind: "Skill" | "Agent";
+  assetKind: "Skill" | "Agent" | "MCP";
   assetName: string;
   remainingSeconds: number;
   pending: boolean;
@@ -106,7 +134,9 @@ function ProjectAssetDeleteConfirmation({
         <DialogDescription>
           {assetKind === "Skill"
             ? `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复。`
-            : `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`}
+            : assetKind === "Agent"
+              ? `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`
+              : `将永久删除整个 MCP“${assetName}”及其配置与 Credential 槽位。此操作不可恢复，已发布连接将不再可用；存在 Agent、历史运行或 Credential 授权快照引用时不会级联删除，需先解除引用。`}
         </DialogDescription>
       </DialogHeader>
       {errorMessage ? (
@@ -155,44 +185,16 @@ export function ProjectSkillDeleteDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
-  const [now, setNow] = useState(() => Date.now());
-  const remainingSeconds = skillDeleteSecondsRemaining(startedAt, now);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      const current = Date.now();
-      setNow(current);
-      if (current >= startedAt + SKILL_DELETE_DELAY_MS) {
-        window.clearInterval(interval);
-      }
-    }, 250);
-    return () => window.clearInterval(interval);
-  }, [startedAt]);
-
   return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open && !pending) onOpenChange(false);
-      }}
-    >
-      <DialogContent
-        showCloseButton={!pending}
-        onEscapeKeyDown={(event) => pending && event.preventDefault()}
-        onInteractOutside={(event) => pending && event.preventDefault()}
-      >
-        <ProjectSkillDeleteConfirmation
-          skillName={skillName}
-          remainingSeconds={remainingSeconds}
-          pending={pending}
-          errorMessage={errorMessage}
-          onCancel={() => onOpenChange(false)}
-          onConfirm={() => {
-            if (!pending && remainingSeconds === 0) onConfirm();
-          }}
-        />
-      </DialogContent>
-    </Dialog>
+    <ProjectAssetDeleteDialog
+      assetKind="Skill"
+      assetName={skillName}
+      startedAt={startedAt}
+      pending={pending}
+      errorMessage={errorMessage}
+      onOpenChange={onOpenChange}
+      onConfirm={onConfirm}
+    />
   );
 }
 
@@ -205,6 +207,64 @@ export function ProjectAgentDeleteDialog({
   onConfirm,
 }: {
   agentName: string;
+  startedAt: number;
+  pending: boolean;
+  errorMessage: string | null;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <ProjectAssetDeleteDialog
+      assetKind="Agent"
+      assetName={agentName}
+      startedAt={startedAt}
+      pending={pending}
+      errorMessage={errorMessage}
+      onOpenChange={onOpenChange}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+export function ProjectMcpDeleteDialog({
+  mcpName,
+  startedAt,
+  pending,
+  errorMessage,
+  onOpenChange,
+  onConfirm,
+}: {
+  mcpName: string;
+  startedAt: number;
+  pending: boolean;
+  errorMessage: string | null;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <ProjectAssetDeleteDialog
+      assetKind="MCP"
+      assetName={mcpName}
+      startedAt={startedAt}
+      pending={pending}
+      errorMessage={errorMessage}
+      onOpenChange={onOpenChange}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+function ProjectAssetDeleteDialog({
+  assetKind,
+  assetName,
+  startedAt,
+  pending,
+  errorMessage,
+  onOpenChange,
+  onConfirm,
+}: {
+  assetKind: "Skill" | "Agent" | "MCP";
+  assetName: string;
   startedAt: number;
   pending: boolean;
   errorMessage: string | null;
@@ -237,8 +297,9 @@ export function ProjectAgentDeleteDialog({
         onEscapeKeyDown={(event) => pending && event.preventDefault()}
         onInteractOutside={(event) => pending && event.preventDefault()}
       >
-        <ProjectAgentDeleteConfirmation
-          agentName={agentName}
+        <ProjectAssetDeleteConfirmation
+          assetKind={assetKind}
+          assetName={assetName}
           remainingSeconds={remainingSeconds}
           pending={pending}
           errorMessage={errorMessage}

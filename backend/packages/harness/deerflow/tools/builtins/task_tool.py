@@ -25,12 +25,16 @@ from deerflow.guardrails.provider import (
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
     cleanup_background_task,
     get_background_task_result,
     request_cancel_background_task,
+)
+from deerflow.subagents.runtime_catalog import (
+    RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
+    trusted_runtime_agent_catalog,
 )
 from deerflow.subagents.status_contract import (
     SubagentStatusValue,
@@ -456,10 +460,37 @@ async def task_tool(
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     cache_token_usage = _token_usage_cache_enabled(runtime_app_config)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    parent_context = runtime.context if runtime is not None else None
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    private_run = "private_scope" in parent_context
+    runtime_agent_catalog = trusted_runtime_agent_catalog(parent_context.get(RUNTIME_AGENT_CATALOG_CONTEXT_KEY)) if private_run else None
+    runtime_agent_profile = runtime_agent_catalog.get(subagent_type) if runtime_agent_catalog is not None else None
+    static_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    available_subagent_names = list(
+        dict.fromkeys(
+            [
+                *static_subagent_names,
+                *(runtime_agent_catalog.names if runtime_agent_catalog else ()),
+            ]
+        )
+    )
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    if runtime_agent_profile is not None:
+        config = SubagentConfig(
+            name=runtime_agent_profile.key,
+            description=runtime_agent_profile.description,
+            system_prompt=None,
+            tools=None,
+            disallowed_tools=["task"],
+            # The executor receives only this profile's exact runtime Skill
+            # tuple below; ``None`` loads that tuple, while ``[]`` would
+            # incorrectly suppress even the explicitly referenced Skills.
+            skills=None,
+            model=runtime_agent_profile.model_name,
+        )
+    else:
+        config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None:
         available = ", ".join(available_subagent_names)
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
@@ -518,9 +549,6 @@ async def task_tool(
     # None when absent (e.g. internal-auth runs) so guardrail behavior is
     # unchanged. Without this, role-aware policy silently mis-attributes any
     # tool call delegated to a subagent (user_role=None).
-    parent_context = runtime.context if runtime is not None else None
-    parent_context = parent_context if isinstance(parent_context, dict) else {}
-    private_run = "private_scope" in parent_context
     guardrail_attribution = copy_guardrail_attribution(parent_context.get(GUARDRAIL_ATTRIBUTION_CONTEXT_KEY)) if private_run else None
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
@@ -538,7 +566,7 @@ async def task_tool(
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
-    if parent_available_skills is not None:
+    if runtime_agent_profile is None and parent_available_skills is not None:
         overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
 
     if overrides:
@@ -550,6 +578,7 @@ async def task_tool(
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
+    effective_tool_groups = runtime_agent_profile.tool_groups if runtime_agent_profile is not None else parent_tool_groups
     resolved_app_config = runtime_app_config
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
         resolved_app_config = get_app_config()
@@ -558,7 +587,7 @@ async def task_tool(
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
     available_tools_kwargs = {
         "model_name": effective_model,
-        "groups": parent_tool_groups,
+        "groups": effective_tool_groups,
         "subagent_enabled": False,
     }
     if private_run:
@@ -577,7 +606,7 @@ async def task_tool(
     tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
     if private_run:
         owner_loop = asyncio.get_running_loop()
-        admitted_mcp_tools = _trusted_private_mcp_tools(parent_context)
+        admitted_mcp_tools = runtime_agent_profile.mcp_tools if runtime_agent_profile is not None else _trusted_private_mcp_tools(parent_context)
         existing_names = {tool.name for tool in tools}
         for admitted_tool in admitted_mcp_tools:
             if admitted_tool.name in existing_names:
@@ -641,12 +670,14 @@ async def task_tool(
     run_read_only_mounts = parent_context.get("__run_read_only_mounts")
     if isinstance(run_read_only_mounts, tuple):
         executor_kwargs["run_read_only_mounts"] = run_read_only_mounts
-    agent_prompt_bundle = _trusted_agent_prompt_bundle(parent_context)
+    agent_prompt_bundle = runtime_agent_profile.prompt_bundle if runtime_agent_profile is not None else _trusted_agent_prompt_bundle(parent_context)
     if agent_prompt_bundle is not None:
         executor_kwargs["agent_prompt_bundle"] = agent_prompt_bundle
-    runtime_skills = parent_context.get("__runtime_skills")
+    runtime_skills = runtime_agent_profile.runtime_skills if runtime_agent_profile is not None else parent_context.get("__runtime_skills")
     if isinstance(runtime_skills, tuple):
         executor_kwargs["runtime_skills"] = runtime_skills
+    if runtime_agent_profile is not None:
+        executor_kwargs["agent_model_settings"] = runtime_agent_profile.model_settings
     if "skill_secret_provider" not in executor_kwargs:
         skill_scoped_secrets = _trusted_skill_scoped_secrets(parent_context)
         if skill_scoped_secrets is not None:

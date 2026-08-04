@@ -72,7 +72,7 @@ if [ "$mode" = "docker" ]; then
         echo "✓ Containers are running:"
         docker ps --format "  - {{.Names}} ({{.Status}})"
     else
-        echo "✗ No DeerFlow-related containers are running"
+        echo "✗ No ActWeave-related containers are running"
         all_passed=false
     fi
 else

@@ -1,4 +1,4 @@
-config_version: 34
+config_version: 35
 log_level: info
 logging:
   enhance:
@@ -56,12 +56,26 @@ tools:
   group: bash
   use: deerflow.sandbox.tools:bash_tool
 mcp_security:
-  # Project MCP servers cannot use stdio. Remote project MCP execution is
-  # disabled until an operator lists the exact HTTPS endpoint here.
-  project_remote_allowed_endpoints: []
-  # Keep this enabled in production and route MCP traffic through a proxy that
-  # independently blocks loopback, private, link-local, and metadata targets.
-  require_egress_proxy: true
+  # Project remote MCP URLs must use an IP literal inside one of these CIDRs.
+  # Exact localhost is normalized to 127.0.0.1 before validation; use [::1]
+  # explicitly for IPv6. Other DNS hostnames are rejected because resolving once
+  # and connecting later would create a DNS-rebinding/TOCTOU gap. Use [] to deny
+  # every project remote MCP target, or an explicit /0 only when that broad access
+  # is intentional. Paths and valid ports remain unrestricted inside the network.
+  project_remote_allowed_networks:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - ::1/128
+    - fc00::/7
+  # Query credentials are injected by Worker and never belong in the persisted
+  # base URL. Production proxy/upstream logs must omit or redact query strings.
+  # HTTP sends header/query Credentials in plaintext and is only appropriate on
+  # a trusted isolated network. Use HTTPS elsewhere; IP certificates need IP SANs.
+  # Optional hardening: when enabled, route MCP traffic through a proxy that
+  # enforces the deployment's independent network policy.
+  require_egress_proxy: false
   egress_proxy_url: null
   discovery_timeout_seconds: 15
   tool_call_timeout_seconds: 60

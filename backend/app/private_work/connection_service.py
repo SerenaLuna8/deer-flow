@@ -10,6 +10,10 @@ from typing import Any
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.channels.instance_identity import (
+    normalize_channel_instance_id,
+    persisted_channel_instance_id,
+)
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -107,6 +111,60 @@ class ProjectConnectionService:
         agent_asset_id: uuid.UUID | str,
         agent_scope: str = "project",
         redirect_after: str | None = None,
+        *,
+        channel_instance_id: str,
+    ) -> ProjectConnectionChallenge:
+        provider = self._required_text(provider, context.request_id)
+        try:
+            normalized_instance_id = normalize_channel_instance_id(
+                provider,
+                channel_instance_id,
+            )
+            persisted_instance_id = persisted_channel_instance_id(
+                provider,
+                normalized_instance_id,
+            )
+        except TypeError:
+            raise PrivateWorkInvalid(context.request_id) from None
+        if persisted_instance_id is None:
+            raise PrivateWorkInvalid(context.request_id)
+        return await self._begin_connect(
+            context,
+            provider,
+            agent_asset_id,
+            agent_scope,
+            redirect_after,
+            channel_instance_id=persisted_instance_id,
+        )
+
+    async def begin_legacy_connect(
+        self,
+        context: PrivateWorkContext,
+        provider: str,
+        agent_asset_id: uuid.UUID | str,
+        agent_scope: str = "project",
+        redirect_after: str | None = None,
+    ) -> ProjectConnectionChallenge:
+        """Compatibility entry for operator-configured channels without a row."""
+
+        return await self._begin_connect(
+            context,
+            provider,
+            agent_asset_id,
+            agent_scope,
+            redirect_after,
+            channel_instance_id=None,
+        )
+
+    async def _begin_connect(
+        self,
+        context: PrivateWorkContext,
+        provider: str,
+        agent_asset_id: uuid.UUID | str,
+        agent_scope: str,
+        redirect_after: str | None,
+        *,
+        channel_instance_id: str | None,
     ) -> ProjectConnectionChallenge:
         context = await self._require(context, Capability.PRIVATE_WORK_CREATE)
         provider = self._required_text(provider, context.request_id)
@@ -126,6 +184,7 @@ class ProjectConnectionService:
             inserted = await self._repository.create_oauth_state_within_cap(
                 scope=context.resource_scope,
                 provider=provider,
+                channel_instance_id=channel_instance_id,
                 state=state,
                 expires_at=expires_at,
                 max_pending=self._max_pending_states,
@@ -191,14 +250,28 @@ class ProjectConnectionService:
         state: str,
         external_account_id: str,
         workspace_id: str | None = None,
+        *,
+        channel_instance_id: str,
         **connection_fields: object,
     ) -> dict[str, Any]:
         request_id = "connection-callback"
         provider = self._required_text(provider, request_id)
         state = self._required_text(state, request_id)
         try:
+            normalized_instance_id = normalize_channel_instance_id(
+                provider,
+                channel_instance_id,
+            )
+        except TypeError:
+            raise PrivateWorkInvalid(request_id) from None
+        expected_instance_id = persisted_channel_instance_id(
+            provider,
+            normalized_instance_id,
+        )
+        try:
             consumed = await self._repository.consume_oauth_state(
                 provider=provider,
+                channel_instance_id=expected_instance_id,
                 state=state,
             )
         except Exception as exc:
@@ -206,6 +279,8 @@ class ProjectConnectionService:
         if not isinstance(consumed, Mapping):
             raise PrivateWorkNotFound(request_id)
         if consumed.get("provider") not in (None, provider):
+            raise PrivateWorkNotFound(request_id)
+        if consumed.get("channel_instance_id") != expected_instance_id:
             raise PrivateWorkNotFound(request_id)
 
         context, state_metadata = await self._context_from_state(consumed)
@@ -228,6 +303,7 @@ class ProjectConnectionService:
             return await self._repository.upsert_connection(
                 scope=context.resource_scope,
                 provider=provider,
+                channel_instance_id=expected_instance_id,
                 external_account_id=external_account_id,
                 workspace_id=workspace_id,
                 metadata=connection_metadata,

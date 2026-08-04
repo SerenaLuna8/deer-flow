@@ -16,6 +16,7 @@ import {
   createAdminCredential,
   createAdminProjectAsset,
   createAdminProjectCredential,
+  createConfiguredProjectMcp,
   createProjectAsset,
   createProjectAssetVersion,
   createProjectCredential,
@@ -23,12 +24,15 @@ import {
   deleteAdminProjectCredential,
   deleteProjectCredential,
   deleteProjectAgent,
+  deleteProjectMcp,
   deleteProjectSkill,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
   enableAdminProjectSystemBinding,
   forkProjectSkillVersion,
   getProjectDefaultAgent,
+  getProjectMcpEditableConfiguration,
+  getProjectMcpToolInventory,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
   listAdminAssets,
@@ -38,10 +42,13 @@ import {
   listSystemAssetCatalog,
   migrateProjectCredentialGrants,
   publishProjectAssetVersion,
+  requestProjectMcpToolDiscovery,
   replaceProjectCredential,
   revokeProjectCredential,
   setProjectDefaultAgent,
+  syncCurrentProjectSystemMcpBinding,
   submitProjectMcpVersion,
+  updateConfiguredProjectMcp,
   updateProjectAgentInstructions,
   upgradeProjectSystemBinding,
 } from "@/core/shared-assets/api";
@@ -143,7 +150,7 @@ const credential = {
 };
 const binding = {
   project_id: PROJECT_ID,
-  kind: "agent",
+  kind: "mcp",
   asset_id: asset.id,
   version_id: versionId,
   enabled: true,
@@ -167,6 +174,407 @@ beforeEach(() => {
 });
 
 describe("shared asset api", () => {
+  test("loads the exact current editable Project MCP configuration", async () => {
+    const slotId = "44444444-4444-4444-8444-444444444444";
+    const response = {
+      item: {
+        ...asset,
+        current_published_version_id: versionId,
+        version: 7,
+      },
+      version: {
+        ...mcpVersion,
+        definition: {
+          ...mcpVersion.definition,
+          transport: "http",
+          command: null,
+          url: "http://127.0.0.1:8771/api/mcp",
+          credential_slots: [
+            {
+              name: "auth",
+              purpose: "MCP request header authentication",
+              payload_schema: { headers: ["Authorization"] },
+              required: true,
+            },
+          ],
+        },
+        credential_slots: [
+          {
+            id: slotId,
+            name: "auth",
+            purpose: "MCP request header authentication",
+            payload_schema: { headers: ["Authorization"] },
+            required: true,
+          },
+        ],
+      },
+      request_id: "req-editable-mcp",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, response));
+    const signal = new AbortController().signal;
+
+    await expect(
+      getProjectMcpEditableConfiguration(PROJECT_ID, asset.id, signal),
+    ).resolves.toEqual(response);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/configured`,
+      { signal },
+    );
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ...response,
+        item: { ...response.item, project_id: versionId },
+      }),
+    );
+    await expect(
+      getProjectMcpEditableConfiguration(PROJECT_ID, asset.id, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+  });
+
+  test("adds one configured project MCP with one flat request", async () => {
+    const input = {
+      slug: "amap-mcp",
+      display_name: "高德地图 MCP",
+      description: "地图与路线规划",
+      transport: "http" as const,
+      command: null,
+      args: [],
+      url: "https://10.0.0.8/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [
+        {
+          name: "api-key",
+          purpose: "高德地图 API Key",
+          payload_schema: { query: ["key"] },
+          required: true,
+        },
+      ],
+    };
+    const response = {
+      item: {
+        ...asset,
+        slug: input.slug,
+        display_name: input.display_name,
+        version: 3,
+      },
+      version: {
+        ...mcpVersion,
+        workflow_status: "pending_approval",
+        definition: {
+          ...mcpVersion.definition,
+          description: input.description,
+          transport: input.transport,
+          command: null,
+          url: input.url,
+          credential_slots: input.credential_slots,
+        },
+        credential_slots: input.credential_slots.map((slot) => ({
+          id: "44444444-4444-4444-8444-444444444444",
+          ...slot,
+        })),
+        submitted_at: "2026-07-14T00:00:00Z",
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+      },
+      request_id: "req-configured-mcp",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(201, response));
+    const signal = new AbortController().signal;
+
+    await expect(
+      createConfiguredProjectMcp(PROJECT_ID, input, signal),
+    ).resolves.toEqual(response);
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/configured`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: expect.any(String),
+        signal,
+      },
+    );
+    const requestBody = mockedFetch.mock.calls[0]?.[1]?.body;
+    expect(typeof requestBody).toBe("string");
+    if (typeof requestBody !== "string") {
+      throw new TypeError("Expected a JSON request body");
+    }
+    expect(JSON.parse(requestBody)).toEqual(input);
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, {
+        ...response,
+        item: { ...response.item, version: 91 },
+      }),
+    );
+    await expect(
+      createConfiguredProjectMcp(PROJECT_ID, input, signal),
+    ).resolves.toMatchObject({ item: { version: 91 } });
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, {
+        ...response,
+        item: {
+          ...response.item,
+          current_published_version_id: response.version.id,
+        },
+        version: { ...response.version, workflow_status: "published" },
+      }),
+    );
+    await expect(
+      createConfiguredProjectMcp(PROJECT_ID, input, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, {
+        ...response,
+        version: {
+          ...response.version,
+          supersedes_version_id: "99999999-9999-4999-8999-999999999999",
+        },
+      }),
+    );
+    await expect(
+      createConfiguredProjectMcp(PROJECT_ID, input, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+  });
+
+  test("updates one configured project MCP without creating a selectable revision", async () => {
+    const input = {
+      description: "更新后的地图服务",
+      transport: "http" as const,
+      command: null,
+      args: [],
+      url: "https://10.0.0.8/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
+      expected_asset_version: 3,
+    };
+    const response = {
+      item: {
+        ...asset,
+        current_published_version_id: mcpVersion.id,
+        version: 5,
+      },
+      version: {
+        ...mcpVersion,
+        definition: {
+          ...mcpVersion.definition,
+          description: input.description,
+          transport: input.transport,
+          command: null,
+          url: input.url,
+        },
+        submitted_at: null,
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+      },
+      request_id: "req-update-configured-mcp",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, response));
+    const signal = new AbortController().signal;
+
+    await expect(
+      updateConfiguredProjectMcp(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toEqual(response);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/configured`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: expect.any(String),
+        signal,
+      },
+    );
+    const updateRequestBody = mockedFetch.mock.calls[0]?.[1]?.body;
+    expect(typeof updateRequestBody).toBe("string");
+    if (typeof updateRequestBody !== "string") {
+      throw new TypeError("Expected a JSON request body");
+    }
+    expect(JSON.parse(updateRequestBody)).toEqual(input);
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ...response,
+        item: { ...response.item, version: 4 },
+      }),
+    );
+    await expect(
+      updateConfiguredProjectMcp(PROJECT_ID, asset.id, input, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ...response,
+        item: { ...response.item, current_published_version_id: null },
+        version: {
+          ...response.version,
+          workflow_status: "pending_approval",
+          submitted_at: "2026-07-14T00:00:00Z",
+        },
+      }),
+    );
+    await expect(
+      updateConfiguredProjectMcp(PROJECT_ID, asset.id, input, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+
+    const credentialInput = {
+      ...input,
+      credential_slots: [
+        {
+          name: "api-key",
+          purpose: "API Key",
+          payload_schema: { query: ["key"] },
+          required: true,
+        },
+      ],
+    };
+    const oldPublishedVersionId = "77777777-7777-4777-8777-777777777777";
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        item: {
+          ...asset,
+          current_published_version_id: oldPublishedVersionId,
+          version: 5,
+        },
+        version: {
+          ...mcpVersion,
+          workflow_status: "pending_approval",
+          definition: {
+            ...mcpVersion.definition,
+            description: credentialInput.description,
+            transport: credentialInput.transport,
+            url: credentialInput.url,
+            credential_slots: credentialInput.credential_slots,
+          },
+          credential_slots: credentialInput.credential_slots.map((slot) => ({
+            ...slot,
+            id: "88888888-8888-4888-8888-888888888888",
+          })),
+          supersedes_version_id: "99999999-9999-4999-8999-999999999999",
+          submitted_at: "2026-07-14T00:00:00Z",
+          reviewed_at: null,
+          reviewed_by_user_id: null,
+        },
+        request_id: "req-stale-configured-mcp",
+      }),
+    );
+    await expect(
+      updateConfiguredProjectMcp(PROJECT_ID, asset.id, credentialInput, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+  });
+
+  test("syncs a System MCP binding to the server-authoritative current configuration", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, binding));
+    const input = { expected_binding_version: 2 };
+    const signal = new AbortController().signal;
+
+    await expect(
+      syncCurrentProjectSystemMcpBinding(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toEqual(binding);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/system-mcp-bindings/${asset.id}/sync-current`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal,
+      },
+    );
+
+    for (const invalidBinding of [
+      { ...binding, kind: "agent" },
+      {
+        ...binding,
+        project_id: "77777777-7777-4777-8777-777777777777",
+      },
+      {
+        ...binding,
+        asset_id: "88888888-8888-4888-8888-888888888888",
+      },
+    ]) {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(200, invalidBinding));
+      await expect(
+        syncCurrentProjectSystemMcpBinding(PROJECT_ID, asset.id, input, signal),
+      ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+    }
+  });
+
+  test("loads only the project-scoped display inventory for one exact MCP version", async () => {
+    const response = {
+      data: {
+        status: "ready",
+        tools: [
+          {
+            name: "maps_weather",
+            description: "根据城市名称查询天气",
+          },
+        ],
+        last_attempt_at: "2026-08-02T08:00:00Z",
+        last_success_at: "2026-08-02T08:00:00Z",
+        error_code: null,
+      },
+      request_id: "req-mcp-tools",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, response));
+    const signal = new AbortController().signal;
+
+    await expect(
+      getProjectMcpToolInventory(PROJECT_ID, asset.id, versionId, signal),
+    ).resolves.toEqual(response);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions/${versionId}/tools`,
+      { signal },
+    );
+  });
+
+  test("queues tool discovery for one exact project MCP version", async () => {
+    const response = {
+      data: {
+        id: "44444444-4444-4444-8444-444444444444",
+        mcp_server_id: asset.id,
+        mcp_server_version_id: versionId,
+        status: "queued",
+        requested_at: "2026-08-03T08:00:00Z",
+        started_at: null,
+        completed_at: null,
+        error_code: null,
+      },
+      request_id: "req-mcp-tool-discovery",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(202, response));
+    const signal = new AbortController().signal;
+
+    await expect(
+      requestProjectMcpToolDiscovery(PROJECT_ID, asset.id, versionId, signal),
+    ).resolves.toEqual(response);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/versions/${versionId}/tool-discovery`,
+      { method: "POST", signal },
+    );
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(202, {
+        ...response,
+        data: { ...response.data, mcp_server_version_id: asset.id },
+      }),
+    );
+    await expect(
+      requestProjectMcpToolDiscovery(PROJECT_ID, asset.id, versionId, signal),
+    ).rejects.toMatchObject({ code: "ASSET_RESPONSE_INVALID" });
+  });
+
   test("uses only project-scoped admin override routes for shared assets credentials approvals and bindings", async () => {
     mockedFetch
       .mockResolvedValueOnce(
@@ -673,6 +1081,26 @@ describe("shared asset api", () => {
     );
   });
 
+  test("permanently deletes one project MCP with its expected revision", async () => {
+    mockedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const signal = new AbortController().signal;
+    const input = { expected_asset_version: 11 };
+
+    await expect(
+      deleteProjectMcp(PROJECT_ID, asset.id, input, signal),
+    ).resolves.toBeUndefined();
+
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+        signal,
+      },
+    );
+  });
+
   test("logically deletes Credential metadata through each scoped route", async () => {
     mockedFetch
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
@@ -778,6 +1206,73 @@ describe("shared asset api", () => {
         body: JSON.stringify(input),
       }),
     );
+  });
+
+  test("activates and suspends project MCP without exposing archive", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          item: {
+            ...asset,
+            status: "active",
+            current_published_version_id: versionId,
+          },
+          request_id: "req-mcp-activate",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          item: {
+            ...asset,
+            status: "suspended",
+            current_published_version_id: versionId,
+            version: 2,
+          },
+          request_id: "req-mcp-suspend",
+        }),
+      );
+    const input = { expected_asset_version: 1 };
+
+    await changeProjectAssetStatus(
+      PROJECT_ID,
+      "mcp-servers",
+      asset.id,
+      "activate",
+      input,
+    );
+    await changeProjectAssetStatus(
+      PROJECT_ID,
+      "mcp-servers",
+      asset.id,
+      "suspend",
+      input,
+    );
+
+    expect(mockedFetch).toHaveBeenNthCalledWith(
+      1,
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/activate`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+    expect(mockedFetch).toHaveBeenNthCalledWith(
+      2,
+      `/backend/api/projects/${PROJECT_ID}/mcp-servers/${asset.id}/suspend`,
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+    expect(() =>
+      changeProjectAssetStatus(
+        PROJECT_ID,
+        "mcp-servers",
+        asset.id,
+        "archive" as never,
+        input,
+      ),
+    ).toThrow(expect.objectContaining({ code: "ASSET_VALIDATION_FAILED" }));
   });
 
   test("uses canonical public errors and rejects unsafe responses", async () => {

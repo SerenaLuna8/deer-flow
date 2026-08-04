@@ -13,13 +13,13 @@ import { Callout } from "nextra/components";
   <strong>Admin → System Settings → Models</strong> and stored in PostgreSQL.
 </Callout>
 
-DeerFlow explicitly separates infrastructure process configuration from
+ActWeave explicitly separates infrastructure process configuration from
 database-governed settings, keeping deployments reproducible, auditable, and
 easy to customize per environment.
 
 ## Config file location
 
-DeerFlow resolves `config.yaml` using the following priority order:
+ActWeave resolves `config.yaml` using the following priority order:
 
 1. The path passed to `AppConfig.from_file(config_path)` explicitly.
 2. The `DEER_FLOW_CONFIG_PATH` environment variable.
@@ -69,7 +69,7 @@ tools:
     api_key: $TAVILY_API_KEY
 ```
 
-This pattern is how DeerFlow achieves pluggability without hardcoding class references.
+This pattern is how ActWeave achieves pluggability without hardcoding class references.
 
 ## Model provider settings
 

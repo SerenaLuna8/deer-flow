@@ -15,6 +15,7 @@ import type {
   AssetScope,
   AssetVersion,
 } from "@/core/shared-assets";
+import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 import { AssetStatusBadge } from "./asset-status-badge";
@@ -60,6 +61,7 @@ export function AssetVersionHistory({
   approvalCredentialsError,
   approvalError,
   configureCredentialGrantsVersionId,
+  currentVersionId,
   onRetryApprovalCredentials,
 }: {
   kind: AssetListKind;
@@ -83,6 +85,7 @@ export function AssetVersionHistory({
   approvalCredentialsError?: unknown;
   approvalError?: unknown;
   configureCredentialGrantsVersionId?: string | null;
+  currentVersionId?: string | null;
   onRetryApprovalCredentials?: () => void;
 }) {
   const { locale, t } = useI18n();
@@ -96,15 +99,34 @@ export function AssetVersionHistory({
   if (versions.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        {t.adminAssets.version.none}
+        {kind === "mcp-servers"
+          ? t.adminAssets.version.mcpNone
+          : t.adminAssets.version.none}
       </p>
     );
   }
+  const mcpConfiguration =
+    kind === "mcp-servers"
+      ? resolveMcpCurrentConfiguration(versions, scope, currentVersionId)
+      : null;
+  if (kind === "mcp-servers" && mcpConfiguration?.state === "unconfirmed") {
+    return (
+      <p role="alert" className="text-destructive text-sm">
+        当前配置无法确认
+      </p>
+    );
+  }
+  const displayedVersions =
+    kind === "mcp-servers"
+      ? mcpConfiguration?.version
+        ? [mcpConfiguration.version]
+        : []
+      : versions;
 
   return (
     <>
       <div className="space-y-3">
-        {versions.map((version, index) => {
+        {displayedVersions.map((version, index) => {
           const isMcp = "mcp_server_id" in version;
           const runtimeBlockReason = isMcp
             ? mcpVersionRuntimeBlockReason(
@@ -121,6 +143,98 @@ export function AssetVersionHistory({
                   version.workflow_status,
                   isMcp && version.credential_slots.length > 0,
                 );
+          const detail = (
+            <div
+              className={
+                isMcp
+                  ? "space-y-4 p-3"
+                  : "border-border/70 space-y-4 border-t p-3"
+              }
+            >
+              {actions.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {actions.includes("publish") && onPublish && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={pending || Boolean(runtimeBlockReason)}
+                      title={runtimeBlockReason ?? undefined}
+                      onClick={() => onPublish?.(version)}
+                    >
+                      {isMcp
+                        ? t.adminAssets.version.publishMcp
+                        : t.adminAssets.version.publish}
+                    </Button>
+                  )}
+                  {actions.includes("submit") && isMcp && onSubmit && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={pending || Boolean(runtimeBlockReason)}
+                      title={runtimeBlockReason ?? undefined}
+                      onClick={() => onSubmit?.(version)}
+                    >
+                      {t.adminAssets.version.submit}
+                    </Button>
+                  )}
+                  {actions.includes("approve") && isMcp && onApprove && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={pending || Boolean(runtimeBlockReason)}
+                      title={runtimeBlockReason ?? undefined}
+                      onClick={() => setApprovalVersion(version)}
+                    >
+                      {t.adminAssets.version.approveMcp}
+                    </Button>
+                  )}
+                </div>
+              )}
+              {runtimeBlockReason ? (
+                <p role="alert" className="text-destructive text-sm">
+                  {runtimeBlockReason}
+                </p>
+              ) : null}
+              {isMcp &&
+                version.workflow_status === "published" &&
+                version.id === configureCredentialGrantsVersionId &&
+                version.credential_slots.length > 0 &&
+                onConfigureCredentialGrants && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={pending}
+                    onClick={() => {
+                      setApprovalMode("configure-grants");
+                      setApprovalVersion(version);
+                    }}
+                  >
+                    {t.adminAssets.version.configureGrants}
+                  </Button>
+                )}
+              <AssetVersionDiff
+                previous={isMcp ? null : (displayedVersions[index + 1] ?? null)}
+                current={version}
+              />
+            </div>
+          );
+          if (isMcp) {
+            return (
+              <div
+                key={version.id}
+                className="border-border/70 rounded-lg border"
+              >
+                <div className="flex items-center gap-3 px-3 pt-3">
+                  <AssetStatusBadge status={versionStatus(version)} />
+                  <time className="text-muted-foreground ml-auto text-xs">
+                    {new Date(version.created_at).toLocaleString(locale)}
+                  </time>
+                </div>
+                {detail}
+              </div>
+            );
+          }
           return (
             <details
               key={version.id}
@@ -137,72 +251,7 @@ export function AssetVersionHistory({
                   {new Date(version.created_at).toLocaleString(locale)}
                 </time>
               </summary>
-              <div className="border-border/70 space-y-4 border-t p-3">
-                {actions.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {actions.includes("publish") && onPublish && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={pending || Boolean(runtimeBlockReason)}
-                        title={runtimeBlockReason ?? undefined}
-                        onClick={() => onPublish?.(version)}
-                      >
-                        {t.adminAssets.version.publish}
-                      </Button>
-                    )}
-                    {actions.includes("submit") && isMcp && onSubmit && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={pending || Boolean(runtimeBlockReason)}
-                        title={runtimeBlockReason ?? undefined}
-                        onClick={() => onSubmit?.(version)}
-                      >
-                        {t.adminAssets.version.submit}
-                      </Button>
-                    )}
-                    {actions.includes("approve") && isMcp && onApprove && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={pending || Boolean(runtimeBlockReason)}
-                        title={runtimeBlockReason ?? undefined}
-                        onClick={() => setApprovalVersion(version)}
-                      >
-                        {t.adminAssets.version.approve}
-                      </Button>
-                    )}
-                  </div>
-                )}
-                {runtimeBlockReason ? (
-                  <p role="alert" className="text-destructive text-sm">
-                    {runtimeBlockReason}
-                  </p>
-                ) : null}
-                {isMcp &&
-                  version.workflow_status === "published" &&
-                  version.id === configureCredentialGrantsVersionId &&
-                  version.credential_slots.length > 0 &&
-                  onConfigureCredentialGrants && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={pending}
-                      onClick={() => {
-                        setApprovalMode("configure-grants");
-                        setApprovalVersion(version);
-                      }}
-                    >
-                      {t.adminAssets.version.configureGrants}
-                    </Button>
-                  )}
-                <AssetVersionDiff
-                  previous={versions[index + 1] ?? null}
-                  current={version}
-                />
-              </div>
+              {detail}
             </details>
           );
         })}

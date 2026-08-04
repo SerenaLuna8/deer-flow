@@ -79,32 +79,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=69,
-        digest="b0ddb59adbf8e6c635c854635bf688507adcaadc690f8f9496dbc665e9ce1db4",
+        count=77,
+        digest="bd0f0e3f2774c7ce3a2e48dae250d67865ce62c9d0dfc1c11757db474a716c2e",
     ),
     "columns": CatalogInvariant(
-        count=817,
-        digest="06b489cc195562dd8db89c652d50e8d1c82171786d88eea1f64df849dd065b0f",
+        count=923,
+        digest="bd9090bb0de21412c68670d2d1f69327959fb7053735e21692d1d828f976f6b4",
     ),
     "sequences": CatalogInvariant(
         count=1,
         digest="94e9734ed0d3e15fc64fcf15a8ed1181999429aec5e9ddb535513ac42145acde",
     ),
     "constraints": CatalogInvariant(
-        count=562,
-        digest="8893d7a0f6ed7accf7c7719891906b03fe7524440c4eab3335968fb4e73156f2",
+        count=654,
+        digest="bff0d55387337e1db57981266e5c784aba034e4282bcf5c4eef9e6dd3fbc6b7a",
     ),
     "indexes": CatalogInvariant(
-        count=227,
-        digest="cf3f7af25676078d4adccc16edd90254f847bc89b46e10c8121fc128a7e06e60",
+        count=262,
+        digest="02622d67a9e71e9542752f2b23c3148f44bc0ee0464706c5a398f7cf8919ab3f",
     ),
     "functions": CatalogInvariant(
         count=13,
-        digest="1a36ac2eb114d801c83fedbe12142d3b5b67060122a3c1f0555ff880e1f09712",
+        digest="3986289c90206f94aa821fef7e8a58e253dec6a968d91c4cb43fde6722ea8f62",
     ),
     "triggers": CatalogInvariant(
-        count=80,
-        digest="372d425df2ea8a3407fe2bb986d03c974f4ea31b2c27617813e55a23e84c2565",
+        count=84,
+        digest="f4d1863e98aeb349598f9899ef44cc3568f7f8f09f3076af1d46d0a8699fbcb0",
     ),
 }
 

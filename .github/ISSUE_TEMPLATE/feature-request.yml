@@ -39,7 +39,7 @@ body:
     id: areas
     attributes:
       label: Affected area(s)
-      description: Which part of DeerFlow would this touch? Select all that apply.
+      description: Which part of ActWeave would this touch? Select all that apply.
       multiple: true
       options:
         - Frontend (UI / Next.js)

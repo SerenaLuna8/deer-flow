@@ -52,7 +52,12 @@ async def test_create_and_update_validate_field_lengths_and_whitelist() -> None:
 
 
 def test_privileged_capabilities_remain_admin_only() -> None:
-    for capability in (Capability.PROJECT_UPDATE, Capability.PROJECT_MEMBERS_MANAGE, Capability.MCP_CREDENTIALS_APPROVE):
+    for capability in (
+        Capability.PROJECT_UPDATE,
+        Capability.PROJECT_MEMBERS_MANAGE,
+        Capability.PROJECT_CHANNELS_MANAGE,
+        Capability.MCP_CREDENTIALS_APPROVE,
+    ):
         assert [role for role in ProjectRole if capability in capabilities_for(role)] == [ProjectRole.ADMIN]
 
 

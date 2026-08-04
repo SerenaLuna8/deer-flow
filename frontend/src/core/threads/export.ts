@@ -3,9 +3,9 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  filterUIVisibleMessages,
   hasContent,
   hasToolCalls,
-  isHiddenFromUIMessage,
   stripInternalMarkers,
 } from "../messages/utils";
 
@@ -34,10 +34,10 @@ function visibleMessages(
   messages: Message[],
   options: ExportOptions,
 ): Message[] {
-  return messages.filter((message) => {
-    if (!options.includeHidden && isHiddenFromUIMessage(message)) {
-      return false;
-    }
+  const visibilityFiltered = options.includeHidden
+    ? messages
+    : filterUIVisibleMessages(messages);
+  return visibilityFiltered.filter((message) => {
     if (!options.includeToolMessages && message.type === "tool") {
       return false;
     }

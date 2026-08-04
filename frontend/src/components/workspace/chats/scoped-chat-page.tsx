@@ -561,6 +561,7 @@ export function ScopedChatPage({
                       )}
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
+                      agentMetadata={threadMetadata.data?.metadata}
                       draftConversationScope={isNewThread ? "new" : threadId}
                       autoFocus={isWelcomeMode}
                       status={

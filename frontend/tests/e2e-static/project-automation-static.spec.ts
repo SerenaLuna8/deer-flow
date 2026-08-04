@@ -68,7 +68,7 @@ test("static workspace stays local and project routes stay absent without API re
   });
   await page.route("**/api/**", (route) => route.abort());
 
-  await page.goto("/workspace");
+  await page.goto("/");
   await expect(page).toHaveURL(/\/workspace$/u);
   await expect(page.getByTestId("static-workspace-demo")).toBeVisible();
   await expect(page.getByRole("link", { name: "Automations" })).toHaveCount(0);

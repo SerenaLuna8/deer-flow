@@ -1,6 +1,6 @@
 ---
 title: 配置
-description: 配置最终项目作用域的 DeerFlow 应用。
+description: 配置最终项目作用域的 ActWeave 应用。
 ---
 
 # 配置
@@ -19,6 +19,35 @@ make check-db
 Agent、Skill、MCP、Credential 和模型定义都是数据库中的版本化资产。system
 admin 管理模型目录和系统资产，项目成员在认证后的项目设置中管理项目资产和
 binding。secret 使用加密 Credential envelope，绝不进入浏览器 query cache。
+
+## 项目 MCP 网络
+
+配置版本 35 使用 CIDR 网段控制项目 MCP 的远程目标，不再逐 URL 或逐 IP 登记：
+
+```yaml
+mcp_security:
+  project_remote_allowed_networks:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - ::1/128
+    - fc00::/7
+  require_egress_proxy: false
+  egress_proxy_url: null
+```
+
+项目 MCP 地址仅接受规范 IPv4、带方括号的 IPv6 literal 或精确的 `localhost`；
+`localhost` 会按 `127.0.0.1` 处理，IPv6 回环请显式填写 `[::1]`。普通 DNS 名称不会
+通过一次 DNS 解析获得网段权限。空网段列表拒绝全部项目远程 MCP；显式填写
+`0.0.0.0/0` 和 `::/0` 才会允许全部 IP。CIDR 只约束目标地址，不约束端口、路径或
+服务身份，因此应只授予项目成员需要访问的网段。
+
+HTTP 可用于可信隔离内网，但 header/query Credential 会以明文经过网络；跨越不可信
+链路必须使用 HTTPS。IP HTTPS 证书必须包含对应 IP SAN。启用出口代理时，代理还必须
+独立执行等价的网络策略，并且 `127.0.0.1` 指向代理自身的网络空间，不再是 Worker。
+`mcp_security` 由 Gateway、Scheduler 和 Worker 在启动时读取，
+修改后需要同时重启这些进程。
 
 Gateway、Worker 和 Scheduler 启动时只验证目标数据库和 schema。启动应用进程前，请先运行显式数据库 setup/migration 命令。
 

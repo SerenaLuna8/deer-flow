@@ -11,7 +11,11 @@ import pytest
 
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.context import PrivateWorkContext
-from app.private_work.errors import PrivateWorkForbidden, PrivateWorkNotFound
+from app.private_work.errors import (
+    PrivateWorkForbidden,
+    PrivateWorkInvalid,
+    PrivateWorkNotFound,
+)
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.errors import ProjectNotFound
@@ -143,6 +147,7 @@ async def test_begin_connect_freezes_scope_and_agent_ref_in_server_state() -> No
         context,
         "slack",
         agent_id,
+        channel_instance_id="instance-a",
         redirect_after="/projects/example/connections",
     )
 
@@ -150,6 +155,7 @@ async def test_begin_connect_freezes_scope_and_agent_ref_in_server_state() -> No
     method, call = repository.calls[-1]
     assert method == "create"
     assert call["scope"] == context.resource_scope
+    assert call["channel_instance_id"] == "instance-a"
     assert call["metadata"] == {
         "agent_asset_id": str(agent_id),
         "agent_scope": "project",
@@ -159,6 +165,45 @@ async def test_begin_connect_freezes_scope_and_agent_ref_in_server_state() -> No
     }
     assert call["redirect_after"] == "/projects/example/connections"
     assert revalidator.calls[-1][1] is Capability.PRIVATE_WORK_CREATE
+
+
+@pytest.mark.anyio
+async def test_begin_instance_connect_maps_invalid_provider_to_private_work_error() -> None:
+    repository = _Repository()
+    revalidator = _Revalidator()
+    context = _private_context()
+
+    with pytest.raises(PrivateWorkInvalid):
+        await _service(repository, revalidator).begin_connect(
+            context,
+            " ",
+            uuid.uuid4(),
+            channel_instance_id=str(uuid.uuid4()),
+        )
+
+
+@pytest.mark.anyio
+async def test_callback_rejects_code_issued_for_another_channel_instance() -> None:
+    repository = _Repository()
+    revalidator = _Revalidator()
+    repository.consumed = {
+        "project_id": str(uuid.uuid4()),
+        "owner_user_id": str(uuid.uuid4()),
+        "provider": "feishu",
+        "channel_instance_id": "instance-a",
+        "metadata": {},
+    }
+
+    with pytest.raises(PrivateWorkNotFound):
+        await _service(repository, revalidator).complete_callback(
+            "feishu",
+            "callback-state",
+            "external-account",
+            "workspace-1",
+            channel_instance_id="instance-b",
+        )
+
+    assert not any(method == "upsert" for method, _call in repository.calls)
 
 
 @pytest.mark.anyio
@@ -173,6 +218,7 @@ async def test_callback_uses_consumed_state_scope_and_revalidates_membership() -
         "project_id": str(state_project_id),
         "owner_user_id": str(state_owner_id),
         "provider": "slack",
+        "channel_instance_id": "instance-a",
         "metadata": {
             "agent_asset_id": str(agent_id),
             "agent_scope": "project",
@@ -208,6 +254,7 @@ async def test_callback_uses_consumed_state_scope_and_revalidates_membership() -
         "callback-state",
         "external-account",
         "workspace-1",
+        channel_instance_id="instance-a",
         metadata={"provider_value": "kept", "agent_asset_id": "untrusted"},
     )
 
@@ -230,6 +277,7 @@ async def test_callback_rejects_inactive_membership_without_upsert() -> None:
     repository.consumed = {
         "project_id": str(uuid.uuid4()),
         "owner_user_id": str(uuid.uuid4()),
+        "channel_instance_id": "instance-a",
         "metadata": {
             "membership_id": str(uuid.uuid4()),
             "membership_version": 7,
@@ -241,7 +289,13 @@ async def test_callback_rejects_inactive_membership_without_upsert() -> None:
         raise ProjectNotFound()
 
     with pytest.raises(PrivateWorkNotFound) as raised:
-        await _service(repository, revalidator, resolver=inactive).complete_callback("slack", "expired-authority", "external", "workspace")
+        await _service(repository, revalidator, resolver=inactive).complete_callback(
+            "slack",
+            "expired-authority",
+            "external",
+            "workspace",
+            channel_instance_id="instance-a",
+        )
 
     assert raised.value.request_id == "state-request"
     assert not any(method == "upsert" for method, _call in repository.calls)
@@ -256,6 +310,7 @@ async def test_callback_rejects_changed_membership_version_without_upsert() -> N
     repository.consumed = {
         "project_id": str(project_id),
         "owner_user_id": str(owner_id),
+        "channel_instance_id": "instance-a",
         "metadata": {
             "membership_id": str(uuid.uuid4()),
             "membership_version": 7,
@@ -278,7 +333,13 @@ async def test_callback_rejects_changed_membership_version_without_upsert() -> N
         )
 
     with pytest.raises(PrivateWorkNotFound):
-        await _service(repository, revalidator, resolver=changed).complete_callback("slack", "stale-authority", "external", "workspace")
+        await _service(repository, revalidator, resolver=changed).complete_callback(
+            "slack",
+            "stale-authority",
+            "external",
+            "workspace",
+            channel_instance_id="instance-a",
+        )
 
     assert not any(method == "upsert" for method, _call in repository.calls)
 
@@ -315,7 +376,12 @@ async def test_viewer_can_list_but_cannot_begin_or_disconnect() -> None:
 
     assert await service.list(context) == [{"id": "connection-1"}]
     with pytest.raises(PrivateWorkForbidden):
-        await service.begin_connect(context, "slack", uuid.uuid4())
+        await service.begin_connect(
+            context,
+            "slack",
+            uuid.uuid4(),
+            channel_instance_id="instance-a",
+        )
     with pytest.raises(PrivateWorkForbidden):
         await service.disconnect(context, "connection-1")
 
@@ -379,6 +445,7 @@ async def test_slack_binding_prefers_project_connection_service() -> None:
         "server-state",
         "U123",
         "T123",
+        channel_instance_id="slack",
         metadata={"team_id": "T123", "channel_id": "C123"},
         status="connected",
     )

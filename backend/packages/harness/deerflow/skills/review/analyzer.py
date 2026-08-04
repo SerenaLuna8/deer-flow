@@ -252,7 +252,7 @@ def _analyze_skill_md(
                 "structure.description-too-long",
                 severity="error",
                 path="SKILL.md",
-                message="Description exceeds DeerFlow's 1024 character limit.",
+                message="Description exceeds ActWeave's 1024 character limit.",
                 remediation=("Shorten the description and move detail into the body."),
             )
         )

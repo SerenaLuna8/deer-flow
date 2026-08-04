@@ -110,7 +110,7 @@ def test_generator_derives_public_catalog_from_current_source_directories(
                         "source_key": "builtin:skill:deerflow-core",
                         "kind": "skill",
                         "slug": "deerflow-core",
-                        "display_name": "DeerFlow Core",
+                        "display_name": "ActWeave Core",
                         "version": 1,
                         "payload_path": "content/deerflow-core-v1.skill.md",
                         "sha256": "0" * 64,
@@ -168,7 +168,7 @@ def test_generator_derives_public_catalog_from_current_source_directories(
 
 def _assert_skill_creator_builder_contract(instructions: str) -> None:
     assert "skill_manage" not in instructions
-    builder_heading = "## DeerFlow Skill Builder"
+    builder_heading = "## ActWeave Skill Builder"
     assert builder_heading in instructions
     builder_section = instructions.split(builder_heading, 1)[1].split("\n## ", 1)[0]
     assert "candidate package" in builder_section
@@ -184,7 +184,7 @@ def _assert_skill_creator_builder_contract(instructions: str) -> None:
     assert "Builder validation" in builder_section
     assert "Builder commit" in builder_section
     assert "explicit user confirmation" in builder_section
-    assert "Outside the dedicated DeerFlow Skill Builder" in builder_section
+    assert "Outside the dedicated ActWeave Skill Builder" in builder_section
 
 
 def test_skill_creator_source_and_packaged_archive_use_builder_candidate_protocol() -> None:

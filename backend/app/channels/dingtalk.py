@@ -16,6 +16,7 @@ import httpx
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.private_work.errors import PrivateWorkError
 
@@ -461,6 +462,8 @@ class DingTalkChannel(Channel):
         return ""
 
     async def _prepare_inbound(self, chat_id: str, inbound: InboundMessage) -> None:
+        if not await self._has_instance_authority():
+            return
         inbound = await self._attach_connection_identity(inbound)
         # Running reply must finish before publish_inbound so AI card tracks are
         # registered before the manager emits streaming outbounds.
@@ -492,6 +495,8 @@ class DingTalkChannel(Channel):
         conversation_id: str,
         code: str,
     ) -> bool:
+        if not await self._has_instance_authority():
+            return True
         connection_service = self.config.get("connection_service")
         if (self._connection_repo is None and connection_service is None) or not code:
             return False
@@ -516,7 +521,14 @@ class DingTalkChannel(Channel):
         }
         if connection_service is not None:
             try:
-                await connection_service.complete_callback("dingtalk", code, sender_staff_id, workspace_id, **fields)
+                await connection_service.complete_callback(
+                    "dingtalk",
+                    code,
+                    sender_staff_id,
+                    workspace_id,
+                    channel_instance_id=self.channel_instance_id,
+                    **fields,
+                )
             except PrivateWorkError:
                 await self._send_connection_reply(
                     conversation_type,
@@ -526,7 +538,12 @@ class DingTalkChannel(Channel):
                 )
                 return True
         else:
-            state = await self._connection_repo.consume_oauth_state(provider="dingtalk", state=code)
+            instance_id = persisted_channel_instance_id("dingtalk", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="dingtalk",
+                channel_instance_id=instance_id,
+                state=code,
+            )
             if state is None:
                 await self._send_connection_reply(
                     conversation_type,
@@ -538,6 +555,7 @@ class DingTalkChannel(Channel):
             await self._connection_repo.upsert_connection(
                 owner_user_id=state["owner_user_id"],
                 provider="dingtalk",
+                channel_instance_id=instance_id,
                 external_account_id=sender_staff_id,
                 workspace_id=workspace_id,
                 **fields,
@@ -546,7 +564,7 @@ class DingTalkChannel(Channel):
             conversation_type,
             sender_staff_id,
             conversation_id,
-            "DingTalk connected to DeerFlow.",
+            "DingTalk connected to ActWeave.",
         )
         return True
 
@@ -674,7 +692,7 @@ class DingTalkChannel(Channel):
                 headers=self._api_headers(token),
                 json={
                     "msgKey": "sampleMarkdown",
-                    "msgParam": json.dumps({"title": "DeerFlow", "text": text}),
+                    "msgParam": json.dumps({"title": "ActWeave", "text": text}),
                     "robotCode": robot_code,
                     "userIds": [user_id],
                 },
@@ -705,7 +723,7 @@ class DingTalkChannel(Channel):
                 headers=self._api_headers(token),
                 json={
                     "msgKey": "sampleMarkdown",
-                    "msgParam": json.dumps({"title": "DeerFlow", "text": text}),
+                    "msgParam": json.dumps({"title": "ActWeave", "text": text}),
                     "robotCode": robot_code,
                     "openConversationId": conversation_id,
                 },

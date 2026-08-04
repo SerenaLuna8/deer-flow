@@ -41,7 +41,10 @@ from app.shared_assets.mcp_service import (
     McpCredentialSlotView,
     McpDefinition,
     McpService,
+    McpToolInventoryView,
+    McpToolView,
     McpVersionView,
+    ProjectMcpConfiguredCreateResult,
 )
 from app.shared_assets.models import (
     AgentModelSettings,
@@ -116,6 +119,8 @@ __all__ = [
     "McpCredentialSlotView",
     "McpDefinition",
     "McpService",
+    "McpToolInventoryView",
+    "McpToolView",
     "McpVersionView",
     "MaterializedMcpSecrets",
     "MAX_AGENT_INSTRUCTION_FIELD_BYTES",
@@ -123,6 +128,7 @@ __all__ = [
     "ProjectAssetResolver",
     "ProjectDefaultAgentSelection",
     "ProjectDefaultAgentService",
+    "ProjectMcpConfiguredCreateResult",
     "ProjectSkillArchiveCreateResult",
     "ResolvedAgentSnapshot",
     "ResolvedAssetSnapshot",

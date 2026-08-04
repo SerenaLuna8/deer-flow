@@ -9,7 +9,10 @@ import {
   CredentialRevokeDialog,
   CredentialSecretDialog,
 } from "@/components/admin/assets/admin-asset-dialogs";
-import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
+import {
+  adminAssetErrorMessage,
+  adminCredentialTypeLabel,
+} from "@/components/admin/assets/admin-asset-view-model";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,14 +30,16 @@ import {
   revokeProjectCredential,
   useProjectAssets,
   useProjectAssetVersions,
+  type AdminProjectAssetStatusAction,
   type AssetListKind,
   type AssetVersion,
   type ProjectAssetList,
   type ProjectAssetItem,
-  type ProjectAssetStatusAction,
   type ProjectCredentialList,
   type ProjectCredentialItem,
   type CreateCredentialInput,
+  CREDENTIAL_PAYLOAD_GROUPS,
+  type CredentialPayloadGroup,
   type ReplaceCredentialInput,
 } from "@/core/shared-assets";
 
@@ -47,20 +52,17 @@ import {
 } from "./credential-delete-dialog";
 import { ProjectAssetSection } from "./project-asset-section";
 import {
+  adminProjectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
-  projectAssetDetailLifecycleActions,
 } from "./project-asset-view-model";
 import { SystemAssetSection } from "./system-asset-section";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
-type CredentialPayloadGroup = "env" | "headers" | "oauth";
 
 export type CredentialPayloadField = {
   group: CredentialPayloadGroup;
   field: string;
 };
-
-const CREDENTIAL_PAYLOAD_GROUPS = ["env", "headers", "oauth"] as const;
 
 export function credentialPayloadFieldsFromVersions(
   versions: AssetVersion[],
@@ -238,7 +240,12 @@ export function ProjectCredentialCatalogView({
                         <dt className="text-muted-foreground text-xs">
                           {t.adminAssets.common.type}
                         </dt>
-                        <dd>{credential.credential_type}</dd>
+                        <dd>
+                          {adminCredentialTypeLabel(
+                            credential.credential_type,
+                            t.adminAssets.common.credentialTypes,
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt className="text-muted-foreground text-xs">
@@ -386,7 +393,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   error?: unknown;
   actionError?: unknown;
   pending?: boolean;
-  onChangeStatus?: (action: ProjectAssetStatusAction<Kind>) => void;
+  onChangeStatus?: (action: AdminProjectAssetStatusAction<Kind>) => void;
   onPublish?: (version: AssetVersion) => void;
   onSubmit?: (version: McpVersion) => void;
   onApprove?: (
@@ -407,11 +414,13 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   return (
     <div className="border-border/70 mt-4 space-y-3 border-t pt-4">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold">
-          {t.adminAssets.common.versionHistory}
-        </h3>
+        {kind !== "mcp-servers" ? (
+          <h3 className="text-sm font-semibold">
+            {t.adminAssets.common.versionHistory}
+          </h3>
+        ) : null}
         <div className="flex flex-wrap gap-2">
-          {projectAssetDetailLifecycleActions(kind, item).map((action) => (
+          {adminProjectAssetDetailLifecycleActions(kind, item).map((action) => (
             <Button
               key={action}
               type="button"
@@ -440,6 +449,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
           kind={kind}
           scope={item.scope}
           versions={versions}
+          currentVersionId={item.current_published_version_id}
           pending={pending}
           approvalCredentials={approvalCredentials}
           approvalCredentialsLoading={approvalCredentialsLoading}

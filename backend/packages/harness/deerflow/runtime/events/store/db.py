@@ -39,7 +39,7 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
-_EXECUTABLE_ROLES = frozenset({"admin", "editor", "runner"})
+_EXECUTABLE_ROLES = frozenset({"admin", "editor", "runner", "channel_guest"})
 _STREAM_EVENT_NAME_METADATA_KEY = "stream_event_name"
 
 

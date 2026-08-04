@@ -271,8 +271,11 @@ export default function SetupPage() {
         />
         <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
           <div className="text-center">
-            <h1 className="font-serif text-3xl">DeerFlow</h1>
-            <p className="text-muted-foreground mt-2">
+            <h1 className="font-serif text-3xl">ActWeave</h1>
+            <p className="text-muted-foreground mt-1 text-sm">
+              Weave intelligence into action.
+            </p>
+            <p className="text-muted-foreground mt-3">
               {t.setup.initAdminTitle}
             </p>
             <p className="text-muted-foreground mt-1 text-xs">
@@ -350,8 +353,11 @@ export default function SetupPage() {
       />
       <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
         <div className="text-center">
-          <h1 className="font-serif text-3xl">DeerFlow</h1>
-          <p className="text-muted-foreground mt-2">
+          <h1 className="font-serif text-3xl">ActWeave</h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            Weave intelligence into action.
+          </p>
+          <p className="text-muted-foreground mt-3">
             {t.setup.completeAdminTitle}
           </p>
           <p className="text-muted-foreground mt-1 text-xs">

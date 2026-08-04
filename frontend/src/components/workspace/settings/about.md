@@ -1,8 +1,8 @@
-# 🦌 [About DeerFlow 2.0](https://github.com/bytedance/deer-flow)
+# 🦌 [About ActWeave](https://github.com/SerenaLuna8/deer-flow)
 
-> **From Open Source, Back to Open Source**
+> **Weave intelligence into action.**
 
-**DeerFlow** (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is a community-driven SuperAgent harness that researches, codes, and creates.
+**ActWeave** is a community-driven SuperAgent harness that researches, codes, and creates.
 With the help of sandboxes, memories, tools and skills, it handles
 different levels of tasks that could take minutes to hours.
 
@@ -10,27 +10,30 @@ different levels of tasks that could take minutes to hours.
 
 ## 🌟 GitHub Repository
 
-Explore DeerFlow on GitHub: [github.com/bytedance/deer-flow](https://github.com/bytedance/deer-flow)
+Explore ActWeave on GitHub: [github.com/SerenaLuna8/deer-flow](https://github.com/SerenaLuna8/deer-flow)
 
-## 🌐 Official Website
+## 🌱 Heritage
 
-Visit the official website of DeerFlow: [deerflow.tech](https://deerflow.tech/)
+ActWeave continues the work of the upstream
+[DeerFlow project](https://github.com/bytedance/deer-flow). Its historical
+website remains available at [deerflow.tech](https://deerflow.tech/).
 
 ## 📧 Support
 
-If you have any questions or need help, please contact us at [support@deerflow.tech](mailto:support@deerflow.tech).
+If you have any questions or need help, open an issue in the
+[ActWeave repository](https://github.com/SerenaLuna8/deer-flow/issues).
 
 ---
 
 ## 📜 License
 
-DeerFlow is proudly open source and distributed under the **MIT License**.
+ActWeave is proudly open source and distributed under the **MIT License**.
 
 ---
 
 ## 🙌 Acknowledgments
 
-We extend our heartfelt gratitude to the open source projects and contributors who have made DeerFlow a reality. We truly stand on the shoulders of giants.
+We extend our heartfelt gratitude to the open source projects, the upstream DeerFlow project, and all contributors who have made ActWeave possible. We truly stand on the shoulders of giants.
 
 ### Core Frameworks
 
@@ -43,13 +46,13 @@ We extend our heartfelt gratitude to the open source projects and contributors w
 - **[Shadcn](https://ui.shadcn.com/)**: Minimalistic components that power our UI.
 - **[SToneX](https://github.com/stonexer)**: For his invaluable contribution to token-by-token visual effects.
 
-These outstanding projects form the backbone of DeerFlow and exemplify the transformative power of open source collaboration.
+These outstanding projects form the backbone of ActWeave and exemplify the transformative power of open source collaboration.
 
 ### Special Thanks
 
-Finally, we want to express our heartfelt gratitude to the core authors of DeerFlow 1.0 and 2.0:
+Finally, we want to express our heartfelt gratitude to the core authors of the upstream DeerFlow 1.0 and 2.0 releases:
 
 - **[Daniel Walnut](https://github.com/hetaoBackend/)**
 - **[Henry Li](https://github.com/magiccube/)**
 
-Without their vision, passion and dedication, `DeerFlow` would not be what it is today.
+Without their vision, passion and dedication, ActWeave would not exist today.

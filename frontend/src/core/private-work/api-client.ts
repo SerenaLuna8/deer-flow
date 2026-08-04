@@ -74,7 +74,7 @@ export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
     return frame;
   }
   // LangGraph's stream consumer only enters its error state for `event:error`.
-  // DeerFlow's durable protocol closes every Run with `event:end` and carries
+  // ActWeave's durable protocol closes every Run with `event:end` and carries
   // the authoritative outcome in `data.status`, so translate only failed
   // terminal outcomes while preserving the durable event ID/cursor.
   return {

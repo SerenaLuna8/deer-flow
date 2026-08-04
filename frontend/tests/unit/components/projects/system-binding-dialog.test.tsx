@@ -22,6 +22,16 @@ rs.mock("@/components/ui/button", () => ({
         }
       ).__systemBindingHistoryRetry = onClick as (() => unknown) | undefined;
     }
+    if (
+      (props as Record<string, unknown>)["data-testid"] ===
+      "system-mcp-binding-submit"
+    ) {
+      (
+        globalThis as typeof globalThis & {
+          __systemMcpBindingSubmit?: () => unknown;
+        }
+      ).__systemMcpBindingSubmit = onClick as (() => unknown) | undefined;
+    }
     return <button {...props}>{children}</button>;
   },
 }));
@@ -52,6 +62,7 @@ rs.mock("@/core/shared-assets", () => ({
   useEnableProjectSystemBinding: rs.fn(),
   useProjectAssetVersions: rs.fn(),
   useRollbackProjectSystemBinding: rs.fn(),
+  useSyncCurrentProjectSystemMcpBinding: rs.fn(),
   useUpgradeProjectSystemBinding: rs.fn(),
 }));
 
@@ -62,6 +73,7 @@ import {
   useEnableProjectSystemBinding,
   useProjectAssetVersions,
   useRollbackProjectSystemBinding,
+  useSyncCurrentProjectSystemMcpBinding,
   useUpgradeProjectSystemBinding,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
@@ -132,7 +144,7 @@ function mutation() {
   };
 }
 
-function prepareMutations() {
+function prepareMutations(syncMutation = mutation()) {
   rs.mocked(useDisableProjectSystemBinding).mockReturnValue(
     mutation() as never,
   );
@@ -143,6 +155,10 @@ function prepareMutations() {
   rs.mocked(useUpgradeProjectSystemBinding).mockReturnValue(
     mutation() as never,
   );
+  rs.mocked(useSyncCurrentProjectSystemMcpBinding).mockReturnValue(
+    syncMutation as never,
+  );
+  return syncMutation;
 }
 
 describe("SystemBindingDialog submission availability", () => {
@@ -267,7 +283,7 @@ describe("SystemBindingDialog history retry", () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  test("shows unsupported historical MCP versions but prevents binding them", () => {
+  test("shows only the current MCP configuration and fails closed when it is unavailable", () => {
     prepareMutations();
     rs.mocked(useProjectAssetVersions).mockReturnValue({
       data: {
@@ -321,10 +337,210 @@ describe("SystemBindingDialog history retry", () => {
       />,
     );
 
-    expect(html).toContain("版本 1（不可用）");
+    expect(html).not.toContain("配置 #1");
+    expect(html).not.toContain("<select");
     expect(html).toContain("Private runtime 仅支持 stdio、SSE 或 HTTP");
-    expect(html).toContain(
-      'option value="22222222-2222-4222-8222-222222222222" disabled=""',
+    expect(html).toContain("当前没有可启用的已发布配置");
+    expect(html).not.toContain("版本");
+  });
+
+  test("offers one update action for the authoritative current MCP configuration", () => {
+    prepareMutations();
+    const previousVersionId = "33333333-3333-4333-8333-333333333333";
+    const definition = {
+      description: "Current MCP",
+      transport: "http" as const,
+      command: null,
+      args: [],
+      url: "https://mcp.example.test/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
+    };
+    rs.mocked(useProjectAssetVersions).mockReturnValue({
+      data: {
+        data: [
+          {
+            id: PUBLISHED_VERSION_ID,
+            mcp_server_id: SYSTEM_ASSET_ID,
+            version_number: 2,
+            workflow_status: "published",
+            definition,
+            credential_slots: [],
+            credential_grants: [],
+            supersedes_version_id: previousVersionId,
+            payload_checksum: "b".repeat(64),
+            submitted_at: null,
+            reviewed_at: null,
+            reviewed_by_user_id: null,
+            created_by_user_id: "user-1",
+            created_at: "2026-07-22T00:00:00Z",
+          },
+          {
+            id: previousVersionId,
+            mcp_server_id: SYSTEM_ASSET_ID,
+            version_number: 1,
+            workflow_status: "published",
+            definition: { ...definition, description: "Historical MCP" },
+            credential_slots: [],
+            credential_grants: [],
+            supersedes_version_id: null,
+            payload_checksum: "a".repeat(64),
+            submitted_at: null,
+            reviewed_at: null,
+            reviewed_by_user_id: null,
+            created_by_user_id: "user-1",
+            created_at: "2026-07-21T00:00:00Z",
+          },
+        ],
+        request_id: "request-1",
+      },
+      error: null,
+      isFetching: false,
+      isLoading: false,
+      refetch: rs.fn(),
+    } as never);
+
+    const html = renderToStaticMarkup(
+      <SystemBindingDialog
+        accountId="account-1"
+        projectId="project-1"
+        kind="mcp-servers"
+        item={{
+          ...SYSTEM_ASSET,
+          binding: {
+            project_id: "project-1",
+            kind: "mcp",
+            asset_id: SYSTEM_ASSET_ID,
+            version_id: previousVersionId,
+            enabled: true,
+            version: 1,
+            created_by_user_id: "user-1",
+            updated_by_user_id: "user-1",
+            created_at: "2026-07-21T00:00:00Z",
+            updated_at: "2026-07-21T00:00:00Z",
+          },
+        }}
+        open
+        onOpenChange={rs.fn()}
+      />,
     );
+
+    expect(html).toContain("有配置更新");
+    expect(html).toContain("更新到当前配置");
+    expect(html).not.toContain("<select");
+    expect(html).not.toContain("配置 #");
+    expect(html).not.toContain("Historical MCP");
+  });
+
+  test("clicking sync-current omits a missing binding revision and preserves an existing one", () => {
+    const syncMutation = prepareMutations();
+    rs.mocked(useProjectAssetVersions).mockReturnValue({
+      data: {
+        data: [
+          {
+            id: PUBLISHED_VERSION_ID,
+            mcp_server_id: SYSTEM_ASSET_ID,
+            version_number: 2,
+            workflow_status: "published",
+            definition: {
+              description: "Current MCP",
+              transport: "http",
+              command: null,
+              args: [],
+              url: "https://mcp.example.test/mcp",
+              env: {},
+              headers: {},
+              oauth: {},
+              routing: {},
+              tool_overrides: {},
+              timeout_seconds: 30,
+              credential_slots: [],
+            },
+            credential_slots: [],
+            credential_grants: [],
+            supersedes_version_id: null,
+            payload_checksum: "b".repeat(64),
+            submitted_at: null,
+            reviewed_at: null,
+            reviewed_by_user_id: null,
+            created_by_user_id: "user-1",
+            created_at: "2026-07-22T00:00:00Z",
+          },
+        ],
+        request_id: "request-1",
+      },
+      error: null,
+      isFetching: false,
+      isLoading: false,
+      refetch: rs.fn(),
+    } as never);
+
+    delete (
+      globalThis as typeof globalThis & {
+        __systemMcpBindingSubmit?: () => unknown;
+      }
+    ).__systemMcpBindingSubmit;
+    renderToStaticMarkup(
+      <SystemBindingDialog
+        accountId="account-1"
+        projectId="project-1"
+        kind="mcp-servers"
+        item={SYSTEM_ASSET}
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+    const submitWithoutBinding = (
+      globalThis as typeof globalThis & {
+        __systemMcpBindingSubmit?: () => unknown;
+      }
+    ).__systemMcpBindingSubmit;
+    expect(submitWithoutBinding).toBeDefined();
+    submitWithoutBinding?.();
+    expect(syncMutation.mutate).toHaveBeenLastCalledWith({
+      assetId: SYSTEM_ASSET_ID,
+      input: {},
+    });
+
+    renderToStaticMarkup(
+      <SystemBindingDialog
+        accountId="account-1"
+        projectId="project-1"
+        kind="mcp-servers"
+        item={{
+          ...SYSTEM_ASSET,
+          binding: {
+            project_id: "project-1",
+            kind: "mcp",
+            asset_id: SYSTEM_ASSET_ID,
+            version_id: "33333333-3333-4333-8333-333333333333",
+            enabled: false,
+            version: 7,
+            created_by_user_id: "user-1",
+            updated_by_user_id: "user-1",
+            created_at: "2026-07-21T00:00:00Z",
+            updated_at: "2026-07-21T00:00:00Z",
+          },
+        }}
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+    const submitWithBinding = (
+      globalThis as typeof globalThis & {
+        __systemMcpBindingSubmit?: () => unknown;
+      }
+    ).__systemMcpBindingSubmit;
+    expect(submitWithBinding).toBeDefined();
+    submitWithBinding?.();
+    expect(syncMutation.mutate).toHaveBeenLastCalledWith({
+      assetId: SYSTEM_ASSET_ID,
+      input: { expected_binding_version: 7 },
+    });
   });
 });

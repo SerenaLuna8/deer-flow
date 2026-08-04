@@ -1,4 +1,4 @@
-"""Browser cookie policy layered over DeerFlow's durable PostgreSQL sessions."""
+"""Browser cookie policy layered over ActWeave's durable PostgreSQL sessions."""
 
 from __future__ import annotations
 

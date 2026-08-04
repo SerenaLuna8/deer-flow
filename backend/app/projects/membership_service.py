@@ -117,6 +117,11 @@ class MembershipService:
         expected_version: int,
     ) -> MembershipView:
         context.require(Capability.PROJECT_MEMBERS_MANAGE)
+        if role is ProjectRole.CHANNEL_GUEST:
+            # Channel guest identities are created and managed only by the
+            # internal group-binding repository.  Public role changes must not
+            # mint or convert one.
+            raise ProjectNotFound()
         async with self.repository.transaction():
             project, target = await self.repository.lock_project_and_member(context, membership_id)
             self._require_version(target.version, expected_version)

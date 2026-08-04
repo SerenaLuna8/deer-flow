@@ -54,6 +54,8 @@ class MembershipRepository:
                         ProjectRow.status == "active",
                         ProjectRow.is_suspended.is_(False),
                         ProjectMembershipRow.status == "active",
+                        ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
+                        UserRow.principal_type == "human",
                         self._actor_scope(context),
                     )
                     .order_by(ProjectMembershipRow.created_at, ProjectMembershipRow.id)
@@ -93,6 +95,7 @@ class MembershipRepository:
                 ProjectMembershipRow.id == membership_id,
                 ProjectMembershipRow.project_id == context.project_id,
                 ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
             )
             .with_for_update()
         )
@@ -155,6 +158,8 @@ class MembershipRepository:
             .where(
                 ProjectMembershipRow.id == membership_id,
                 ProjectMembershipRow.project_id == project_id,
+                ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
+                UserRow.principal_type == "human",
             )
         )
         rows = (await self.session.execute(statement)).all()
@@ -165,6 +170,8 @@ class MembershipRepository:
 
     @staticmethod
     def _view(membership: ProjectMembershipRow, user: UserRow) -> MembershipView:
+        if user.principal_type != "human" or user.email is None:
+            raise ProjectNotFound()
         try:
             role = ProjectRole(membership.role)
             user_id = uuid.UUID(user.id)

@@ -32,6 +32,10 @@ rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: () => false }));
 
 import AdminLayout from "@/app/admin/layout";
 import {
+  AddProjectMcpDialogContent,
+  configuredMcpInput,
+  projectMcpAuthFieldDraft,
+  projectMcpConfigurationDialogCopy,
   skillMarkdownTemplate,
   McpVersionFields,
   SkillVersionFields,
@@ -52,6 +56,10 @@ import {
   versionWorkflowActions,
 } from "@/components/admin/assets/admin-asset-page";
 import {
+  projectMcpCredentialErrorMessage,
+  projectMcpVersionErrorMessage,
+} from "@/components/admin/assets/admin-asset-view-model";
+import {
   AdminAssetsNavigation,
   AdminAssetsShell,
 } from "@/components/admin/assets/admin-assets-shell";
@@ -69,6 +77,8 @@ import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { I18nProvider } from "@/core/i18n/context";
 import type { Locale } from "@/core/i18n/locale";
+import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
   sharedAssetKeys,
   SharedAssetApiError,
@@ -593,7 +603,7 @@ describe("admin asset access and credential safety", () => {
             scope: "system",
             project_id: null,
             slug: "deerflow-docs",
-            display_name: "DeerFlow Docs",
+            display_name: "ActWeave Docs",
             status: "active",
             current_published_version_id:
               "21111111-1111-4111-8111-111111111111",
@@ -747,13 +757,7 @@ describe("admin asset access and credential safety", () => {
       renderLocalized(createElement(McpVersionFields)),
     ].join("\n");
 
-    for (const label of [
-      "媒体类型",
-      "传输方式",
-      "URL",
-      "凭据槽位",
-      "凭据字段分组",
-    ]) {
+    for (const label of ["媒体类型", "传输方式", "MCP 服务地址", "身份认证"]) {
       expect(html).toContain(label);
     }
     for (const english of [
@@ -774,12 +778,24 @@ describe("admin asset access and credential safety", () => {
     const html = renderLocalized(createElement(McpVersionFields));
 
     expect(html).toContain('<option value="sse"');
-    expect(html).toContain('<option value="http"');
+    expect(html.indexOf('<option value="http"')).toBeLessThan(
+      html.indexOf('<option value="sse"'),
+    );
+    expect(html).toContain("HTTP（Streamable HTTP）");
     expect(html).toContain('name="url"');
     expect(html).toContain('required=""');
-    expect(html).toContain("执行器访问");
-    expect(html).toContain("平台批准的精确 HTTPS 地址");
-    expect(html).toContain("实际超时由平台控制");
+    expect(html).toContain('placeholder="http://localhost:8771/api/mcp"');
+    expect(html).toContain('name="auth_mode"');
+    expect(html).toContain('value="headers"');
+    expect(html).toContain('value="query"');
+    expect(html).toContain('value="none"');
+    expect(html).toContain("请求头");
+    expect(html).toContain("查询参数");
+    expect(html).toContain("不需要认证");
+    expect(html).not.toContain('name="needs_project_credential"');
+    expect(html).not.toContain('name="slot_group"');
+    expect(html).not.toContain('name="slot_name"');
+    expect(html).not.toContain('name="slot_fields"');
     expect(html).not.toContain('<option value="stdio"');
     expect(html).not.toContain('<option value="streamable_http"');
     expect(html).not.toContain('<option value="env"');
@@ -787,35 +803,275 @@ describe("admin asset access and credential safety", () => {
     expect(html).not.toContain('name="command"');
     expect(html).not.toContain('name="args"');
     expect(html).not.toContain('name="timeout_seconds"');
+    expect(html).not.toContain('name="cidr"');
+    expect(html).not.toContain('name="allowed_networks"');
+  });
+
+  test("prefills the complete Project MCP endpoint path when editing", () => {
+    const version: Extract<AssetVersion, { mcp_server_id: string }> = {
+      id: "11111111-1111-4111-8111-111111111111",
+      mcp_server_id: "21111111-1111-4111-8111-111111111111",
+      version_number: 3,
+      workflow_status: "published",
+      definition: {
+        description: "Transfer resource MCP",
+        transport: "http",
+        command: null,
+        args: [],
+        url: "http://127.0.0.1:8771/api/mcp",
+        env: {},
+        headers: {},
+        oauth: {},
+        routing: {},
+        tool_overrides: {},
+        timeout_seconds: 30,
+        credential_slots: [],
+      },
+      credential_slots: [],
+      credential_grants: [],
+      supersedes_version_id: null,
+      payload_checksum: "mcp-checksum",
+      submitted_at: null,
+      reviewed_at: null,
+      reviewed_by_user_id: null,
+      created_by_user_id: "admin",
+      created_at: "2026-07-13T08:00:00+00:00",
+    };
+
+    const html = renderLocalized(
+      <Dialog open>
+        <AddProjectMcpDialogContent
+          pending={false}
+          errorMessage={null}
+          editConfiguration={{
+            asset: {
+              id: version.mcp_server_id,
+              scope: "project",
+              project_id: "31111111-1111-4111-8111-111111111111",
+              slug: "transfer-resource-mcp",
+              display_name: "Transfer resource MCP",
+              status: "active",
+              current_published_version_id: version.id,
+              version: 7,
+              created_by_user_id: "admin",
+              created_at: "2026-07-13T08:00:00+00:00",
+              updated_at: "2026-07-13T08:00:00+00:00",
+            },
+            version,
+          }}
+          onSubmit={() => undefined}
+        />
+      </Dialog>,
+    );
+
+    expect(html).toContain('name="url"');
+    expect(html).toContain('value="http://127.0.0.1:8771/api/mcp"');
+    expect(html).not.toContain('value="http://127.0.0.1:8771"');
+    expect(html).toContain("安全预览");
+    expect(html).toContain("lg:grid-cols-[minmax(0,1fr)_minmax(24rem,0.95fr)]");
+  });
+
+  test("describes invalid project MCP URLs in both locales", () => {
+    expect(zhCN.adminAssets.runtime.invalidProjectUrl).toContain(
+      "localhost 或规范格式的 IPv4/IPv6 字面量",
+    );
+    expect(enUS.adminAssets.runtime.invalidProjectUrl).toContain(
+      "localhost or a canonical IPv4/IPv6 literal",
+    );
+  });
+
+  test("switches only the default auth field between header and query modes", () => {
+    expect(projectMcpAuthFieldDraft("headers", "key")).toBe("Authorization");
+    expect(projectMcpAuthFieldDraft("query", "Authorization")).toBe("key");
+    expect(projectMcpAuthFieldDraft("headers", "X-Tenant")).toBe("X-Tenant");
+    expect(projectMcpAuthFieldDraft("query", "tenant_id")).toBe("tenant_id");
+  });
+
+  test("adds a project MCP in one form and uses configuration terminology", () => {
+    const addHtml = renderLocalized(
+      <Dialog open>
+        <AddProjectMcpDialogContent
+          pending={false}
+          errorMessage={null}
+          onSubmit={() => undefined}
+        />
+      </Dialog>,
+    );
+    const editCopy = projectMcpConfigurationDialogCopy(
+      false,
+      zhCN.adminAssets.dialogs,
+    );
+
+    expect(addHtml).toContain("添加 MCP");
+    expect(addHtml).toContain('name="display_name"');
+    expect(addHtml).toContain('name="slug"');
+    expect(addHtml).toContain('name="description"');
+    expect(addHtml).toContain('name="transport"');
+    expect(addHtml).toContain('name="url"');
+    expect(addHtml).toContain('name="auth_mode"');
+    expect(addHtml).toContain("安全预览");
+    expect(addHtml).toContain("发布流程");
+    expect(addHtml).not.toContain('name="slot_name"');
+    expect(addHtml).not.toContain("一次填写服务信息和配置");
+    expect(addHtml).not.toContain("等待项目 Admin 审批");
+    expect(addHtml).not.toContain("JSON");
+    expect(editCopy).toEqual({ title: "编辑配置", submit: "保存配置" });
+
+    const form = new FormData();
+    form.set("display_name", " 高德地图 MCP ");
+    form.set("slug", "amap-mcp");
+    form.set("description", "地图与路线规划");
+    form.set("transport", "http");
+    form.set("url", " http://localhost:8771/api/mcp ");
+    form.set("auth_mode", "query");
+    form.set("slot_fields", "key");
+
+    expect(configuredMcpInput(form)).toEqual({
+      slug: "amap-mcp",
+      display_name: "高德地图 MCP",
+      description: "地图与路线规划",
+      transport: "http",
+      command: null,
+      args: [],
+      url: "http://localhost:8771/api/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [
+        {
+          name: "auth",
+          purpose: "MCP query parameter authentication",
+          payload_schema: { query: ["key"] },
+          required: true,
+        },
+      ],
+    });
+    expect(configuredMcpInput(form)).not.toHaveProperty(
+      "expected_asset_version",
+    );
+
+    form.set("auth_mode", "none");
+    expect(configuredMcpInput(form).credential_slots).toEqual([]);
   });
 
   test("project MCP version input clears stale local-process fields", () => {
     const form = new FormData();
     form.set("description", "Remote MCP");
     form.set("transport", "sse");
-    form.set("url", " https://mcp.example.test/sse ");
+    form.set("url", " https://10.0.0.8/sse ");
     form.set("command", "npx");
     form.set("args", "--yes,server");
     form.set("timeout_seconds", "999");
-    form.set("slot_name", "api-token");
-    form.set("slot_group", "oauth");
-    form.set("slot_fields", "Authorization");
+    form.set("auth_mode", "query");
+    form.set("slot_fields", "key");
 
     expect(versionInput("mcp-servers", form, 4)).toMatchObject({
       description: "Remote MCP",
       transport: "sse",
-      url: "https://mcp.example.test/sse",
+      url: "https://10.0.0.8/sse",
       command: null,
       args: [],
       timeout_seconds: 30,
       credential_slots: [
         {
-          name: "api-token",
-          payload_schema: { headers: ["Authorization"] },
+          name: "auth",
+          payload_schema: { query: ["key"] },
         },
       ],
       expected_asset_version: 4,
     });
+  });
+
+  test.each([
+    "http://localhost:8771/api/mcp",
+    "http://LOCALHOST:8771/api/mcp",
+    "https://127.0.0.1:9443/mcp",
+    "http://10.20.30.40/mcp",
+    "http://[::1]:8771/api/mcp",
+    "https://[fd00::1234]/mcp",
+  ])("accepts a canonical Project MCP IP or localhost URL: %s", (url) => {
+    const form = new FormData();
+    form.set("display_name", "Internal MCP");
+    form.set("slug", "internal-mcp");
+    form.set("transport", "http");
+    form.set("url", url);
+    form.set("auth_mode", "none");
+
+    expect(configuredMcpInput(form).url).toBe(url);
+  });
+
+  test.each([
+    "http://user:password@localhost:8771/api/mcp",
+    "http://localhost:8771/api/mcp#tools",
+    "ftp://trans-resource.internal/api/mcp",
+    "http://localhost:0/api/mcp",
+    "http://*/api/mcp",
+    "http://trans-resource:8771/api/mcp",
+    "https://mcp.internal/api/mcp",
+    "https://mcp.example.com/api/mcp",
+    "http://localhost./api/mcp",
+    "http://foo.localhost/api/mcp",
+    "http://127.1/api/mcp",
+    "http://0x7f.0.0.1/api/mcp",
+    "http://0177.0.0.1/api/mcp",
+    "http://[0:0:0:0:0:0:0:1]/api/mcp",
+    "http://[FD00::1234]/api/mcp",
+    "not-a-url",
+  ])("rejects an unsafe or invalid Project MCP URL: %s", (url) => {
+    const form = new FormData();
+    form.set("transport", "http");
+    form.set("url", url);
+
+    expect(() => configuredMcpInput(form)).toThrow("HTTP 或 HTTPS");
+  });
+
+  test("rejects URL query secrets without echoing their value", () => {
+    const form = new FormData();
+    form.set("transport", "http");
+    form.set(
+      "url",
+      "http://localhost:8771/api/mcp?key=credential-secret-sentinel",
+    );
+
+    expect(() => versionInput("mcp-servers", form, 4)).toThrow(
+      "URL 不能包含查询参数",
+    );
+    try {
+      versionInput("mcp-servers", form, 4);
+    } catch (error) {
+      expect(String(error)).not.toContain("credential-secret-sentinel");
+    }
+  });
+
+  test("requires a field name for request-header and query authentication", () => {
+    const missingFields = new FormData();
+    missingFields.set("transport", "http");
+    missingFields.set("url", "http://localhost:8771/api/mcp");
+    missingFields.set("auth_mode", "query");
+
+    expect(() => versionInput("mcp-servers", missingFields, 4)).toThrow(
+      "查询参数名称",
+    );
+  });
+
+  test("rejects a pasted Authorization secret without echoing it", () => {
+    const form = new FormData();
+    form.set("transport", "http");
+    form.set("url", "http://localhost:8771/api/mcp");
+    form.set("auth_mode", "headers");
+    form.set("slot_fields", "Authorization: Basic credential-secret-sentinel");
+
+    expect(() => versionInput("mcp-servers", form, 4)).toThrow(
+      "只填写请求头名称",
+    );
+    try {
+      versionInput("mcp-servers", form, 4);
+    } catch (error) {
+      expect(String(error)).not.toContain("credential-secret-sentinel");
+    }
   });
 
   test("blank Skill authoring provides a valid immutable SKILL.md envelope", () => {
@@ -1000,6 +1256,79 @@ describe("admin asset access and credential safety", () => {
     ).not.toContain("publish");
   });
 
+  test("MCP details present only the current configuration without revision history", () => {
+    const mcpVersion: Extract<AssetVersion, { mcp_server_id: string }> = {
+      id: "11111111-1111-4111-8111-111111111111",
+      mcp_server_id: "21111111-1111-4111-8111-111111111111",
+      version_number: 3,
+      workflow_status: "pending_approval",
+      definition: {
+        description: "Maps",
+        transport: "http",
+        command: null,
+        args: [],
+        url: "https://mcp.example.test/mcp",
+        env: {},
+        headers: {},
+        oauth: {},
+        routing: {},
+        tool_overrides: {},
+        timeout_seconds: 30,
+        credential_slots: [],
+      },
+      credential_slots: [],
+      credential_grants: [],
+      supersedes_version_id: null,
+      payload_checksum: "mcp-checksum",
+      submitted_at: null,
+      reviewed_at: null,
+      reviewed_by_user_id: null,
+      created_by_user_id: "admin",
+      created_at: "2026-07-13T08:00:00+00:00",
+    };
+    const historicalMcpVersion = {
+      ...mcpVersion,
+      id: "31111111-1111-4111-8111-111111111111",
+      version_number: 2,
+      definition: { ...mcpVersion.definition, description: "Historical Maps" },
+    };
+    const html = renderLocalized(
+      createElement(AssetVersionHistory, {
+        kind: "mcp-servers",
+        scope: "project",
+        versions: [mcpVersion, historicalMcpVersion],
+        onApprove: () => undefined,
+      }),
+    );
+
+    expect(html).not.toContain("配置 #3");
+    expect(html).not.toContain("配置 #2");
+    expect(html).not.toContain("<details");
+    expect(html).toContain("当前配置");
+    expect(html).not.toContain("上一配置");
+    expect(html).not.toContain("Historical Maps");
+    expect(html).not.toContain("版本 3");
+    expect(html).not.toContain("发布版本");
+
+    const publishedMcpVersion = {
+      ...mcpVersion,
+      workflow_status: "published" as const,
+    };
+    const timeline = renderLocalized(
+      createElement(VersionTimeline, {
+        kind: "mcp-servers",
+        versions: [historicalMcpVersion, publishedMcpVersion],
+        currentVersionId: publishedMcpVersion.id,
+      }),
+    );
+    expect(timeline).not.toContain("配置 #3");
+    expect(timeline).not.toContain("配置 #2");
+    expect(timeline).not.toContain("admin-version-row");
+    expect(timeline).not.toContain("Historical Maps");
+    expect(timeline).toContain("配置 UUID（内部修订）");
+    expect(timeline).not.toContain("版本 3");
+  });
+
   test("diff presents checksums and file metadata without secret fields", () => {
     const html = renderLocalized(
       createElement(AssetVersionDiff, {
@@ -1141,6 +1470,54 @@ describe("admin asset access and credential safety", () => {
     ).toBe("项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。");
     expect(adminAssetErrorMessage(new Error("private backend detail"))).toBe(
       "操作失败，请稍后重试。",
+    );
+  });
+
+  test("maps Project MCP validation failures to actionable safe guidance", () => {
+    const validationError = new SharedAssetApiError(
+      422,
+      "ASSET_VALIDATION_FAILED",
+      "Asset validation failed",
+    );
+
+    expect(projectMcpVersionErrorMessage(validationError)).toContain(
+      "HTTP（Streamable HTTP）或 SSE",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).toContain(
+      "管理员配置的允许网段",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).toContain(
+      "localhost",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).toContain(
+      "规范格式的 IPv4/IPv6 字面量",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).toContain(
+      "headers 或 query",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).toContain(
+      "重启 Gateway、Scheduler 和 Worker",
+    );
+    expect(projectMcpCredentialErrorMessage(validationError)).toContain(
+      "分组和字段名",
+    );
+    expect(projectMcpCredentialErrorMessage(validationError)).toContain(
+      "完全一致",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).not.toContain(
+      "query/key",
+    );
+    expect(projectMcpCredentialErrorMessage(validationError)).not.toContain(
+      "query/key",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).not.toContain(
+      "private backend detail",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).not.toContain(
+      "服务端允许列表完全一致",
+    );
+    expect(projectMcpVersionErrorMessage(validationError)).not.toContain(
+      "解析出的目标 IP",
     );
   });
 });

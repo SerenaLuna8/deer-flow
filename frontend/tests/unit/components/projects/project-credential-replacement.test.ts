@@ -21,6 +21,7 @@ function credentialVersion(
     payload_schema: {
       env: ["REGION", "TOKEN"],
       headers: ["Authorization"],
+      query: ["key"],
       oauth: ["client_id"],
     },
     supersedes_version_id: null,
@@ -38,6 +39,7 @@ describe("project Credential replacement", () => {
       { group: "env", field: "REGION" },
       { group: "env", field: "TOKEN" },
       { group: "headers", field: "Authorization" },
+      { group: "query", field: "key" },
       { group: "oauth", field: "client_id" },
     ]);
   });
@@ -85,7 +87,7 @@ describe("project Credential replacement", () => {
     );
     expect(page).toContain('title="项目凭证"');
     expect(page).toContain(
-      'description="管理项目运行所需的环境变量、请求头和 OAuth 字段。"',
+      'description="管理项目运行所需的环境变量、请求头、查询参数和 OAuth 字段。"',
     );
     expect(page).not.toContain("管理 MCP 连接所需");
     expect(page).not.toContain("敏感值只写入一次");

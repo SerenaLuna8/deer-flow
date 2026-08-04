@@ -120,7 +120,11 @@ class InvitationService:
             invitation_role = ProjectRole(role)
         except ValueError:
             raise ProjectValidationFailed("invalid_invitation_role") from None
-        if invitation_role is ProjectRole.ADMIN:
+        if invitation_role not in {
+            ProjectRole.EDITOR,
+            ProjectRole.RUNNER,
+            ProjectRole.VIEWER,
+        }:
             raise ProjectValidationFailed("invalid_invitation_role")
         invited_email = normalize_email(email)
         token = secrets.token_urlsafe(32)

@@ -51,7 +51,7 @@ describe("HumanInputCard", () => {
     expect(html).toContain('type="text"');
   });
 
-  it("collapses answered state to the selected value", () => {
+  it("renders answered state as a collapsed read-only disclosure", () => {
     const response: HumanInputResponse = {
       version: 1,
       kind: "human_input_response",
@@ -67,9 +67,17 @@ describe("HumanInputCard", () => {
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain("Answered");
     expect(html).toContain("Answered: staging");
-    expect(html).not.toContain("development");
+    expect(html).toContain("<details");
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:=|\s|>)/);
+    expect(html).toContain("<summary");
+    expect(html).toContain("Need the target environment.");
+    expect(html).toContain("Which environment should I deploy to?");
+    expect(html).toContain("development");
+    expect(html).toContain('data-human-input-option-selected="true"');
+    expect(html).toContain("Your answer");
     expect(html).not.toContain("Type another answer...");
     expect(html).not.toContain("Submit answer");
+    expect(html).not.toContain("<form");
   });
 
   it("renders read-only state when no submit handler is available", () => {
@@ -199,19 +207,17 @@ describe("HumanInputCard", () => {
         ],
       },
     });
-    const requiredLabel =
-      /<label[^>]*id="([^"]+)"[^>]*>[\s\S]*?<\/label>/.exec(
-        requiredGroupHtml,
-      );
-    const requiredGroup =
-      /<div id="[^"]+"[^>]*role="group"[^>]*>/.exec(requiredGroupHtml)?.[0];
+    const requiredLabel = /<label[^>]*id="([^"]+)"[^>]*>[\s\S]*?<\/label>/.exec(
+      requiredGroupHtml,
+    );
+    const requiredGroup = /<div id="[^"]+"[^>]*role="group"[^>]*>/.exec(
+      requiredGroupHtml,
+    )?.[0];
 
     expect(requiredLabel).toBeDefined();
     expect(requiredLabel?.[0]).toContain("Receipts");
     expect(requiredLabel?.[0]).toMatch(/required/i);
-    expect(requiredGroup).toContain(
-      `aria-labelledby="${requiredLabel?.[1]}"`,
-    );
+    expect(requiredGroup).toContain(`aria-labelledby="${requiredLabel?.[1]}"`);
     expect(requiredGroup).not.toContain("aria-required");
 
     const invalidGroupHtml = renderToStaticMarkup(

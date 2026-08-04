@@ -1,10 +1,10 @@
 # Apple Container Support
 
-DeerFlow now supports Apple Container as the preferred container runtime on macOS, with automatic fallback to Docker.
+ActWeave now supports Apple Container as the preferred container runtime on macOS, with automatic fallback to Docker.
 
 ## Overview
 
-Starting with this version, DeerFlow automatically detects and uses Apple Container on macOS when available, falling back to Docker when:
+Starting with this version, ActWeave automatically detects and uses Apple Container on macOS when available, falling back to Docker when:
 - Apple Container is not installed
 - Running on non-macOS platforms
 
@@ -155,7 +155,7 @@ The project includes a unified cleanup script that handles both runtimes:
 
 **Usage:**
 ```bash
-# Clean up all DeerFlow sandbox containers
+# Clean up all ActWeave sandbox containers
 ./scripts/cleanup-containers.sh deer-flow-sandbox
 
 # Custom prefix

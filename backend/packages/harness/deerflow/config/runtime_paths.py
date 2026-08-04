@@ -17,7 +17,7 @@ def project_root() -> Path:
 
 
 def runtime_home() -> Path:
-    """Return the writable DeerFlow state directory."""
+    """Return the writable ActWeave state directory."""
     if env_home := os.getenv("DEER_FLOW_HOME"):
         return Path(env_home).resolve()
     return project_root() / ".deer-flow"

@@ -1,6 +1,6 @@
-# DeerFlow Frontend
+# ActWeave Frontend
 
-DeerFlow Frontend 是 project-first SaaS 的 Next.js Web UI。它通过 Nginx 同源访问 Gateway，不直接执行 Agent graph，也不把账户、项目、成员或资产权限建立在浏览器状态上。
+ActWeave Frontend 是 project-first SaaS 的 Next.js Web UI。它通过 Nginx 同源访问 Gateway，不直接执行 Agent graph，也不把账户、项目、成员或资产权限建立在浏览器状态上。
 
 完整应用请从仓库根目录启动：
 
@@ -23,6 +23,7 @@ make dev
 
 | 路由                                   | 用途                  |
 | -------------------------------------- | --------------------- |
+| `/`                                    | 按登录状态进入登录页或工作区 |
 | `/login`、`/setup`                     | 登录和首次账户初始化  |
 | `/workspace`                           | 多项目工作区          |
 | `/projects/[project_slug]`             | 项目主页              |

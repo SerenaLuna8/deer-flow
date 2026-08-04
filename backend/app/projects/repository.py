@@ -203,7 +203,16 @@ class ProjectRepository:
             raise ProjectDatabaseUnavailable() from None
 
     async def _get_in_transaction(self, context: ProjectContext) -> ProjectView:
-        member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
+        member_count = (
+            select(func.count())
+            .where(
+                ProjectMembershipRow.project_id == ProjectRow.id,
+                ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
+            )
+            .correlate(ProjectRow)
+            .scalar_subquery()
+        )
         asset_counts = project_asset_summary_columns(ProjectRow.id)
         quota_summary = project_quota_summary_columns(
             ProjectRow.id,
@@ -353,7 +362,16 @@ class ProjectRepository:
         request_id: str,
         include_recoverable: bool,
     ) -> ProjectPage:
-        member_count = select(func.count()).where(ProjectMembershipRow.project_id == ProjectRow.id, ProjectMembershipRow.status == "active").correlate(ProjectRow).scalar_subquery()
+        member_count = (
+            select(func.count())
+            .where(
+                ProjectMembershipRow.project_id == ProjectRow.id,
+                ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
+            )
+            .correlate(ProjectRow)
+            .scalar_subquery()
+        )
         asset_counts = project_asset_summary_columns(ProjectRow.id)
         quota_summary = project_quota_summary_columns(
             ProjectRow.id,

@@ -67,6 +67,7 @@ describe("CredentialSecretDialog multi-field writes", () => {
         group: "headers",
         field: "Authorization",
       },
+      { id: "row-query", group: "query", field: "key" },
       { id: "row-oauth", group: "oauth", field: "refresh_token" },
     ];
 
@@ -76,7 +77,8 @@ describe("CredentialSecretDialog multi-field writes", () => {
         GITHUB_ORG: `${SECRET_SENTINEL}-1`,
       },
       headers: { Authorization: `${SECRET_SENTINEL}-2` },
-      oauth: { refresh_token: `${SECRET_SENTINEL}-3` },
+      query: { key: `${SECRET_SENTINEL}-3` },
+      oauth: { refresh_token: `${SECRET_SENTINEL}-4` },
     });
     expect(JSON.stringify(rows)).not.toContain(SECRET_SENTINEL);
   });
@@ -159,6 +161,40 @@ describe("CredentialSecretDialog multi-field writes", () => {
     });
   });
 
+  test("uses a system-fixed Credential type instead of form-controlled input", () => {
+    const rows: CredentialSecretFieldRow[] = [
+      {
+        id: "row-mcp-auth",
+        group: "headers",
+        field: "Authorization",
+      },
+    ];
+    const form = secretForm(rows);
+    form.set("name", "trans-resource-basic-auth");
+    form.set("display_name", "Trans Resource Basic Auth");
+    form.set("credential_type", "tampered_type");
+    const onCreate = rs.fn();
+
+    submitCredentialSecretForm({
+      mode: "create",
+      rows,
+      form,
+      fixedCredentialType: "mcp_auth",
+      expectedVersion: undefined,
+      clear: rs.fn(),
+      onCreate,
+    });
+
+    expect(onCreate).toHaveBeenCalledWith({
+      name: "trans-resource-basic-auth",
+      display_name: "Trans Resource Basic Auth",
+      credential_type: "mcp_auth",
+      payload: {
+        headers: { Authorization: `${SECRET_SENTINEL}-0` },
+      },
+    });
+  });
+
   test("prefills replacement field names only and never renders secret values", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="zh-CN">
@@ -171,6 +207,7 @@ describe("CredentialSecretDialog multi-field writes", () => {
           initialFields={[
             { group: "env", field: "GITHUB_TOKEN" },
             { group: "headers", field: "Authorization" },
+            { group: "query", field: "key" },
             { group: "oauth", field: "refresh_token" },
           ]}
           onOpenChange={rs.fn()}
@@ -181,9 +218,69 @@ describe("CredentialSecretDialog multi-field writes", () => {
 
     expect(html).toContain('value="GITHUB_TOKEN"');
     expect(html).toContain('value="Authorization"');
+    expect(html).toContain('value="key"');
     expect(html).toContain('value="refresh_token"');
-    expect(html.match(/type="password"/gu)).toHaveLength(3);
+    expect(html.match(/type="password"/gu)).toHaveLength(4);
+    expect(html).toContain('<option value="query">查询参数</option>');
     expect(html).not.toContain(SECRET_SENTINEL);
+  });
+
+  test.each([
+    { group: "headers" as const, field: "Authorization" },
+    { group: "query" as const, field: "key" },
+  ])(
+    "locks a new MCP Credential to its $group field structure",
+    ({ group, field }) => {
+      const html = renderToStaticMarkup(
+        <I18nProvider initialLocale="zh-CN">
+          <CredentialSecretDialog
+            mode="create"
+            open
+            fixedFields
+            fixedCredentialType="mcp_auth"
+            pending={false}
+            errorMessage={null}
+            initialFields={[{ group, field }]}
+            onOpenChange={rs.fn()}
+            onCreate={rs.fn()}
+          />
+        </I18nProvider>,
+      );
+
+      expect(html).toContain(`value="${field}"`);
+      expect(html).toMatch(
+        new RegExp(`<select[^>]+disabled=""[^>]*>[\\s\\S]*value="${group}"`),
+      );
+      expect(html).toMatch(
+        new RegExp(`<input[^>]+readOnly=""[^>]+value="${field}"`),
+      );
+      expect(html).toContain('type="password"');
+      expect(html).not.toContain('name="credential_type"');
+      expect(html).not.toContain('placeholder="token"');
+      expect(html).not.toContain(">类型<");
+      expect(html).not.toContain("添加字段");
+      expect(html).not.toContain("移除字段");
+      expect(html).not.toContain(SECRET_SENTINEL);
+    },
+  );
+
+  test("keeps the editable type field for generic Credential creation", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <CredentialSecretDialog
+          mode="create"
+          open
+          pending={false}
+          errorMessage={null}
+          onOpenChange={rs.fn()}
+          onCreate={rs.fn()}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain(">类型<");
+    expect(html).toContain('name="credential_type"');
+    expect(html).toContain('placeholder="token"');
   });
 
   test("keeps history unavailability separate from write progress", () => {

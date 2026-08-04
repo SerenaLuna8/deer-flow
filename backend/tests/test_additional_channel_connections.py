@@ -93,9 +93,40 @@ def test_feishu_connect_command_binds_identity(_postgres_database):
             assert connections[0]["provider"] == "feishu"
             assert connections[0]["external_account_id"] == "ou-user-1"
             assert connections[0]["workspace_id"] == "oc-chat-1"
-            channel._reply_card.assert_awaited_once_with("om-message-1", "Feishu connected to DeerFlow.")
+            channel._reply_card.assert_awaited_once_with("om-message-1", "Feishu connected to ActWeave.")
         finally:
             await runtime.seed.engine.dispose()
+
+    anyio.run(go)
+
+
+def test_feishu_connect_confirmation_falls_back_to_new_chat_card():
+    import anyio
+
+    from app.channels.feishu import FeishuChannel
+
+    async def go():
+        channel = FeishuChannel(
+            bus=MessageBus(),
+            config={"app_id": "app", "app_secret": "secret"},
+        )
+        channel._reply_card = AsyncMock(side_effect=RuntimeError("reply failed"))
+        channel._create_card = AsyncMock()
+
+        await channel._send_connection_confirmation(
+            message_id="om-message-1",
+            chat_id="oc-chat-1",
+            text="Feishu connected to ActWeave.",
+        )
+
+        channel._reply_card.assert_awaited_once_with(
+            "om-message-1",
+            "Feishu connected to ActWeave.",
+        )
+        channel._create_card.assert_awaited_once_with(
+            "oc-chat-1",
+            "Feishu connected to ActWeave.",
+        )
 
     anyio.run(go)
 
@@ -175,7 +206,7 @@ def test_wechat_connect_command_binds_identity(_postgres_database):
             assert connections[0]["provider"] == "wechat"
             assert connections[0]["external_account_id"] == "wx-user-1"
             assert connections[0]["workspace_id"] == "wx-user-1"
-            channel._send_connection_reply.assert_awaited_once_with("wx-user-1", "ctx-1", "WeChat connected to DeerFlow.")
+            channel._send_connection_reply.assert_awaited_once_with("wx-user-1", "ctx-1", "WeChat connected to ActWeave.")
         finally:
             await runtime.seed.engine.dispose()
 
@@ -219,7 +250,7 @@ def test_wecom_connect_command_binds_identity(_postgres_database):
             assert connections[0]["workspace_id"] == "bot-1"
             channel._ws_client.reply.assert_awaited_once_with(
                 frame,
-                {"msgtype": "text", "text": {"content": "WeCom connected to DeerFlow."}},
+                {"msgtype": "text", "text": {"content": "WeCom connected to ActWeave."}},
             )
         finally:
             await runtime.seed.engine.dispose()

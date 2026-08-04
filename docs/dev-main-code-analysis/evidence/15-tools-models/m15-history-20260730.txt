@@ -1,3 +1,0 @@
-MODULE15-HISTORY-MARKER-7Q9X
-This file is used only for the isolated Module 15 browser acceptance.
-The expected historical-upload marker is M15-HISTORY-ROUND-1.

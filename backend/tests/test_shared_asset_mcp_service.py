@@ -4,7 +4,9 @@ import dataclasses
 import importlib
 import inspect
 import uuid
+from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.exc import InvalidRequestError
@@ -16,6 +18,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetForbidden, AssetValidationFailed
+from app.shared_assets.models import WorkflowStatus
 from deerflow.mcp.definition import ExactMcpEndpointPolicy
 
 
@@ -55,6 +58,208 @@ def _system_context() -> SystemAssetGovernanceContext:
     )
 
 
+class _UnitTransaction:
+    def __init__(self) -> None:
+        self.enter_count = 0
+        self.exit_count = 0
+        self.exit_error: type[BaseException] | None = None
+
+    async def __aenter__(self):
+        self.enter_count += 1
+        return self
+
+    async def __aexit__(self, exc_type, _exc, _traceback) -> None:
+        self.exit_count += 1
+        self.exit_error = exc_type
+
+
+class _UnitSession:
+    def __init__(self) -> None:
+        self.transaction = _UnitTransaction()
+        self.enter_count = 0
+        self.exit_count = 0
+        self.begin_count = 0
+        self.flush_count = 0
+
+    async def __aenter__(self):
+        self.enter_count += 1
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+        self.exit_count += 1
+
+    def begin(self) -> _UnitTransaction:
+        self.begin_count += 1
+        return self.transaction
+
+    async def flush(self) -> None:
+        self.flush_count += 1
+
+
+def _configured_service_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    service_module,
+    *,
+    url: str,
+):
+    session = _UnitSession()
+    factory_calls = 0
+    repository_events: list[str] = []
+    created: dict[str, object] = {}
+    now = datetime.now(UTC)
+
+    class Repository:
+        def __init__(self, repository_session) -> None:
+            assert repository_session is session
+            self.session = repository_session
+
+        async def create_project_asset(self, actor, row) -> None:
+            repository_events.append("asset")
+            assert actor.project_id == row.project_id
+            row.id = uuid.uuid4()
+            row.status = "active"
+            row.current_published_version_id = None
+            row.version = 1
+            row.created_at = now
+            row.updated_at = now
+            created["asset"] = row
+
+        async def next_version_number(self, asset) -> int:
+            repository_events.append("next-version")
+            assert asset is created["asset"]
+            return 1
+
+        async def add_version(self, asset, version, slots, *, request_id: str):
+            repository_events.append("version")
+            assert asset is created["asset"]
+            assert request_id == "req-mcp-unit"
+            version.submitted_at = None
+            version.reviewed_at = None
+            version.reviewed_by_user_id = None
+            version.created_at = now
+            for slot in slots:
+                slot.id = uuid.uuid4()
+            created["version"] = version
+            created["slots"] = slots
+            return SimpleNamespace(row=version, slots=slots, grants=())
+
+    def session_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return session
+
+    monkeypatch.setattr(service_module, "McpRepository", Repository)
+    discovery_attempts = SimpleNamespace(
+        enqueue=AsyncMock(
+            return_value=SimpleNamespace(
+                id=uuid.uuid4(),
+                status="queued",
+            )
+        )
+    )
+    monkeypatch.setattr(
+        service_module,
+        "McpToolDiscoveryAttemptRepository",
+        lambda repository_session: discovery_attempts,
+        raising=False,
+    )
+    governance_sink = SimpleNamespace(append_project=AsyncMock())
+    service = service_module.McpService(
+        session_factory,
+        governance_sink,
+        endpoint_policy=_endpoint_policy(url),
+    )
+    return service, session, governance_sink, repository_events, created, discovery_attempts, lambda: factory_calls
+
+
+def _updated_service_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    service_module,
+    *,
+    url: str,
+):
+    session = _UnitSession()
+    factory_calls = 0
+    repository_events: list[str] = []
+    created: dict[str, object] = {}
+    now = datetime.now(UTC)
+    current_version_id = uuid.uuid4()
+    asset = SimpleNamespace(
+        id=uuid.uuid4(),
+        scope="project",
+        project_id=uuid.uuid4(),
+        slug="existing-mcp",
+        display_name="Existing MCP",
+        status="active",
+        current_published_version_id=current_version_id,
+        version=7,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=now,
+        updated_at=now,
+    )
+
+    class Repository:
+        def __init__(self, repository_session) -> None:
+            assert repository_session is session
+            self.session = repository_session
+
+        async def get_project_asset(self, actor, asset_id, *, for_update: bool):
+            repository_events.append("asset")
+            assert actor.project_id == asset.project_id
+            assert asset_id == asset.id
+            assert for_update is True
+            return asset
+
+        async def next_version_number(self, selected_asset) -> int:
+            repository_events.append("next-version")
+            assert selected_asset is asset
+            return 2
+
+        async def add_version(self, selected_asset, version, slots, *, request_id: str):
+            repository_events.append("version")
+            assert selected_asset is asset
+            assert request_id == "req-mcp-unit"
+            version.submitted_at = None
+            version.reviewed_at = None
+            version.reviewed_by_user_id = None
+            version.created_at = now
+            for slot in slots:
+                slot.id = uuid.uuid4()
+            created["version"] = version
+            created["slots"] = slots
+            return SimpleNamespace(row=version, slots=slots, grants=())
+
+    def session_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return session
+
+    monkeypatch.setattr(service_module, "McpRepository", Repository)
+    discovery_attempts = SimpleNamespace(
+        enqueue=AsyncMock(
+            return_value=SimpleNamespace(
+                id=uuid.uuid4(),
+                status="queued",
+            )
+        )
+    )
+    monkeypatch.setattr(
+        service_module,
+        "McpToolDiscoveryAttemptRepository",
+        lambda repository_session: discovery_attempts,
+        raising=False,
+    )
+    actor = _context()
+    actor = dataclasses.replace(actor, project_id=asset.project_id)
+    governance_sink = SimpleNamespace(append_project=AsyncMock())
+    service = service_module.McpService(
+        session_factory,
+        governance_sink,
+        endpoint_policy=_endpoint_policy(url),
+    )
+    return service, actor, asset, session, governance_sink, repository_events, created, discovery_attempts, lambda: factory_calls
+
+
 def test_mcp_service_exposes_frozen_contracts_and_scoped_repository() -> None:
     package = importlib.import_module("app.shared_assets")
     service_module = importlib.import_module("app.shared_assets.mcp_service")
@@ -68,9 +273,11 @@ def test_mcp_service_exposes_frozen_contracts_and_scoped_repository() -> None:
         service_module.McpDefinition,
         service_module.McpAssetView,
         service_module.McpVersionView,
+        service_module.ProjectMcpConfiguredCreateResult,
     ):
         assert dataclasses.is_dataclass(value_type)
         assert value_type.__dataclass_params__.frozen is True
+    assert package.ProjectMcpConfiguredCreateResult is service_module.ProjectMcpConfiguredCreateResult
     assert "payload_checksum" in {field.name for field in dataclasses.fields(service_module.McpVersionView)}
 
     for name, method in inspect.getmembers(repository_module.McpRepository, predicate=inspect.isfunction):
@@ -90,6 +297,496 @@ def test_mcp_service_exposes_frozen_contracts_and_scoped_repository() -> None:
         "expected_active_grant_versions",
     ]
     assert audit_module._ACTIONS["mcp.credential_grants.configure"] is AuditAction.ASSET_UPDATED
+    assert audit_module._ACTIONS["mcp.activate"] is AuditAction.ASSET_UPDATED
+    assert audit_module._ACTIONS["mcp.delete"] is AuditAction.ASSET_DELETED
+
+
+@pytest.mark.asyncio
+async def test_configured_project_mcp_without_slots_is_created_and_published_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context()
+    url = "https://configured.example.test/mcp"
+    service, session, governance_sink, repository_events, created, discovery_attempts, factory_calls = _configured_service_harness(
+        monkeypatch,
+        service_module,
+        url=url,
+    )
+
+    result = await service.create_project_configured(
+        actor,
+        service_module.CreateMcpServer("configured-mcp", "Configured MCP"),
+        service_module.McpDefinition(
+            description="Ready without credentials",
+            transport="http",
+            url=url,
+        ),
+    )
+
+    asset = created["asset"]
+    version = created["version"]
+    assert factory_calls() == 1
+    assert session.enter_count == 1
+    assert session.begin_count == 1
+    assert session.transaction.enter_count == 1
+    assert session.transaction.exit_count == 1
+    assert session.transaction.exit_error is None
+    assert repository_events == ["asset", "next-version", "version"]
+    assert asset.scope == "project"
+    assert asset.project_id == actor.project_id
+    assert asset.slug == "configured-mcp"
+    assert asset.current_published_version_id == version.id
+    assert asset.version == 3
+    assert version.workflow_status == WorkflowStatus.PUBLISHED.value
+    assert version.version_number == 1
+    assert version.supersedes_version_id is None
+    assert version.submitted_at is None
+    assert result.asset.id == asset.id
+    assert result.asset.version == 3
+    assert result.asset.current_published_version_id == version.id
+    assert result.version.id == version.id
+    assert result.version.workflow_status is WorkflowStatus.PUBLISHED
+    assert result.version.credential_slots == ()
+    assert [awaited.kwargs["action"] for awaited in governance_sink.append_project.await_args_list] == [
+        "mcp.create",
+        "mcp.version.create",
+        "mcp.publish",
+    ]
+    assert all(awaited.args == (session,) for awaited in governance_sink.append_project.await_args_list)
+    assert all(awaited.kwargs["asset_id"] == asset.id for awaited in governance_sink.append_project.await_args_list)
+    assert governance_sink.append_project.await_args_list[0].kwargs["version_id"] is None
+    assert all(awaited.kwargs["version_id"] == version.id for awaited in governance_sink.append_project.await_args_list[1:])
+    discovery_attempts.enqueue.assert_awaited_once()
+    discovery_call = discovery_attempts.enqueue.await_args.kwargs
+    assert discovery_call["project_id"] == actor.project_id
+    assert discovery_call["requested_by_user_id"] == actor.user_id
+    assert discovery_call["mcp_server_id"] == asset.id
+    assert discovery_call["mcp_server_version_id"] == version.id
+    assert discovery_call["payload_checksum"] == version.payload_checksum
+    assert discovery_call["grant_digest"] == service_module.mcp_grant_closure_digest(())
+    assert discovery_call["trigger"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_configured_project_mcp_with_slots_is_created_and_submitted_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context()
+    url = "https://credentialed.example.test/mcp"
+    service, session, governance_sink, repository_events, created, discovery_attempts, factory_calls = _configured_service_harness(
+        monkeypatch,
+        service_module,
+        url=url,
+    )
+
+    result = await service.create_project_configured(
+        actor,
+        service_module.CreateMcpServer("credentialed-mcp", "Credentialed MCP"),
+        service_module.McpDefinition(
+            description="Requires project credential approval",
+            transport="http",
+            url=url,
+            credential_slots=(
+                service_module.McpCredentialSlot(
+                    "api-key",
+                    "Amap query credential",
+                    {"query": ("key",)},
+                ),
+            ),
+        ),
+    )
+
+    asset = created["asset"]
+    version = created["version"]
+    assert factory_calls() == 1
+    assert session.begin_count == 1
+    assert session.transaction.exit_error is None
+    assert repository_events == ["asset", "next-version", "version"]
+    assert asset.current_published_version_id is None
+    assert asset.version == 3
+    assert version.workflow_status == WorkflowStatus.PENDING_APPROVAL.value
+    assert version.submitted_at is not None
+    assert result.asset.id == asset.id
+    assert result.asset.version == 3
+    assert result.asset.current_published_version_id is None
+    assert result.version.workflow_status is WorkflowStatus.PENDING_APPROVAL
+    assert [slot.name for slot in result.version.credential_slots] == ["api-key"]
+    assert [awaited.kwargs["action"] for awaited in governance_sink.append_project.await_args_list] == [
+        "mcp.create",
+        "mcp.version.create",
+        "mcp.submit_approval",
+    ]
+    assert all(awaited.args == (session,) for awaited in governance_sink.append_project.await_args_list)
+    assert all(awaited.kwargs["asset_id"] == asset.id for awaited in governance_sink.append_project.await_args_list)
+    assert all(awaited.kwargs["version_id"] == version.id for awaited in governance_sink.append_project.await_args_list[1:])
+    discovery_attempts.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_configured_mcp_is_project_context_only_before_storage() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("project-only rejection must not open storage")
+
+    with pytest.raises(AssetForbidden):
+        await service_module.McpService(ExplodingFactory()).create_project_configured(
+            _system_context(),
+            service_module.CreateMcpServer("system-mcp", "System MCP"),
+            service_module.McpDefinition(
+                transport="http",
+                url="https://configured.example.test/mcp",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("with_slot", "expected_status", "expected_action"),
+    [
+        (False, WorkflowStatus.PUBLISHED, "mcp.publish"),
+        (True, WorkflowStatus.PENDING_APPROVAL, "mcp.submit_approval"),
+    ],
+)
+async def test_update_project_configured_creates_and_advances_one_revision_atomically(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    with_slot: bool,
+    expected_status: WorkflowStatus,
+    expected_action: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    url = "https://updated.example.test/mcp"
+    service, actor, asset, session, governance_sink, repository_events, created, discovery_attempts, factory_calls = _updated_service_harness(
+        monkeypatch,
+        service_module,
+        url=url,
+    )
+    prior_version_id = asset.current_published_version_id
+    slots = (
+        (
+            service_module.McpCredentialSlot(
+                "api-key",
+                "Updated query credential",
+                {"query": ("key",)},
+            ),
+        )
+        if with_slot
+        else ()
+    )
+
+    result = await service.update_project_configured(
+        actor,
+        asset.id,
+        service_module.McpDefinition(
+            description="Updated definition",
+            transport="http",
+            url=url,
+            credential_slots=slots,
+        ),
+        expected_asset_version=7,
+    )
+
+    version = created["version"]
+    assert factory_calls() == 1
+    assert session.begin_count == 1
+    assert session.transaction.enter_count == 1
+    assert session.transaction.exit_error is None
+    assert repository_events == ["asset", "next-version", "version"]
+    assert version.version_number == 2
+    assert version.supersedes_version_id == prior_version_id
+    assert version.workflow_status == expected_status.value
+    assert asset.version == 9
+    assert asset.slug == "existing-mcp"
+    assert asset.display_name == "Existing MCP"
+    assert asset.current_published_version_id == (version.id if expected_status is WorkflowStatus.PUBLISHED else prior_version_id)
+    assert result.asset.version == 9
+    assert result.version.workflow_status is expected_status
+    assert [awaited.kwargs["action"] for awaited in governance_sink.append_project.await_args_list] == [
+        "mcp.version.create",
+        expected_action,
+    ]
+    assert all(awaited.args == (session,) for awaited in governance_sink.append_project.await_args_list)
+    assert all(awaited.kwargs["asset_id"] == asset.id for awaited in governance_sink.append_project.await_args_list)
+    assert all(awaited.kwargs["version_id"] == version.id for awaited in governance_sink.append_project.await_args_list)
+    assert discovery_attempts.enqueue.await_count == (0 if with_slot else 1)
+    if not with_slot:
+        discovery_call = discovery_attempts.enqueue.await_args.kwargs
+        assert discovery_call["project_id"] == actor.project_id
+        assert discovery_call["requested_by_user_id"] == actor.user_id
+        assert discovery_call["mcp_server_id"] == asset.id
+        assert discovery_call["mcp_server_version_id"] == version.id
+        assert discovery_call["payload_checksum"] == version.payload_checksum
+        assert discovery_call["grant_digest"] == service_module.mcp_grant_closure_digest(())
+        assert discovery_call["trigger"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_update_project_configured_is_project_context_only_before_storage() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("project-only rejection must not open storage")
+
+    with pytest.raises(AssetForbidden):
+        await service_module.McpService(ExplodingFactory()).update_project_configured(
+            _system_context(),
+            uuid.uuid4(),
+            service_module.McpDefinition(
+                transport="http",
+                url="https://updated.example.test/mcp",
+            ),
+            expected_asset_version=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_project_configured_locks_and_revalidates_the_current_editable_definition() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.EDITOR)
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    url = "http://127.0.0.1:8771/api/mcp"
+    definition = service_module.McpDefinition(
+        description="Current project MCP",
+        transport="http",
+        url=url,
+    )
+    service = service_module.McpService(
+        lambda: None,
+        endpoint_policy=_endpoint_policy(url),
+    )
+    asset = SimpleNamespace(
+        id=asset_id,
+        scope="project",
+        project_id=actor.project_id,
+        slug="current-project-mcp",
+        display_name="Current project MCP",
+        status="active",
+        current_published_version_id=version_id,
+        version=7,
+        created_by_user_id=str(actor.user_id),
+        created_at=now,
+        updated_at=now,
+    )
+    row = SimpleNamespace(
+        id=version_id,
+        mcp_server_id=asset_id,
+        version_number=2,
+        workflow_status=WorkflowStatus.PUBLISHED.value,
+        description=definition.description,
+        transport=definition.transport,
+        command=definition.command,
+        args=list(definition.args),
+        url=definition.url,
+        non_secret_env=dict(definition.env),
+        non_secret_headers=dict(definition.headers),
+        oauth_metadata=dict(definition.oauth),
+        routing=dict(definition.routing),
+        tool_overrides=dict(definition.tool_overrides),
+        timeout_seconds=definition.timeout_seconds,
+        supersedes_version_id=None,
+        payload_checksum=service._checksum(definition),
+        submitted_at=None,
+        reviewed_at=None,
+        reviewed_by_user_id=None,
+        created_by_user_id=str(actor.user_id),
+        created_at=now,
+    )
+    record = SimpleNamespace(row=row, slots=(), grants=())
+    repository = SimpleNamespace(
+        get_project_asset=AsyncMock(return_value=asset),
+        get_project_current_configuration=AsyncMock(return_value=record),
+    )
+
+    async def execute(_actor, operation, governance=None):
+        del governance
+        return await operation(repository)
+
+    service._execute = execute
+
+    result = await service.get_project_configured(actor, asset_id)
+
+    assert result.asset.id == asset_id
+    assert result.version.id == version_id
+    assert result.version.definition.url == url
+    repository.get_project_asset.assert_awaited_once_with(
+        actor,
+        asset_id,
+        for_update=True,
+    )
+    repository.get_project_current_configuration.assert_awaited_once_with(
+        actor,
+        asset,
+        for_update=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_project_configured_fails_closed_when_current_endpoint_policy_changed() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.EDITOR)
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    url = "http://127.0.0.1:8771/api/mcp"
+    definition = service_module.McpDefinition(transport="http", url=url)
+    checksum_service = service_module.McpService(
+        lambda: None,
+        endpoint_policy=_endpoint_policy(url),
+    )
+    asset = SimpleNamespace(
+        id=asset_id,
+        scope="project",
+        project_id=actor.project_id,
+        status="active",
+        current_published_version_id=version_id,
+    )
+    row = SimpleNamespace(
+        id=version_id,
+        mcp_server_id=asset_id,
+        workflow_status=WorkflowStatus.PUBLISHED.value,
+        description=definition.description,
+        transport=definition.transport,
+        command=definition.command,
+        args=list(definition.args),
+        url=definition.url,
+        non_secret_env=dict(definition.env),
+        non_secret_headers=dict(definition.headers),
+        oauth_metadata=dict(definition.oauth),
+        routing=dict(definition.routing),
+        tool_overrides=dict(definition.tool_overrides),
+        timeout_seconds=definition.timeout_seconds,
+        payload_checksum=checksum_service._checksum(definition),
+    )
+    record = SimpleNamespace(row=row, slots=(), grants=())
+    repository = SimpleNamespace(
+        get_project_asset=AsyncMock(return_value=asset),
+        get_project_current_configuration=AsyncMock(return_value=record),
+    )
+    service = service_module.McpService(
+        lambda: None,
+        endpoint_policy=_endpoint_policy("http://127.0.0.1:8772/other"),
+    )
+
+    async def execute(_actor, operation, governance=None):
+        del governance
+        return await operation(repository)
+
+    service._execute = execute
+
+    with pytest.raises(AssetValidationFailed):
+        await service.get_project_configured(actor, asset_id)
+
+
+@pytest.mark.asyncio
+async def test_get_project_configured_requires_edit_capability_before_storage() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+
+    class ExplodingFactory:
+        def __call__(self):
+            raise AssertionError("read-only members must not load editable MCP paths")
+
+    with pytest.raises(AssetForbidden):
+        await service_module.McpService(ExplodingFactory()).get_project_configured(
+            _context(ProjectRole.VIEWER),
+            uuid.uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["publish", "submit_approval", "approve"])
+async def test_mcp_transition_rejects_stale_lineage_before_replacing_current(
+    transition: str,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.ADMIN)
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    current_version_id = uuid.uuid4()
+    stale_parent_id = uuid.uuid4()
+    slot = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="api-key",
+        purpose="API key",
+        payload_schema={"query": ["key"]},
+        required=True,
+    )
+    record = SimpleNamespace(
+        row=SimpleNamespace(
+            id=version_id,
+            workflow_status=(WorkflowStatus.PENDING_APPROVAL.value if transition == "approve" else WorkflowStatus.DRAFT.value),
+            supersedes_version_id=stale_parent_id,
+        ),
+        slots=(slot,) if transition != "publish" else (),
+        grants=(),
+    )
+    asset = SimpleNamespace(
+        id=asset_id,
+        status="active",
+        version=4,
+        current_published_version_id=current_version_id,
+    )
+
+    class Session:
+        async def flush(self) -> None:
+            raise AssertionError("stale lineage must not flush")
+
+    class Repository:
+        session = Session()
+
+        async def get_project_asset(self, _actor, _asset_id, *, for_update: bool):
+            assert for_update is True
+            return asset
+
+        async def lock_project(self, _actor) -> None:
+            return None
+
+        async def _get_project_asset_after_lock(self, _actor, _asset_id):
+            return asset
+
+        async def get_project_version(self, _actor, _asset_id, _version_id, *, for_update: bool):
+            assert for_update is True
+            return record
+
+    service = service_module.McpService(lambda: None)
+
+    async def execute(_actor, operation, governance=None):
+        del governance
+        return await operation(Repository())
+
+    service._execute = execute
+
+    with pytest.raises(service_module.AssetConflict):
+        if transition == "publish":
+            await service.publish(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=4,
+            )
+        elif transition == "submit_approval":
+            await service.submit_approval(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=4,
+            )
+        else:
+            await service.approve(
+                actor,
+                asset_id,
+                version_id,
+                {"api-key": uuid.uuid4()},
+                expected_asset_version=4,
+            )
+
+    assert asset.current_published_version_id == current_version_id
+    assert record.row.supersedes_version_id == stale_parent_id
 
 
 @pytest.mark.asyncio
@@ -538,7 +1235,7 @@ async def test_mcp_definition_rejects_compact_or_undashed_secret_carrier_before_
             {
                 "description": "Ordinary passwordless issue tracker",
                 "transport": "http",
-                "url": "https://mcp.test/tools?mode=read",
+                "url": "https://mcp.test/tools/read",
             },
             id="ordinary-description-url",
         ),
@@ -621,6 +1318,205 @@ async def test_editor_cannot_approve_credential_mcp_before_storage() -> None:
             {"primary": uuid.uuid4()},
             expected_asset_version=3,
         )
+
+
+@pytest.mark.asyncio
+async def test_approved_project_mcp_enqueues_discovery_with_the_new_grant_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.ADMIN)
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    credential_version_id = uuid.uuid4()
+    grant_id = uuid.uuid4()
+    slot = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="primary",
+        purpose="Authorization header",
+        payload_schema={"headers": ["Authorization"]},
+        required=True,
+    )
+    row = SimpleNamespace(
+        id=version_id,
+        workflow_status=WorkflowStatus.PENDING_APPROVAL.value,
+        supersedes_version_id=None,
+        payload_checksum="a" * 64,
+        reviewed_at=None,
+        reviewed_by_user_id=None,
+    )
+    record = SimpleNamespace(row=row, slots=(slot,), grants=())
+    asset = SimpleNamespace(
+        id=asset_id,
+        scope="project",
+        project_id=actor.project_id,
+        status="active",
+        current_published_version_id=None,
+        version=3,
+    )
+    grant = SimpleNamespace(id=grant_id, status="active")
+    session = SimpleNamespace(flush=AsyncMock())
+    repository = SimpleNamespace(
+        session=session,
+        create_grants=AsyncMock(return_value=(grant,)),
+    )
+    discovery_attempts = SimpleNamespace(enqueue=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4(), status="queued")))
+    monkeypatch.setattr(
+        service_module,
+        "CredentialRepository",
+        lambda repository_session: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "McpToolDiscoveryAttemptRepository",
+        lambda repository_session: discovery_attempts,
+        raising=False,
+    )
+    service = service_module.McpService(lambda: None)
+    service._lock_project_first = AsyncMock()
+    service._get_asset = AsyncMock(return_value=asset)
+    service._get_version = AsyncMock(return_value=record)
+    service._lock_credential_versions = AsyncMock(return_value={credential_version_id: SimpleNamespace(version=SimpleNamespace(id=credential_version_id))})
+    service._validate_slot_credential = lambda *_args: None
+    service._validate_transition_definition = lambda *_args: None
+    service._version_view = lambda value: SimpleNamespace(
+        id=value.row.id,
+        workflow_status=WorkflowStatus(value.row.workflow_status),
+    )
+
+    async def execute(_actor, operation, governance=None):
+        del governance
+        return await operation(repository)
+
+    service._execute = execute
+
+    result = await service.approve(
+        actor,
+        asset_id,
+        version_id,
+        {"primary": credential_version_id},
+        expected_asset_version=3,
+    )
+
+    assert result.workflow_status is WorkflowStatus.PUBLISHED
+    discovery_attempts.enqueue.assert_awaited_once()
+    discovery_call = discovery_attempts.enqueue.await_args.kwargs
+    assert discovery_call["project_id"] == actor.project_id
+    assert discovery_call["requested_by_user_id"] == actor.user_id
+    assert discovery_call["mcp_server_id"] == asset_id
+    assert discovery_call["mcp_server_version_id"] == version_id
+    assert discovery_call["payload_checksum"] == row.payload_checksum
+    assert discovery_call["grant_digest"] == service_module.mcp_grant_closure_digest((grant_id,))
+    assert discovery_call["trigger"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_manual_tool_discovery_requires_current_published_closure_and_is_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = _context(ProjectRole.EDITOR)
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    attempt_id = uuid.uuid4()
+    grant_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    asset = SimpleNamespace(
+        id=asset_id,
+        scope="project",
+        project_id=actor.project_id,
+        status="active",
+        current_published_version_id=version_id,
+    )
+    record = SimpleNamespace(
+        row=SimpleNamespace(
+            id=version_id,
+            workflow_status=WorkflowStatus.PUBLISHED.value,
+            payload_checksum="b" * 64,
+        ),
+        slots=(SimpleNamespace(id=uuid.uuid4(), required=True),),
+        grants=(SimpleNamespace(id=grant_id, status="active"),),
+    )
+    stored = SimpleNamespace(
+        attempt_id=attempt_id,
+        project_id=actor.project_id,
+        mcp_server_id=asset_id,
+        mcp_server_version_id=version_id,
+        requested_by_user_id=actor.user_id,
+        trigger="manual",
+        payload_checksum=record.row.payload_checksum,
+        grant_digest=service_module.mcp_grant_closure_digest((grant_id,)),
+        status="queued",
+        requested_at=now,
+        started_at=None,
+        completed_at=None,
+        public_error_code=None,
+        revision=1,
+    )
+    discovery_attempts = SimpleNamespace(
+        enqueue=AsyncMock(return_value=stored),
+        get=AsyncMock(return_value=stored),
+        latest_for_version=AsyncMock(return_value=stored),
+        active_for_closure=AsyncMock(return_value=None),
+    )
+    repository = SimpleNamespace(
+        session=SimpleNamespace(),
+        get_project_visible_version=AsyncMock(return_value=record),
+    )
+    monkeypatch.setattr(
+        service_module,
+        "McpToolDiscoveryAttemptRepository",
+        lambda repository_session: discovery_attempts,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "lock_mcp_credential_closure",
+        AsyncMock(return_value=SimpleNamespace(grant_ids=(grant_id,))),
+    )
+    service = service_module.McpService(lambda: None)
+    service._get_asset = AsyncMock(return_value=asset)
+    service._get_version = AsyncMock(return_value=record)
+    service._validate_transition_definition = lambda *_args: None
+
+    async def execute(_actor, operation, governance=None):
+        del governance
+        return await operation(repository)
+
+    service._execute = execute
+
+    requested = await service.request_tool_discovery(actor, asset_id, version_id)
+    latest = await service.get_tool_discovery_attempt(
+        actor,
+        asset_id,
+        version_id,
+    )
+    exact = await service.get_tool_discovery_attempt(
+        actor,
+        asset_id,
+        version_id,
+        attempt_id=attempt_id,
+    )
+
+    assert requested.id == attempt_id
+    assert requested.status == "queued"
+    assert latest == requested
+    assert exact == requested
+    discovery_attempts.enqueue.assert_awaited_once()
+    discovery_call = discovery_attempts.enqueue.await_args.kwargs
+    assert discovery_call["project_id"] == actor.project_id
+    assert discovery_call["requested_by_user_id"] == actor.user_id
+    assert discovery_call["mcp_server_id"] == asset_id
+    assert discovery_call["mcp_server_version_id"] == version_id
+    assert discovery_call["payload_checksum"] == record.row.payload_checksum
+    assert discovery_call["grant_digest"] == stored.grant_digest
+    assert discovery_call["trigger"] == "manual"
+    discovery_attempts.latest_for_version.assert_awaited_once_with(
+        actor.project_id,
+        asset_id,
+        version_id,
+    )
+    discovery_attempts.get.assert_awaited_once_with(actor.project_id, attempt_id)
 
 
 @pytest.mark.asyncio
@@ -890,13 +1786,18 @@ async def test_mcp_transition_revalidates_historical_project_definition(
         tool_overrides=dict(definition.tool_overrides),
         timeout_seconds=definition.timeout_seconds,
         payload_checksum=service_module.McpService._checksum(definition),
+        supersedes_version_id=None,
     )
     record = SimpleNamespace(
         row=row,
         slots=slots if transition != "publish" else (),
         grants=(),
     )
-    asset = SimpleNamespace(status="active", version=1)
+    asset = SimpleNamespace(
+        status="active",
+        version=1,
+        current_published_version_id=None,
+    )
 
     class Session:
         async def flush(self) -> None:

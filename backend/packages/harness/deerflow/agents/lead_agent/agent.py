@@ -57,6 +57,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.skills.types import Skill
+from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
@@ -148,7 +149,7 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
     if not is_plan_mode:
         return None
 
-    # Custom prompts matching DeerFlow's style
+    # Custom prompts matching ActWeave's style
     system_prompt = """
 <todo_list_system>
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
@@ -733,6 +734,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
     private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
+    runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(private_runtime, "agent_catalog", None)) if private_runtime is not None else None
     agent_model_overrides: dict[str, object] = {}
     if agent_version_model_settings is not None:
         sampling_overrides = getattr(
@@ -794,6 +796,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             exact_agent_prompt=private_prompt_bundle,
             exact_skills=runtime_skills,
             exact_skills_container_path=container_base_path if runtime_skills is not None else None,
+            runtime_agent_catalog=runtime_agent_catalog,
         ),
         state_schema=get_thread_state_schema(
             mode,

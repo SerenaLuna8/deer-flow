@@ -759,6 +759,177 @@ def test_task_tool_passes_only_admitted_private_mcp_proxies_to_subagent(monkeypa
     assert tools[0].metadata == admitted_tool.metadata
 
 
+def test_task_tool_dynamic_runtime_agent_uses_only_its_exact_profile(
+    monkeypatch,
+    tmp_path,
+):
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel
+
+    from deerflow.agents.lead_agent.prompt import AgentPromptBundle
+    from deerflow.config.agents_config import AgentModelSettings
+    from deerflow.skills.types import Skill, SkillCategory
+    from deerflow.subagents.runtime_catalog import (
+        RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
+        build_runtime_agent_catalog,
+        build_runtime_agent_profile,
+    )
+
+    class Args(BaseModel):
+        value: str
+
+    async def invoke(value: str) -> str:
+        return value
+
+    def admitted_tool(name: str) -> StructuredTool:
+        return StructuredTool.from_function(
+            coroutine=invoke,
+            name=name,
+            description=name,
+            args_schema=Args,
+            metadata={"deerflow_mcp": True, "deerflow_private_mcp": True},
+        )
+
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    child_file = child_dir / "SKILL.md"
+    child_file.write_text("---\nname: child\ndescription: child\n---\n", encoding="utf-8")
+    child_skill = Skill(
+        name="child",
+        description="Child skill",
+        license=None,
+        skill_dir=child_dir,
+        skill_file=child_file,
+        relative_path=child_dir.relative_to(tmp_path),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        runtime_read_only=True,
+    )
+    parent_skill = object()
+    parent_bundle = AgentPromptBundle(
+        payload_schema_version=2,
+        agents_instructions="parent-agents",
+        soul="parent-soul",
+        identity="parent-identity",
+        user_context="parent-user",
+    )
+    child_bundle = AgentPromptBundle(
+        payload_schema_version=2,
+        agents_instructions="child-agents",
+        soul="child-soul",
+        identity="child-identity",
+        user_context="child-user",
+    )
+    parent_mcp = admitted_tool("parent_mcp")
+    child_mcp = admitted_tool("child_mcp")
+    model_settings = AgentModelSettings(
+        temperature=0.3,
+        thinking_enabled=True,
+        reasoning_effort="high",
+    )
+    profile = build_runtime_agent_profile(
+        key="project/researcher",
+        description="Researcher",
+        model_name="child-model",
+        model_settings=model_settings,
+        tool_groups=("file:read",),
+        prompt_bundle=child_bundle,
+        runtime_skills=(child_skill,),
+        mcp_tools=(child_mcp,),
+    )
+    runtime = _make_runtime()
+    runtime.context.update(
+        {
+            "private_scope": object(),
+            "__agent_prompt_bundle": parent_bundle,
+            "__runtime_skills": (parent_skill,),
+            "__runtime_mcp_tools": (parent_mcp,),
+            RUNTIME_AGENT_CATALOG_CONTEXT_KEY: build_runtime_agent_catalog((profile,)),
+        }
+    )
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    def get_available_tools(**kwargs):
+        captured["tools_kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("dynamic runtime Agents must not use the static registry")),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_available_subagent_names",
+        lambda **_kwargs: ["general-purpose"],
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行项目 Agent",
+        prompt="research",
+        subagent_type="project/researcher",
+        tool_call_id="tc-runtime-agent",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["tools_kwargs"]["groups"] == ("file:read",)
+    assert captured["tools_kwargs"]["subagent_enabled"] is False
+    assert captured["tools_kwargs"]["include_mcp"] is False
+    kwargs = captured["executor_kwargs"]
+    assert kwargs["config"].name == "project/researcher"
+    assert kwargs["config"].model == "child-model"
+    assert kwargs["config"].disallowed_tools == ["task"]
+    assert kwargs["config"].skills is None
+    assert kwargs["runtime_skills"] == (child_skill,)
+    assert kwargs["agent_prompt_bundle"] is child_bundle
+    assert kwargs["agent_model_settings"] is model_settings
+    assert [tool.name for tool in kwargs["tools"]] == ["child_mcp"]
+    assert kwargs["tools"][0] is not child_mcp
+
+
+def test_task_tool_ignores_forged_runtime_agent_catalog(monkeypatch):
+    from deerflow.subagents.runtime_catalog import RUNTIME_AGENT_CATALOG_CONTEXT_KEY
+
+    runtime = _make_runtime()
+    runtime.context.update(
+        {
+            "private_scope": object(),
+            RUNTIME_AGENT_CATALOG_CONTEXT_KEY: {"project/forged": _make_subagent_config("project/forged")},
+        }
+    )
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: None)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="运行伪造 Agent",
+        prompt="research",
+        subagent_type="project/forged",
+        tool_call_id="tc-forged-runtime-agent",
+    )
+
+    message = _task_tool_message(output)
+    assert message.content == "Task failed. Error: Unknown subagent type 'project/forged'. Available: general-purpose"
+
+
 @pytest.mark.asyncio
 async def test_private_run_authority_proxy_marshals_checks_to_parent_loop():
     owner_loop = asyncio.get_running_loop()

@@ -7,7 +7,6 @@ import {
   createProjectChatForAgent,
   createProjectChatWithDefaultAgent,
   enableSystemAgentAndCreateProjectChat,
-  ensureMainSystemAgentBindings,
   executableProjectAgents,
   configurableSystemAgents,
   mainProjectAgent,
@@ -195,7 +194,12 @@ describe("project Agent selector", () => {
     });
   });
 
-  test("shows only active executable project Agents and enabled system bindings", () => {
+  test("shows active project Agents, enabled system Agents, and unbound Main", () => {
+    const main: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      slug: "project-assistant",
+      display_name: "Main",
+    };
     const agents = executableProjectAgents(catalog);
 
     expect(agents.map((agent) => agent.id)).toEqual([
@@ -219,6 +223,10 @@ describe("project Agent selector", () => {
     expect(html).toContain('data-testid="project-agent-selector-overlay"');
     expect(html).toContain("data-dialog-initial-focus");
     expect(html).not.toMatch(/logical|复核版本/u);
+
+    expect(
+      executableProjectAgents({ ...catalog, system_items: [main] }),
+    ).toEqual([catalog.project_items[0], main]);
   });
 
   test("create selection contains logical Agent only", () => {
@@ -384,6 +392,23 @@ describe("project Agent selector", () => {
     ).toEqual([disabled.id]);
   });
 
+  test("never offers Main as a binding-management action", () => {
+    const main: ProjectAssetItem = {
+      ...catalog.system_items[1]!,
+      slug: "project-assistant",
+      display_name: "Main",
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.execute",
+        "shared_assets.manage_bindings",
+      ],
+    };
+
+    expect(
+      configurableSystemAgents({ ...catalog, system_items: [main] }),
+    ).toEqual([]);
+  });
+
   test("only offers immediate enable when the published Agent dependencies are already bound", () => {
     const agent = {
       ...catalog.system_items[1]!,
@@ -516,12 +541,24 @@ describe("project Agent selector", () => {
               ...unsupportedMcp.definition,
               transport: "http",
               command: null,
-              url: "https://mcp.example.test",
+              url: "http://localhost:8771/api/mcp",
             },
           },
         },
       ]),
     ).toBe("ready");
+  });
+
+  test("does not apply static MCP dependency checks to Main", () => {
+    const main = {
+      ...catalog.system_items[1]!,
+      slug: "project-assistant",
+      display_name: "Main",
+    };
+
+    expect(agentMcpDependencyAvailability(main, undefined, undefined)).toBe(
+      "ready",
+    );
   });
 
   test("keeps dependency-blocked system Agents out of the immediate enable action", () => {
@@ -626,211 +663,5 @@ describe("project Agent selector", () => {
       ],
       ["navigate", `/projects/alpha/chats/${threadId}`],
     ]);
-  });
-
-  test("enables Main system dependencies before enabling Main", async () => {
-    const mainAgent: ProjectAssetItem = {
-      ...catalog.system_items[1]!,
-      slug: "project-assistant",
-      display_name: "Main",
-      capabilities: [
-        "shared_assets.read",
-        "shared_assets.execute",
-        "shared_assets.manage_bindings",
-      ],
-      binding: null,
-    };
-    const skillVersionId = "99999999-9999-4999-8999-999999999999";
-    const systemSkill: ProjectAssetItem = {
-      ...catalog.system_items[1]!,
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      slug: "deerflow-core",
-      current_published_version_id: skillVersionId,
-      binding: null,
-    };
-    const calls: unknown[] = [];
-
-    await ensureMainSystemAgentBindings({
-      agent: mainAgent,
-      agentTarget: {
-        versionId: VERSION_ID,
-        versionNumber: 1,
-        boundVersionNumber: null,
-      },
-      requiredSkillVersionIds: [skillVersionId],
-      requiredMcpVersionIds: [],
-      skillDependencies: [
-        {
-          item: systemSkill,
-          versionId: skillVersionId,
-          versionNumber: 1,
-          boundVersionNumber: null,
-        },
-      ],
-      mcpDependencies: [],
-      enableBinding: async (kind, input) => {
-        calls.push([kind, input]);
-      },
-      moveBinding: async () => undefined,
-    });
-
-    expect(calls).toEqual([
-      [
-        "skill",
-        {
-          asset_id: systemSkill.id,
-          version_id: skillVersionId,
-        },
-      ],
-      [
-        "agent",
-        {
-          asset_id: mainAgent.id,
-          version_id: VERSION_ID,
-        },
-      ],
-    ]);
-  });
-
-  test("repairs a mismatched dependency even when Main is already bound", async () => {
-    const mainAgent: ProjectAssetItem = {
-      ...catalog.system_items[0]!,
-      slug: "project-assistant",
-    };
-    const targetVersionId = "99999999-9999-4999-8999-999999999999";
-    const boundVersionId = "88888888-8888-4888-8888-888888888888";
-    const systemSkill: ProjectAssetItem = {
-      ...catalog.system_items[0]!,
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      current_published_version_id: targetVersionId,
-      binding: {
-        ...catalog.system_items[0]!.binding!,
-        kind: "skill",
-        asset_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        version_id: boundVersionId,
-        version: 3,
-      },
-    };
-    const moves: unknown[] = [];
-    const changed = await ensureMainSystemAgentBindings({
-      agent: mainAgent,
-      agentTarget: {
-        versionId: VERSION_ID,
-        versionNumber: 1,
-        boundVersionNumber: 1,
-      },
-      requiredSkillVersionIds: [targetVersionId],
-      requiredMcpVersionIds: [],
-      skillDependencies: [
-        {
-          item: systemSkill,
-          versionId: targetVersionId,
-          versionNumber: 2,
-          boundVersionNumber: 1,
-        },
-      ],
-      mcpDependencies: [],
-      enableBinding: async () => {
-        throw new Error("already-bound Main must not be enabled again");
-      },
-      moveBinding: async (kind, assetId, action, input) => {
-        moves.push([kind, assetId, action, input]);
-      },
-    });
-
-    expect(changed).toBe(true);
-    expect(moves).toEqual([
-      [
-        "skill",
-        systemSkill.id,
-        "upgrade",
-        {
-          version_id: targetVersionId,
-          expected_binding_version: 3,
-        },
-      ],
-    ]);
-  });
-
-  test("does not bind Main when a required MCP version is unsupported", async () => {
-    const mainAgent: ProjectAssetItem = {
-      ...catalog.system_items[1]!,
-      slug: "project-assistant",
-      capabilities: [
-        "shared_assets.read",
-        "shared_assets.execute",
-        "shared_assets.manage_bindings",
-      ],
-      binding: null,
-    };
-    const mcpVersionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const systemMcp: ProjectAssetItem = {
-      ...catalog.system_items[1]!,
-      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      current_published_version_id: mcpVersionId,
-      binding: null,
-    };
-    const calls: unknown[] = [];
-
-    await expect(
-      ensureMainSystemAgentBindings({
-        agent: mainAgent,
-        agentTarget: {
-          versionId: VERSION_ID,
-          versionNumber: 1,
-          boundVersionNumber: null,
-        },
-        requiredSkillVersionIds: [],
-        requiredMcpVersionIds: [mcpVersionId],
-        skillDependencies: [],
-        mcpDependencies: [
-          {
-            item: systemMcp,
-            versionId: mcpVersionId,
-            versionNumber: 1,
-            boundVersionNumber: null,
-          },
-        ],
-        mcpVersions: [
-          {
-            scope: "system",
-            version: {
-              id: mcpVersionId,
-              mcp_server_id: systemMcp.id,
-              version_number: 1,
-              workflow_status: "published",
-              definition: {
-                description: "Legacy",
-                transport: "streamable_http",
-                command: null,
-                args: [],
-                url: "https://mcp.example.test",
-                env: {},
-                headers: {},
-                oauth: {},
-                routing: {},
-                tool_overrides: {},
-                timeout_seconds: 30,
-                credential_slots: [],
-              },
-              credential_slots: [],
-              credential_grants: [],
-              supersedes_version_id: null,
-              payload_checksum: "sha256:mcp",
-              submitted_at: null,
-              reviewed_at: null,
-              reviewed_by_user_id: null,
-              created_by_user_id: "user-1",
-              created_at: "2026-07-15T00:00:00Z",
-            },
-          },
-        ],
-        enableBinding: async (kind, input) => {
-          calls.push([kind, input]);
-        },
-        moveBinding: async () => undefined,
-      }),
-    ).rejects.toThrow("不能作为 Agent 依赖");
-    expect(calls).toEqual([]);
   });
 });

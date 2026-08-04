@@ -31,9 +31,9 @@ Cool? Cool.
 
 ---
 
-## DeerFlow Skill Builder
+## ActWeave Skill Builder
 
-When running inside the dedicated DeerFlow Skill Builder, follow this section instead of
+When running inside the dedicated ActWeave Skill Builder, follow this section instead of
 the generic initialization, validation, packaging, and installation steps below. Builder
 authoring is staged: prepare a candidate package first and let the product own persistence.
 
@@ -85,7 +85,7 @@ Do not emulate validation with bundled scripts.
 after validation succeeds. Never commit automatically or claim that a candidate is already
 installed, published, or enabled; let Builder report the persisted result.
 
-Outside the dedicated DeerFlow Skill Builder, ignore this section and follow the
+Outside the dedicated ActWeave Skill Builder, ignore this section and follow the
 environment-appropriate generic workflow below.
 
 ---

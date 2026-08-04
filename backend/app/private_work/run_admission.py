@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -8,6 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.channels.instance_identity import (
+    normalize_channel_instance_id,
+    persisted_channel_instance_id,
+)
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -50,12 +56,13 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
 )
 from app.shared_assets.model_refs import ModelRefResolver
-from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
+from app.shared_assets.models import AssetKind, AssetSelection, ResolvedRunAssetClosure
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
     ChannelConversationRow,
+    ProjectChannelInstanceRow,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.trace_context import generate_trace_id, normalize_trace_id
@@ -78,6 +85,7 @@ class PrivateRunInboundAuthority:
     workspace_id: str | None
     external_conversation_id: str
     external_topic_id: str | None
+    channel_instance_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -89,6 +97,14 @@ class PrivateRunInboundAuthority:
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise TypeError(f"{name} must be a non-empty string")
+        object.__setattr__(
+            self,
+            "channel_instance_id",
+            normalize_channel_instance_id(
+                self.provider,
+                self.channel_instance_id,
+            ),
+        )
         for name in (
             "workspace_id",
             "external_topic_id",
@@ -159,6 +175,64 @@ class PrivateRunAdmissionAuditPort(Protocol):
     ) -> None: ...
 
 
+class PrivateRunHumanInputResponsePromoter(Protocol):
+    async def promote(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        thread_id: str,
+        kwargs: Mapping[str, object],
+    ) -> dict[str, object]: ...
+
+
+def _matches_server_promoted_human_input_retry(
+    persisted_kwargs: Mapping[str, object],
+    retry_kwargs: Mapping[str, object],
+) -> bool:
+    """Ignore only the visibility bit added by a prior trusted admission."""
+
+    persisted_input = persisted_kwargs.get("input")
+    retry_input = retry_kwargs.get("input")
+    if not isinstance(persisted_input, Mapping) or not isinstance(retry_input, Mapping):
+        return False
+    persisted_messages = persisted_input.get("messages")
+    retry_messages = retry_input.get("messages")
+    if not isinstance(persisted_messages, list) or len(persisted_messages) != 1:
+        return False
+    if not isinstance(retry_messages, list) or len(retry_messages) != 1:
+        return False
+    persisted_message = persisted_messages[0]
+    retry_message = retry_messages[0]
+    if not isinstance(persisted_message, Mapping) or not isinstance(retry_message, Mapping):
+        return False
+    persisted_additional = persisted_message.get("additional_kwargs")
+    retry_additional = retry_message.get("additional_kwargs")
+    if not isinstance(persisted_additional, Mapping) or not isinstance(retry_additional, Mapping):
+        return False
+    if set(persisted_additional) != {"hide_from_ui", "human_input_response"}:
+        return False
+    if persisted_additional.get("hide_from_ui") is not True or set(retry_additional) != {"human_input_response"}:
+        return False
+    if persisted_additional.get("human_input_response") != retry_additional.get("human_input_response"):
+        return False
+
+    normalized = copy.deepcopy(dict(persisted_kwargs))
+    normalized_input = normalized.get("input")
+    if not isinstance(normalized_input, dict):
+        return False
+    normalized_messages = normalized_input.get("messages")
+    if not isinstance(normalized_messages, list) or len(normalized_messages) != 1:
+        return False
+    normalized_message = normalized_messages[0]
+    if not isinstance(normalized_message, dict):
+        return False
+    normalized_additional = normalized_message.get("additional_kwargs")
+    if not isinstance(normalized_additional, dict):
+        return False
+    normalized_additional.pop("hide_from_ui")
+    return normalized == retry_kwargs
+
+
 class _NoopPrivateRunAdmissionQuota:
     async def reserve_concurrent_run(
         self,
@@ -196,6 +270,7 @@ class PrivateRunAdmissionService:
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunAdmissionQuotaPort | None = None,
         audit: PrivateRunAdmissionAuditPort | None = None,
+        human_input_response_promoter: PrivateRunHumanInputResponsePromoter | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._resolver = resolver or ProjectAssetResolver(session_factory)
@@ -209,6 +284,7 @@ class PrivateRunAdmissionService:
         )
         self._quota = quota or _NoopPrivateRunAdmissionQuota()
         self._audit = audit or _NoopPrivateRunAdmissionAudit()
+        self._human_input_response_promoter = human_input_response_promoter
 
     async def _persisted_snapshot(
         self,
@@ -245,19 +321,45 @@ class PrivateRunAdmissionService:
         context: PrivateWorkContext,
         thread_id: str,
         server_context: PrivateRunAdmissionServerContext | None,
-    ) -> None:
+    ) -> tuple[uuid.UUID, str] | None:
         authority = server_context.inbound_authority if server_context is not None else None
         if authority is None:
-            return
+            return None
 
-        connection = (
+        persisted_instance_id = persisted_channel_instance_id(
+            authority.provider,
+            authority.channel_instance_id,
+        )
+        if persisted_instance_id is not None:
+            try:
+                exact_instance_id = uuid.UUID(persisted_instance_id)
+            except (TypeError, ValueError):
+                raise PrivateWorkNotFound(context.request_id) from None
+            instance = (
+                await session.execute(
+                    select(ProjectChannelInstanceRow.id)
+                    .where(
+                        ProjectChannelInstanceRow.id == exact_instance_id,
+                        ProjectChannelInstanceRow.project_id == context.project_id,
+                        ProjectChannelInstanceRow.provider == authority.provider,
+                        ProjectChannelInstanceRow.desired_status == "enabled",
+                        ProjectChannelInstanceRow.deleted_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if instance is None:
+                raise PrivateWorkNotFound(context.request_id)
+
+        connection_metadata = (
             await session.execute(
-                select(ChannelConnectionRow.id)
+                select(ChannelConnectionRow.metadata_json)
                 .where(
                     ChannelConnectionRow.id == authority.connection_id,
                     ChannelConnectionRow.project_id == context.project_id,
                     ChannelConnectionRow.owner_user_id == str(context.user_id),
                     ChannelConnectionRow.provider == authority.provider,
+                    ChannelConnectionRow.channel_instance_id == (exact_instance_id if persisted_instance_id is not None else None),
                     ChannelConnectionRow.external_account_id == authority.external_account_id,
                     ChannelConnectionRow.workspace_id == (authority.workspace_id or ""),
                     ChannelConnectionRow.status == "connected",
@@ -266,8 +368,15 @@ class PrivateRunAdmissionService:
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if connection is None:
+        if not isinstance(connection_metadata, Mapping):
             raise PrivateWorkNotFound(context.request_id)
+        agent_scope = connection_metadata.get("agent_scope")
+        if agent_scope not in {"project", "system"}:
+            raise PrivateWorkNotFound(context.request_id)
+        try:
+            agent_asset_id = uuid.UUID(str(connection_metadata["agent_asset_id"]))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise PrivateWorkNotFound(context.request_id) from None
 
         conversation = (
             await session.execute(
@@ -286,6 +395,7 @@ class PrivateRunAdmissionService:
         ).scalar_one_or_none()
         if conversation is None:
             raise PrivateWorkNotFound(context.request_id)
+        return agent_asset_id, agent_scope
 
     @staticmethod
     def _is_same_request(
@@ -294,7 +404,11 @@ class PrivateRunAdmissionService:
         thread_id: str,
         request: PrivateRunCreate,
     ) -> bool:
-        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and run.metadata == request.metadata and run.kwargs == request.kwargs
+        kwargs_match = run.kwargs == request.kwargs or _matches_server_promoted_human_input_retry(
+            run.kwargs,
+            request.kwargs,
+        )
+        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and run.metadata == request.metadata and kwargs_match
 
     @staticmethod
     def _server_kwargs(
@@ -361,7 +475,7 @@ class PrivateRunAdmissionService:
                     Capability.SHARED_ASSETS_EXECUTE,
                     lock=True,
                 )
-                await self._require_inbound_authority(
+                inbound_agent = await self._require_inbound_authority(
                     session,
                     context,
                     thread_id,
@@ -373,6 +487,8 @@ class PrivateRunAdmissionService:
                     lock=True,
                 )
                 if thread is None:
+                    raise PrivateWorkNotFound(context.request_id)
+                if inbound_agent is not None and (thread.agent_asset_id != inbound_agent[0] or thread.agent_scope != inbound_agent[1]):
                     raise PrivateWorkNotFound(context.request_id)
 
                 runs = PrivateRunRepository(session)
@@ -485,12 +601,27 @@ class PrivateRunAdmissionService:
                 ):
                     raise PrivateWorkConflict(context.request_id)
 
-                resolved = await self._resolver.resolve_project_asset_snapshot_in_session(
+                # Keep this after the Thread lock and active-Run rejection.
+                # Worker checkpoint writes take the same Thread lock, so the
+                # open-request read and this admission are one serialized
+                # decision rather than a client-owned visibility assertion.
+                if self._human_input_response_promoter is not None:
+                    server_request = replace(
+                        server_request,
+                        kwargs=await self._human_input_response_promoter.promote(
+                            session,
+                            context,
+                            thread_id,
+                            server_request.kwargs,
+                        ),
+                    )
+
+                resolved = await self._resolver.resolve_run_asset_closure_in_session(
                     session,
                     current,
                     AssetSelection(AssetKind.AGENT, thread.agent_asset_id),
                 )
-                if type(resolved) is not ResolvedAgentSnapshot or resolved.scope.value != thread.agent_scope:
+                if type(resolved) is not ResolvedRunAssetClosure or resolved.lead_agent.scope.value != thread.agent_scope:
                     raise RunSnapshotAssetStale
 
                 run = await self._snapshots.create_run_with_snapshot_in_session(
@@ -528,7 +659,7 @@ class PrivateRunAdmissionService:
                     context,
                     run.run_id,
                 )
-                if snapshot.catalog_generation != resolved.catalog_generation:
+                if snapshot.catalog_generation != resolved.lead_agent.catalog_generation:
                     raise RunSnapshotAssetStale
                 return AdmittedPrivateRun(
                     run=run,

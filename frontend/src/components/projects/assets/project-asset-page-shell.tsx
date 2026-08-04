@@ -40,6 +40,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { agentBuilderCanAuthor } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
 import type { Project } from "@/core/projects/types";
 import {
   useCreateProjectAsset,
@@ -49,11 +50,16 @@ import {
   useEnableProjectSystemBinding,
   useImportProjectSkillArchive,
   useProjectAssets,
+  useSyncCurrentProjectSystemMcpBinding,
   type AssetKind,
   type AssetListKind,
   type AssetVersion,
+  type DisableSystemBindingInput,
+  type EnableSystemBindingInput,
   type ProjectAssetItem,
   type ProjectAssetList,
+  type ProjectMcpEditableConfigurationResponse,
+  type SyncCurrentSystemMcpBindingInput,
 } from "@/core/shared-assets";
 
 import { useCurrentProject } from "../project-context";
@@ -63,8 +69,11 @@ import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import {
   projectAssetCreateErrorMessage,
+  projectMcpStatusToggleState,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
+import { ProjectMcpCreateDialog } from "./project-mcp-create-dialog";
+import { ProjectMcpEditDialog } from "./project-mcp-edit-dialog";
 import {
   ProjectSkillImportDialog,
   projectSkillImportErrorMessage,
@@ -131,7 +140,10 @@ export function SkillCreateMenuItems({
   );
 }
 
-function assetAvailability(item: ProjectAssetItem): string {
+function assetAvailability(
+  item: ProjectAssetItem,
+  kind: Exclude<AssetListKind, "credentials">,
+): string {
   if (item.scope === "system") {
     if (!item.binding) return "未启用";
     if (!item.binding.enabled) return "已从项目停用";
@@ -139,11 +151,14 @@ function assetAvailability(item: ProjectAssetItem): string {
       item.current_published_version_id &&
       item.current_published_version_id !== item.binding.version_id
     ) {
-      return "有新版本";
+      return kind === "mcp-servers" ? "有新配置" : "有新版本";
     }
     return "已在项目启用";
   }
-  return item.current_published_version_id ? "已有发布版本" : "尚未发布";
+  if (!item.current_published_version_id) {
+    return kind === "mcp-servers" ? "尚未生效" : "尚未发布";
+  }
+  return kind === "mcp-servers" ? "已有生效配置" : "已有发布版本";
 }
 
 export function filterProjectAssetItems(
@@ -179,7 +194,37 @@ export function projectAssetSourceOptions(
   ];
 }
 
-export function systemBindingToggleState(item: ProjectAssetItem): {
+export function projectAssetPrimaryActionLabel(kind: MutableAssetKind): string {
+  return kind === "mcp-servers"
+    ? "添加 MCP"
+    : `新建 ${KIND_META[kind].singular}`;
+}
+
+export function projectAssetEmptyMessage(
+  kind: MutableAssetKind,
+  source: ProjectAssetSourceFilter,
+): string {
+  if (kind === "mcp-servers" && source === "project") {
+    return "尚未添加项目 MCP。";
+  }
+  const sourceLabel = source === "system" ? "系统提供" : "项目自建";
+  return `暂无${sourceLabel}的 ${KIND_META[kind].singular}。`;
+}
+
+export function projectAssetListErrorMessage(
+  kind: MutableAssetKind,
+  error: unknown,
+): string {
+  const detail = error
+    ? adminAssetErrorMessage(error)
+    : "服务未返回有效的资产列表。";
+  return kind === "mcp-servers" ? `无法加载 MCP 列表。${detail}` : detail;
+}
+
+export function systemBindingToggleState(
+  item: ProjectAssetItem,
+  kind?: MutableAssetKind,
+): {
   checked: boolean;
   disabled: boolean;
   targetVersionId: string | null;
@@ -191,13 +236,93 @@ export function systemBindingToggleState(item: ProjectAssetItem): {
     (item.status === "active" || checked);
   const targetVersionId =
     item.scope === "system"
-      ? (item.binding?.version_id ?? item.current_published_version_id)
+      ? kind === "mcp-servers"
+        ? item.current_published_version_id
+        : (item.binding?.version_id ?? item.current_published_version_id)
       : null;
   return {
     checked,
     disabled: !canManage || (!checked && targetVersionId === null),
     targetVersionId,
   };
+}
+
+export function systemMcpBindingNeedsUpdate(item: ProjectAssetItem): boolean {
+  return (
+    item.scope === "system" &&
+    item.status === "active" &&
+    item.capabilities.includes("shared_assets.manage_bindings") &&
+    item.binding?.enabled === true &&
+    item.current_published_version_id !== null &&
+    item.binding.version_id !== item.current_published_version_id
+  );
+}
+
+export type ProjectSystemBindingListAction =
+  | { type: "enable"; input: EnableSystemBindingInput }
+  | {
+      type: "sync-current";
+      assetId: string;
+      input: SyncCurrentSystemMcpBindingInput;
+    }
+  | {
+      type: "disable";
+      assetId: string;
+      input: DisableSystemBindingInput;
+    };
+
+export function projectSystemBindingListAction(
+  kind: MutableAssetKind,
+  item: ProjectAssetItem,
+  checked: boolean,
+  syncCurrent = false,
+): ProjectSystemBindingListAction | null {
+  const state = systemBindingToggleState(item, kind);
+  if (syncCurrent) {
+    if (kind !== "mcp-servers" || !systemMcpBindingNeedsUpdate(item)) {
+      return null;
+    }
+    return {
+      type: "sync-current",
+      assetId: item.id,
+      input: item.binding
+        ? { expected_binding_version: item.binding.version }
+        : {},
+    };
+  }
+  if (state.disabled || state.checked === checked) return null;
+
+  if (checked) {
+    if (kind === "mcp-servers") {
+      if (!item.current_published_version_id) return null;
+      return {
+        type: "sync-current",
+        assetId: item.id,
+        input: item.binding
+          ? { expected_binding_version: item.binding.version }
+          : {},
+      };
+    }
+    if (!state.targetVersionId) return null;
+    return {
+      type: "enable",
+      input: {
+        asset_id: item.id,
+        version_id: state.targetVersionId,
+        ...(item.binding
+          ? { expected_binding_version: item.binding.version }
+          : {}),
+      },
+    };
+  }
+
+  return item.binding?.enabled
+    ? {
+        type: "disable",
+        assetId: item.id,
+        input: { expected_binding_version: item.binding.version },
+      }
+    : null;
 }
 
 export type VersionDialogSubmissionToken = {
@@ -232,6 +357,16 @@ export function importedSkillSelectionReady(
     return null;
   }
   return selection;
+}
+
+export const configuredMcpSelectionReady = importedSkillSelectionReady;
+
+export function configuredMcpSuccessMessage(
+  workflowStatus: "published" | "pending_approval",
+): string {
+  return workflowStatus === "published"
+    ? "MCP 已添加并发布。"
+    : "MCP 配置已保存，凭据尚未绑定，因此暂未生效。";
 }
 
 export function createdProjectAssetSelectionReady(
@@ -285,13 +420,14 @@ function AssetList({
   selectedAssetId,
   onSelect,
   onToggleSystemBinding,
-  onToggleProjectSkillStatus,
-  bindingIntent,
+  onSyncSystemMcpBinding,
+  onToggleProjectAssetStatus,
+  bindingIntent = null,
   bindingErrorAssetId,
   bindingError,
-  skillStatusIntent,
-  skillStatusErrorAssetId,
-  skillStatusError,
+  projectStatusIntent = null,
+  projectStatusErrorAssetId,
+  projectStatusError,
 }: {
   kind: MutableAssetKind;
   source: ProjectAssetSourceFilter;
@@ -299,24 +435,23 @@ function AssetList({
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
   onToggleSystemBinding: (item: ProjectAssetItem, checked: boolean) => void;
-  onToggleProjectSkillStatus?: (
+  onSyncSystemMcpBinding?: (item: ProjectAssetItem) => void;
+  onToggleProjectAssetStatus?: (
     item: ProjectAssetItem,
     checked: boolean,
   ) => void;
   bindingIntent?: { assetId: string; checked: boolean } | null;
   bindingErrorAssetId?: string | null;
   bindingError?: unknown;
-  skillStatusIntent?: { assetId: string; checked: boolean } | null;
-  skillStatusErrorAssetId?: string | null;
-  skillStatusError?: unknown;
+  projectStatusIntent?: { assetId: string; checked: boolean } | null;
+  projectStatusErrorAssetId?: string | null;
+  projectStatusError?: unknown;
 }) {
   const Icon = KIND_META[kind].icon;
-  const sourceLabel = source === "system" ? "系统提供" : "项目自建";
-
   if (items.length === 0) {
     return (
       <p className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm">
-        暂无{sourceLabel}的 {KIND_META[kind].singular}。
+        {projectAssetEmptyMessage(kind, source)}
       </p>
     );
   }
@@ -331,25 +466,30 @@ function AssetList({
       {items.map((item) => {
         const selected = item.id === selectedAssetId;
         const description = item.description?.trim();
-        const toggleState = systemBindingToggleState(item);
+        const toggleState = systemBindingToggleState(item, kind);
         const pending = bindingIntent?.assetId === item.id;
         const bindingBusy = bindingIntent !== null;
         const checked = pending ? bindingIntent.checked : toggleState.checked;
+        const mcpUpdateAvailable =
+          kind === "mcp-servers" && systemMcpBindingNeedsUpdate(item);
         const bindingItemError =
           bindingErrorAssetId === item.id && bindingError
             ? adminAssetErrorMessage(bindingError)
             : null;
-        const skillToggleState = projectSkillStatusToggleState(item);
-        const skillStatusPending = skillStatusIntent?.assetId === item.id;
-        const skillStatusBusy = skillStatusIntent !== null;
-        const skillChecked = skillStatusPending
-          ? skillStatusIntent.checked
-          : skillToggleState.checked;
-        const skillStatusItemError =
-          skillStatusErrorAssetId === item.id && skillStatusError
-            ? adminAssetErrorMessage(skillStatusError)
+        const projectToggleState =
+          kind === "mcp-servers"
+            ? projectMcpStatusToggleState(item)
+            : projectSkillStatusToggleState(item);
+        const projectStatusPending = projectStatusIntent?.assetId === item.id;
+        const projectStatusBusy = projectStatusIntent !== null;
+        const projectChecked = projectStatusPending
+          ? projectStatusIntent.checked
+          : projectToggleState.checked;
+        const projectStatusItemError =
+          projectStatusErrorAssetId === item.id && projectStatusError
+            ? adminAssetErrorMessage(projectStatusError)
             : null;
-        const error = bindingItemError ?? skillStatusItemError;
+        const error = bindingItemError ?? projectStatusItemError;
         return (
           <div
             key={item.id}
@@ -397,7 +537,12 @@ function AssetList({
                       <span className="truncate text-sm font-semibold">
                         {item.display_name}
                       </span>
-                      {item.status !== "active" ? (
+                      {item.status !== "active" &&
+                      !(
+                        kind === "mcp-servers" &&
+                        item.scope === "project" &&
+                        item.status === "suspended"
+                      ) ? (
                         <AssetStatusBadge status={item.status} />
                       ) : null}
                     </span>
@@ -405,18 +550,24 @@ function AssetList({
                       {item.slug}
                     </span>
                   </span>
-                  <span className="hidden shrink-0 text-right md:block">
-                    <span className="text-sm font-medium">
-                      {assetAvailability(item)}
-                    </span>
-                    <time className="text-muted-foreground mt-0.5 block text-xs">
-                      {new Date(item.updated_at).toLocaleDateString("zh-CN")}
-                    </time>
-                  </span>
-                  <ArrowRightIcon
-                    aria-hidden
-                    className="text-muted-foreground size-4 shrink-0 transition-transform group-hover:translate-x-0.5"
-                  />
+                  {kind !== "mcp-servers" ? (
+                    <>
+                      <span className="hidden shrink-0 text-right md:block">
+                        <span className="text-sm font-medium">
+                          {assetAvailability(item, kind)}
+                        </span>
+                        <time className="text-muted-foreground mt-0.5 block text-xs">
+                          {new Date(item.updated_at).toLocaleDateString(
+                            "zh-CN",
+                          )}
+                        </time>
+                      </span>
+                      <ArrowRightIcon
+                        aria-hidden
+                        className="text-muted-foreground size-4 shrink-0 transition-transform group-hover:translate-x-0.5"
+                      />
+                    </>
+                  ) : null}
                 </>
               )}
             </button>
@@ -434,53 +585,61 @@ function AssetList({
                     {checked ? "已启用" : "未启用"}
                   </span>
                 ) : null}
-                {kind === "mcp-servers" ? (
+                {mcpUpdateAvailable ? (
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
-                    onClick={() => onSelect(item)}
-                  >
-                    管理绑定
-                  </Button>
-                ) : (
-                  <Switch
-                    checked={checked}
-                    disabled={toggleState.disabled || bindingBusy}
-                    className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
+                    disabled={bindingBusy || !onSyncSystemMcpBinding}
                     aria-busy={pending || undefined}
-                    aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
-                    title={
-                      !toggleState.targetVersionId && !checked
-                        ? "没有可启用的已发布版本"
-                        : undefined
-                    }
-                    onCheckedChange={(next) =>
-                      onToggleSystemBinding(item, next)
-                    }
-                  />
-                )}
-              </div>
-            ) : kind === "skills" ? (
-              <div className="flex min-w-28 shrink-0 flex-col items-center justify-center gap-1.5 px-5 py-5">
+                    aria-label={`更新 ${item.display_name} 配置`}
+                    onClick={() => onSyncSystemMcpBinding?.(item)}
+                  >
+                    更新
+                  </Button>
+                ) : null}
                 <Switch
-                  checked={skillChecked}
+                  checked={checked}
+                  disabled={toggleState.disabled || bindingBusy}
+                  className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
+                  aria-busy={pending || undefined}
+                  aria-label={`${checked ? "停用" : "启用"} ${item.display_name}`}
+                  title={
+                    !toggleState.targetVersionId && !checked
+                      ? kind === "mcp-servers"
+                        ? "没有可启用的已发布配置"
+                        : "没有可启用的已发布版本"
+                      : undefined
+                  }
+                  onCheckedChange={(next) => onToggleSystemBinding(item, next)}
+                />
+              </div>
+            ) : kind === "skills" || kind === "mcp-servers" ? (
+              <div
+                className={
+                  kind === "skills"
+                    ? "flex min-w-28 shrink-0 flex-col items-center justify-center gap-1.5 px-5 py-5"
+                    : "border-border/70 flex min-w-28 shrink-0 items-center justify-end border-l px-3 sm:min-w-36 sm:px-4"
+                }
+              >
+                <Switch
+                  checked={projectChecked}
                   disabled={
-                    skillToggleState.disabled ||
-                    skillStatusBusy ||
-                    !onToggleProjectSkillStatus
+                    projectToggleState.disabled ||
+                    projectStatusBusy ||
+                    !onToggleProjectAssetStatus
                   }
                   className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
-                  aria-busy={skillStatusPending || undefined}
-                  aria-label={`${skillChecked ? "停用" : "启用"} ${item.display_name}`}
-                  title={skillToggleState.disabledReason ?? undefined}
+                  aria-busy={projectStatusPending || undefined}
+                  aria-label={`${projectChecked ? "停用" : "启用"} ${item.display_name}`}
+                  title={projectToggleState.disabledReason ?? undefined}
                   onCheckedChange={(next) =>
-                    onToggleProjectSkillStatus?.(item, next)
+                    onToggleProjectAssetStatus?.(item, next)
                   }
                 />
-                {skillToggleState.disabledReason ? (
+                {kind === "skills" && projectToggleState.disabledReason ? (
                   <span className="text-muted-foreground text-xs whitespace-nowrap">
-                    {skillToggleState.disabledReason}
+                    {projectToggleState.disabledReason}
                   </span>
                 ) : null}
               </div>
@@ -508,13 +667,14 @@ export function ProjectAssetListView({
   selectedAssetId,
   onSelect,
   onToggleSystemBinding,
-  onToggleProjectSkillStatus,
+  onSyncSystemMcpBinding,
+  onToggleProjectAssetStatus,
   bindingIntent,
   bindingErrorAssetId,
   bindingError,
-  skillStatusIntent,
-  skillStatusErrorAssetId,
-  skillStatusError,
+  projectStatusIntent,
+  projectStatusErrorAssetId,
+  projectStatusError,
 }: {
   kind: MutableAssetKind;
   data: ProjectAssetList;
@@ -522,16 +682,17 @@ export function ProjectAssetListView({
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
   onToggleSystemBinding: (item: ProjectAssetItem, checked: boolean) => void;
-  onToggleProjectSkillStatus?: (
+  onSyncSystemMcpBinding?: (item: ProjectAssetItem) => void;
+  onToggleProjectAssetStatus?: (
     item: ProjectAssetItem,
     checked: boolean,
   ) => void;
   bindingIntent?: { assetId: string; checked: boolean } | null;
   bindingErrorAssetId?: string | null;
   bindingError?: unknown;
-  skillStatusIntent?: { assetId: string; checked: boolean } | null;
-  skillStatusErrorAssetId?: string | null;
-  skillStatusError?: unknown;
+  projectStatusIntent?: { assetId: string; checked: boolean } | null;
+  projectStatusErrorAssetId?: string | null;
+  projectStatusError?: unknown;
 }) {
   return (
     <AssetList
@@ -541,13 +702,14 @@ export function ProjectAssetListView({
       selectedAssetId={selectedAssetId}
       onSelect={onSelect}
       onToggleSystemBinding={onToggleSystemBinding}
-      onToggleProjectSkillStatus={onToggleProjectSkillStatus}
+      onSyncSystemMcpBinding={onSyncSystemMcpBinding}
+      onToggleProjectAssetStatus={onToggleProjectAssetStatus}
       bindingIntent={bindingIntent}
       bindingErrorAssetId={bindingErrorAssetId}
       bindingError={bindingError}
-      skillStatusIntent={skillStatusIntent}
-      skillStatusErrorAssetId={skillStatusErrorAssetId}
-      skillStatusError={skillStatusError}
+      projectStatusIntent={projectStatusIntent}
+      projectStatusErrorAssetId={projectStatusErrorAssetId}
+      projectStatusError={projectStatusError}
     />
   );
 }
@@ -586,12 +748,13 @@ function ProjectAssetCatalog({
     data: ProjectAssetList;
   }) => ReactNode;
 }) {
+  const { t } = useI18n();
   const query = useProjectAssets(accountId, project.id, kind);
   const createAsset = useCreateProjectAsset(accountId, project.id, kind);
   const createVersion = useCreateProjectAssetVersion(
     accountId,
     project.id,
-    kind === "agents" ? null : kind,
+    kind === "skills" ? kind : null,
   );
   const enableBinding = useEnableProjectSystemBinding(
     accountId,
@@ -602,6 +765,10 @@ function ProjectAssetCatalog({
     accountId,
     project.id,
     BINDING_KIND[kind],
+  );
+  const syncCurrentMcpBinding = useSyncCurrentProjectSystemMcpBinding(
+    accountId,
+    project.id,
   );
   const changeStatus = useChangeProjectAssetStatus(accountId, project.id, kind);
   const importSkill = useImportProjectSkillArchive(accountId, project.id);
@@ -617,13 +784,15 @@ function ProjectAssetCatalog({
     assetId: string;
     checked: boolean;
   } | null>(null);
-  const [skillStatusIntent, setSkillStatusIntent] = useState<{
+  const [projectStatusIntent, setProjectStatusIntent] = useState<{
     assetId: string;
     checked: boolean;
   } | null>(null);
   const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
     null,
   );
+  const [mcpEditConfiguration, setMcpEditConfiguration] =
+    useState<ProjectMcpEditableConfigurationResponse | null>(null);
   const versionDialogGeneration = useRef(0);
   const activeVersionDialog = useRef<VersionDialogSubmissionToken | null>(null);
   const [createdVersions, setCreatedVersions] = useState<
@@ -631,6 +800,11 @@ function ProjectAssetCatalog({
   >({});
   const [importedSkillSelection, setImportedSkillSelection] =
     useState<ImportedSkillSelection | null>(null);
+  const [configuredMcpSelection, setConfiguredMcpSelection] =
+    useState<ImportedSkillSelection | null>(null);
+  const [configuredMcpStatus, setConfiguredMcpStatus] = useState<
+    "published" | "pending_approval" | null
+  >(null);
   const [createdAssetId, setCreatedAssetId] = useState<string | null>(null);
   const [versionSubmission, setVersionSubmission] = useState<{
     token: VersionDialogSubmissionToken;
@@ -665,8 +839,10 @@ function ProjectAssetCatalog({
   function openVersionDialog(
     item: ProjectAssetItem,
     _selectedVersion: AssetVersion | null,
+    editableMcpConfiguration?: ProjectMcpEditableConfigurationResponse,
   ) {
     if (kind === "agents") return;
+    if (kind === "mcp-servers" && !editableMcpConfiguration) return;
     const token = {
       assetId: item.id,
       generation: ++versionDialogGeneration.current,
@@ -675,6 +851,7 @@ function ProjectAssetCatalog({
     createVersion.reset();
     setVersionSubmission(null);
     setVersionAsset(item);
+    setMcpEditConfiguration(editableMcpConfiguration ?? null);
   }
 
   function closeVersionDialog() {
@@ -682,6 +859,7 @@ function ProjectAssetCatalog({
     activeVersionDialog.current = null;
     createVersion.reset();
     setVersionAsset(null);
+    setMcpEditConfiguration(null);
     setVersionSubmission((current) =>
       current && token && versionDialogSubmissionMatches(current.token, token)
         ? null
@@ -776,6 +954,23 @@ function ProjectAssetCatalog({
   }, [data, importedSkillSelection]);
 
   useEffect(() => {
+    const readySelection = configuredMcpSelectionReady(
+      data,
+      configuredMcpSelection,
+    );
+    if (!readySelection) return;
+    setSelectedAssetId(readySelection.assetId);
+    setCreatedVersions((current) =>
+      rememberRequestedVersion(
+        current,
+        readySelection.assetId,
+        readySelection.versionId,
+      ),
+    );
+    setConfiguredMcpSelection(null);
+  }, [configuredMcpSelection, data]);
+
+  useEffect(() => {
     const readyAssetId = createdProjectAssetSelectionReady(
       data,
       createdAssetId,
@@ -789,54 +984,64 @@ function ProjectAssetCatalog({
     if (selectedAssetId && data && !selectedItem) setSelectedAssetId(null);
   }, [data, selectedAssetId, selectedItem]);
 
-  function toggleSystemBinding(item: ProjectAssetItem, checked: boolean) {
-    if (kind === "mcp-servers") return;
-    const state = systemBindingToggleState(item);
-    if (state.disabled || state.checked === checked) return;
-
+  function runSystemBindingAction(
+    item: ProjectAssetItem,
+    checked: boolean,
+    syncCurrent = false,
+  ) {
+    const action = projectSystemBindingListAction(
+      kind,
+      item,
+      checked,
+      syncCurrent,
+    );
+    if (!action) return;
     enableBinding.reset();
     disableBinding.reset();
+    syncCurrentMcpBinding.reset();
     setBindingIntent({ assetId: item.id, checked });
     const settle = () =>
       setBindingIntent((current) =>
         current?.assetId === item.id ? null : current,
       );
 
-    if (checked && state.targetVersionId) {
-      enableBinding.mutate(
-        {
-          asset_id: item.id,
-          version_id: state.targetVersionId,
-          ...(item.binding
-            ? { expected_binding_version: item.binding.version }
-            : {}),
-        },
+    if (action.type === "sync-current") {
+      syncCurrentMcpBinding.mutate(
+        { assetId: action.assetId, input: action.input },
         { onSettled: settle },
       );
       return;
     }
-
-    if (!checked && item.binding?.enabled) {
+    if (action.type === "enable") {
+      enableBinding.mutate(action.input, { onSettled: settle });
+      return;
+    }
+    if (action.type === "disable") {
       disableBinding.mutate(
-        {
-          assetId: item.id,
-          input: { expected_binding_version: item.binding.version },
-        },
+        { assetId: action.assetId, input: action.input },
         { onSettled: settle },
       );
-      return;
     }
-
-    settle();
   }
 
-  function toggleProjectSkillStatus(item: ProjectAssetItem, checked: boolean) {
-    if (kind !== "skills") return;
-    const state = projectSkillStatusToggleState(item);
+  function toggleSystemBinding(item: ProjectAssetItem, checked: boolean) {
+    runSystemBindingAction(item, checked);
+  }
+
+  function syncSystemMcpBinding(item: ProjectAssetItem) {
+    runSystemBindingAction(item, true, true);
+  }
+
+  function toggleProjectAssetStatus(item: ProjectAssetItem, checked: boolean) {
+    if (kind !== "skills" && kind !== "mcp-servers") return;
+    const state =
+      kind === "mcp-servers"
+        ? projectMcpStatusToggleState(item)
+        : projectSkillStatusToggleState(item);
     if (state.disabled || state.checked === checked) return;
 
     changeStatus.reset();
-    setSkillStatusIntent({ assetId: item.id, checked });
+    setProjectStatusIntent({ assetId: item.id, checked });
     changeStatus.mutate(
       {
         assetId: item.id,
@@ -845,7 +1050,7 @@ function ProjectAssetCatalog({
       },
       {
         onSettled: () =>
-          setSkillStatusIntent((current) =>
+          setProjectStatusIntent((current) =>
             current?.assetId === item.id ? null : current,
           ),
       },
@@ -880,9 +1085,7 @@ function ProjectAssetCatalog({
     return (
       <div className="border-destructive/30 rounded-2xl border p-6">
         <p role="alert" className="text-destructive text-sm">
-          {query.error
-            ? adminAssetErrorMessage(query.error)
-            : "资产列表暂时不可用。"}
+          {projectAssetListErrorMessage(kind, query.error)}
         </p>
         <Button
           type="button"
@@ -908,19 +1111,32 @@ function ProjectAssetCatalog({
       : data.project_items.length;
   const filterActive = searchQuery.trim() !== "";
   const sourceOptions = projectAssetSourceOptions(kind);
-  const bindingError = enableBinding.error ?? disableBinding.error;
-  const bindingErrorAssetId = enableBinding.error
-    ? enableBinding.variables?.asset_id
-    : disableBinding.error
-      ? disableBinding.variables?.assetId
-      : null;
-  const skillStatusErrorAssetId = changeStatus.error
+  const bindingError =
+    syncCurrentMcpBinding.error ?? enableBinding.error ?? disableBinding.error;
+  const bindingErrorAssetId = syncCurrentMcpBinding.error
+    ? syncCurrentMcpBinding.variables?.assetId
+    : enableBinding.error
+      ? enableBinding.variables?.asset_id
+      : disableBinding.error
+        ? disableBinding.variables?.assetId
+        : null;
+  const projectStatusErrorAssetId = changeStatus.error
     ? changeStatus.variables?.assetId
     : null;
 
   return (
     <>
       {renderLead?.({ project, data })}
+
+      {kind === "mcp-servers" && configuredMcpStatus ? (
+        <p
+          role="status"
+          aria-live="polite"
+          className="border-success/30 bg-success/5 text-success mb-4 rounded-xl border px-4 py-3 text-sm"
+        >
+          {configuredMcpSuccessMessage(configuredMcpStatus)}
+        </p>
+      ) : null}
 
       {layout === "agent-cards" && renderList ? (
         renderList({
@@ -1020,10 +1236,15 @@ function ProjectAssetCatalog({
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => onCreateOpenChange(true)}
+                    onClick={() => {
+                      if (kind === "mcp-servers") {
+                        setConfiguredMcpStatus(null);
+                      }
+                      onCreateOpenChange(true);
+                    }}
                   >
                     <PlusIcon aria-hidden className="size-4" />
-                    新建{KIND_META[kind].singular}
+                    {projectAssetPrimaryActionLabel(kind)}
                   </Button>
                 )}
               </div>
@@ -1060,13 +1281,14 @@ function ProjectAssetCatalog({
                     selectedAssetId={selectedAssetId}
                     onSelect={(item) => setSelectedAssetId(item.id)}
                     onToggleSystemBinding={toggleSystemBinding}
-                    onToggleProjectSkillStatus={toggleProjectSkillStatus}
+                    onSyncSystemMcpBinding={syncSystemMcpBinding}
+                    onToggleProjectAssetStatus={toggleProjectAssetStatus}
                     bindingIntent={bindingIntent}
                     bindingErrorAssetId={bindingErrorAssetId}
                     bindingError={bindingError}
-                    skillStatusIntent={skillStatusIntent}
-                    skillStatusErrorAssetId={skillStatusErrorAssetId}
-                    skillStatusError={changeStatus.error}
+                    projectStatusIntent={projectStatusIntent}
+                    projectStatusErrorAssetId={projectStatusErrorAssetId}
+                    projectStatusError={changeStatus.error}
                   />
                 )}
               </TabsContent>
@@ -1104,7 +1326,7 @@ function ProjectAssetCatalog({
         />
       )}
 
-      {kind !== "agents" ? (
+      {kind === "skills" ? (
         <CreateAssetDialog
           kind={kind}
           scope="project"
@@ -1117,6 +1339,21 @@ function ProjectAssetCatalog({
           }
           onOpenChange={onCreateOpenChange}
           onSubmit={(input) => createAsset.mutate(input)}
+        />
+      ) : null}
+
+      {kind === "mcp-servers" ? (
+        <ProjectMcpCreateDialog
+          accountId={accountId}
+          project={project}
+          open={createOpen}
+          onOpenChange={onCreateOpenChange}
+          onCompleted={({ assetId, versionId, status }) => {
+            setSourceTouched(true);
+            setSourceFilter("project");
+            setConfiguredMcpSelection({ assetId, versionId });
+            setConfiguredMcpStatus(status);
+          }}
         />
       ) : null}
 
@@ -1138,10 +1375,10 @@ function ProjectAssetCatalog({
         />
       ) : null}
 
-      {versionAsset && kind !== "agents" ? (
+      {versionAsset && kind === "skills" ? (
         <CreateVersionDialog
           key={`${versionAsset.id}:${activeVersionDialog.current?.generation ?? "closed"}`}
-          kind={kind}
+          kind="skills"
           asset={versionAsset}
           open
           pending={
@@ -1159,11 +1396,34 @@ function ProjectAssetCatalog({
               versionSubmission.token,
             ) &&
             versionSubmission.error
-              ? adminAssetErrorMessage(versionSubmission.error)
+              ? adminAssetErrorMessage(
+                  versionSubmission.error,
+                  t.adminAssets.errors,
+                )
               : null
           }
           onOpenChange={(next) => !next && closeVersionDialog()}
           onSubmit={(input: VersionAuthoringInput) => void submitVersion(input)}
+        />
+      ) : null}
+
+      {versionAsset && kind === "mcp-servers" && mcpEditConfiguration ? (
+        <ProjectMcpEditDialog
+          key={`${versionAsset.id}:${mcpEditConfiguration.version.id}:${mcpEditConfiguration.item.version}:${activeVersionDialog.current?.generation ?? "closed"}`}
+          accountId={accountId}
+          project={project}
+          configuration={mcpEditConfiguration}
+          open
+          onOpenChange={(next) => !next && closeVersionDialog()}
+          onCompleted={({ assetId, versionId }) => {
+            const token = activeVersionDialog.current;
+            if (token?.assetId !== assetId) return;
+            activeVersionDialog.current = null;
+            rememberVersion(assetId, versionId);
+            setVersionAsset(null);
+            setMcpEditConfiguration(null);
+            setVersionSubmission(null);
+          }}
         />
       ) : null}
     </>

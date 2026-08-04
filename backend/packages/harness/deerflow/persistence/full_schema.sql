@@ -1,6 +1,6 @@
 BEGIN;
 
--- DeerFlow complete PostgreSQL application schema snapshot.
+-- ActWeave complete PostgreSQL application schema snapshot.
 -- Applied only by `make setup-db` to an empty database.
 -- This file is not an incremental migration and must remain transaction-safe.
 
@@ -64,12 +64,13 @@ CREATE TABLE jobs (
     completed_at TIMESTAMP WITH TIME ZONE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (id),
-    CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
-    CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge')),
+    CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
+    CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery')),
     CONSTRAINT ck_jobs_retry_safety CHECK (retry_safety IN ('safe', 'unknown', 'unsafe')),
     CONSTRAINT ck_jobs_status CHECK (status IN ('queued', 'leased', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'dead')),
     CONSTRAINT ck_jobs_attempts CHECK (attempt_count >= 0 AND max_attempts >= 1),
     CONSTRAINT uq_jobs_type_idempotency UNIQUE (job_type, idempotency_key),
+    CONSTRAINT uq_jobs_id_project_owner UNIQUE (id, project_id, owner_user_id),
     CONSTRAINT uq_jobs_predecessor_dead_job UNIQUE (predecessor_dead_job_id)
 );
 
@@ -192,8 +193,9 @@ CREATE UNIQUE INDEX uq_scheduled_task_runs_manual_idempotency ON scheduled_task_
 
 CREATE TABLE users (
     id VARCHAR(36) NOT NULL,
-    email VARCHAR(320) NOT NULL,
+    email VARCHAR(320),
     password_hash VARCHAR(128),
+    principal_type VARCHAR(16) DEFAULT 'human' NOT NULL,
     system_role VARCHAR(16) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     oauth_provider VARCHAR(32),
@@ -201,12 +203,16 @@ CREATE TABLE users (
     needs_setup BOOLEAN NOT NULL,
     token_version INTEGER NOT NULL,
     PRIMARY KEY (id),
-    CONSTRAINT ck_users_system_role CHECK (system_role IN ('system_admin', 'user'))
+    CONSTRAINT ck_users_system_role CHECK (system_role IN ('system_admin', 'user')),
+    CONSTRAINT ck_users_principal_type CHECK (principal_type IN ('human', 'channel_guest')),
+    CONSTRAINT ck_users_oauth_identity_shape CHECK ((oauth_provider IS NULL AND oauth_id IS NULL) OR (oauth_provider IS NOT NULL AND oauth_id IS NOT NULL)),
+    CONSTRAINT ck_users_channel_guest_identity CHECK ((principal_type = 'human' AND email IS NOT NULL) OR (principal_type = 'channel_guest' AND email IS NULL AND password_hash IS NULL AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' AND needs_setup IS FALSE AND token_version = 0)),
+    CONSTRAINT uq_users_id_principal_type UNIQUE (id, principal_type)
 );
 
 CREATE UNIQUE INDEX idx_users_oauth_identity ON users (oauth_provider, oauth_id) WHERE oauth_provider IS NOT NULL AND oauth_id IS NOT NULL;
 
-CREATE UNIQUE INDEX ix_users_email ON users (lower(email));
+CREATE UNIQUE INDEX ix_users_email ON users (lower(email)) WHERE email IS NOT NULL;
 
 CREATE TABLE auth_sessions (
     session_id_hash CHAR(64) NOT NULL,
@@ -401,6 +407,60 @@ CREATE UNIQUE INDEX uq_credentials_system_name ON credentials (lower(name)) WHER
 
 CREATE INDEX ix_credentials_scope_project_is_delete ON credentials (scope, project_id, is_delete);
 
+CREATE TABLE project_channel_instances (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    display_name VARCHAR(120) NOT NULL,
+    desired_status VARCHAR(16) DEFAULT 'disabled' NOT NULL,
+    observed_status VARCHAR(16) DEFAULT 'stopped' NOT NULL,
+    public_config JSONB DEFAULT '{}'::jsonb NOT NULL,
+    provider_identity_digest VARCHAR(64) NOT NULL,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    last_error_code VARCHAR(64),
+    created_by_user_id VARCHAR(36) NOT NULL,
+    updated_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    deleted_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT pk_project_channel_instances PRIMARY KEY (id),
+    CONSTRAINT ck_project_channel_instances_provider CHECK (provider ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT ck_project_channel_instances_desired_status CHECK (desired_status IN ('enabled', 'disabled')),
+    CONSTRAINT ck_project_channel_instances_observed_status CHECK (observed_status IN ('stopped', 'starting', 'running', 'stopping', 'error')),
+    CONSTRAINT ck_project_channel_instances_public_config CHECK (jsonb_typeof(public_config) = 'object' AND public_config::text !~* '"[^"]*(secret|token|password|api_key|private_key)[^"]*"[[:space:]]*:'),
+    CONSTRAINT ck_project_channel_instances_identity_digest CHECK (provider_identity_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_channel_instances_revision CHECK (revision >= 1),
+    CONSTRAINT fk_project_channel_instances_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_instances_creator FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_instances_updater FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT uq_project_channel_instances_project_id UNIQUE (project_id, id),
+    CONSTRAINT uq_project_channel_instances_project_provider UNIQUE (project_id, id, provider)
+);
+
+CREATE UNIQUE INDEX uq_project_channel_instances_live_provider ON project_channel_instances (project_id, provider) WHERE deleted_at IS NULL;
+
+CREATE UNIQUE INDEX uq_project_channel_instances_live_identity ON project_channel_instances (provider, provider_identity_digest) WHERE deleted_at IS NULL;
+
+CREATE INDEX ix_project_channel_instances_runtime ON project_channel_instances (desired_status, observed_status, id) WHERE deleted_at IS NULL;
+
+CREATE TABLE project_channel_instance_leases (
+    channel_instance_id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    holder_id UUID NOT NULL,
+    lease_token_hash VARCHAR(64) NOT NULL,
+    fencing_generation BIGINT NOT NULL,
+    lease_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    last_heartbeat_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_project_channel_instance_leases PRIMARY KEY (channel_instance_id),
+    CONSTRAINT ck_project_channel_instance_leases_token_hash CHECK (lease_token_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_channel_instance_leases_generation CHECK (fencing_generation >= 1),
+    CONSTRAINT fk_project_channel_instance_leases_instance FOREIGN KEY(project_id, channel_instance_id) REFERENCES project_channel_instances (project_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_project_channel_instance_leases_expiry ON project_channel_instance_leases (lease_expires_at, channel_instance_id);
+
 CREATE TABLE mcp_servers (
     id UUID NOT NULL,
     scope VARCHAR(16) NOT NULL,
@@ -498,16 +558,114 @@ CREATE TABLE project_memberships (
     PRIMARY KEY (id),
     CONSTRAINT ck_project_memberships_end_reason CHECK (end_reason IS NULL OR end_reason IN ('left', 'removed')),
     CONSTRAINT ck_project_memberships_activation_generation CHECK (activation_generation >= 1),
-    CONSTRAINT ck_project_memberships_role CHECK (role IN ('admin', 'editor', 'runner', 'viewer')),
+    CONSTRAINT ck_project_memberships_role CHECK (role IN ('admin', 'editor', 'runner', 'viewer', 'channel_guest')),
     CONSTRAINT ck_project_memberships_status CHECK (status IN ('active', 'left', 'removed')),
     CONSTRAINT ck_project_memberships_version CHECK (version >= 1),
     CONSTRAINT fk_project_memberships_ended_by_user_id_users FOREIGN KEY(ended_by_user_id) REFERENCES users (id),
     FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE,
     FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE,
-    CONSTRAINT uq_project_memberships_project_user UNIQUE (project_id, user_id)
+    CONSTRAINT uq_project_memberships_project_user UNIQUE (project_id, user_id),
+    CONSTRAINT uq_project_memberships_guest_identity UNIQUE (project_id, user_id, id, role)
 );
 
 CREATE INDEX ix_project_memberships_user_id ON project_memberships (user_id);
+
+CREATE TABLE project_channel_group_binding_challenges (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    channel_instance_id UUID NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    code_digest VARCHAR(64) NOT NULL,
+    agent_asset_id UUID NOT NULL,
+    agent_scope VARCHAR(16) NOT NULL,
+    membership_id UUID NOT NULL,
+    membership_version BIGINT NOT NULL,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    consumed_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_project_channel_group_binding_challenges PRIMARY KEY (id),
+    CONSTRAINT uq_project_channel_group_binding_challenges_code_digest UNIQUE (code_digest),
+    CONSTRAINT ck_project_channel_group_binding_challenges_provider CHECK (provider ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT ck_project_channel_group_binding_challenges_digest CHECK (code_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_channel_group_binding_challenges_agent_scope CHECK (agent_scope IN ('project', 'system')),
+    CONSTRAINT ck_project_channel_group_binding_challenges_membership_version CHECK (membership_version >= 1),
+    CONSTRAINT ck_project_channel_group_binding_challenges_expiry CHECK (expires_at > created_at),
+    CONSTRAINT ck_project_channel_group_binding_challenges_consumed CHECK (consumed_at IS NULL OR consumed_at >= created_at),
+    CONSTRAINT fk_project_channel_group_binding_challenges_instance FOREIGN KEY(project_id, channel_instance_id) REFERENCES project_channel_instances (project_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_channel_group_binding_challenges_membership FOREIGN KEY(membership_id) REFERENCES project_memberships (id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_channel_group_binding_challenges_creator_membership FOREIGN KEY(project_id, created_by_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_channel_group_binding_challenges_agent FOREIGN KEY(agent_asset_id, agent_scope) REFERENCES agents (id, scope) ON DELETE RESTRICT
+);
+
+CREATE INDEX ix_project_channel_group_binding_challenges_pending ON project_channel_group_binding_challenges (channel_instance_id, provider, expires_at) WHERE consumed_at IS NULL;
+
+CREATE INDEX ix_project_channel_group_binding_challenges_membership ON project_channel_group_binding_challenges (project_id, membership_id, membership_version);
+
+CREATE TABLE project_channel_group_bindings (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    channel_instance_id UUID NOT NULL,
+    provider VARCHAR(32) NOT NULL,
+    external_group_ref CHAR(64) NOT NULL,
+    external_group_name VARCHAR(256),
+    agent_scope VARCHAR(16) NOT NULL,
+    agent_asset_id UUID NOT NULL,
+    status VARCHAR(16) DEFAULT 'active' NOT NULL,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    updated_by_user_id VARCHAR(36) NOT NULL,
+    first_activity_at TIMESTAMP WITH TIME ZONE,
+    last_activity_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    deleted_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_project_channel_group_bindings_provider CHECK (provider ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT ck_project_channel_group_bindings_external_ref CHECK (external_group_ref ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_channel_group_bindings_agent_scope CHECK (agent_scope IN ('system', 'project')),
+    CONSTRAINT ck_project_channel_group_bindings_status CHECK (status IN ('active', 'disabled')),
+    CONSTRAINT ck_project_channel_group_bindings_revision CHECK (revision >= 1),
+    CONSTRAINT ck_project_channel_group_bindings_activity CHECK ((first_activity_at IS NULL AND last_activity_at IS NULL) OR (first_activity_at IS NOT NULL AND last_activity_at IS NOT NULL AND first_activity_at <= last_activity_at)),
+    CONSTRAINT ck_project_channel_group_bindings_deleted_status CHECK (deleted_at IS NULL OR status = 'disabled'),
+    CONSTRAINT fk_project_channel_group_bindings_instance FOREIGN KEY(project_id, channel_instance_id, provider) REFERENCES project_channel_instances (project_id, id, provider) ON DELETE CASCADE,
+    CONSTRAINT fk_project_channel_group_bindings_agent FOREIGN KEY(agent_asset_id, agent_scope) REFERENCES agents (id, scope) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_group_bindings_creator FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_group_bindings_updater FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT uq_project_channel_group_bindings_project_id UNIQUE (project_id, id)
+);
+
+CREATE UNIQUE INDEX uq_project_channel_group_bindings_live_group ON project_channel_group_bindings (channel_instance_id, external_group_ref) WHERE deleted_at IS NULL;
+
+CREATE INDEX ix_project_channel_group_bindings_project_status ON project_channel_group_bindings (project_id, status, id) WHERE deleted_at IS NULL;
+
+CREATE TABLE channel_external_principals (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    group_binding_id UUID NOT NULL,
+    external_account_ref CHAR(64) NOT NULL,
+    principal_user_id VARCHAR(36) NOT NULL,
+    principal_type VARCHAR(16) DEFAULT 'channel_guest' NOT NULL,
+    membership_id UUID NOT NULL,
+    membership_role VARCHAR(16) DEFAULT 'channel_guest' NOT NULL,
+    status VARCHAR(16) DEFAULT 'active' NOT NULL,
+    first_seen_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_channel_external_principals_external_ref CHECK (external_account_ref ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_channel_external_principals_type CHECK (principal_type = 'channel_guest'),
+    CONSTRAINT ck_channel_external_principals_membership_role CHECK (membership_role = 'channel_guest'),
+    CONSTRAINT ck_channel_external_principals_status CHECK (status IN ('active', 'frozen')),
+    CONSTRAINT ck_channel_external_principals_seen_order CHECK (first_seen_at <= last_seen_at),
+    CONSTRAINT fk_channel_external_principals_group_binding FOREIGN KEY(project_id, group_binding_id) REFERENCES project_channel_group_bindings (project_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_channel_external_principals_guest_user FOREIGN KEY(principal_user_id, principal_type) REFERENCES users (id, principal_type) ON DELETE CASCADE,
+    CONSTRAINT fk_channel_external_principals_guest_membership FOREIGN KEY(project_id, principal_user_id, membership_id, membership_role) REFERENCES project_memberships (project_id, user_id, id, role) ON DELETE CASCADE,
+    CONSTRAINT uq_channel_external_principals_group_account UNIQUE (group_binding_id, external_account_ref)
+);
+
+CREATE INDEX ix_channel_external_principals_project_status ON channel_external_principals (project_id, status, id);
 
 CREATE TABLE project_quotas (
     project_id UUID NOT NULL,
@@ -748,17 +906,18 @@ CREATE TABLE channel_connections (
     last_seen_at TIMESTAMP WITH TIME ZONE,
     last_error_at TIMESTAMP WITH TIME ZONE,
     project_id UUID NOT NULL,
+    channel_instance_id UUID,
     frozen_at TIMESTAMP WITH TIME ZONE,
     PRIMARY KEY (id),
     CONSTRAINT ck_channel_connections_status CHECK (status IN ('connected', 'frozen', 'revoked')),
     CONSTRAINT fk_channel_connections_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_channel_connections_project_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
     CONSTRAINT fk_channel_connections_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT uq_channel_connections_private_scope UNIQUE (project_id, owner_user_id, id),
-    CONSTRAINT uq_channel_connection_owner_provider_identity UNIQUE (project_id, owner_user_id, provider, external_account_id, workspace_id)
+    CONSTRAINT fk_channel_connections_project_instance FOREIGN KEY(project_id, channel_instance_id) REFERENCES project_channel_instances (project_id, id) ON DELETE RESTRICT,
+    CONSTRAINT uq_channel_connections_private_scope UNIQUE (project_id, owner_user_id, id)
 );
 
-CREATE INDEX idx_channel_connections_event_lookup ON channel_connections (provider, workspace_id, bot_user_id);
+CREATE INDEX idx_channel_connections_event_lookup ON channel_connections (channel_instance_id, provider, workspace_id, bot_user_id);
 
 CREATE INDEX ix_channel_connections_owner_user_id ON channel_connections (owner_user_id);
 
@@ -766,7 +925,15 @@ CREATE INDEX ix_channel_connections_project_id ON channel_connections (project_i
 
 CREATE INDEX ix_channel_connections_provider ON channel_connections (provider);
 
-CREATE UNIQUE INDEX uq_channel_connection_active_identity ON channel_connections (provider, external_account_id, workspace_id) WHERE status = 'connected';
+CREATE INDEX ix_channel_connections_channel_instance_id ON channel_connections (channel_instance_id);
+
+CREATE UNIQUE INDEX uq_channel_connection_owner_legacy_identity ON channel_connections (project_id, owner_user_id, provider, external_account_id, workspace_id) WHERE channel_instance_id IS NULL;
+
+CREATE UNIQUE INDEX uq_channel_connection_owner_instance_identity ON channel_connections (project_id, owner_user_id, channel_instance_id, external_account_id, workspace_id) WHERE channel_instance_id IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_channel_connection_active_legacy_identity ON channel_connections (provider, external_account_id, workspace_id) WHERE status = 'connected' AND channel_instance_id IS NULL;
+
+CREATE UNIQUE INDEX uq_channel_connection_active_instance_identity ON channel_connections (channel_instance_id, external_account_id, workspace_id) WHERE status = 'connected' AND channel_instance_id IS NOT NULL;
 
 CREATE TABLE channel_oauth_states (
     state_hash VARCHAR(128) NOT NULL,
@@ -781,10 +948,12 @@ CREATE TABLE channel_oauth_states (
     consumed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     project_id UUID NOT NULL,
+    channel_instance_id UUID,
     PRIMARY KEY (state_hash),
     CONSTRAINT fk_channel_oauth_states_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_channel_oauth_states_project_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
-    CONSTRAINT fk_channel_oauth_states_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT
+    CONSTRAINT fk_channel_oauth_states_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_channel_oauth_states_project_instance FOREIGN KEY(project_id, channel_instance_id) REFERENCES project_channel_instances (project_id, id) ON DELETE RESTRICT
 );
 
 CREATE INDEX ix_channel_oauth_states_owner_user_id ON channel_oauth_states (owner_user_id);
@@ -792,6 +961,8 @@ CREATE INDEX ix_channel_oauth_states_owner_user_id ON channel_oauth_states (owne
 CREATE INDEX ix_channel_oauth_states_project_id ON channel_oauth_states (project_id);
 
 CREATE INDEX ix_channel_oauth_states_provider ON channel_oauth_states (provider);
+
+CREATE INDEX ix_channel_oauth_states_channel_instance_id ON channel_oauth_states (channel_instance_id);
 
 CREATE TABLE credential_versions (
     id UUID NOT NULL,
@@ -1088,7 +1259,7 @@ CREATE TABLE channel_inbound_deliveries (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     PRIMARY KEY (id),
     CONSTRAINT ck_channel_inbound_deliveries_digest CHECK (provider_delivery_digest <> ''),
-    CONSTRAINT fk_channel_inbound_deliveries_conversation FOREIGN KEY(project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, thread_id) REFERENCES channel_conversations (project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_channel_inbound_deliveries_connection FOREIGN KEY(project_id, owner_user_id, connection_id) REFERENCES channel_connections (project_id, owner_user_id, id) ON DELETE CASCADE,
     CONSTRAINT fk_channel_inbound_deliveries_run FOREIGN KEY(project_id, owner_user_id, thread_id, run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
     CONSTRAINT uq_channel_inbound_deliveries_scope UNIQUE (project_id, owner_user_id, connection_id, provider, external_conversation_id, external_topic_id, provider_delivery_digest)
 );
@@ -1182,6 +1353,67 @@ CREATE TABLE mcp_version_credential_slots (
     CONSTRAINT uq_mcp_credential_slots_version_id UNIQUE (mcp_server_version_id, id),
     CONSTRAINT uq_mcp_credential_slots_version_name UNIQUE (mcp_server_version_id, name)
 );
+
+CREATE TABLE mcp_tool_discovery_attempts (
+    job_id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    mcp_server_id UUID NOT NULL,
+    mcp_server_version_id UUID NOT NULL,
+    requested_by_user_id VARCHAR(36) NOT NULL,
+    trigger VARCHAR(16) NOT NULL,
+    payload_checksum CHAR(64) NOT NULL,
+    grant_digest CHAR(64) NOT NULL,
+    result_status VARCHAR(16),
+    public_error_code VARCHAR(64),
+    requested_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    PRIMARY KEY (job_id),
+    CONSTRAINT ck_mcp_tool_discovery_attempt_trigger CHECK (trigger IN ('auto', 'manual')),
+    CONSTRAINT ck_mcp_tool_discovery_attempt_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_mcp_tool_discovery_attempt_grant_digest CHECK (grant_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_mcp_tool_discovery_attempt_result_status CHECK (result_status IS NULL OR result_status IN ('succeeded', 'failed', 'cancelled')),
+    CONSTRAINT ck_mcp_tool_discovery_attempt_result CHECK ((result_status IS NULL AND public_error_code IS NULL) OR (result_status = 'succeeded' AND public_error_code IS NULL) OR (result_status = 'cancelled' AND public_error_code IS NULL) OR (result_status = 'failed' AND public_error_code IN ('mcp_discovery_unavailable', 'mcp_catalog_invalid'))),
+    CONSTRAINT ck_mcp_tool_discovery_attempt_revision CHECK (revision >= 1),
+    CONSTRAINT fk_mcp_tool_discovery_attempt_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    CONSTRAINT fk_mcp_tool_discovery_attempt_requester FOREIGN KEY(requested_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_mcp_tool_discovery_attempt_job FOREIGN KEY(job_id, project_id, requested_by_user_id) REFERENCES jobs (id, project_id, owner_user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_mcp_tool_discovery_attempt_version FOREIGN KEY(mcp_server_id, mcp_server_version_id) REFERENCES mcp_server_versions (mcp_server_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_mcp_tool_discovery_attempts_version ON mcp_tool_discovery_attempts (project_id, mcp_server_id, mcp_server_version_id, requested_at DESC, job_id);
+
+CREATE INDEX ix_mcp_tool_discovery_attempts_closure ON mcp_tool_discovery_attempts (project_id, mcp_server_id, mcp_server_version_id, payload_checksum, grant_digest, requested_at DESC);
+
+CREATE TABLE project_mcp_tool_inventories (
+    project_id UUID NOT NULL,
+    mcp_server_version_id UUID NOT NULL,
+    mcp_server_id UUID NOT NULL,
+    attempt_payload_checksum CHAR(64) NOT NULL,
+    attempt_grant_digest CHAR(64) NOT NULL,
+    attempt_status VARCHAR(16) NOT NULL,
+    public_error_code VARCHAR(64),
+    tools JSONB DEFAULT '[]'::jsonb NOT NULL,
+    tools_payload_checksum CHAR(64),
+    tools_grant_digest CHAR(64),
+    last_attempt_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    last_success_at TIMESTAMP WITH TIME ZONE,
+    revision BIGINT DEFAULT 1 NOT NULL,
+    PRIMARY KEY (project_id, mcp_server_version_id),
+    CONSTRAINT ck_project_mcp_tool_inventory_attempt_status CHECK (attempt_status IN ('ready', 'failed')),
+    CONSTRAINT ck_project_mcp_tool_inventory_attempt_checksum CHECK (attempt_payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_mcp_tool_inventory_attempt_grant_digest CHECK (attempt_grant_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_mcp_tool_inventory_tools_checksum CHECK (tools_payload_checksum IS NULL OR tools_payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_mcp_tool_inventory_tools_grant_digest CHECK (tools_grant_digest IS NULL OR tools_grant_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_project_mcp_tool_inventory_error CHECK ((attempt_status = 'ready' AND public_error_code IS NULL) OR (attempt_status = 'failed' AND public_error_code IN ('mcp_discovery_unavailable', 'mcp_catalog_invalid'))),
+    CONSTRAINT ck_project_mcp_tool_inventory_success_shape CHECK ((tools_payload_checksum IS NULL AND tools_grant_digest IS NULL AND last_success_at IS NULL) OR (tools_payload_checksum IS NOT NULL AND tools_grant_digest IS NOT NULL AND last_success_at IS NOT NULL)),
+    CONSTRAINT ck_project_mcp_tool_inventory_tools_shape CHECK (jsonb_typeof(tools) = 'array' AND jsonb_array_length(tools) <= 128),
+    CONSTRAINT ck_project_mcp_tool_inventory_time_order CHECK (last_success_at IS NULL OR last_success_at <= last_attempt_at),
+    CONSTRAINT ck_project_mcp_tool_inventory_revision CHECK (revision >= 1),
+    CONSTRAINT fk_project_mcp_tool_inventory_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_mcp_tool_inventory_version FOREIGN KEY(mcp_server_id, mcp_server_version_id) REFERENCES mcp_server_versions (mcp_server_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_project_mcp_tool_inventories_asset ON project_mcp_tool_inventories (project_id, mcp_server_id, mcp_server_version_id);
 
 CREATE TABLE project_system_agent_bindings (
     project_id UUID NOT NULL,
@@ -1704,9 +1936,23 @@ BEGIN
                     JOIN projects project ON project.id = asset.project_id
                     WHERE version.id = OLD.mcp_server_version_id
                       AND asset.scope = 'project'
-                      AND project.status = 'pending_deletion'
-                      AND project.deletion_effective_at IS NOT NULL
-                      AND project.deletion_effective_at <= now()
+                      AND (
+                          (
+                              project.status = 'pending_deletion'
+                              AND project.deletion_effective_at IS NOT NULL
+                              AND project.deletion_effective_at <= now()
+                          )
+                          OR (
+                              project.status = 'active'
+                              AND project.is_suspended IS FALSE
+                              AND asset.status = 'archived'
+                              AND asset.current_published_version_id IS NULL
+                              AND current_setting(
+                                  'deerflow.mcp_hard_delete_asset_id',
+                                  true
+                              ) = asset.id::text
+                          )
+                      )
                 ) INTO purge_allowed;
             END IF;
         ELSE
@@ -1922,6 +2168,14 @@ CREATE TRIGGER trg_channel_conversations_updated_at BEFORE UPDATE ON channel_con
 
 CREATE TRIGGER trg_channel_credentials_updated_at BEFORE UPDATE ON channel_credentials FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
 
+CREATE TRIGGER trg_project_channel_instances_updated_at BEFORE UPDATE ON project_channel_instances FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_project_channel_instance_leases_updated_at BEFORE UPDATE ON project_channel_instance_leases FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_project_channel_group_bindings_updated_at BEFORE UPDATE ON project_channel_group_bindings FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
+CREATE TRIGGER trg_channel_external_principals_updated_at BEFORE UPDATE ON channel_external_principals FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+
 CREATE TRIGGER trg_credentials_updated_at BEFORE UPDATE ON credentials FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
 
 CREATE TRIGGER trg_files_updated_at BEFORE UPDATE ON files FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
@@ -2071,6 +2325,34 @@ CREATE TRIGGER trg_skill_design_draft_files_updated_at BEFORE UPDATE ON skill_de
 
 
 ALTER TABLE credentials ADD CONSTRAINT uq_credentials_project_asset_id UNIQUE (project_id, id);
+
+CREATE TABLE project_channel_credential_bindings (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    channel_instance_id UUID NOT NULL,
+    credential_id UUID NOT NULL,
+    credential_version_id UUID NOT NULL,
+    binding_revision BIGINT NOT NULL,
+    status VARCHAR(16) DEFAULT 'active' NOT NULL,
+    created_by_user_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    revoked_at TIMESTAMP WITH TIME ZONE,
+    revoked_by_user_id VARCHAR(36),
+    CONSTRAINT pk_project_channel_credential_bindings PRIMARY KEY (id),
+    CONSTRAINT ck_project_channel_credential_bindings_revision CHECK (binding_revision >= 1),
+    CONSTRAINT ck_project_channel_credential_bindings_status CHECK (status IN ('active', 'revoked')),
+    CONSTRAINT ck_project_channel_credential_bindings_revocation CHECK ((status = 'active' AND revoked_at IS NULL AND revoked_by_user_id IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)),
+    CONSTRAINT fk_project_channel_credential_bindings_instance FOREIGN KEY(project_id, channel_instance_id) REFERENCES project_channel_instances (project_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_channel_credential_bindings_project_credential FOREIGN KEY(project_id, credential_id) REFERENCES credentials (project_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_credential_bindings_credential_version FOREIGN KEY(credential_id, credential_version_id) REFERENCES credential_versions (credential_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_credential_bindings_creator FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_project_channel_credential_bindings_revoker FOREIGN KEY(revoked_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT uq_project_channel_credential_bindings_scope_id UNIQUE (project_id, channel_instance_id, id)
+);
+
+CREATE UNIQUE INDEX uq_project_channel_credential_bindings_active_instance ON project_channel_credential_bindings (project_id, channel_instance_id) WHERE status = 'active';
+
+CREATE INDEX ix_project_channel_credential_bindings_credential ON project_channel_credential_bindings (project_id, credential_id, credential_version_id, status);
 
 CREATE TABLE project_skill_credential_configs (
     project_id UUID NOT NULL,

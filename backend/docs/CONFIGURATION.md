@@ -1,6 +1,6 @@
 # Configuration Guide
 
-This guide explains how to configure DeerFlow for your environment.
+This guide explains how to configure ActWeave for your environment.
 
 ## Config Versioning
 
@@ -14,8 +14,12 @@ Run `make config-upgrade` to merge new fields into your config.
 - **Missing `config_version`** in your config is treated as version 0.
 - Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
-- The current example schema is **version 34**. Version 34 moves the allowlisted Agent runtime
-  leaves, local self-registration switch, and project-quota defaults to PostgreSQL system policy.
+- The current example schema is **version 35**. Version 35 replaces the retired per-URL Project
+  MCP allowlist with `mcp_security.project_remote_allowed_networks`. During upgrade, an omitted or
+  empty version-34 endpoint list becomes an empty deny-all network list; a nonempty endpoint list
+  requires an explicit operator-selected CIDR and makes `make config-upgrade` stop without writing.
+  Version 34 moved the allowlisted Agent runtime leaves, local self-registration switch, and
+  project-quota defaults to PostgreSQL system policy.
   These leaves are rejected in YAML and removed by `make config-upgrade`; deployment-owned
   siblings such as custom prompt text and storage paths remain. Version 33 removed the legacy
   top-level `models:` section, and version 32 removed `authorization:`.
@@ -27,6 +31,27 @@ Run `make config-upgrade` to merge new fields into your config.
 Agent, Skill and MCP definitions are versioned PostgreSQL assets. System admins
 只读治理 packaged bootstrap system catalog；项目成员在经过认证的 UI/API 中管理
 project assets。`config.yaml` 只管理进程和运行时设置。
+
+### Project MCP network policy
+
+Project-authored remote MCP uses secret-free HTTP(S) base URLs and accepts only canonical IP
+literals inside `mcp_security.project_remote_allowed_networks`. The defaults cover IPv4 loopback,
+RFC 1918, IPv6 loopback, and IPv6 ULA. An empty list denies every remote Project MCP; `/0` grants
+the corresponding entire address family and should be an explicit operator choice. Any valid path
+or port is allowed once the IP is inside a configured network.
+
+Exact `localhost` is normalized to `127.0.0.1` before policy validation and persistence. Use
+`[::1]` explicitly for IPv6. Other DNS hostnames are rejected: resolving a name during validation
+and resolving it again during the HTTP connection would create a DNS-rebinding/TOCTOU boundary,
+not a trustworthy CIDR check. In containers, `localhost` therefore means the Worker container
+itself; use the target's private IP literal for another container.
+
+`require_egress_proxy` defaults to `false` and is independent of the CIDR list. When set to `true`,
+a valid `egress_proxy_url` is mandatory. HTTP transmits header/query Credentials in plaintext and
+is suitable only for a trusted isolated network. Use HTTPS on untrusted links; certificates for
+IP-literal URLs need a matching IP SAN. When traffic uses a forward proxy, `127.0.0.1` is resolved
+from the proxy's network namespace rather than the Worker, and the proxy must independently enforce
+the intended network boundary.
 
 ### Project Memory
 
@@ -103,7 +128,7 @@ auth:
   验证 user、token-version、session expiry 和 revoke 状态。logout 删除全部三个浏览器 cookie
   并撤销当前 durable session；密码变更撤销全部旧 session。
 
-DeerFlow 当前没有启用 generic `AuthorizationProvider` 配置。旧顶层 `authorization:` 不会被
+ActWeave 当前没有启用 generic `AuthorizationProvider` 配置。旧顶层 `authorization:` 不会被
 静默忽略：version 32 把它列为 tombstone，直接加载会失败，`make config-upgrade` 会删除它。
 项目权限继续来自 server-issued ProjectContext、当前 membership/capability、owner scope 和
 side-effect revalidation。
@@ -290,7 +315,7 @@ deployment and configuration options.
 
 ### Sandbox
 
-DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
+ActWeave supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
 
 **Local Execution** (runs sandbox code directly on the host machine):
 ```yaml
@@ -349,7 +374,7 @@ is empty, missing, or does not match the `X-API-Key` header. The public Nginx
 entry does not route Provisioner endpoints directly; lifecycle calls originate
 from the backend Worker.
 
-When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
+When using Docker development (`make docker-start`), ActWeave starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
@@ -378,7 +403,7 @@ provider in `config.yaml`.
 
 Notes specific to `E2BSandboxProvider`:
 
-- Each DeerFlow thread is bound to its e2b sandbox via metadata
+- Each ActWeave thread is bound to its e2b sandbox via metadata
   (`deer_flow_user`, `deer_flow_thread`), so the same thread reuses the same
   sandbox across gateway restarts and across processes — no cross-process
   file lock is needed because the e2b control plane is the source of truth.
@@ -401,7 +426,7 @@ sandbox:
   allow_host_bash: false
 ```
 
-`allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
+`allow_host_bash` is intentionally `false` by default. ActWeave's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
 
 When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
 
@@ -422,7 +447,7 @@ sandbox:
       read_only: true
 ```
 
-If the configured `host_path` is not visible to the gateway process, DeerFlow logs an error and ignores that mount.
+If the configured `host_path` is not visible to the gateway process, ActWeave logs an error and ignores that mount.
 
 **Option 2: Docker Sandbox** (isolated, more secure):
 ```yaml
@@ -439,13 +464,13 @@ sandbox:
       read_only: false
 ```
 
-When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+When you configure `sandbox.mounts`, ActWeave exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
-For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+For bare-metal Docker sandbox runs that use localhost, ActWeave binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
 
 ### Building a Custom AIO Sandbox Image
 
-`AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; DeerFlow treats that image as an upstream AIO sandbox runtime.
+`AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; ActWeave treats that image as an upstream AIO sandbox runtime.
 
 For persistent system or language dependencies, extend the published image and keep its startup command intact:
 
@@ -453,7 +478,7 @@ For persistent system or language dependencies, extend the published image and k
 FROM enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 
 USER root
-# Example user dependency; not required by DeerFlow itself.
+# Example user dependency; not required by ActWeave itself.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends graphviz \
     && rm -rf /var/lib/apt/lists/*
@@ -474,11 +499,11 @@ sandbox:
 
 In provisioner mode, sandbox Pods are created by the provisioner service, so configure the provisioner `SANDBOX_IMAGE` environment variable instead of `sandbox.image`. See the [Provisioner Setup Guide](../../docker/provisioner/README.md#custom-sandbox-image).
 
-If you rebuild the runtime from scratch instead of extending the published image, it must expose the same HTTP API used by `agent-sandbox`. DeerFlow currently depends on:
+If you rebuild the runtime from scratch instead of extending the published image, it must expose the same HTTP API used by `agent-sandbox`. ActWeave currently depends on:
 
 - `sandbox.get_context()`, including `home_dir`
 - `shell.exec_command(...)`
-- `bash.exec(...)` — only exercised for per-command environment injection (skills that declare `required-secrets`). The `/v1/bash/*` routes exist since upstream all-in-one-sandbox `1.9.3`; on older images (including a `latest` tag still frozen on the `1.0.0.x` line) DeerFlow fails fast with an actionable error instead of surfacing the raw 404. Pin `sandbox.image` to `1.9.3` or newer (e.g. `1.11.0`) and recreate the sandbox container to use `required-secrets` with the AIO sandbox.
+- `bash.exec(...)` — only exercised for per-command environment injection (skills that declare `required-secrets`). The `/v1/bash/*` routes exist since upstream all-in-one-sandbox `1.9.3`; on older images (including a `latest` tag still frozen on the `1.0.0.x` line) ActWeave fails fast with an actionable error instead of surfacing the raw 404. Pin `sandbox.image` to `1.9.3` or newer (e.g. `1.11.0`) and recreate the sandbox container to use `required-secrets` with the AIO sandbox.
 - `file.read_file(...)`
 - `file.write_file(...)`, including base64 writes for binary content
 - streamed `file.download_file(...)`
@@ -489,9 +514,9 @@ If you rebuild the runtime from scratch instead of extending the published image
 Custom images must also keep these compatibility constraints:
 
 - The container should listen on the configured sandbox port, `8080` by default.
-- `/mnt/user-data` must remain writable because DeerFlow mounts thread workspace, uploads, and outputs there.
-- `home_dir` comes from the sandbox context endpoint; do not assume DeerFlow hardcodes it.
-- Shell command handling must remain compatible with serialized `exec_command` calls. DeerFlow serializes shell access on the host side to avoid corrupting the sandbox's persistent shell session.
+- `/mnt/user-data` must remain writable because ActWeave mounts thread workspace, uploads, and outputs there.
+- `home_dir` comes from the sandbox context endpoint; do not assume ActWeave hardcodes it.
+- Shell command handling must remain compatible with serialized `exec_command` calls. ActWeave serializes shell access on the host side to avoid corrupting the sandbox's persistent shell session.
 
 ### Skills
 
@@ -538,7 +563,7 @@ The default GitHub API rate limits are quite restrictive. For frequent project r
 
 **Configuration Steps**:
 1. Uncomment the `GITHUB_TOKEN` line in the `.env` file and add your personal access token
-2. Restart the DeerFlow service to apply changes
+2. Restart the ActWeave service to apply changes
 
 ## Environment Variables
 
@@ -575,7 +600,7 @@ The configuration file should be placed in the **project root directory** (`deer
 
 ## Configuration Priority
 
-DeerFlow searches for configuration in this order:
+ActWeave searches for configuration in this order:
 
 1. Path specified in code via `config_path` argument
 2. Path from `DEER_FLOW_CONFIG_PATH` environment variable
@@ -585,7 +610,7 @@ DeerFlow searches for configuration in this order:
 ## Security Notes
 ### Sandbox Isolation and the Docker Socket (DooD)
 
-DeerFlow executes agent-generated shell/code through a configurable sandbox
+ActWeave executes agent-generated shell/code through a configurable sandbox
 (`sandbox.use` in `config.yaml`). The isolation guarantees differ by mode, and
 one mode requires mounting the host Docker socket. Understand the trade-offs
 before exposing an instance to untrusted input.
@@ -601,7 +626,7 @@ before exposing an instance to untrusted input.
 Mounting `/var/run/docker.sock` into a container grants that container
 **root-equivalent control of the host**: anything able to reach the socket can
 start a new container that bind-mounts the host filesystem and escape. This
-matters for DeerFlow because the gateway executes model-generated commands, so a
+matters for ActWeave because the gateway executes model-generated commands, so a
 prompt injection or any in-container code-execution primitive could pivot to the
 host through the socket.
 
@@ -625,7 +650,7 @@ To keep this off the default attack surface:
 
 ### CLI Credential Mounts (Claude Code / Codex)
 
-DeerFlow can reuse your Claude Code / Codex CLI subscription login as a model
+ActWeave can reuse your Claude Code / Codex CLI subscription login as a model
 provider (`ClaudeChatModel`, the Codex provider) or for ACP agents that run the
 CLI in-container. The Compose stack used to bind-mount the **entire** `~/.claude`
 and `~/.codex` directories (read-only) into the gateway container in **every**

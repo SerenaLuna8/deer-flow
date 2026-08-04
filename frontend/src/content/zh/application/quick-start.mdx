@@ -1,6 +1,6 @@
 ---
 title: 快速上手
-description: 使用全新 PostgreSQL 数据库和 make dev 启动 DeerFlow project-first 全栈。
+description: 使用全新 PostgreSQL 数据库和 make dev 启动 ActWeave project-first 全栈。
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -44,11 +44,11 @@ make setup
 
 ### 初始化 PostgreSQL
 
-DeerFlow 只支持全新 PostgreSQL 目标库，不会在启动时建库、修复 schema 或原地升级旧数据库。目标应用 role 必须预先存在。
+ActWeave 只支持全新 PostgreSQL 目标库，不会在启动时建库、修复 schema 或原地升级旧数据库。目标应用 role 必须预先存在。
 
 ```bash
 export POSTGRES_ADMIN_URL='<连接 postgres maintenance database 的管理员 URL>'
-export DATABASE_URL='<全新 DeerFlow 目标库 URL>'
+export DATABASE_URL='<全新 ActWeave 目标库 URL>'
 make setup-db
 make check-db
 ```

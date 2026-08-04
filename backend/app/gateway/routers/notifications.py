@@ -13,6 +13,7 @@ from app.gateway.deps import (
     get_project_quota_enforcer,
     project_session,
 )
+from app.gateway.public_project_roles import PublicInvitationRole
 from app.gateway.routers.project_governance import (
     GOVERNANCE_DOMAIN_ERRORS,
     GovernanceRoute,
@@ -25,7 +26,6 @@ from app.gateway.routers.project_invitations import (
 from app.notifications.models import InvitationNotificationView, NotificationPage
 from app.projects.invitation_repository import InvitationRepository
 from app.projects.invitation_service import InvitationService
-from app.projects.models import ProjectRole
 
 router = APIRouter(tags=["notifications"], route_class=GovernanceRoute)
 
@@ -45,7 +45,7 @@ class NotificationResponse(BaseModel):
     kind: Literal["project_invitation"] = "project_invitation"
     project: NotificationProjectResponse
     actor: NotificationActorResponse
-    role: ProjectRole
+    role: PublicInvitationRole
     status: Literal["pending", "redeemed", "revoked", "expired"]
     is_read: bool
     created_at: datetime

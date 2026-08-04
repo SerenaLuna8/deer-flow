@@ -5,22 +5,28 @@ import {
   agentInstructionsInputSchema,
   agentVersionSchema,
   assetSummarySchema,
+  configuredMcpResponseSchema,
+  createConfiguredMcpInputSchema,
   createCredentialInputSchema,
   credentialPayloadSchema,
   credentialVersionSchema,
   credentialMetadataSchema,
   deleteCredentialInputSchema,
+  mcpToolInventoryResponseSchema,
+  mcpToolDiscoveryAttemptResponseSchema,
   mcpVersionSchema,
   mcpVersionInputSchema,
   projectAssetListSchema,
   projectCredentialListSchema,
   projectDefaultAgentInputSchema,
   projectDefaultAgentSchema,
+  projectMcpEditableConfigurationResponseSchema,
   skillFileForkInputSchema,
   skillVersionFileContentResponseSchema,
   skillVersionInputSchema,
   skillVersionSchema,
   systemBindingSchema,
+  updateConfiguredMcpInputSchema,
   versionHistoryResponseSchema,
   versionResponseSchema,
 } from "@/core/shared-assets/types";
@@ -30,6 +36,443 @@ const VERSION_ID = "22222222-2222-4222-8222-222222222222";
 const PROJECT_ID = "33333333-3333-4333-8333-333333333333";
 
 describe("shared asset contracts", () => {
+  test("strictly accepts only a safe flat project MCP configured-create payload", () => {
+    const input = {
+      slug: "amap-mcp",
+      display_name: "高德地图 MCP",
+      description: "地图与路线规划",
+      transport: "http" as const,
+      command: null,
+      args: [],
+      url: "http://localhost:8771/api/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [
+        {
+          name: "api-key",
+          purpose: "高德地图 API Key",
+          payload_schema: { query: ["key"] },
+          required: true,
+        },
+      ],
+    };
+
+    expect(createConfiguredMcpInputSchema.parse(input)).toEqual(input);
+    expect(
+      createConfiguredMcpInputSchema.safeParse({
+        ...input,
+        expected_asset_version: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      createConfiguredMcpInputSchema.safeParse({
+        ...input,
+        transport: "stdio",
+        command: "mcp-amap",
+        url: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      createConfiguredMcpInputSchema.safeParse({
+        ...input,
+        url: "https://mcp.amap.com/mcp?key=must-not-be-sent",
+      }).success,
+    ).toBe(false);
+
+    const definition = {
+      description: input.description,
+      transport: input.transport,
+      command: input.command,
+      args: input.args,
+      url: input.url,
+      env: input.env,
+      headers: input.headers,
+      oauth: input.oauth,
+      routing: input.routing,
+      tool_overrides: input.tool_overrides,
+      timeout_seconds: input.timeout_seconds,
+      credential_slots: input.credential_slots,
+    };
+    const update = { ...definition, expected_asset_version: 4 };
+    expect(updateConfiguredMcpInputSchema.parse(update)).toEqual(update);
+    expect(updateConfiguredMcpInputSchema.safeParse(definition).success).toBe(
+      false,
+    );
+    expect(
+      updateConfiguredMcpInputSchema.safeParse({
+        ...update,
+        transport: "stdio",
+      }).success,
+    ).toBe(false);
+    expect(
+      updateConfiguredMcpInputSchema.safeParse({
+        ...update,
+        url: "https://mcp.amap.com/mcp?key=must-not-be-sent",
+      }).success,
+    ).toBe(false);
+    expect(
+      updateConfiguredMcpInputSchema.safeParse({
+        ...update,
+        credential_slots: [
+          update.credential_slots[0],
+          update.credential_slots[0],
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      updateConfiguredMcpInputSchema.safeParse({
+        ...update,
+        credential_slots: [
+          {
+            ...update.credential_slots[0],
+            payload_schema: {
+              headers: ["Authorization"],
+              query: ["key"],
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  test.each([
+    "http://localhost:8771/api/mcp",
+    "http://LOCALHOST:8771/api/mcp",
+    "https://127.0.0.1:9443/mcp",
+    "http://10.20.30.40/mcp",
+    "http://[::1]:8771/api/mcp",
+    "https://[fd00::1234]/mcp",
+  ])(
+    "accepts an HTTP(S) Project MCP endpoint on localhost or a canonical IP: %s",
+    (url) => {
+      const createInput = {
+        slug: "internal-mcp",
+        display_name: "Internal MCP",
+        transport: "http" as const,
+        url,
+      };
+
+      expect(
+        createConfiguredMcpInputSchema.safeParse(createInput).success,
+      ).toBe(true);
+      expect(
+        updateConfiguredMcpInputSchema.safeParse({
+          transport: "http",
+          url,
+          expected_asset_version: 1,
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  test.each([
+    "http://user:password@localhost:8771/api/mcp",
+    "http://localhost:8771/api/mcp?token=secret",
+    "http://localhost:8771/api/mcp?",
+    "http://localhost:8771/api/mcp#tools",
+    "http://localhost:8771/api/mcp#",
+    "ftp://trans-resource.internal/api/mcp",
+    "http://localhost:0/api/mcp",
+    "http://*/api/mcp",
+    "http://trans-resource:8771/api/mcp",
+    "https://mcp.internal/api/mcp",
+    "https://mcp.example.com/api/mcp",
+    "http://localhost./api/mcp",
+    "http://foo.localhost/api/mcp",
+    "http://127.1/api/mcp",
+    "http://0x7f.0.0.1/api/mcp",
+    "http://0177.0.0.1/api/mcp",
+    "http://[0:0:0:0:0:0:0:1]/api/mcp",
+    "http://[FD00::1234]/api/mcp",
+    "not-a-url",
+  ])("rejects an unsafe or invalid Project MCP endpoint: %s", (url) => {
+    expect(
+      createConfiguredMcpInputSchema.safeParse({
+        slug: "internal-mcp",
+        display_name: "Internal MCP",
+        transport: "http",
+        url,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("strictly binds the configured MCP aggregate to its final item and version", () => {
+    const response = {
+      item: {
+        id: ASSET_ID,
+        scope: "project",
+        project_id: PROJECT_ID,
+        slug: "amap-mcp",
+        display_name: "高德地图 MCP",
+        status: "active",
+        current_published_version_id: VERSION_ID,
+        version: 3,
+        created_by_user_id: "user-1",
+        created_at: "2026-08-02T00:00:00Z",
+        updated_at: "2026-08-02T00:00:00Z",
+      },
+      version: {
+        id: VERSION_ID,
+        mcp_server_id: ASSET_ID,
+        version_number: 1,
+        workflow_status: "published",
+        definition: {
+          description: "地图与路线规划",
+          transport: "http",
+          command: null,
+          args: [],
+          url: "https://mcp.amap.com/mcp",
+          env: {},
+          headers: {},
+          oauth: {},
+          routing: {},
+          tool_overrides: {},
+          timeout_seconds: 30,
+          credential_slots: [],
+        },
+        credential_slots: [],
+        credential_grants: [],
+        supersedes_version_id: null,
+        payload_checksum: "b".repeat(64),
+        submitted_at: null,
+        reviewed_at: null,
+        reviewed_by_user_id: null,
+        created_by_user_id: "user-1",
+        created_at: "2026-08-02T00:00:00Z",
+      },
+      request_id: "req-configured-mcp",
+    };
+
+    expect(configuredMcpResponseSchema.parse(response)).toEqual(response);
+    expect(
+      configuredMcpResponseSchema.safeParse({
+        ...response,
+        item: { ...response.item, id: "44444444-4444-4444-8444-444444444444" },
+      }).success,
+    ).toBe(false);
+    expect(
+      configuredMcpResponseSchema.safeParse({
+        ...response,
+        version: { ...response.version, workflow_status: "draft" },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("strictly accepts a published editable MCP configuration with Credential slots", () => {
+    const slotId = "44444444-4444-4444-8444-444444444444";
+    const response = {
+      item: {
+        id: ASSET_ID,
+        scope: "project",
+        project_id: PROJECT_ID,
+        slug: "transfer-mcp",
+        display_name: "Transfer MCP",
+        status: "active",
+        current_published_version_id: VERSION_ID,
+        version: 7,
+        created_by_user_id: "user-1",
+        created_at: "2026-08-02T00:00:00Z",
+        updated_at: "2026-08-02T00:00:00Z",
+      },
+      version: {
+        id: VERSION_ID,
+        mcp_server_id: ASSET_ID,
+        version_number: 3,
+        workflow_status: "published",
+        definition: {
+          description: "Transfer resource MCP",
+          transport: "http",
+          command: null,
+          args: [],
+          url: "http://127.0.0.1:8771/api/mcp",
+          env: {},
+          headers: {},
+          oauth: {},
+          routing: {},
+          tool_overrides: {},
+          timeout_seconds: 30,
+          credential_slots: [
+            {
+              name: "auth",
+              purpose: "MCP request header authentication",
+              payload_schema: { headers: ["Authorization"] },
+              required: true,
+            },
+          ],
+        },
+        credential_slots: [
+          {
+            id: slotId,
+            name: "auth",
+            purpose: "MCP request header authentication",
+            payload_schema: { headers: ["Authorization"] },
+            required: true,
+          },
+        ],
+        credential_grants: [],
+        supersedes_version_id: null,
+        payload_checksum: "b".repeat(64),
+        submitted_at: "2026-08-02T00:00:00Z",
+        reviewed_at: "2026-08-02T00:01:00Z",
+        reviewed_by_user_id: "admin-1",
+        created_by_user_id: "user-1",
+        created_at: "2026-08-02T00:00:00Z",
+      },
+      request_id: "req-editable-mcp",
+    };
+
+    expect(
+      projectMcpEditableConfigurationResponseSchema.parse(response),
+    ).toEqual(response);
+    expect(
+      projectMcpEditableConfigurationResponseSchema.safeParse({
+        ...response,
+        item: {
+          ...response.item,
+          current_published_version_id: slotId,
+        },
+        version: {
+          ...response.version,
+          workflow_status: "pending_approval",
+          supersedes_version_id: slotId,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      projectMcpEditableConfigurationResponseSchema.safeParse({
+        ...response,
+        version: { ...response.version, workflow_status: "draft" },
+      }).success,
+    ).toBe(false);
+    expect(
+      projectMcpEditableConfigurationResponseSchema.safeParse({
+        ...response,
+        private_locator: "must-not-enter-browser-cache",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("strictly parses bounded MCP tool inventory metadata", () => {
+    const response = {
+      data: {
+        status: "ready",
+        tools: [
+          {
+            name: "maps_weather",
+            description: "根据城市名称查询天气",
+          },
+        ],
+        last_attempt_at: "2026-08-02T08:00:00Z",
+        last_success_at: "2026-08-02T08:00:00Z",
+        error_code: null,
+      },
+      request_id: "req-mcp-tools",
+    };
+
+    expect(mcpToolInventoryResponseSchema.parse(response)).toEqual(response);
+    expect(
+      mcpToolInventoryResponseSchema.safeParse({
+        ...response,
+        data: {
+          ...response.data,
+          tools: [{ name: "project secret", description: "invalid" }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      mcpToolInventoryResponseSchema.safeParse({
+        ...response,
+        data: {
+          ...response.data,
+          tools: [response.data.tools[0], response.data.tools[0]],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      mcpToolInventoryResponseSchema.safeParse({
+        ...response,
+        data: {
+          ...response.data,
+          tools: Array.from({ length: 129 }, (_, index) => ({
+            name: `tool_${index}`,
+            description: "bounded",
+          })),
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      mcpToolInventoryResponseSchema.safeParse({
+        ...response,
+        data: { ...response.data, endpoint: "https://secret.example.test" },
+      }).success,
+    ).toBe(false);
+
+    expect(
+      mcpToolInventoryResponseSchema.parse({
+        ...response,
+        data: {
+          ...response.data,
+          status: "testing",
+          error_code: null,
+        },
+      }).data,
+    ).toEqual({
+      ...response.data,
+      status: "testing",
+      error_code: null,
+    });
+    expect(
+      mcpToolInventoryResponseSchema.safeParse({
+        ...response,
+        data: {
+          ...response.data,
+          status: "testing",
+          error_code: "mcp_discovery_unavailable",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("strictly parses one bounded MCP tool-discovery attempt", () => {
+    const response = {
+      data: {
+        id: "44444444-4444-4444-8444-444444444444",
+        mcp_server_id: ASSET_ID,
+        mcp_server_version_id: VERSION_ID,
+        status: "queued",
+        requested_at: "2026-08-03T08:00:00Z",
+        started_at: null,
+        completed_at: null,
+        error_code: null,
+      },
+      request_id: "req-mcp-tool-discovery",
+    };
+
+    expect(mcpToolDiscoveryAttemptResponseSchema.parse(response)).toEqual(
+      response,
+    );
+    expect(
+      mcpToolDiscoveryAttemptResponseSchema.safeParse({
+        ...response,
+        data: { ...response.data, status: "pending" },
+      }).success,
+    ).toBe(false);
+    expect(
+      mcpToolDiscoveryAttemptResponseSchema.safeParse({
+        ...response,
+        data: {
+          ...response.data,
+          status: "failed",
+          error_code: "private_upstream_error",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("strictly parses the project default Agent pointer and revision guard", () => {
     expect(
       projectDefaultAgentSchema.parse({
@@ -408,6 +851,7 @@ describe("shared asset contracts", () => {
           GITHUB_ORG: "deer-flow",
         },
         headers: { Authorization: "write-only-header" },
+        query: { key: "write-only-query-key" },
         oauth: { refresh_token: "write-only-refresh-token" },
       }),
     ).toEqual({
@@ -416,6 +860,7 @@ describe("shared asset contracts", () => {
         GITHUB_ORG: "deer-flow",
       },
       headers: { Authorization: "write-only-header" },
+      query: { key: "write-only-query-key" },
       oauth: { refresh_token: "write-only-refresh-token" },
     });
 

@@ -23,7 +23,7 @@ from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
-from app.private_work.errors import PrivateWorkMcpQuotaExceeded
+from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkMcpQuotaExceeded
 from app.private_work.file_finalizer import (
     PrivateFileFinalizationAuditPort,
     PrivateFileFinalizer,
@@ -47,7 +47,10 @@ from app.private_work.sandbox_files import (
     PrivateRunFileAuthority,
     PrivateSandboxFileProjection,
 )
-from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.private_work.snapshot_repository import (
+    RunSnapshotRepository,
+    agent_model_snapshot_purpose,
+)
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
@@ -72,8 +75,8 @@ from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
 from deerflow.mcp_definition_policy import (
-    ExactMcpEndpointPolicy,
     McpEndpointPolicy,
+    NetworkMcpEndpointPolicy,
 )
 from deerflow.persistence.jobs.sql import (
     JobClaim,
@@ -1068,10 +1071,8 @@ class RunAgentPrivateExecutor:
                 mcp_security = McpSecurityConfig()
             self._asset_runtime = PrivateAssetRuntime(
                 session_factory,
-                endpoint_policy=ExactMcpEndpointPolicy(
-                    frozenset(
-                        mcp_security.project_remote_allowed_endpoints,
-                    )
+                endpoint_policy=NetworkMcpEndpointPolicy(
+                    mcp_security.project_remote_allowed_networks,
                 ),
                 http_client_factory=make_secure_mcp_http_client_factory(
                     proxy_url=mcp_security.egress_proxy_url,
@@ -1199,6 +1200,7 @@ class RunAgentPrivateExecutor:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
             runtime_app_config = self._app_config
             runtime_policy = None
+            delegate_model_names: dict[uuid.UUID, str] = {}
             if self._runtime_policy_materializer is not None:
                 try:
                     runtime_policy = await self._runtime_policy_materializer.materialize_run_snapshot(
@@ -1226,6 +1228,26 @@ class RunAgentPrivateExecutor:
                     runtime_models: dict[str, ModelConfig] = {
                         lead_model.name: lead_model,
                     }
+                    delegated_agent_versions: set[uuid.UUID] = set()
+                    for asset in execution.snapshot.assets:
+                        if asset.asset_kind != "agent" or asset.dependency_order == 0:
+                            continue
+                        if asset.version_id in delegated_agent_versions:
+                            raise PermanentExecutionError("RUN_ASSET_STALE")
+                        delegated_agent_versions.add(asset.version_id)
+                        delegated_model = await self._model_materializer.materialize_snapshot(
+                            project_id=execution.context.project_id,
+                            owner_user_id=str(execution.context.user_id),
+                            run_id=execution.run.run_id,
+                            purpose=agent_model_snapshot_purpose(
+                                asset.version_id,
+                            ),
+                        )
+                        existing = runtime_models.get(delegated_model.name)
+                        if existing is not None and existing != delegated_model:
+                            raise PermanentExecutionError("RUN_ASSET_STALE")
+                        runtime_models[delegated_model.name] = delegated_model
+                        delegate_model_names[asset.version_id] = delegated_model.name
                     if runtime_policy is not None:
                         auxiliary_model_refs = (
                             ("title", runtime_app_config.title.model_name),
@@ -1274,10 +1296,15 @@ class RunAgentPrivateExecutor:
 
             push_current_app_config(runtime_app_config)
             runtime_config_pushed = True
+            materialize_kwargs: dict[str, object] = {
+                "authorization_boundary": boundary,
+            }
+            if delegate_model_names:
+                materialize_kwargs["delegate_model_names"] = delegate_model_names
             private_runtime = await self._asset_runtime.materialize(
                 execution.context,
                 admitted,
-                authorization_boundary=boundary,
+                **materialize_kwargs,
             )
             resolved_runtime_model = resolve_model_ref(
                 runtime_app_config,
@@ -1440,6 +1467,8 @@ class RunAgentPrivateExecutor:
             raise PermanentExecutionError(
                 "CHECKPOINT_MODE_MISMATCH",
             ) from error
+        except PrivateWorkAssetStale:
+            raise PermanentExecutionError("RUN_ASSET_STALE") from None
         except TransientExecutionError as error:
             if error.attempt_usage is None and record is not None and not boundary.lease_lost:
                 raise TransientExecutionError(

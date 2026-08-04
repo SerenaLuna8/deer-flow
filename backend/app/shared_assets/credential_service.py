@@ -35,7 +35,7 @@ from deerflow.persistence.shared_assets import CredentialEnvelopeRow, Credential
 
 _NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?\Z")
 _TYPE_PATTERN = re.compile(r"[a-z][a-z0-9._-]{0,31}\Z")
-_PAYLOAD_SECTIONS = frozenset({"env", "headers", "oauth"})
+_PAYLOAD_SECTIONS = frozenset({"env", "headers", "oauth", "query"})
 _CONFLICT_CONSTRAINTS = frozenset(
     {
         "uq_credentials_project_name",

@@ -5,20 +5,27 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
+from deerflow.persistence.private_work.model import (
+    RunAssetVersionRow,
+    RunMcpGrantSnapshotRow,
+)
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
+    AgentVersionMcpRefRow,
     CredentialGrantRow,
     CredentialRow,
     CredentialVersionRow,
     McpCredentialSlotRow,
     McpServerRow,
     McpServerVersionRow,
+    ProjectSystemMcpBindingRow,
 )
 
 
@@ -152,6 +159,165 @@ class McpRepository:
         self.session.add(row)
         await self.session.flush()
         return row
+
+    async def plan_project_asset_deletion(
+        self,
+        context: ProjectContext,
+        asset: McpServerRow,
+    ) -> tuple[uuid.UUID, ...]:
+        """Lock one project MCP package and reject every retained external use."""
+
+        self._require_project_actor(context)
+        if asset.scope != "project" or asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        version_ids = tuple(
+            (
+                await self.session.execute(
+                    select(McpServerVersionRow.id)
+                    .where(McpServerVersionRow.mcp_server_id == asset.id)
+                    .order_by(
+                        McpServerVersionRow.version_number,
+                        McpServerVersionRow.id,
+                    )
+                    .with_for_update(of=McpServerVersionRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        _locked_slot_ids = tuple(
+            (
+                await self.session.execute(
+                    select(McpCredentialSlotRow.id)
+                    .where(
+                        McpCredentialSlotRow.mcp_server_version_id.in_(version_ids),
+                    )
+                    .order_by(McpCredentialSlotRow.id)
+                    .with_for_update(of=McpCredentialSlotRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        _locked_grant_ids = tuple(
+            (
+                await self.session.execute(
+                    select(CredentialGrantRow.id)
+                    .where(
+                        CredentialGrantRow.mcp_server_version_id.in_(version_ids),
+                    )
+                    .order_by(CredentialGrantRow.id)
+                    .with_for_update(of=CredentialGrantRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        retained_reference_exists = bool(
+            await self.session.scalar(
+                select(
+                    or_(
+                        exists().where(
+                            AgentVersionMcpRefRow.mcp_server_version_id.in_(
+                                version_ids,
+                            ),
+                        ),
+                        exists().where(
+                            RunAssetVersionRow.project_id == context.project_id,
+                            RunAssetVersionRow.asset_kind == "mcp",
+                            RunAssetVersionRow.asset_scope == "project",
+                            RunAssetVersionRow.asset_id == asset.id,
+                        ),
+                        exists().where(
+                            RunMcpGrantSnapshotRow.mcp_version_id.in_(version_ids),
+                        ),
+                        exists().where(
+                            or_(
+                                ProjectSystemMcpBindingRow.system_mcp_server_id == asset.id,
+                                ProjectSystemMcpBindingRow.mcp_server_version_id.in_(
+                                    version_ids,
+                                ),
+                            ),
+                        ),
+                    )
+                )
+            )
+        )
+        if retained_reference_exists:
+            raise AssetConflict(context.request_id)
+        # Keep both lock queries above even when the identifiers are otherwise
+        # unused: they close FK insertion races before the reference check.
+        return version_ids
+
+    async def delete_project_asset(
+        self,
+        context: ProjectContext,
+        asset: McpServerRow,
+        version_ids: Sequence[uuid.UUID],
+    ) -> None:
+        """Physically remove one already-locked, externally unreferenced MCP."""
+
+        self._require_project_actor(context)
+        selected_version_ids = tuple(version_ids)
+        if asset.scope != "project" or asset.project_id != context.project_id or len(set(selected_version_ids)) != len(selected_version_ids):
+            raise AssetNotFound(context.request_id)
+
+        # This transient state is never committed. The transaction-local exact
+        # asset id authorizes deleting immutable slots for this package only.
+        asset.current_published_version_id = None
+        asset.status = "archived"
+        await self.session.flush()
+        await self.session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.mcp_hard_delete_asset_id",
+                    str(asset.id),
+                    True,
+                )
+            )
+        )
+
+        if selected_version_ids:
+            await self.session.execute(
+                delete(CredentialGrantRow).where(
+                    CredentialGrantRow.mcp_server_version_id.in_(
+                        selected_version_ids,
+                    )
+                )
+            )
+            await self.session.execute(
+                delete(McpCredentialSlotRow).where(
+                    McpCredentialSlotRow.mcp_server_version_id.in_(
+                        selected_version_ids,
+                    )
+                )
+            )
+            child = aliased(McpServerVersionRow)
+            remaining = set(selected_version_ids)
+            while remaining:
+                deleted_ids = set(
+                    (
+                        await self.session.execute(
+                            delete(McpServerVersionRow)
+                            .where(
+                                McpServerVersionRow.id.in_(remaining),
+                                McpServerVersionRow.mcp_server_id == asset.id,
+                                ~exists().where(
+                                    child.supersedes_version_id == McpServerVersionRow.id,
+                                ),
+                            )
+                            .returning(McpServerVersionRow.id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not deleted_ids:
+                    raise AssetConflict(context.request_id)
+                remaining.difference_update(deleted_ids)
+
+        await self.session.delete(asset)
+        await self.session.flush()
 
     async def get_project_asset(
         self,
@@ -377,6 +543,91 @@ class McpRepository:
         if row is None:
             raise AssetNotFound(context.request_id)
         return await self._record(row, for_update=for_update)
+
+    async def get_project_current_configuration(
+        self,
+        context: ProjectContext,
+        asset: McpServerRow,
+        *,
+        for_update: bool = False,
+    ) -> McpVersionRecord | None:
+        """Return the editable head without exposing arbitrary history.
+
+        A current-lineage pending revision is the configuration the editor
+        must resume. Otherwise the exact published pointer is returned.
+        Callers that request a lock must already hold the project/asset lock.
+        """
+
+        self._require_project_actor(context)
+        if asset.scope != "project" or asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        pending_lineage = McpServerVersionRow.supersedes_version_id.is_(None) if asset.current_published_version_id is None else McpServerVersionRow.supersedes_version_id == asset.current_published_version_id
+        eligible = [
+            and_(
+                McpServerVersionRow.workflow_status == "pending_approval",
+                pending_lineage,
+            )
+        ]
+        if asset.current_published_version_id is not None:
+            eligible.append(
+                and_(
+                    McpServerVersionRow.id == asset.current_published_version_id,
+                    McpServerVersionRow.workflow_status == "published",
+                )
+            )
+        statement = (
+            select(McpServerVersionRow)
+            .where(
+                McpServerVersionRow.mcp_server_id == asset.id,
+                or_(*eligible),
+            )
+            .order_by(
+                (McpServerVersionRow.workflow_status == "pending_approval").desc(),
+                McpServerVersionRow.version_number.desc(),
+                McpServerVersionRow.id,
+            )
+            .limit(1)
+        )
+        if for_update:
+            statement = statement.with_for_update(of=McpServerVersionRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            return None
+        return await self._record(row, for_update=for_update)
+
+    async def get_project_visible_version(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> McpVersionRecord:
+        """Load one exact project-visible version without scanning history."""
+
+        self._require_project_actor(context)
+        statement = (
+            select(McpServerVersionRow)
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .where(
+                McpServerVersionRow.id == version_id,
+                McpServerVersionRow.mcp_server_id == asset_id,
+                or_(
+                    and_(
+                        McpServerRow.scope == "project",
+                        McpServerRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        McpServerRow.scope == "system",
+                        McpServerRow.project_id.is_(None),
+                        McpServerVersionRow.workflow_status == "published",
+                    ),
+                ),
+                self._project_context_exists(context),
+            )
+        )
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return await self._record(row, for_update=False)
 
     async def get_override_version(
         self,

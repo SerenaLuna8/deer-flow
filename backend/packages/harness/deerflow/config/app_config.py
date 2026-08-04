@@ -233,7 +233,7 @@ def apply_logging_level(name: str | None) -> None:
 
 
 class AppConfig(BaseModel):
-    """Config for the DeerFlow application"""
+    """Config for the ActWeave application."""
 
     log_level: str = Field(
         default="info",
@@ -275,7 +275,7 @@ class AppConfig(BaseModel):
         default_factory=McpSecurityConfig,
         description=format_field_description(
             "mcp_security",
-            field_doc="Operator-owned project MCP endpoint, egress, discovery, and tool-call policy.",
+            field_doc="Operator-owned project MCP network, egress, discovery, and tool-call policy.",
         ),
     )
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
@@ -288,7 +288,7 @@ class AppConfig(BaseModel):
         default_factory=ChannelConnectionsConfig,
         description=format_field_description(
             "channel_connections",
-            field_doc="User-facing IM channel connection configuration.",
+            field_doc=("Legacy deployment-config IM channel connection provider availability; does not gate database-backed project channel instances."),
         ),
     )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
@@ -301,7 +301,7 @@ class AppConfig(BaseModel):
         default_factory=DatabaseConfig,
         description=format_field_description(
             "database",
-            field_doc="PostgreSQL connection shared by LangGraph persistence and DeerFlow application data.",
+            field_doc="PostgreSQL connection shared by LangGraph persistence and ActWeave application data.",
         ),
     )
     scheduler: SchedulerConfig = Field(
@@ -401,7 +401,7 @@ class AppConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, use ``config.yaml`` at the DeerFlow repository root.
+        3. Otherwise, use ``config.yaml`` at the ActWeave repository root.
         """
         if config_path:
             path = Path(config_path)
@@ -720,7 +720,7 @@ def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
 
 
 def get_app_config() -> AppConfig:
-    """Get the DeerFlow config instance.
+    """Get the ActWeave config instance.
 
     Returns a cached singleton instance and automatically reloads it when the
     underlying config file path or content signature changes. Use

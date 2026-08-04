@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a redacted DeerFlow support bundle for community troubleshooting."""
+"""Create a redacted ActWeave support bundle for community troubleshooting."""
 
 from __future__ import annotations
 
@@ -675,7 +675,7 @@ def render_issue_summary(triage: dict[str, Any]) -> str:
     doctor = triage["doctor"]
     versions = triage["versions"]
     lines = [
-        "## DeerFlow support bundle summary",
+        "## ActWeave support bundle summary",
         "",
         f"- Triage status: {triage['status']}",
         f"- Active signals: {', '.join(triage['active_signals']) or 'none'}",
@@ -758,7 +758,7 @@ def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: di
     lines = [
         "# AI issue draft",
         "",
-        "Use this when a coding agent or AI assistant files a DeerFlow bug report.",
+        "Use this when a coding agent or AI assistant files an ActWeave bug report.",
         "Do not file this issue until every REQUIRED placeholder is replaced.",
         "Do not invent if unknown; ask the reporter for missing reproduction facts instead.",
         "",
@@ -768,7 +768,7 @@ def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: di
         "",
         "### Before you start",
         "",
-        "- [ ] I searched [existing issues](https://github.com/bytedance/deer-flow/issues?q=is%3Aissue) and this is not a duplicate.",
+        "- [ ] I searched [existing issues](https://github.com/SerenaLuna8/deer-flow/issues?q=is%3Aissue) and this is not a duplicate.",
         "- [ ] I can reproduce this on the latest `main`.",
         "",
         "### Problem summary",
@@ -804,7 +804,7 @@ def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: di
         _doctor_excerpt(doctor),
         "```",
         "",
-        "### How are you running DeerFlow?",
+        "### How are you running ActWeave?",
         "",
         "<REQUIRED: choose Local, Docker, CI, or Other>",
         "",
@@ -854,7 +854,7 @@ def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: di
 def render_bundle_readme(triage: dict[str, Any]) -> str:
     """Render the support bundle README."""
     lines = [
-        "# DeerFlow Support Bundle",
+        "# ActWeave Support Bundle",
         "",
         "## Start here",
         "",
@@ -985,7 +985,7 @@ def create_support_bundle(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parents[1]
-    parser.add_argument("--project-root", type=Path, default=repo_root, help="DeerFlow project root")
+    parser.add_argument("--project-root", type=Path, default=repo_root, help="ActWeave project root")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument(
         "--thread-id",

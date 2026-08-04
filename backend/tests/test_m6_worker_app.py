@@ -97,6 +97,10 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         def __init__(self, factory, **kwargs) -> None:
             captured["handler"] = (factory, kwargs)
 
+    class DiscoveryHandler:
+        def __init__(self, factory, **kwargs) -> None:
+            captured["discovery_handler"] = (factory, kwargs)
+
     class Service:
         def __init__(
             self,
@@ -166,6 +170,12 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         raising=False,
     )
     monkeypatch.setattr(worker_app, "PrivateRunJobHandler", Handler)
+    monkeypatch.setattr(
+        worker_app,
+        "McpToolDiscoveryJobHandler",
+        DiscoveryHandler,
+        raising=False,
+    )
     monkeypatch.setattr(worker_app, "PrivateRunJobTerminalPort", TerminalPort)
     monkeypatch.setattr(worker_app, "WorkerService", Service)
     checkpoint_freeze: list[tuple[str, object]] = []
@@ -219,9 +229,11 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
         "private_run",
         "automation_run",
         "retention_purge",
+        "mcp_discovery",
     }
     assert handlers["automation_run"] is handlers["private_run"]
     assert handlers["retention_purge"] is not handlers["private_run"]
+    assert handlers["mcp_discovery"] is not handlers["private_run"]
     assert worker_config is config.worker
     repository = repository_builder(object())
     assert repository._owner_ref(str(uuid.uuid4())).key_id == "test"
@@ -235,6 +247,9 @@ async def test_worker_entrypoint_installs_default_private_run_handler(
     assert captured["executor"][1]["bridge"] is captured["durable_bridge"]
     assert captured["executor"][1]["audit"] is captured["handler"][1]["audit"]
     assert captured["executor"][1]["runtime_policy_materializer"] is captured["runtime_policy_materializer"]
+    assert captured["discovery_handler"][0] is session_factory
+    assert captured["discovery_handler"][1]["endpoint_policy"]._parsed_networks
+    assert captured["discovery_handler"][1]["discovery_timeout_seconds"] == 15
     assert captured["logging_config"] is config
     assert captured["closed"] is True
     assert checkpoint_freeze == [("mode", "delta"), ("frequency", 7)]

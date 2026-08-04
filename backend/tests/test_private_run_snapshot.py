@@ -23,6 +23,7 @@ from app.private_work.run_repository import PrivateRunCreate, PrivateRunReposito
 from app.private_work.snapshot_repository import (
     RunSnapshotAssetStale,
     RunSnapshotRepository,
+    agent_model_snapshot_purpose,
 )
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.shared_assets.models import (
@@ -33,6 +34,14 @@ from app.shared_assets.models import (
 )
 from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.persistence.run.model import RunRow
+
+
+def test_agent_model_snapshot_purpose_uses_exact_version_uuid() -> None:
+    version_id = uuid.UUID("01234567-89ab-cdef-0123-456789abcdef")
+
+    assert agent_model_snapshot_purpose(version_id) == (
+        "agent.0123456789abcdef0123456789abcdef"
+    )
 
 
 @dataclass(frozen=True)
@@ -261,7 +270,7 @@ async def test_run_snapshot_rejects_project_remote_when_policy_is_not_injected()
         )
 
 
-def test_run_snapshot_rejects_historical_project_non_header_credential_slot() -> None:
+def test_run_snapshot_rejects_historical_project_unsupported_env_credential_slot() -> None:
     endpoint = "https://allowed.example.test/mcp"
     version_id = uuid.uuid4()
     asset = SimpleNamespace(scope="project")

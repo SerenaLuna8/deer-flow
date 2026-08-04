@@ -27,7 +27,7 @@ from app.system_runtime_settings import SystemRuntimePolicyService
 from app.system_settings import SystemModelCatalogService
 from deerflow.config import get_app_config
 from deerflow.config.mcp_security_config import McpSecurityConfig
-from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
+from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
 from deerflow.persistence import (
     close_engine,
     get_engine,
@@ -110,8 +110,8 @@ async def run_scheduler(
             )
         else:
             mcp_security = McpSecurityConfig()
-        mcp_endpoint_policy = ExactMcpEndpointPolicy(
-            frozenset(mcp_security.project_remote_allowed_endpoints),
+        mcp_endpoint_policy = NetworkMcpEndpointPolicy(
+            mcp_security.project_remote_allowed_networks,
         )
     except Exception:
         raise SchedulerConfigurationUnavailable() from None

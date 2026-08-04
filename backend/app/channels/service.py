@@ -8,6 +8,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel
+from app.channels.instance_identity import normalize_channel_instance_id
 from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import MessageBus
 from app.channels.store import ChannelStore
@@ -45,6 +46,45 @@ _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
 
 
+def _make_group_identity_candidates(identity_hasher: Any | None = None):
+    """Build the app-owned HMAC lookup used for non-login group guests."""
+
+    if identity_hasher is None:
+        from app.channel_group_bindings.identity import (
+            AuditChannelGroupIdentityHasher,
+        )
+
+        identity_hasher = AuditChannelGroupIdentityHasher()
+
+    def candidates(
+        provider: str,
+        channel_instance_id,
+        external_account_id: str,
+        workspace_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        if not external_account_id or not workspace_id:
+            return ()
+        account_refs = identity_hasher.account_refs(
+            provider,
+            channel_instance_id,
+            external_account_id,
+        )
+        group_refs = identity_hasher.group_refs(
+            provider,
+            channel_instance_id,
+            workspace_id,
+        )
+        if not account_refs or not group_refs:
+            raise RuntimeError("channel identity keyring is inconsistent")
+        # A group can have been bound under a retained key while a member is
+        # first seen after rotation under the active key. Preserve each
+        # account/group pair as one coordinate, but include every retained-key
+        # combination so that mixed-generation rows remain readable.
+        return tuple((account_ref, group_ref) for account_ref in dict.fromkeys(account_refs) for group_ref in dict.fromkeys(group_refs))
+
+    return candidates
+
+
 def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
     cred_keys = _CHANNEL_CREDENTIAL_KEYS.get(name, [])
     return any(not isinstance(channel_config.get(key), bool) and channel_config.get(key) is not None and str(channel_config[key]).strip() for key in cred_keys)
@@ -61,11 +101,11 @@ def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, 
 
 
 def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
-    """Build the inbound authority repository independently of product gates.
+    """Build the inbound authority repository independently of legacy flags.
 
-    ``channel_connections.enabled`` controls browser connection features. It
-    is not allowed to disable the PostgreSQL authority check for executable
-    inbound messages.
+    ``channel_connections.*`` only exposes deployment-config compatibility
+    providers. It cannot bypass PostgreSQL inbound authority or gate an exact
+    database-backed project instance.
     """
     try:
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
@@ -82,7 +122,10 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     if session_factory is None:
         logger.warning("Channel inbound authority persistence is not available")
         return None
-    return ChannelConnectionRepository(session_factory)
+    return ChannelConnectionRepository(
+        session_factory,
+        external_identity_candidates=_make_group_identity_candidates(),
+    )
 
 
 def _make_project_connection_service(connection_repo: Any | None):
@@ -103,6 +146,7 @@ def _make_project_connection_service(connection_repo: Any | None):
 def _make_project_inbound_dispatcher(
     connection_repo: Any | None,
     gateway_app: Any | None,
+    instance_authority_guard: Any | None = None,
 ):
     if connection_repo is None or gateway_app is None:
         return None
@@ -132,6 +176,7 @@ def _make_project_inbound_dispatcher(
     return ProjectInboundDispatcher(
         resolver,
         build_gateway_project_run_launcher(app=gateway_app),
+        instance_authority_guard=instance_authority_guard,
     )
 
 
@@ -148,15 +193,23 @@ class ChannelService:
         *,
         connection_repo: Any | None = None,
         connection_service: Any | None = None,
+        channel_group_binding_service: Any | None = None,
         gateway_app: Any | None = None,
     ) -> None:
-        self.bus = MessageBus()
+        from app.channels.instance_authority import ChannelInstanceAuthorityGuard
+
+        self._instance_authority_guard = ChannelInstanceAuthorityGuard()
+        self.bus = MessageBus(
+            instance_authority_guard=self._instance_authority_guard,
+        )
         self.store = ChannelStore(connection_repo) if connection_repo is not None else None
         self._connection_repo = connection_repo
         self._connection_service = connection_service or _make_project_connection_service(connection_repo)
+        self._channel_group_binding_service = channel_group_binding_service
         private_inbound_dispatcher = _make_project_inbound_dispatcher(
             connection_repo,
             gateway_app,
+            self._instance_authority_guard,
         )
         config = dict(channels_config or {})
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
@@ -175,6 +228,7 @@ class ChannelService:
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
+        self._instance_configs: dict[str, tuple[str, dict[str, Any]]] = {name: (name, dict(channel_config)) for name, channel_config in config.items() if name in _CHANNEL_REGISTRY and isinstance(channel_config, dict)}
         self._running = False
         self._readiness_locks: dict[str, asyncio.Lock] = {}
 
@@ -197,9 +251,15 @@ class ChannelService:
             channels_config = dict(extra["channels"] or {})
         connection_config = getattr(app_config, "channel_connections", None)
         connection_repo = _make_connection_repo(connection_config)
+        channel_group_binding_service = getattr(
+            getattr(gateway_app, "state", None),
+            "project_channel_group_binding_service",
+            None,
+        )
         return cls(
             channels_config=channels_config,
             connection_repo=connection_repo,
+            channel_group_binding_service=channel_group_binding_service,
             gateway_app=gateway_app,
         )
 
@@ -268,13 +328,76 @@ class ChannelService:
                     await channel.stop()
                 except Exception:
                     logger.exception("Error stopping non-running channel before readiness retry")
-                self._channels.pop(name, None)
+                    return False
+                if self._channels.get(name) is channel:
+                    self._channels.pop(name, None)
 
             max_attempts = max(1, attempts)
             for attempt in range(max_attempts):
                 if attempt > 0:
                     logger.info("Retrying channel startup after readiness check")
                 if await self._start_channel(name, channel_config):
+                    return True
+            return False
+
+    async def ensure_channel_instance_ready(
+        self,
+        channel_instance_id: str,
+        provider: str,
+        config: dict[str, Any] | None = None,
+        *,
+        attempts: int = 1,
+    ) -> bool:
+        """Ensure one exact provider instance is running.
+
+        Unlike :meth:`ensure_channel_ready`, this method never uses the
+        provider name as the runtime lookup key, so multiple project instances
+        of the same provider can coexist safely.
+        """
+
+        instance_id = normalize_channel_instance_id(
+            provider,
+            channel_instance_id,
+        )
+        if not self._running:
+            logger.warning("ChannelService is not running; cannot ensure channel readiness")
+            return False
+        if provider not in _CHANNEL_REGISTRY:
+            logger.warning("Unknown channel type")
+            return False
+        if config is not None:
+            self._instance_configs[instance_id] = (provider, dict(config))
+
+        lock = self._readiness_locks.setdefault(instance_id, asyncio.Lock())
+        async with lock:
+            entry = self._instance_configs.get(instance_id)
+            if entry is None or entry[0] != provider:
+                logger.warning("No config for requested channel instance")
+                return False
+            channel_config = entry[1]
+            if not channel_config.get("enabled", False):
+                return False
+
+            channel = self._channels.get(instance_id)
+            if channel is not None and channel.is_running:
+                return True
+            if channel is not None:
+                try:
+                    await channel.stop()
+                except Exception:
+                    logger.exception("Error stopping non-running channel instance before readiness retry")
+                    return False
+                if self._channels.get(instance_id) is channel:
+                    self._channels.pop(instance_id, None)
+
+            for attempt in range(max(1, attempts)):
+                if attempt > 0:
+                    logger.info("Retrying channel instance startup after readiness check")
+                if await self._start_channel(
+                    provider,
+                    channel_config,
+                    channel_instance_id=instance_id,
+                ):
                     return True
             return False
 
@@ -310,6 +433,7 @@ class ChannelService:
             if isinstance(channel_config, dict):
                 # Update the cached config so get_status() stays consistent.
                 self._config[name] = channel_config
+                self._instance_configs[name] = (name, dict(channel_config))
                 return channel_config
         except Exception:
             logger.exception("Failed to reload config for channel %s, using cached version", name)
@@ -317,12 +441,15 @@ class ChannelService:
 
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
-        if name in self._channels:
+        channel = self._channels.get(name)
+        if channel is not None:
             try:
-                await self._channels[name].stop()
+                await channel.stop()
             except Exception:
                 logger.exception("Error stopping channel for restart")
-            del self._channels[name]
+                return False
+            if self._channels.get(name) is channel:
+                self._channels.pop(name, None)
 
         if reload_config:
             # Reading config.yaml and the runtime store is disk IO; keep it
@@ -343,6 +470,7 @@ class ChannelService:
     async def configure_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Apply runtime config for a channel and restart it if the service is running."""
         self._config[name] = dict(config)
+        self._instance_configs[name] = (name, dict(config))
         if not self._running:
             return True
         # The caller just supplied the authoritative config (e.g. credentials
@@ -350,25 +478,109 @@ class ChannelService:
         # file reload here would clobber it with the stale on-disk entry.
         return await self.restart_channel(name, reload_config=False)
 
+    async def configure_channel_instance(
+        self,
+        channel_instance_id: str,
+        provider: str,
+        config: dict[str, Any],
+    ) -> bool:
+        """Apply runtime configuration for one exact project channel instance."""
+
+        instance_id = normalize_channel_instance_id(
+            provider,
+            channel_instance_id,
+        )
+        self._instance_configs[instance_id] = (provider, dict(config))
+        if not self._running:
+            return True
+        return await self.restart_channel_instance(instance_id)
+
+    def set_channel_instance_authority(
+        self,
+        authority: Any,
+    ) -> None:
+        """Install the Coordinator's exact lease revalidation callback."""
+
+        self._instance_authority_guard.set_authority(authority)
+
+    async def restart_channel_instance(self, channel_instance_id: str) -> bool:
+        """Restart one exact channel instance without touching its siblings."""
+
+        entry = self._instance_configs.get(channel_instance_id)
+        if entry is None:
+            logger.warning("No config for requested channel instance")
+            return False
+        provider, config = entry
+        channel = self._channels.get(channel_instance_id)
+        if channel is not None:
+            try:
+                await channel.stop()
+            except Exception:
+                logger.exception("Error stopping channel instance for restart")
+                return False
+            if self._channels.get(channel_instance_id) is channel:
+                self._channels.pop(channel_instance_id, None)
+        if not config.get("enabled", False):
+            return True
+        return await self._start_channel(
+            provider,
+            config,
+            channel_instance_id=channel_instance_id,
+        )
+
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
+        channel = self._channels.get(name)
+        if channel is not None:
+            try:
+                await channel.stop()
+            except Exception:
+                logger.exception("Error stopping channel for removal")
+                return False
+            if self._channels.get(name) is channel:
+                self._channels.pop(name, None)
         self._config.pop(name, None)
-        channel = self._channels.pop(name, None)
+        self._instance_configs.pop(name, None)
+        logger.info("Channel stopped and removed")
+        return True
+
+    async def remove_channel_instance(self, channel_instance_id: str) -> bool:
+        """Stop and forget one exact channel instance."""
+
+        channel = self._channels.get(channel_instance_id)
         if channel is None:
+            self._instance_configs.pop(channel_instance_id, None)
             return True
         try:
             await channel.stop()
-            logger.info("Channel stopped and removed")
+            if self._channels.get(channel_instance_id) is channel:
+                self._channels.pop(channel_instance_id, None)
+            self._instance_configs.pop(channel_instance_id, None)
+            logger.info("Channel instance stopped and removed")
             return True
         except Exception:
-            logger.exception("Error stopping channel for removal")
+            logger.exception("Error stopping channel instance for removal")
             return False
 
-    async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
+    async def _start_channel(
+        self,
+        name: str,
+        config: dict[str, Any],
+        *,
+        channel_instance_id: str | None = None,
+    ) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
             logger.warning("Unknown channel type")
+            return False
+
+        instance_id = normalize_channel_instance_id(
+            name,
+            channel_instance_id,
+        )
+        if instance_id in self._channels:
+            logger.error("Cannot start channel while a previous instance still requires cleanup")
             return False
 
         try:
@@ -379,25 +591,48 @@ class ChannelService:
             logger.exception("Failed to import channel class")
             return False
 
+        channel: Channel | None = None
         try:
             config = dict(config)
+            config["channel_instance_id"] = instance_id
             config["channel_store"] = self.store
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
             if self._connection_service is not None:
                 config["connection_service"] = self._connection_service
+            if channel_instance_id is not None and self._channel_group_binding_service is not None:
+                config["channel_group_binding_service"] = self._channel_group_binding_service
             channel = channel_cls(bus=self.bus, config=config)
-            self._channels[name] = channel
+            self._channels[instance_id] = channel
             await channel.start()
             if not channel.is_running:
-                self._channels.pop(name, None)
+                try:
+                    await channel.stop()
+                except Exception as exc:
+                    logger.error(
+                        "Channel failed to start and cleanup is incomplete: %s",
+                        type(exc).__name__,
+                    )
+                    return False
+                if self._channels.get(instance_id) is channel:
+                    self._channels.pop(instance_id, None)
                 logger.error("Channel did not enter a running state after start()")
                 return False
             logger.info("Channel started")
             return True
-        except Exception:
-            self._channels.pop(name, None)
-            logger.exception("Failed to start channel")
+        except Exception as exc:
+            if channel is not None:
+                try:
+                    await channel.stop()
+                except Exception as cleanup_exc:
+                    logger.error(
+                        "Channel start failed and cleanup is incomplete: %s",
+                        type(cleanup_exc).__name__,
+                    )
+                    return False
+                if self._channels.get(instance_id) is channel:
+                    self._channels.pop(instance_id, None)
+            logger.error("Failed to start channel: %s", type(exc).__name__)
             return False
 
     def get_status(self) -> dict[str, Any]:
@@ -419,6 +654,26 @@ class ChannelService:
     def get_channel(self, name: str) -> Channel | None:
         """Return a running channel instance by name when available."""
         return self._channels.get(name)
+
+    def get_channel_instance(self, channel_instance_id: str) -> Channel | None:
+        """Return one exact running channel instance."""
+
+        return self._channels.get(channel_instance_id)
+
+    def get_channel_instance_status(self, channel_instance_id: str) -> dict[str, Any] | None:
+        """Return bounded runtime status for one configured channel instance."""
+
+        entry = self._instance_configs.get(channel_instance_id)
+        if entry is None:
+            return None
+        provider, config = entry
+        channel = self._channels.get(channel_instance_id)
+        return {
+            "channel_instance_id": channel_instance_id,
+            "provider": provider,
+            "enabled": bool(config.get("enabled", False)),
+            "running": channel is not None and channel.is_running,
+        }
 
     def is_channel_enabled(self, name: str) -> bool:
         """Return whether ``channels.<name>.enabled`` is truthy in the live config.

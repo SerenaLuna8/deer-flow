@@ -5,13 +5,11 @@ import { Button } from "@/components/ui/button";
 export function ProjectEmptyState({
   search,
   filtered,
-  onCreate,
   onClearFilter,
   onClearSearch,
 }: {
   search: string;
   filtered: boolean;
-  onCreate: () => void;
   onClearFilter: () => void;
   onClearSearch: () => void;
 }) {
@@ -35,21 +33,19 @@ export function ProjectEmptyState({
           ? "换一个关键词，或清除筛选查看全部项目。"
           : "项目用于组织成员和共享的 Agent、Skill 与 MCP。"}
       </p>
-      <Button
-        type="button"
-        className="mt-6"
-        variant={narrowed ? "outline" : "default"}
-        onClick={
-          narrowed
-            ? () => {
-                onClearSearch();
-                onClearFilter();
-              }
-            : onCreate
-        }
-      >
-        {narrowed ? "清除筛选" : "创建项目"}
-      </Button>
+      {narrowed ? (
+        <Button
+          type="button"
+          className="mt-6"
+          variant="outline"
+          onClick={() => {
+            onClearSearch();
+            onClearFilter();
+          }}
+        >
+          清除筛选
+        </Button>
+      ) : null}
     </div>
   );
 }

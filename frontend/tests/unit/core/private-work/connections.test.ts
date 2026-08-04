@@ -4,10 +4,15 @@ import { QueryClient } from "@tanstack/react-query";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import {
   connectProjectConnection,
+  configureProjectChannelInstance,
+  deleteProjectChannelInstance,
   disconnectProjectConnection,
+  listProjectChannelInstances,
   listProjectConnectionProviders,
   listProjectConnections,
+  projectChannelInstancesQueryKey,
   projectConnectionsQueryKey,
+  setProjectChannelInstanceEnabled,
 } from "@/core/private-work/connections";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
@@ -36,6 +41,170 @@ beforeEach(() => {
 });
 
 describe("project connection adapter", () => {
+  test("loads strict project channel instances under the account and project cache root", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        instances: [
+          {
+            id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            provider: "feishu",
+            display_name: "Feishu",
+            status: "running",
+            enabled: true,
+            configured: true,
+            credential_configured: true,
+            public_config: {
+              app_id: "cli_public",
+              domain: "https://open.feishu.cn",
+            },
+            updated_at: "2026-08-03T08:00:00Z",
+            last_error: null,
+          },
+          {
+            id: null,
+            provider: "slack",
+            display_name: "Slack",
+            status: "unconfigured",
+            enabled: false,
+            configured: false,
+            credential_configured: false,
+            public_config: {},
+            updated_at: null,
+            last_error: null,
+          },
+        ],
+      }),
+    );
+
+    const result = await listProjectChannelInstances(access);
+
+    expect(result.instances[0]).toMatchObject({
+      provider: "feishu",
+      credential_configured: true,
+      public_config: { app_id: "cli_public" },
+    });
+    expect(result.instances[1]).toMatchObject({
+      provider: "slack",
+      status: "unconfigured",
+      id: null,
+    });
+    expect(projectChannelInstancesQueryKey(scope)).toEqual([
+      "account",
+      scope.accountId,
+      "project",
+      scope.projectId,
+      "private-work",
+      "channel-instances",
+    ]);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      `/api/projects/${scope.projectId}/channel-instances`,
+      { signal: undefined },
+    );
+    expect(JSON.stringify(result)).not.toMatch(/app_secret|credential_value/i);
+  });
+
+  test("rejects secret-shaped fields from the cacheable instance read model", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        instances: [
+          {
+            id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            provider: "feishu",
+            display_name: "Feishu",
+            status: "running",
+            enabled: true,
+            configured: true,
+            credential_configured: true,
+            public_config: {
+              app_id: "cli_public",
+              app_secret: SECRET,
+            },
+            updated_at: "2026-08-03T08:00:00Z",
+            last_error: null,
+          },
+        ],
+      }),
+    );
+
+    await expect(listProjectChannelInstances(access)).rejects.toThrow();
+  });
+
+  test("configures a channel imperatively without retaining its secret in TanStack caches", async () => {
+    const queryClient = new QueryClient();
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        provider: "feishu",
+        display_name: "Feishu",
+        status: "starting",
+        enabled: true,
+        configured: true,
+        credential_configured: true,
+        public_config: { app_id: "cli_public", domain: "feishu" },
+        updated_at: "2026-08-03T08:00:00Z",
+        last_error: null,
+      }),
+    );
+
+    await configureProjectChannelInstance(access, "feishu", {
+      publicConfig: { app_id: "cli_public", domain: "feishu" },
+      credentials: { app_secret: SECRET },
+      enabled: true,
+    });
+
+    const init = mockedFetch.mock.calls[0]?.[1];
+    expect(mockedFetch.mock.calls[0]?.[0]).toBe(
+      `/api/projects/${scope.projectId}/channel-instances/feishu`,
+    );
+    expect(init).toMatchObject({ method: "PUT" });
+    if (typeof init?.body !== "string") {
+      throw new Error("expected JSON request body");
+    }
+    expect(JSON.parse(init.body)).toEqual({
+      public_config: { app_id: "cli_public", domain: "feishu" },
+      credentials: { app_secret: SECRET },
+      enabled: true,
+    });
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
+    expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
+    expect(JSON.stringify(queryClient.getQueryCache().getAll())).not.toContain(
+      SECRET,
+    );
+  });
+
+  test("updates and deletes the exact provider instance", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          provider: "feishu",
+          display_name: "Feishu",
+          status: "disabled",
+          enabled: false,
+          configured: true,
+          credential_configured: true,
+          public_config: { app_id: "cli_public" },
+          updated_at: "2026-08-03T08:30:00Z",
+          last_error: null,
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await setProjectChannelInstanceEnabled(access, "feishu", false);
+    await deleteProjectChannelInstance(access, "feishu");
+
+    expect(mockedFetch.mock.calls.map(([url]) => url)).toEqual([
+      `/api/projects/${scope.projectId}/channel-instances/feishu/disable`,
+      `/api/projects/${scope.projectId}/channel-instances/feishu`,
+    ]);
+    expect(mockedFetch.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+    });
+    expect(mockedFetch.mock.calls[1]?.[1]).toMatchObject({
+      method: "DELETE",
+    });
+  });
+
   test("loads safe provider health from the exact project path", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse({

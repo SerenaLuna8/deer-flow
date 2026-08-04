@@ -33,6 +33,7 @@ async def init_engine(config: DatabaseConfig) -> None:
         max_overflow=config.max_overflow,
         pool_timeout=config.pool_timeout_seconds,
         pool_pre_ping=True,
+        hide_parameters=True,
         connect_args={"server_settings": {"statement_timeout": str(config.statement_timeout_seconds * 1000)}},
         json_serializer=_json_serializer,
     )
@@ -46,7 +47,7 @@ async def init_engine(config: DatabaseConfig) -> None:
         await engine.dispose()
         _engine = None
         _session_factory = None
-        raise RuntimeError("Unable to initialize PostgreSQL database. Verify database.url and create the target database before starting DeerFlow.") from exc
+        raise RuntimeError("Unable to initialize PostgreSQL database. Verify database.url and create the target database before starting ActWeave.") from exc
 
     if _engine is not None:
         await _engine.dispose()

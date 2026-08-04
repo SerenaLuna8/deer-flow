@@ -23,12 +23,13 @@ import {
   canMoveSystemBinding,
 } from "@/components/projects/assets/system-binding-dialog";
 import { I18nProvider } from "@/core/i18n/context";
-import type {
-  AssetVersion,
-  ProjectAssetItem,
-  ProjectAssetList,
-  ProjectCredentialItem,
-  ProjectCredentialList,
+import {
+  SharedAssetApiError,
+  type AssetVersion,
+  type ProjectAssetItem,
+  type ProjectAssetList,
+  type ProjectCredentialItem,
+  type ProjectCredentialList,
 } from "@/core/shared-assets";
 
 const PROJECT_ID = "33333333-3333-4333-8333-333333333333";
@@ -134,7 +135,7 @@ const pendingMcpVersion: AssetVersion = {
     },
   ],
   credential_grants: [],
-  supersedes_version_id: null,
+  supersedes_version_id: VERSION_ID,
   payload_checksum: "a".repeat(64),
   submitted_at: "2026-07-14T00:00:00Z",
   reviewed_at: null,
@@ -350,14 +351,15 @@ describe("project shared asset pages", () => {
     expect(editorPending).toContain("等待管理员审批");
     expect(editorPending).not.toContain("批准并发布");
     expect(editorPending).not.toContain("发布版本");
-    expect(editorDraft).toContain("提交审批");
+    expect(editorDraft).toContain("当前配置无法确认");
+    expect(editorDraft).not.toContain("提交审批");
     expect(editorDraft).not.toContain("发布版本");
     expect(admin).toContain("批准并发布");
     expect(admin).toContain(">归档<");
     expect(admin).toContain(">暂停<");
   });
 
-  test("keeps unsupported historical MCP versions readable but blocks workflow actions", () => {
+  test("fails closed instead of exposing an unsupported historical MCP draft", () => {
     const item: ProjectAssetItem = {
       ...adminData.project_items[0]!,
       capabilities: [
@@ -383,10 +385,9 @@ describe("project shared asset pages", () => {
       />,
     );
 
-    expect(html).toContain("streamable_http");
-    expect(html).toContain("此历史版本可以查看，但不能发布、绑定或用于 Agent");
-    expect(html).toContain("提交审批");
-    expect(html).toContain('disabled=""');
+    expect(html).toContain("当前配置无法确认");
+    expect(html).not.toContain("streamable_http");
+    expect(html).not.toContain("提交审批");
   });
 
   test("Credential view uses source tabs without repeating scope badges", () => {
@@ -399,7 +400,7 @@ describe("project shared asset pages", () => {
           project_id: PROJECT_ID,
           name: "github",
           display_name: "GitHub",
-          credential_type: "token",
+          credential_type: "mcp_auth",
           status: "active",
           current_version_id: VERSION_ID,
           version: 2,
@@ -431,6 +432,8 @@ describe("project shared asset pages", () => {
     expect(html).toContain(">有效<");
     expect(html).not.toContain("显示明文");
     expect(html).not.toContain("复制密钥");
+    expect(html).toContain("MCP 认证");
+    expect(html).not.toContain("mcp_auth");
     expect(html).not.toContain("ciphertext");
   });
 
@@ -597,9 +600,46 @@ describe("project shared asset pages", () => {
     expect(errorHtml).toContain('disabled=""');
   });
 
+  test("project MCP approval explains query Credential schema mismatches", () => {
+    const html = renderToStaticMarkup(
+      <McpApprovalForm
+        version={pendingMcpVersion}
+        pending={false}
+        credentials={[]}
+        credentialScope="project"
+        approvalError={
+          new SharedAssetApiError(
+            422,
+            "ASSET_VALIDATION_FAILED",
+            "private backend detail",
+          )
+        }
+        onApprove={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("分组和字段名");
+    expect(html).toContain("完全一致");
+    expect(html).not.toContain("query/key");
+    expect(html).not.toContain("private backend detail");
+  });
+
   test("system Credential stays metadata-only while project Credential can show safe history", () => {
     expect(projectCredentialShowsHistory({ scope: "system" })).toBe(false);
     expect(projectCredentialShowsHistory({ scope: "project" })).toBe(true);
+  });
+
+  test("does not repeat pending MCP approval guidance inside the detail content", () => {
+    const source = fs.readFileSync(
+      path.join(
+        process.cwd(),
+        "src/components/projects/assets/project-asset-detail-sheet.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(source).not.toContain("待审批 · 请通过编辑配置选择凭据并发布");
+    expect(source).not.toContain("待审批 · 等待项目管理员处理");
   });
 
   test("project Credential writes bypass TanStack mutation variables", () => {
@@ -607,6 +647,13 @@ describe("project shared asset pages", () => {
       path.join(
         process.cwd(),
         "src/components/projects/assets/project-assets-page.tsx",
+      ),
+      "utf8",
+    );
+    const mcpCreateSource = fs.readFileSync(
+      path.join(
+        process.cwd(),
+        "src/components/projects/assets/project-mcp-create-dialog.tsx",
       ),
       "utf8",
     );
@@ -620,5 +667,11 @@ describe("project shared asset pages", () => {
     expect(source).not.toContain("useCreateProjectCredential");
     expect(source).not.toContain("useReplaceProjectCredential");
     expect(source).not.toContain("useMutation(");
+    expect(mcpCreateSource).toContain("await createProjectCredential(");
+    expect(mcpCreateSource).toContain(
+      "fixedCredentialType={PROJECT_MCP_CREDENTIAL_TYPE}",
+    );
+    expect(mcpCreateSource).not.toContain("useCreateProjectCredential");
+    expect(mcpCreateSource).not.toContain("useMutation(");
   });
 });

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.projects.models import ProjectRole
 from app.quotas.models import (
     QUOTA_DIMENSIONS,
     QuotaDifference,
@@ -67,6 +68,7 @@ class QuotaReconciler:
                 .where(
                     ProjectMembershipRow.project_id == project_id,
                     ProjectMembershipRow.status == "active",
+                    ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
                 )
             )
         elif dimension == "storage_bytes":

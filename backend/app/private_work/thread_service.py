@@ -216,6 +216,19 @@ class PrivateThreadService:
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
 
+    async def is_initialized(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+    ) -> bool:
+        """Return whether Thread metadata and its initial checkpoint both exist."""
+
+        context = require_issued_private_work_context(context)
+        if await self.get(context, thread_id) is None:
+            return False
+        item = await self._project_scoped_checkpointer.for_context(context).aget_tuple(self._checkpoint_config(thread_id))
+        return self._checkpoint_tuple_id(item) is not None
+
     async def patch(
         self,
         context: PrivateWorkContext,
@@ -632,6 +645,7 @@ class PrivateThreadService:
         context: PrivateWorkContext,
         actor: ProjectContext,
     ) -> ThreadAgentRef:
+        builtin_main_fallback = False
         try:
             configured = await self._default_agent_service.resolve_configured_agent_in_session(
                 session,
@@ -645,6 +659,7 @@ class PrivateThreadService:
         if configured is not None:
             selected = ThreadAgentRef(configured.asset_id, "project")
         else:
+            builtin_main_fallback = True
             builtin_main_id = (
                 await session.execute(
                     select(AgentRow.id)
@@ -672,10 +687,11 @@ class PrivateThreadService:
                 raise PrivateWorkDefaultAgentUnavailable(context.request_id)
             selected = ThreadAgentRef(resolved_main.asset_id, "system")
 
-        try:
-            await require_executable_agent(session, context, selected)
-        except PrivateWorkNotFound:
-            raise PrivateWorkDefaultAgentUnavailable(context.request_id) from None
+        if not builtin_main_fallback:
+            try:
+                await require_executable_agent(session, context, selected)
+            except PrivateWorkNotFound:
+                raise PrivateWorkDefaultAgentUnavailable(context.request_id) from None
         return selected
 
     @staticmethod

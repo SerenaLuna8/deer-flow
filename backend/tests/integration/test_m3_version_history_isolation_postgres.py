@@ -27,7 +27,7 @@ from app.shared_assets.models import (
     SkillArchiveFile,
 )
 from deerflow.config.quota_config import QuotaConfig
-from deerflow.mcp.definition import ExactMcpEndpointPolicy
+from deerflow.mcp.definition import ExactMcpEndpointPolicy, NetworkMcpEndpointPolicy
 from deerflow.persistence.shared_assets import CredentialRow
 
 
@@ -109,6 +109,47 @@ async def _seed_system_admin(engine: AsyncEngine) -> SystemAssetGovernanceContex
         user_id=user_id,
         request_id="req-history-system",
     )
+
+
+@pytest.mark.asyncio
+async def test_project_mcp_network_policy_persists_normalized_localhost_endpoint(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    context = await _seed_project(engine, factory, label="mcp-network-policy")
+    module = importlib.import_module("app.shared_assets.mcp_service")
+    service = module.McpService(
+        factory,
+        endpoint_policy=NetworkMcpEndpointPolicy(
+            (
+                "127.0.0.0/8",
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "::1/128",
+                "fc00::/7",
+            )
+        ),
+    )
+    try:
+        asset = await service.create_asset(
+            context,
+            module.CreateMcpServer("local-mcp", "Local MCP"),
+        )
+        draft = await service.create_version(
+            context,
+            asset.id,
+            module.McpDefinition(
+                transport="http",
+                url="http://localhost:8771/api/mcp",
+            ),
+            expected_asset_version=1,
+        )
+
+        assert draft.definition.url == "http://127.0.0.1:8771/api/mcp"
+    finally:
+        await engine.dispose()
 
 
 def _agent_payload() -> AgentPayload:

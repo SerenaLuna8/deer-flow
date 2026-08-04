@@ -985,7 +985,7 @@ async def oauth_callback(
 
     Handles the OIDC provider's redirect after user authorization.
     Validates the state cookie, exchanges the code for tokens, validates
-    the ID token, provisions/links the DeerFlow user, and sets the
+    the ID token, provisions/links the ActWeave user, and sets the
     session cookie.
     """
     from deerflow.config.app_config import get_app_config
@@ -1070,7 +1070,7 @@ async def oauth_callback(
 
     user = result["user"]
 
-    # ── Issue DeerFlow session ───────────────────────────────────────
+    # ── Issue ActWeave session ───────────────────────────────────────
     token = await _issue_session(user)
 
     redirect_target = state_payload.next_path or "/workspace"

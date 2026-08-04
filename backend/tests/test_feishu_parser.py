@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channel_group_bindings.errors import (
+    GroupBindingAgentUnavailable,
+    GroupBindingNotFound,
+    GroupBindingUnavailable,
+)
+from app.channels.commands import KNOWN_CHANNEL_COMMANDS, parse_group_bind_command
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -14,6 +19,7 @@ from app.channels.message_bus import (
     MessageBus,
     OutboundMessage,
 )
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 
 def _pending(
@@ -69,6 +75,446 @@ def test_feishu_on_message_plain_text():
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["text"] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_feishu_group_binding_command_is_consumed_without_creating_inbound():
+    bus = MessageBus()
+    channel = FeishuChannel(
+        bus,
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": MagicMock(),
+        },
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    channel._bind_group_from_code = AsyncMock(return_value=True)
+    channel._schedule_prepare_inbound = MagicMock()
+    event = _make_text_event(
+        "/bind-project group-code",
+        chat_id="oc-group-1",
+        message_id="om-bind-1",
+        user_id="ou-admin-1",
+        chat_type="group",
+    )
+
+    channel._on_message(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    channel._bind_group_from_code.assert_awaited_once_with(
+        message_id="om-bind-1",
+        chat_id="oc-group-1",
+        user_id="ou-admin-1",
+        code="group-code",
+        chat_type="group",
+    )
+    channel._schedule_prepare_inbound.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_feishu_group_binding_command_accepts_leading_bot_mention():
+    channel = FeishuChannel(
+        MessageBus(),
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": MagicMock(),
+        },
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    channel._bind_group_from_code = AsyncMock(return_value=True)
+    channel._schedule_prepare_inbound = MagicMock()
+    event = _make_text_event(
+        "@ActWeave /bind-project group-code",
+        chat_id="oc-group-1",
+        message_id="om-bind-mention-1",
+        user_id="ou-admin-1",
+        chat_type="group",
+    )
+
+    channel._on_message(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    channel._bind_group_from_code.assert_awaited_once_with(
+        message_id="om-bind-mention-1",
+        chat_id="oc-group-1",
+        user_id="ou-admin-1",
+        code="group-code",
+        chat_type="group",
+    )
+    channel._schedule_prepare_inbound.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "/bind-project",
+        "/bind-project group-code extra",
+        "@ActWeave /bind-project",
+        "@ActWeave /bind-project group-code extra",
+    ),
+)
+def test_group_binding_command_parser_rejects_incomplete_or_extra_arguments(text):
+    parsed = parse_group_bind_command(text)
+
+    assert parsed.matched is True
+    assert parsed.code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    (
+        "/bind-project",
+        "/bind-project group-code extra",
+    ),
+)
+async def test_feishu_invalid_group_binding_command_is_consumed(text):
+    channel = FeishuChannel(
+        MessageBus(),
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": MagicMock(),
+        },
+    )
+    channel._main_loop = asyncio.get_running_loop()
+    channel._bind_group_from_code = AsyncMock(return_value=True)
+    channel._send_connection_confirmation = AsyncMock()
+    channel._schedule_prepare_inbound = MagicMock()
+    event = _make_text_event(
+        text,
+        chat_id="oc-group-1",
+        message_id="om-bind-invalid-1",
+        user_id="ou-admin-1",
+        chat_type="group",
+    )
+
+    channel._on_message(event)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    channel._bind_group_from_code.assert_not_awaited()
+    channel._send_connection_confirmation.assert_awaited_once_with(
+        message_id="om-bind-invalid-1",
+        chat_id="oc-group-1",
+        text=("The Feishu group connection command is incomplete or malformed. Copy the full command from Project Settings and send it again."),
+    )
+    channel._schedule_prepare_inbound.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_feishu_bound_group_uses_guest_identity_before_personal_connection():
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    personal_repo = MagicMock()
+    personal_repo.find_connection_by_external_identity = AsyncMock(
+        return_value={
+            "id": "personal-connection",
+            "project_id": "11111111-1111-4111-8111-111111111111",
+            "owner_user_id": "22222222-2222-4222-8222-222222222222",
+            "membership_version": 1,
+        }
+    )
+    group_service = MagicMock()
+    group_service.resolve_or_create_guest = AsyncMock(
+        return_value={
+            "id": "guest-connection",
+            "project_id": "33333333-3333-4333-8333-333333333333",
+            "owner_user_id": "44444444-4444-4444-8444-444444444444",
+            "membership_version": 1,
+            "resolved_conversation_id": "group-hmac-ref",
+            "resolved_topic_id": "topic-hmac-ref",
+        }
+    )
+    channel = FeishuChannel(
+        bus,
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "connection_repo": personal_repo,
+            "channel_group_binding_service": group_service,
+        },
+    )
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="oc-group-1",
+        user_id="ou-member-1",
+        text="hello",
+        topic_id="om-root-1",
+        metadata={
+            "chat_type": "group",
+            "message_id": "om-message-1",
+            "root_id": None,
+            "parent_id": None,
+            "thread_id": None,
+            "topic_id": "om-root-1",
+        },
+    )
+
+    await channel._prepare_inbound("om-message-1", inbound)
+
+    group_service.resolve_or_create_guest.assert_awaited_once_with(
+        provider="feishu",
+        channel_instance_id=channel.channel_instance_id,
+        chat_id="oc-group-1",
+        sender_id="ou-member-1",
+        topic_id="om-root-1",
+    )
+    personal_repo.find_connection_by_external_identity.assert_not_awaited()
+    assert inbound.connection_id == "guest-connection"
+    assert inbound.private_scope is not None
+    assert inbound.private_scope.owner_user_id == "44444444-4444-4444-8444-444444444444"
+    assert inbound.private_scope.project_id == "33333333-3333-4333-8333-333333333333"
+    assert inbound.resolved_conversation_id == "group-hmac-ref"
+    assert inbound.resolved_topic_id == "topic-hmac-ref"
+
+
+@pytest.mark.asyncio
+async def test_feishu_guest_pending_clarification_refreshes_pseudonymous_topic():
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    group_service = MagicMock()
+    group_service.resolve_or_create_guest = AsyncMock(
+        return_value={
+            "id": "guest-connection",
+            "project_id": "33333333-3333-4333-8333-333333333333",
+            "owner_user_id": "44444444-4444-4444-8444-444444444444",
+            "membership_version": 1,
+            "resolved_conversation_id": "group-hmac-ref",
+            "resolved_topic_id": "initial-topic-hmac-ref",
+        }
+    )
+    group_service.pseudonymize_topic_aliases.return_value = ("pending-topic-hmac-ref",)
+    channel = FeishuChannel(
+        bus,
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": group_service,
+        },
+    )
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._pending_clarifications[channel._pending_key("oc-group-1", "ou-member-1")] = [_pending("om-original-topic")]
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="oc-group-1",
+        user_id="ou-member-1",
+        text="answer",
+        topic_id="om-new-message",
+        metadata={
+            "chat_type": "group",
+            "message_id": "om-new-message",
+            "root_id": None,
+            "parent_id": None,
+            "thread_id": None,
+            "topic_id": "om-new-message",
+            RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY: False,
+        },
+    )
+
+    await channel._prepare_inbound("om-new-message", inbound)
+
+    assert inbound.topic_id == "om-original-topic"
+    assert inbound.resolved_topic_id == "pending-topic-hmac-ref"
+    assert inbound.metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is True
+    group_service.pseudonymize_topic_aliases.assert_called_once_with(
+        provider="feishu",
+        channel_instance_id=channel.channel_instance_id,
+        chat_id="oc-group-1",
+        resolved_conversation_id="group-hmac-ref",
+        topic_ids=("om-original-topic",),
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_guest_pending_clarification_fails_closed_without_topic_alias():
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    group_service = MagicMock()
+    group_service.resolve_or_create_guest = AsyncMock(
+        return_value={
+            "id": "guest-connection",
+            "project_id": "33333333-3333-4333-8333-333333333333",
+            "owner_user_id": "44444444-4444-4444-8444-444444444444",
+            "membership_version": 1,
+            "resolved_conversation_id": "group-hmac-ref",
+            "resolved_topic_id": "initial-topic-hmac-ref",
+        }
+    )
+    group_service.pseudonymize_topic_aliases.return_value = ()
+    channel = FeishuChannel(
+        bus,
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": group_service,
+        },
+    )
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    channel._pending_clarifications[channel._pending_key("oc-group-1", "ou-member-1")] = [_pending("om-original-topic")]
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="oc-group-1",
+        user_id="ou-member-1",
+        text="answer",
+        topic_id="om-new-message",
+        metadata={
+            "chat_type": "group",
+            RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY: False,
+        },
+    )
+
+    await channel._prepare_inbound("om-new-message", inbound)
+
+    assert inbound.resolved_topic_id is None
+    assert inbound.metadata["group_binding_unavailable"] is True
+
+
+@pytest.mark.asyncio
+async def test_feishu_unbound_group_does_not_fall_back_to_personal_connection():
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    personal_repo = MagicMock()
+    personal_repo.find_connection_by_external_identity = AsyncMock(
+        return_value={
+            "id": "personal-connection",
+            "project_id": "11111111-1111-4111-8111-111111111111",
+            "owner_user_id": "22222222-2222-4222-8222-222222222222",
+            "membership_version": 1,
+        }
+    )
+    group_service = MagicMock()
+    group_service.resolve_or_create_guest = AsyncMock(return_value=None)
+    channel = FeishuChannel(
+        bus,
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "connection_repo": personal_repo,
+            "channel_group_binding_service": group_service,
+        },
+    )
+    channel._add_reaction = AsyncMock()
+    channel._ensure_running_card_started = MagicMock()
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="oc-group-1",
+        user_id="ou-member-1",
+        text="hello",
+        topic_id="om-root-1",
+        metadata={
+            "chat_type": "group",
+            "message_id": "om-message-1",
+            "root_id": None,
+            "parent_id": None,
+            "thread_id": None,
+            "topic_id": "om-root-1",
+        },
+    )
+
+    await channel._prepare_inbound("om-message-1", inbound)
+
+    personal_repo.find_connection_by_external_identity.assert_not_awaited()
+    assert inbound.connection_id is None
+    assert inbound.metadata["group_binding_required"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "metadata_key"),
+    (
+        (GroupBindingNotFound("group-not-found"), "group_binding_required"),
+        (
+            GroupBindingAgentUnavailable("group-agent-unavailable"),
+            "group_binding_agent_unavailable",
+        ),
+        (GroupBindingUnavailable("group-unavailable"), "group_binding_unavailable"),
+    ),
+)
+async def test_feishu_group_resolution_errors_are_preserved_for_clear_rejection(
+    error,
+    metadata_key,
+):
+    group_service = MagicMock()
+    group_service.resolve_or_create_guest = AsyncMock(side_effect=error)
+    channel = FeishuChannel(
+        MessageBus(),
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": group_service,
+        },
+    )
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="oc-group-1",
+        user_id="ou-member-1",
+        text="hello",
+        metadata={"chat_type": "group"},
+    )
+
+    await channel._attach_connection_identity(inbound)
+
+    assert inbound.connection_id is None
+    assert inbound.metadata[metadata_key] is True
+
+
+@pytest.mark.asyncio
+async def test_feishu_group_binding_persists_provider_group_name() -> None:
+    service = MagicMock()
+    service.complete_challenge = AsyncMock()
+    channel = FeishuChannel(
+        MessageBus(),
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_group_binding_service": service,
+        },
+    )
+    channel._has_instance_authority = AsyncMock(return_value=True)
+    channel._resolve_group_display_name = AsyncMock(return_value="研发群")
+    channel._send_connection_confirmation = AsyncMock()
+
+    handled = await channel._bind_group_from_code(
+        message_id="om-bind",
+        chat_id="oc-group",
+        user_id="ou-sender",
+        code="valid-binding-code",
+        chat_type="group",
+    )
+
+    assert handled is True
+    service.complete_challenge.assert_awaited_once_with(
+        provider="feishu",
+        channel_instance_id=channel.channel_instance_id,
+        code="valid-binding-code",
+        chat_id="oc-group",
+        sender_id="ou-sender",
+        display_name="研发群",
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_group_name_lookup_is_best_effort() -> None:
+    response = MagicMock()
+    response.success.return_value = True
+    response.data.name = "  产品讨论群  "
+    channel = FeishuChannel(
+        MessageBus(),
+        {"app_id": "test", "app_secret": "test"},
+    )
+    channel._api_client = MagicMock()
+    channel._api_client.im.v1.chat.aget = AsyncMock(return_value=response)
+
+    assert await channel._resolve_group_display_name("oc-group") == "产品讨论群"
 
 
 def test_feishu_is_not_running_when_ws_thread_exits():
@@ -274,6 +720,128 @@ async def test_feishu_prepare_inbound_reuses_stored_parent_topic_for_card_replie
     assert inbound.metadata["topic_id"] == "om_clarification_card"
 
 
+@pytest.mark.asyncio
+async def test_feishu_guest_topic_lookup_uses_only_pseudonymous_aliases():
+    store = MagicMock()
+    store.get_thread_id = AsyncMock(side_effect=[None, "deer-thread-guest"])
+    group_service = MagicMock()
+    group_service.pseudonymize_topic_aliases.return_value = (
+        "1" * 64,
+        "2" * 64,
+    )
+    channel = FeishuChannel(
+        MessageBus(),
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_store": store,
+            "channel_group_binding_service": group_service,
+        },
+    )
+    inbound = InboundMessage(
+        channel_name="feishu",
+        chat_id="raw-group-id",
+        user_id="raw-sender-id",
+        text="answer",
+        channel_instance_id="20000000-0000-4000-8000-000000000001",
+        topic_id="raw-root-id",
+        connection_id="guest-connection",
+        private_scope=PrivateResourceScope(
+            project_id="11111111-1111-4111-8111-111111111111",
+            owner_user_id="22222222-2222-4222-8222-222222222222",
+            membership_version=1,
+        ),
+        resolved_conversation_id="a" * 64,
+        resolved_topic_id="1" * 64,
+        metadata={
+            "root_id": "raw-root-id",
+            "parent_id": "raw-parent-card-id",
+            "thread_id": None,
+            "topic_id": "raw-root-id",
+            "chat_type": "group",
+        },
+    )
+
+    topic_id, found = await channel._resolve_persisted_topic_id(inbound)
+
+    assert (topic_id, found) == ("raw-parent-card-id", True)
+    assert inbound.resolved_topic_id == "2" * 64
+    assert {(call.args[1], call.kwargs["topic_id"]) for call in store.get_thread_id.await_args_list} == {
+        ("a" * 64, "1" * 64),
+        ("a" * 64, "2" * 64),
+    }
+    assert "raw-group-id" not in repr(store.get_thread_id.await_args_list)
+    assert "raw-root-id" not in repr(store.get_thread_id.await_args_list)
+    assert "raw-parent-card-id" not in repr(store.get_thread_id.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_feishu_guest_outbound_persists_only_pseudonymous_aliases():
+    store = MagicMock()
+    store.set_thread_id = AsyncMock(return_value=True)
+    aliases = {
+        "raw-source-id": "1" * 64,
+        "raw-card-id": "2" * 64,
+        "raw-message-id": "3" * 64,
+        "raw-root-id": "4" * 64,
+        "raw-parent-id": "5" * 64,
+        "raw-provider-thread-id": "6" * 64,
+        "raw-topic-id": "7" * 64,
+    }
+    group_service = MagicMock()
+    group_service.pseudonymize_topic_aliases.side_effect = lambda **kwargs: tuple(aliases[value] for value in kwargs["topic_ids"])
+    channel = FeishuChannel(
+        MessageBus(),
+        {
+            "app_id": "test",
+            "app_secret": "test",
+            "channel_store": store,
+            "channel_group_binding_service": group_service,
+        },
+    )
+    message = OutboundMessage(
+        channel_name="feishu",
+        channel_instance_id="20000000-0000-4000-8000-000000000001",
+        chat_id="raw-group-id",
+        thread_id="deer-thread-guest",
+        text="done",
+        thread_ts="raw-source-id",
+        connection_id="guest-connection",
+        private_scope=PrivateResourceScope(
+            project_id="11111111-1111-4111-8111-111111111111",
+            owner_user_id="22222222-2222-4222-8222-222222222222",
+            membership_version=1,
+        ),
+        resolved_conversation_id="a" * 64,
+        resolved_topic_id="0" * 64,
+        metadata={
+            "message_id": "raw-message-id",
+            "root_id": "raw-root-id",
+            "parent_id": "raw-parent-id",
+            "thread_id": "raw-provider-thread-id",
+            "topic_id": "raw-topic-id",
+        },
+    )
+
+    await channel._remember_thread_mapping(
+        message,
+        "raw-source-id",
+        "raw-card-id",
+    )
+
+    assert {call.args[1] for call in store.set_thread_id.await_args_list} == {
+        "a" * 64,
+    }
+    assert {call.kwargs["topic_id"] for call in store.set_thread_id.await_args_list} == {
+        "0" * 64,
+        *aliases.values(),
+    }
+    persisted = repr(store.set_thread_id.await_args_list)
+    assert "raw-group-id" not in persisted
+    for raw_alias in aliases:
+        assert raw_alias not in persisted
+
+
 def _make_text_event(
     text: str,
     *,
@@ -283,6 +851,7 @@ def _make_text_event(
     root_id: str | None = None,
     parent_id: str | None = None,
     thread_id: str | None = None,
+    chat_type: str = "group",
 ):
     event = MagicMock()
     event.event.message.chat_id = chat_id
@@ -290,6 +859,7 @@ def _make_text_event(
     event.event.message.root_id = root_id
     event.event.message.parent_id = parent_id
     event.event.message.thread_id = thread_id
+    event.event.message.chat_type = chat_type
     event.event.sender.sender_id.open_id = user_id
     event.event.message.content = json.dumps({"text": text})
     return event

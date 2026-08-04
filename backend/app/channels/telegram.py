@@ -10,6 +10,7 @@ from typing import Any
 
 from app.channels.base import Channel
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.private_work.errors import PrivateWorkError
 
@@ -393,6 +394,8 @@ class TelegramChannel(Channel):
         return str(getattr(user, "id", ""))
 
     async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+        if not await self._has_instance_authority():
+            return True
         connection_service = self.config.get("connection_service")
         if (self._connection_repo is None and connection_service is None) or not state_token:
             return False
@@ -411,25 +414,38 @@ class TelegramChannel(Channel):
         }
         if connection_service is not None:
             try:
-                connection = await connection_service.complete_callback("telegram", state_token, user_id, chat_id, **fields)
+                connection = await connection_service.complete_callback(
+                    "telegram",
+                    state_token,
+                    user_id,
+                    chat_id,
+                    channel_instance_id=self.channel_instance_id,
+                    **fields,
+                )
             except PrivateWorkError:
                 await update.message.reply_text("Telegram connection link is invalid or expired.")
                 return True
         else:
-            state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
+            instance_id = persisted_channel_instance_id("telegram", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="telegram",
+                channel_instance_id=instance_id,
+                state=state_token,
+            )
             if state is None:
                 await update.message.reply_text("Telegram connection link is invalid or expired.")
                 return True
             connection = await self._connection_repo.upsert_connection(
                 owner_user_id=state["owner_user_id"],
                 provider="telegram",
+                channel_instance_id=instance_id,
                 external_account_id=user_id,
                 workspace_id=chat_id,
                 **fields,
             )
         owner_user_id = connection.get("owner_user_id", "unknown")
-        logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
-        await update.message.reply_text("Telegram connected to DeerFlow.")
+        logger.info("[Telegram] bound chat=%s user=%s to ActWeave user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
+        await update.message.reply_text("Telegram connected to ActWeave.")
         return True
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
@@ -478,9 +494,11 @@ class TelegramChannel(Channel):
                 return
         if not self._check_user(update.effective_user.id):
             return
-        await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
+        await update.message.reply_text("Welcome to ActWeave! Send me a message to start a conversation.\nType /help for available commands.")
 
     async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
+        if not await self._has_instance_authority():
+            return
         await self._send_running_reply(chat_id, msg_id)
         await self.bus.publish_inbound(inbound)
 
@@ -536,7 +554,7 @@ class TelegramChannel(Channel):
         user_id = str(update.effective_user.id)
         msg_id = str(update.message.message_id)
 
-        # topic_id determines which DeerFlow thread the message maps to.
+        # topic_id determines which ActWeave thread the message maps to.
         # In private chats, use None so that all messages share a single
         # thread (the store key becomes "channel:chat_id").
         # In group chats, use the reply-to message id or the current

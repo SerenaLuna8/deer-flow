@@ -1,6 +1,6 @@
-"""DeerFlowClient — Embedded Python client for DeerFlow agent system.
+"""DeerFlowClient — Embedded Python client for the ActWeave agent system.
 
-Provides direct programmatic access to DeerFlow's agent capabilities
+Provides direct programmatic access to ActWeave's agent capabilities
 without requiring LangGraph Server or Gateway API processes.
 
 Usage:
@@ -109,9 +109,9 @@ class StreamEvent:
 
 
 class DeerFlowClient:
-    """Embedded Python client for DeerFlow agent system.
+    """Embedded Python client for the ActWeave agent system.
 
-    Provides direct programmatic access to DeerFlow's agent capabilities
+    Provides direct programmatic access to ActWeave's agent capabilities
     without requiring LangGraph Server or Gateway API processes.
 
     Note:
@@ -646,7 +646,7 @@ class DeerFlowClient:
         thread_id: str | None = None,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
-        """Stream a conversation turn with a DeerFlow request trace context.
+        """Stream a conversation turn with an ActWeave request trace context.
 
         Mirrors the Gateway ``TraceMiddleware`` gate: when
         ``logging.enhance.enabled`` is off the embedded client does **not**

@@ -287,6 +287,7 @@ class ProjectLifecycleRepository:
                 select(func.count()).where(
                     ProjectMembershipRow.project_id == project.id,
                     ProjectMembershipRow.status == "active",
+                    ProjectMembershipRow.role != ProjectRole.CHANNEL_GUEST.value,
                 )
             )
         ).scalar_one()

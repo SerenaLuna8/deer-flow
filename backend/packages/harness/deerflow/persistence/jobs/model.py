@@ -62,6 +62,12 @@ class JobRow(Base):
     __table_args__ = (
         UniqueConstraint("job_type", "idempotency_key", name="uq_jobs_type_idempotency"),
         UniqueConstraint(
+            "id",
+            "project_id",
+            "owner_user_id",
+            name="uq_jobs_id_project_owner",
+        ),
+        UniqueConstraint(
             "predecessor_dead_job_id",
             name="uq_jobs_predecessor_dead_job",
         ),
@@ -96,7 +102,7 @@ class JobRow(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "job_type IN ('private_run', 'automation_run', 'retention_purge')",
+            "job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery')",
             name="ck_jobs_type",
         ),
         CheckConstraint(
@@ -108,7 +114,8 @@ class JobRow(Base):
         CheckConstraint(
             "(job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) "
             "OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) "
-            "OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)",
+            "OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
+            "OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)",
             name="ck_jobs_authority_shape",
         ),
         Index("ix_jobs_claim", "status", "available_at", priority.desc(), "created_at"),

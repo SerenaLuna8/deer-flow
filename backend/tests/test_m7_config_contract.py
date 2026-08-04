@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 import deerflow.config.app_config as app_config_module
@@ -89,7 +92,7 @@ def test_models_are_rejected_when_loaded_from_yaml(
     config_path.write_text(
         "\n".join(
             (
-                "config_version: 34",
+                "config_version: 35",
                 "sandbox:",
                 "  use: deerflow.sandbox.local:LocalSandboxProvider",
                 "models:",
@@ -140,7 +143,7 @@ def test_database_runtime_policy_leaves_are_yaml_only_tombstones(
     baseline = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}).model_dump(mode="python")
     leaf_value = _path_value(baseline, field_path)
     config_data: dict[str, object] = {
-        "config_version": 34,
+        "config_version": 35,
         "sandbox": {
             "use": "deerflow.sandbox.local:LocalSandboxProvider",
         },
@@ -176,7 +179,7 @@ def test_deployment_owned_runtime_siblings_remain_in_yaml(
 ) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        """config_version: 34
+        """config_version: 35
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 title:
@@ -390,6 +393,88 @@ def test_config_upgrade_removes_database_backed_runtime_policy_leaves() -> None:
     assert "34: {" in source
     assert "DATABASE_RUNTIME_YAML_PATH_TOMBSTONES" in source
     assert "container.pop(child_key)" in source
+
+
+def test_config_upgrade_replaces_retired_mcp_endpoint_allowlist_with_network_policy() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = (repo_root / "scripts/config-upgrade.sh").read_text(encoding="utf-8")
+
+    assert "35: {" in source
+    assert "mcp_security.project_remote_allowed_endpoints" in source
+    assert "retired_endpoints != []" in source
+    assert "if 'mcp_security' not in user:" in source
+    assert "if 'project_remote_allowed_networks' not in mcp_security:" in source
+    assert "mcp_security['project_remote_allowed_networks'] = []" in source
+    assert "v34 implicit project MCP deny-all" in source
+    assert "No files were changed." in source
+    assert "project_remote_allowed_networks:" in (repo_root / "config.example.yaml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "mcp_security",
+    (
+        "",
+        "mcp_security:\n  project_remote_allowed_endpoints: []\n  require_egress_proxy: false\n",
+    ),
+)
+def test_config_upgrade_preserves_v34_implicit_or_explicit_mcp_deny_all(
+    tmp_path: Path,
+    mcp_security: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"config_version: 34\nsandbox:\n  use: test\n{mcp_security}",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts/config-upgrade.sh")],
+        cwd=repo_root,
+        env={**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == 35
+    assert upgraded["mcp_security"]["project_remote_allowed_networks"] == []
+    assert "project_remote_allowed_endpoints" not in upgraded["mcp_security"]
+
+
+def test_config_upgrade_refuses_to_widen_a_nonempty_v34_mcp_endpoint_list(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    config_path = tmp_path / "config.yaml"
+    original = """config_version: 34
+sandbox:
+  use: test
+mcp_security:
+  project_remote_allowed_endpoints:
+    - http://localhost:8771/api/mcp
+  require_egress_proxy: false
+"""
+    config_path.write_text(original, encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts/config-upgrade.sh")],
+        cwd=repo_root,
+        env={**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Cannot migrate nonempty mcp_security.project_remote_allowed_endpoints" in result.stdout
+    assert "No files were changed." in result.stdout
+    assert config_path.read_text(encoding="utf-8") == original
+    assert not config_path.with_suffix(".yaml.bak").exists()
 
 
 def test_example_and_deployment_config_do_not_define_models() -> None:

@@ -1,13 +1,13 @@
 ---
 title: Deployment Guide
-description: DeerFlow boundaries for local, Docker Compose, and Kubernetes/Helm deployments.
+description: ActWeave boundaries for local, Docker Compose, and Kubernetes/Helm deployments.
 ---
 
 import { Callout } from "nextra/components";
 
 # Deployment Guide
 
-The DeerFlow topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the DeerFlow Compose stack.
+The ActWeave topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the ActWeave Compose stack.
 
 <Callout type="warning">
   The repository provides launch resources, but Docker Compose, Kubernetes/Helm, browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
@@ -22,7 +22,7 @@ The DeerFlow topology consists of Nginx, Frontend, Gateway, Worker, an optional 
 
 ```bash
 export POSTGRES_ADMIN_URL='<administrator URL for the postgres maintenance database>'
-export DATABASE_URL='<fresh DeerFlow target database URL>'
+export DATABASE_URL='<fresh ActWeave target database URL>'
 make setup-db
 make check-db
 ```

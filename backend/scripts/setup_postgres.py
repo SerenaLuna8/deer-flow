@@ -1,4 +1,4 @@
-"""显式创建并初始化 DeerFlow PostgreSQL 数据库。"""
+"""显式创建并初始化 ActWeave PostgreSQL 数据库。"""
 
 from __future__ import annotations
 
@@ -361,7 +361,7 @@ def print_result(result: SetupResult) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="初始化 DeerFlow PostgreSQL 数据库")
+    parser = argparse.ArgumentParser(description="初始化 ActWeave PostgreSQL 数据库")
     parser.add_argument("--database", help="必须与 DATABASE_URL 中的数据库名一致")
     return parser
 

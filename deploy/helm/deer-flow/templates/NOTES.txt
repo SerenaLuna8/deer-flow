@@ -1,4 +1,4 @@
-DeerFlow rendered the final project-scoped topology in namespace
+ActWeave rendered the final project-scoped topology in namespace
 {{ include "deer-flow.namespace" . }}:
 
   • Gateway admits authenticated Runs and serves durable SSE replay.
@@ -11,7 +11,7 @@ DATABASE LIFECYCLE
 {{- if .Values.postgresql.enabled }}
   ⚠️  Bundled PostgreSQL was explicitly enabled. The StatefulSet creates an
       EMPTY database only. This chart does not create, migrate, stamp or repair
-      DeerFlow schema.
+      ActWeave schema.
 {{- else }}
   External PostgreSQL Secret:
     {{ include "deer-flow.databaseUrlSecret" . }} (key: database-url)

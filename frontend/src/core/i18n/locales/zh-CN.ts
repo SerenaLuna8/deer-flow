@@ -96,11 +96,11 @@ export const zhCN: Translations = {
   welcome: {
     greeting: "你好，欢迎回来！",
     description:
-      "欢迎使用 🦌 DeerFlow，一个完全开源的超级智能体。通过内置和自定义的 Skills，\nDeerFlow 可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n图片、视频、播客及网页等，几乎可以做任何事情。",
+      "欢迎使用 🦌 ActWeave，一个完全开源的超级智能体。通过内置和自定义的 Skills，\nActWeave 可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n图片、视频、播客及网页等，几乎可以做任何事情。",
 
     createYourOwnSkill: "创建你自己的 Agent SKill",
     createYourOwnSkillDescription:
-      "创建你的 Agent Skill 来释放 DeerFlow 的潜力。通过自定义技能，DeerFlow\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
+      "创建你的 Agent Skill 来释放 ActWeave 的潜力。通过自定义技能，ActWeave\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
   },
 
   // Clipboard
@@ -155,7 +155,7 @@ export const zhCN: Translations = {
     voiceInputStartLabel: "语音输入",
     voiceInputStopLabel: "停止语音输入",
     voiceInputStart:
-      "语音输入。DeerFlow 只接收转写文本，音频由浏览器或系统语音服务处理。",
+      "语音输入。ActWeave 只接收转写文本，音频由浏览器或系统语音服务处理。",
     voiceInputListening: "正在聆听... 点击停止语音输入。",
     voiceInputUnsupported:
       "当前浏览器不支持语音输入。建议使用 Chrome 或 Edge。",
@@ -772,10 +772,14 @@ export const zhCN: Translations = {
     common: {
       assetVersion: "资产修订",
       versionId: "版本 UUID",
+      mcpConfigurationId: "配置 UUID（内部修订）",
       currentPublishedVersion: "当前发布版本",
+      currentPublishedMcpConfiguration: "当前发布配置",
       updatedAt: "更新时间",
       versionHistory: "版本历史",
+      mcpConfigurationHistory: "配置历史",
       versionCount: (count) => `${count} 个版本`,
+      mcpConfigurationCount: (count) => `${count} 项配置`,
       credentialMetadata: "凭据元数据",
       details: "详情",
       dangerZone: "危险操作",
@@ -784,6 +788,7 @@ export const zhCN: Translations = {
         modelApiKey: "模型 API 密钥",
         apiKey: "API 密钥",
         token: "访问令牌",
+        mcpAuth: "MCP 认证",
         oauth: "OAuth 授权",
         database: "数据库凭据",
       },
@@ -795,6 +800,7 @@ export const zhCN: Translations = {
       credentialPayloadGroups: {
         env: "环境变量 (env)",
         headers: "请求头 (headers)",
+        query: "查询参数 (query)",
         oauth: "OAuth (oauth)",
       },
       metadataVersion: "元数据版本",
@@ -834,6 +840,51 @@ export const zhCN: Translations = {
       rejected: "已拒绝",
       retired: "已替换",
       revoked: "已撤销",
+    },
+    mcpToolInventory: {
+      title: "服务工具",
+      description: "Worker 最近一次从此 MCP 服务安全发现的工具。",
+      toolCount: (count) => `${count} 个工具`,
+      loading: "正在加载工具目录",
+      unpublished:
+        "此配置尚未生效。请编辑配置并绑定项目凭据；生效后，Worker 会自动测试服务并读取工具目录。",
+      neverDiscovered: "尚无工具发现记录。你可以立即测试服务并读取工具目录。",
+      testing: "正在测试服务并读取工具…",
+      catalogInvalid:
+        "最近一次发现返回的工具目录不符合安全要求。请检查 MCP 服务的工具名称、描述和参数结构后重新测试。",
+      discoveryUnavailable:
+        "最近一次连接 MCP 服务失败。请检查服务可用性、出口代理和网络配置后重新测试。",
+      stale:
+        "MCP 配置或 Credential 授权已变化，之前的工具目录已过期。请重新测试。",
+      refreshFailed: "工具目录刷新失败，当前仍展示上次读取的结果。",
+      degradedSuffix: "当前展示上次成功发现的工具。",
+      empty: "该服务在最近一次发现中未提供可用工具。",
+      lastSuccess: "最近成功发现：",
+      noDescription: "暂无描述",
+      testService: "测试服务",
+      retestService: "重新测试",
+      testingAction: "测试中…",
+      testFailurePrefix: "配置已保存，但测试服务失败。",
+      loadErrors: {
+        notFound: "该 MCP 配置不存在或已不可见。请关闭详情并刷新 MCP 列表。",
+        forbidden:
+          "你没有查看此 MCP 工具目录的权限。请联系项目管理员确认资产读取权限。",
+        authRequired: "登录状态已失效，无法读取工具目录。请重新登录。",
+        responseInvalid:
+          "资产服务返回的工具目录无效，已停止展示。请联系管理员检查 Gateway 与前端兼容性。",
+        network:
+          "暂时无法连接或读取资产服务。请稍后再试；如果持续失败，请联系平台管理员。",
+        generic:
+          "工具目录加载失败。请稍后再试；如果持续失败，请联系项目管理员。",
+      },
+      testErrors: {
+        notFound: "该 MCP 配置不存在或已不可见。",
+        forbidden: "你没有测试此 MCP 服务的权限。",
+        authRequired: "登录状态已失效，请重新登录后再测试。",
+        conflict: "配置或测试状态已变化，请刷新后重试。",
+        network: "测试请求暂时无法提交，请稍后重试。",
+        generic: "测试请求未能提交，请稍后重试。",
+      },
     },
     pages: {
       systemEyebrow: "平台共享资产",
@@ -947,11 +998,15 @@ export const zhCN: Translations = {
     },
     version: {
       none: "尚未创建版本。",
+      mcpNone: "尚未保存配置。",
       selectHint: "选择左侧版本以查看详情。",
       number: (number) => `版本 ${number}`,
+      mcpNumber: (number) => `配置 #${number}`,
       publish: "发布版本",
+      publishMcp: "发布配置",
       submit: "提交审批",
       approve: "批准并发布",
+      approveMcp: "批准并发布配置",
       configureGrants: "配置凭据授权",
     },
     diff: {
@@ -960,7 +1015,7 @@ export const zhCN: Translations = {
       model: "模型",
       toolGroups: "工具组",
       skillVersions: "Skill 版本",
-      mcpVersions: "MCP 版本",
+      mcpVersions: "MCP 配置",
       compatibility: "兼容性",
       scanDecision: "扫描结论",
       scanAllow: "允许",
@@ -986,27 +1041,29 @@ export const zhCN: Translations = {
       field: "字段",
       previous: "上一版本",
       current: "当前版本",
+      previousMcpConfiguration: "上一配置",
+      currentMcpConfiguration: "当前配置",
     },
     runtime: {
       unsupportedProjectTransport:
-        "当前仅支持 SSE 或 HTTP。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+        "当前仅支持 SSE 或 HTTP。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       unsupportedSystemTransport:
-        "当前私有运行环境仅支持标准输入输出、SSE 或 HTTP。此系统历史版本可以查看，但不能绑定或用于 Agent。",
+        "当前私有运行环境仅支持标准输入输出、SSE 或 HTTP。此系统历史配置可以查看，但不能绑定或用于 Agent。",
       missingProjectUrl:
-        "当前传输方式缺少 URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+        "当前传输方式缺少 URL。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       invalidProjectUrl:
-        "当前项目 MCP 需要无凭据、无查询参数的绝对 HTTPS URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+        "当前项目 MCP 需要无内嵌凭据、无查询参数或片段的绝对 HTTP 或 HTTPS URL，主机仅支持精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不解析普通 DNS 主机名。localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 必须属于管理员配置的允许网段。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       projectOAuth:
-        "当前项目 MCP 不支持版本内 OAuth 配置。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+        "当前项目 MCP 不支持配置内 OAuth。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       projectHeadersOnly:
-        "当前项目 MCP 凭据槽位仅支持请求头。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+        "当前项目 MCP 凭据槽位仅支持请求头或查询参数。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       missingSystemCommand:
         "当前标准输入输出型系统 MCP 缺少命令，不能绑定或用于 Agent。",
       missingSystemUrl: "当前远程系统 MCP 缺少 URL，不能绑定或用于 Agent。",
       systemEnvOnly:
         "当前标准输入输出型系统 MCP 凭据槽位仅支持环境变量，不能绑定或用于 Agent。",
       systemRemoteCredentialsOnly:
-        "当前远程系统 MCP 凭据槽位仅支持请求头或 OAuth，不能绑定或用于 Agent。",
+        "当前远程系统 MCP 凭据槽位仅支持请求头、查询参数或 OAuth，不能绑定或用于 Agent。",
     },
     dialogs: {
       createAssetTitle: (kind) => `创建 ${kind}`,
@@ -1014,10 +1071,29 @@ export const zhCN: Translations = {
         "创建后会自动生成 SKILL.md 草稿版本（已填入基础模板），Skill 默认停用。",
       assetCreationDescription: (scope) =>
         `先创建${scope === "system" ? "系统级" : "项目级"}资产，再在资产中创建并发布版本。`,
+      addMcpTitle: "添加 MCP",
+      addMcpDescription:
+        "填写连接与身份认证信息；敏感值只在项目凭据中加密保存。",
+      addMcpSubmit: "添加 MCP",
+      addAndPublish: "添加并发布",
+      addAndApprove: "添加、绑定凭据并发布",
+      addAndSubmitApproval: "添加并保存配置",
+      retryMcpApproval: "重试绑定并发布",
+      mcpSavedApprovalFailed:
+        "MCP 配置已保存，但凭据绑定与发布未完成。请重试，不会重复创建 MCP。",
+      mcpSavedRetryApprovalOnly:
+        "MCP 已安全保存；再次提交只会重试绑定与发布，不会重复创建。",
+      addingMcp: "添加中…",
+      editMcpConfigTitle: "编辑配置",
+      saveMcpConfig: "保存配置",
+      saveAndPublishMcpConfig: "保存并发布",
+      saveAndApproveMcpConfig: "保存、绑定凭据并发布",
+      saveAndSubmitMcpConfig: "保存配置",
+      savingMcpConfig: "保存中…",
       name: "名称",
       assetSlug: "资产标识",
       slugTitle: "使用 3–63 位小写字母、数字和单个连字符",
-      slugHelp: "3–63 位小写字母、数字或连字符；创建后作为稳定标识使用。",
+      slugHelp: "3–63 位小写字母、数字或连字符",
       filePath: "文件路径",
       mediaType: "媒体类型",
       fileContent: "文件内容",
@@ -1026,22 +1102,77 @@ export const zhCN: Translations = {
       description: "描述",
       transport: "传输方式",
       sseTransport: "服务器推送（SSE）",
-      workerUrlHelp: "该地址由执行器访问，须填写平台批准的精确 HTTPS 地址。",
-      timeoutHelp: "实际超时由平台控制，版本中的兼容值不可在此修改。",
-      credentialSlotOptional: "凭据槽位（可选）",
-      slotPublicationHelp: "创建槽位后，本版本只能通过提交和批准流程发布。",
+      httpTransport: "HTTP（Streamable HTTP）",
+      mcpServiceUrl: "MCP 服务地址",
+      urlQueryRemoved:
+        "已从 URL 中移除查询参数；其中的值不会保存。请通过项目凭据安全写入。",
+      authentication: "身份认证",
+      headerAuthentication: "请求头",
+      queryAuthentication: "查询参数",
+      noAuthentication: "不需要认证",
+      noAuthenticationHelp: "此 MCP 不读取项目凭据，保存后可直接发布。",
+      connectionAndAuthentication: "连接与认证",
+      needsProjectCredential: "需要项目凭据",
       slotName: "槽位名称",
       slotNameTitle:
         "以小写字母开头，只能使用小写字母、数字、点、下划线或连字符",
       slotNameHelp:
         "以小写字母开头，最多 63 位；可使用数字、点、下划线和连字符。",
       purpose: "用途",
-      credentialHeaderGroup: "凭据字段分组：请求头",
+      credentialFieldGroup: "凭据字段分组",
       requiredFields: "必需字段（逗号或换行分隔）",
       requiredFieldsHelp:
         "填写所选分组中凭据必须包含的字段名；多个字段用逗号或换行分隔。",
-      unsupportedMcpTransport: "新 MCP 版本仅支持 SSE 或 HTTP",
+      requestHeaderName: "请求头名称",
+      queryParameterName: "查询参数名称",
+      credentialFieldNameTitle:
+        "这里只填写字段名称；多个字段用逗号分隔，不要填写 Basic、Bearer 或密钥值",
+      credentialFieldNameHelp:
+        "这里只填写字段名称。敏感值请在“项目凭据”中加密保存；多个字段用逗号分隔。",
+      queryGroup: "查询参数",
+      unsupportedMcpTransport: "新 MCP 配置仅支持 SSE 或 HTTP",
       missingMcpUrl: "SSE 或 HTTP 传输必须填写 URL",
+      invalidMcpUrl:
+        "请输入 Worker 可访问且不含内嵌凭据、查询参数或片段的完整 HTTP 或 HTTPS 地址，主机仅支持精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不解析普通 DNS 主机名。localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 必须属于管理员配置的允许网段，网段由平台统一配置，无需在此表单选择。",
+      mcpUrlQuery:
+        "URL 不能包含查询参数。请填写基础 URL，并通过查询参数凭据槽位保存密钥。",
+      unsupportedMcpCredentialGroup:
+        "项目 MCP 凭据槽位仅支持请求头或查询参数。",
+      missingMcpCredentialSlotName: "填写凭据字段时必须同时填写槽位名称。",
+      missingMcpCredentialFields: "填写槽位名称后，请填写至少一个必需字段。",
+      missingMcpHeaderName: "请填写请求头名称，例如 Authorization。",
+      missingMcpQueryName: "请填写查询参数名称，例如 key。",
+      invalidMcpCredentialFieldName:
+        "这里只填写请求头名称或查询参数名称，不要粘贴 Basic、Bearer 或密钥值。",
+      projectCredential: "项目凭据",
+      createProjectCredential: "新建项目凭据",
+      credentialSelectedByAdmin: "由项目管理员选择凭据",
+      noCompatibleCredential: "暂无匹配的项目凭据",
+      compatibleCredentialsOnly: "只显示与当前认证要求完全匹配的已启用凭据。",
+      credentialFieldsMatch: "字段匹配",
+      adminCompletesApproval:
+        "当前账号不能绑定凭据；保存后由项目管理员完成凭据绑定并使配置生效。",
+      safetyPreview: "安全预览",
+      configurationPreviewReadonly: "配置预览（只读）",
+      serviceAddress: "服务地址",
+      waitingForServiceAddress: "等待填写服务地址",
+      pendingCredentialSelection: "等待选择项目凭据",
+      encryptedRead: "加密读取",
+      secretNeverDisplayed: "凭据密钥始终加密保存，不会在此表单或预览中显示。",
+      credentialSource: "凭据来源",
+      encryptedProjectCredential: "项目凭据（加密）",
+      publicationStatus: "发布状态",
+      publishOnSave: "保存后直接发布",
+      publishAfterApproval: "保存后自动绑定并发布",
+      publicationFlow: "发布流程",
+      saveMcpStep: "保存 MCP 配置",
+      saveMcpStepDetail: "连接信息与认证要求会先保存为不可变配置。",
+      selectCredentialStep: "选择字段结构完全匹配的项目凭据",
+      selectCredentialStepDetail:
+        "凭据分组、字段名、大小写和顺序必须完全一致。",
+      approvePublishStep: "绑定凭据并发布",
+      approvePublishStepDetail: "凭据绑定完成后，MCP 配置会立即生效。",
+      approvalRunsAfterSave: "选择匹配凭据后，保存配置会自动完成绑定与发布。",
       createVersionTitle: (kind) => `创建 ${kind} 版本`,
       secretCreateTitle: "创建凭据",
       secretReplaceTitle: "替换凭据",
@@ -1049,7 +1180,9 @@ export const zhCN: Translations = {
       credentialSlug: "凭据标识",
       credentialFields: "凭据字段",
       credentialFieldsHelp:
-        "可添加多个环境变量、请求头或 OAuth 字段；每个值仅写入一次。",
+        "可添加多个环境变量、请求头、查询参数或 OAuth 字段；每个值仅写入一次。",
+      fixedCredentialFieldsHelp:
+        "凭据类型和字段结构已按 MCP 认证要求固定；只需填写名称、凭据标识和敏感值。",
       addField: "添加字段",
       group: "分组",
       envGroup: "环境变量",
@@ -1105,18 +1238,18 @@ export const zhCN: Translations = {
       approval: {
         configureTitle: "配置 MCP 凭据授权",
         configureDescription:
-          "为已发布的内置系统 MCP 选择系统凭据当前版本。此操作只配置槽位授权，不修改或重新发布 MCP 定义。",
+          "为已发布的内置系统 MCP 选择系统凭据。此操作只配置槽位授权，不修改或重新发布 MCP 定义。",
         saveGrants: "保存授权",
         configureEmptyOptional:
           "当前没有可选凭据；可选槽位可留空并保存，以清除既有授权。",
         clearOptionalGrant: "不绑定凭据",
-        publishTitle: "批准 MCP 版本",
+        publishTitle: "批准 MCP 配置",
         publishDescription:
-          "为每个凭据槽位选择当前作用域可见的已启用凭据当前版本。批准成功后版本才会发布。",
-        approve: "批准并发布",
+          "为每个凭据槽位选择当前作用域可见的已启用凭据。批准成功后配置才会发布。",
+        approve: "批准并发布配置",
         publishEmptyOptional: "当前没有可选凭据；可选槽位可留空并直接批准。",
         selectCredential: "请选择凭据",
-        currentVersion: "当前版本",
+        currentVersion: "当前凭据",
         loadingCredentials: "正在加载凭据…",
         credentialsFailed: "凭据列表加载失败，请重试。",
         requiredUnavailable: "必填槽位没有可用凭据。",
@@ -1133,6 +1266,10 @@ export const zhCN: Translations = {
       forbidden: "当前账户没有执行此操作的权限。",
       conflict: "资产状态已变化，请刷新后重试。",
       validationFailed: "提交内容不符合资产要求。",
+      mcpVersionValidation:
+        "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌凭据、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每个凭据槽位只使用 headers 或 query 单一分组且已填写字段。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。",
+      mcpCredentialMismatch:
+        "所选凭据不满足 MCP 槽位要求，或凭据已失效。凭据必须处于启用状态，并且分组和字段名必须与所选槽位的 schema 完全一致（包括大小写）。",
       storageQuota:
         "项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。",
       storageUnavailable: "资产存储暂时不可用，请稍后重试。",
@@ -1225,7 +1362,7 @@ export const zhCN: Translations = {
     },
     empty: {
       title: "还没有定时任务",
-      description: "创建一个任务，让 DeerFlow 按计划自动完成工作。",
+      description: "创建一个任务，让 ActWeave 按计划自动完成工作。",
       action: "创建第一条任务",
       filteredTitle: "没有符合条件的任务",
       filteredDescription: "调整筛选条件，或清除筛选查看全部任务。",
@@ -1341,11 +1478,11 @@ export const zhCN: Translations = {
     save: "保存智能体",
     saving: "正在保存智能体...",
     saveRequested:
-      "已提交保存请求，DeerFlow 正在根据当前对话生成并保存初版智能体。",
+      "已提交保存请求，ActWeave 正在根据当前对话生成并保存初版智能体。",
     saveHint:
       "你可以在右上角的菜单里随时保存这个智能体，就算目前还只是初稿也可以。",
     agentCreatedPendingRefresh:
-      "智能体已创建，但 DeerFlow 暂时还无法读取到它。请稍后刷新当前页面。",
+      "智能体已创建，但 ActWeave 暂时还无法读取到它。请稍后刷新当前页面。",
     more: "更多操作",
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
@@ -1360,13 +1497,13 @@ export const zhCN: Translations = {
 
   // Workspace
   workspace: {
-    officialWebsite: "访问 DeerFlow 官方网站",
-    githubTooltip: "访问 DeerFlow 的 GitHub 仓库",
+    officialWebsite: "访问 ActWeave 官方网站",
+    githubTooltip: "访问 ActWeave 的 GitHub 仓库",
     settingsAndMore: "设置和更多",
-    visitGithub: "在 GitHub 上查看 DeerFlow",
+    visitGithub: "在 GitHub 上查看 ActWeave",
     reportIssue: "报告问题",
     contactUs: "联系我们",
-    about: "关于 DeerFlow",
+    about: "关于 ActWeave",
     logout: "退出登录",
     gatewayUnavailable: "网关暂时不可用。",
     gatewayUnavailableRetrying: "正在后台重试…",
@@ -1440,20 +1577,20 @@ export const zhCN: Translations = {
     saveAndConnect: "保存并连接",
     saveChanges: "保存修改",
     descriptions: {
-      telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
+      telegram: "通过 ActWeave Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
-      discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
-      feishu: "通过 DeerFlow 应用接收飞书和 Lark 消息。",
-      dingtalk: "通过 DeerFlow Bot 接收钉钉 Stream Push 消息。",
-      wechat: "通过 DeerFlow Bot 接收微信 iLink 消息。",
-      wecom: "通过 DeerFlow AI Bot 接收企业微信消息。",
+      discord: "通过 ActWeave Bot 接收 Discord 服务器消息。",
+      feishu: "通过 ActWeave 应用接收飞书和 Lark 消息。",
+      dingtalk: "通过 ActWeave Bot 接收钉钉 Stream Push 消息。",
+      wechat: "通过 ActWeave Bot 接收微信 iLink 消息。",
+      wecom: "通过 ActWeave AI Bot 接收企业微信消息。",
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
   },
 
   // Page titles (document title)
   pages: {
-    appName: "DeerFlow",
+    appName: "ActWeave",
     chats: "对话",
     newChat: "新对话",
     untitled: "未命名",
@@ -1480,7 +1617,7 @@ export const zhCN: Translations = {
     writeFile: "写入文件",
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
-    skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    skillInstallTooltip: "安装技能并使其可在 ActWeave 中使用",
   },
 
   humanInput: {
@@ -1496,6 +1633,10 @@ export const zhCN: Translations = {
     requiredError: "请填写所有必填字段后再提交。",
     requiredA11yLabel: "必填",
     selectPlaceholder: "请选择...",
+    availableOptions: "可选项",
+    requestedInformation: "需要填写的信息",
+    selected: "已选择",
+    yourAnswer: "你的回答",
     answeredValue: (value: string) => `已回答：${value}`,
   },
 
@@ -1568,7 +1709,7 @@ export const zhCN: Translations = {
     noResults: "未找到结果。",
     actions: "操作",
     keyboardShortcuts: "键盘快捷键",
-    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 DeerFlow。",
+    keyboardShortcutsDescription: "使用键盘快捷键更快地操作 ActWeave。",
     openCommandPalette: "打开命令面板",
     toggleSidebar: "切换侧边栏",
   },
@@ -1576,7 +1717,7 @@ export const zhCN: Translations = {
   // Settings
   settings: {
     title: "设置",
-    description: "根据你的偏好调整 DeerFlow 的界面和行为。",
+    description: "根据你的偏好调整 ActWeave 的界面和行为。",
     sections: {
       account: "账号",
       appearance: "外观",
@@ -1589,7 +1730,7 @@ export const zhCN: Translations = {
     },
     memory: {
       title: "记忆",
-      description: "查看和管理 DeerFlow 对你的长期理解。",
+      description: "查看和管理 ActWeave 对你的长期理解。",
       manageMemory: "数据管理",
       factCount: (count) => `${count} 条事实`,
       summaryCount: (count) => `${count} 个摘要`,
@@ -1599,7 +1740,7 @@ export const zhCN: Translations = {
       smartSummaries: "智能摘要",
       emptyTitle: "还没有记忆",
       emptyDescription:
-        "添加一条事实，或继续对话，让 DeerFlow 学习有用的上下文。",
+        "添加一条事实，或继续对话，让 ActWeave 学习有用的上下文。",
       loadErrorTitle: "无法加载记忆",
       empty: "暂无可展示的记忆数据。",
       rawJson: "原始 JSON",
@@ -1636,7 +1777,7 @@ export const zhCN: Translations = {
       factValidationContent: "事实内容不能为空。",
       factValidationConfidence: "置信度必须是 0 到 1 之间的数字。",
       noFacts: "还没有保存的事实。",
-      summaryReadOnly: "这些摘要由 DeerFlow 自动维护，当前为只读。",
+      summaryReadOnly: "这些摘要由 ActWeave 自动维护，当前为只读。",
       memoryFullyEmpty: "还没有保存任何记忆。",
       factPreviewLabel: "即将删除的事实",
       searchPlaceholder: "搜索记忆",
@@ -1700,7 +1841,7 @@ export const zhCN: Translations = {
     },
     channels: {
       title: "渠道",
-      description: "连接可在浏览器外向 DeerFlow 发送消息的即时通讯账号。",
+      description: "连接可在浏览器外向 ActWeave 发送消息的即时通讯账号。",
       disabled:
         "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
     },
@@ -1710,7 +1851,7 @@ export const zhCN: Translations = {
       createSkill: "新建技能",
       emptyTitle: "还没有技能",
       emptyDescription:
-        "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
+        "将你的 Agent Skill 文件夹放在 ActWeave 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
@@ -1732,12 +1873,12 @@ export const zhCN: Translations = {
     notification: {
       title: "通知",
       description:
-        "DeerFlow 只会在窗口不活跃时发送完成通知，特别适合长时间任务：你可以先去做别的事，完成后会收到提醒。",
+        "ActWeave 只会在窗口不活跃时发送完成通知，特别适合长时间任务：你可以先去做别的事，完成后会收到提醒。",
       requestPermission: "请求通知权限",
       deniedHint:
         "通知权限已被拒绝。可在浏览器的网站设置中重新开启，以接收完成提醒。",
       testButton: "发送测试通知",
-      testTitle: "DeerFlow",
+      testTitle: "ActWeave",
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
@@ -1751,7 +1892,7 @@ export const zhCN: Translations = {
       changePasswordDescription: "更新你的账号密码。",
       ssoPasswordDescription: "密码由你的 SSO 提供商管理。",
       ssoPasswordMessage:
-        "此账号通过 {provider} 登录，DeerFlow 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
+        "此账号通过 {provider} 登录，ActWeave 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
       currentPassword: "当前密码",
       newPassword: "新密码",
       confirmNewPassword: "确认新密码",
@@ -1786,7 +1927,7 @@ export const zhCN: Translations = {
     createAdminAccount: "创建管理员账号",
     adminSetupRequiredTitle: "需要先完成管理员初始化",
     adminSetupRequiredDescription:
-      "DeerFlow 需要先创建管理员账号，然后才能创建新的普通账号。",
+      "ActWeave 需要先创建管理员账号，然后才能创建新的普通账号。",
     orContinueWith: "或使用以下方式登录",
     ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
     continueWith: (provider: string) => `使用 ${provider} 登录`,
@@ -1806,7 +1947,7 @@ export const zhCN: Translations = {
   setup: {
     loading: "加载中…",
     initAdminTitle: "创建管理员账号",
-    initAdminDescription: "设置管理员账号后即可开始使用 DeerFlow。",
+    initAdminDescription: "设置管理员账号后即可开始使用 ActWeave。",
     email: "邮箱",
     emailPlaceholder: "you@example.com",
     password: "密码",

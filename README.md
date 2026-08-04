@@ -1,10 +1,12 @@
-# DeerFlow
+# ActWeave
+
+Weave intelligence into action.
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-DeerFlow 是一个面向多账户、多项目协作的开源 super agent 系统。它以 LangGraph Agent harness 为执行核心，提供项目级认证授权、Agent/Skill/MCP 资产、长期 Memory、Sub-Agent、Sandbox、Automation、IM Channel 和持久化流式会话。
+ActWeave 是一个面向多账户、多项目协作的开源 super agent 系统。它以 LangGraph Agent harness 为执行核心，提供项目级认证授权、Agent/Skill/MCP 资产、长期 Memory、Sub-Agent、Sandbox、Automation、IM Channel 和持久化流式会话。
 
 当前实现是 project-first SaaS 架构：浏览器和外部渠道先进入 Gateway，Gateway 完成认证、项目授权和 Run 准入，Worker 独占 Agent graph 执行，Scheduler 只负责 Automation 到期准入。应用数据、运行状态和资产版本统一存储在 PostgreSQL。
 
@@ -41,7 +43,7 @@ Gateway 会从请求追踪上下文继承或生成私有 Run 的可信关联；�
 `present_files` 在对话中提供可下载文件卡。运行中的 `write_file` 预览会在收尾完成后切换为
 UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次打开，不依赖临时流式消息。
 
-> DeerFlow 2 是一次重写，与最初的 Deep Research 实现不共用代码。原始版本见上游 [`main-1.x`](https://github.com/bytedance/deer-flow/tree/main-1.x) 分支。
+> ActWeave 当前代码线源自 DeerFlow 2 的重写；它与最初的 Deep Research 实现不共用代码。原始 DeerFlow 版本见 ByteDance 上游 [`main-1.x`](https://github.com/bytedance/deer-flow/tree/main-1.x) 分支。
 
 ## 核心能力
 
@@ -49,7 +51,7 @@ UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次
 - 项目用量：具备用量权限的项目管理员可在概览查看全项目最近 24 个小时的 Token 消耗趋势。
 - 系统通知：工作区顶部铃铛集中展示账号级通知和未读数量；已注册用户收到项目邀请后可直接在通知中接受，未注册邮箱仍使用一次性邀请链接。
 - Agent 运行：持久化 Thread/Run、durable SSE、断线重连、取消、重试和 Worker lease。
-- 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
+- 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。Main 无需项目 Agent 绑定，会在每次 Run 准入时冻结当前项目可用的系统/自建 Agent、Skill 和 MCP；普通 Agent 仍只加载其版本明确引用的 Skill 与 MCP。会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
 - 会话模式：输入区只保留一个模式选择器；闪速、思考、Pro、Ultra 分别固定使用最低、低、中、高推理强度，不再提供可与模式冲突的独立推理深度设置。
 - 执行过程：复杂任务结束后，可在最终回答前展开按时间顺序保留的全部思考、工具调用和子任务，最终回答所属模型调用的思考也作为最后一步收在其中；每次模型调用的思考保持为独立的“已思考（用时 X 秒）”区块，不会合并成普通执行步骤或重复显示。外层默认折叠以保持页面简洁；没有前序执行过程的直接回答仍保留独立思考区块，任务执行中会逐轮保留思考并自动展开当前轮次。
 - 思考时长：完成态显示 Worker 从模型流中观测到的实际思考区间；任务总耗时继续单独展示，包含模型等待、工具和子任务时间，不会冒充思考时长。
@@ -58,7 +60,7 @@ UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次
 - Agent harness：Sub-Agent、Plan Mode、上下文压缩、长期 Memory、Guardrail、Tool Search 和循环检测。
 - Sandbox：支持 Local、容器和 Provisioner/Kubernetes provider；具体隔离能力取决于所选 provider。
 - 项目自动化：一次性或 Cron Automation，由独立 Scheduler 准入、Worker 执行。
-- IM Channel：Feishu/Lark、Slack、Telegram、Discord、DingTalk、WeChat 和企业微信等项目绑定连接。
+- IM Channel：Feishu/Lark、Slack、Telegram、Discord、DingTalk、WeChat 和企业微信等项目绑定连接。项目 Admin 在“渠道连接”为项目配置独立应用实例，成员可保留个人 `p2p /connect`。Feishu 还支持 Admin 选择 Agent 后在群内发送一次性 `/bind-project` 命令；群成员无需 ActWeave 账号或个人绑定，同群同话题中仍按发送人使用完全隔离的私有会话。Secret 只保存为加密项目 Credential，不写入项目元数据或浏览器查询缓存。
 
 ## 运行架构
 
@@ -121,10 +123,13 @@ make config
 两者都不应提交。模型定义及其 provider Credential 不再属于 YAML 运行配置，而是保存在
 PostgreSQL；system admin 可在 `/admin/settings/models` 管理。完整进程字段见
 [`config.example.yaml`](./config.example.yaml) 和[后端配置说明](./backend/docs/CONFIGURATION.md)。
-当前示例配置 schema 为 version 34；已有本地配置应运行 `make config-upgrade`。升级器会删除
-已迁入 PostgreSQL 的 Agent runtime、注册开关和配额默认值叶子，以及旧顶层 `models:` 与
-`authorization:`。system admin 在 `/admin/settings/system` 修改这些策略后，新请求/新 Run
-立即按各自生效边界读取，无需重启进程。
+当前示例配置 schema 为 version 35；已有本地配置应运行 `make config-upgrade`。旧的空 endpoint
+列表会安全迁移为空网段列表并继续拒绝全部项目远程 MCP；旧列表只要包含精确 URL，升级器就会
+中止并要求人工选择 CIDR，避免把一个地址静默放大为整个网段。升级器还会删除已迁入
+PostgreSQL 的 Agent runtime、注册开关和配额默认值叶子，以及旧顶层 `models:` 与
+`authorization:`。system admin 在 `/admin/settings/system` 修改这些数据库策略后，新请求/新
+Run 立即按各自生效边界读取；`mcp_security` 仍是启动时配置，修改后需同时重启 Gateway、
+Scheduler 和 Worker。
 
 ### 3. 初始化 PostgreSQL
 
@@ -190,6 +195,7 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 ## 产品入口
 
+- `/`：直接进入统一鉴权入口；未登录跳转登录页，已登录进入 `/workspace`。
 - `/workspace`：登录后的多项目工作区。
 - `/projects/{project_slug}`：项目会话、Agent、Skill、MCP、Credential、Memory、Automation、成员和设置。
 - `/admin`：仅 system admin 可访问的平台资产与运维页面。
@@ -198,9 +204,15 @@ Kubernetes/Helm 资源位于 `deploy/helm/`。Docker Compose、Kubernetes 和不
 
 System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 packaged catalog 写入 PostgreSQL。运行进程只读取数据库中的资产版本和 Run 准入时固定的 snapshot。仓库内 `skills/public/` 的 14 个完整目录是全部 System Skill 的唯一来源：开发期生成器会用它们精确替换 packaged catalog 中的 Skill 集合，同时保留 System Agent 和 MCP。每个新建项目会在创建事务中把当时全部 System Skill 的当前已发布版本绑定为默认启用；以后重新 setup 不会向既有项目补绑新 Skill，也不会重新启用管理员已停用的 Skill。项目管理员仍可在“系统提供”列表中逐项启用或停用，也不应再把同一目录重复导入为项目 Skill。
 
-项目 MCP 采用默认拒绝的执行策略：项目不能直接启动 `stdio` 子进程，只能使用平台运维在 `mcp_security.project_remote_allowed_endpoints` 中批准的精确 HTTPS `http`/`sse` 地址。任意环境变量、静态请求头和 OAuth 配置不会作为普通版本字段保存，认证值必须通过加密 Credential 的 header slot 提供。Worker 对工具发现和每次调用重新校验快照与端点、禁用重定向和环境代理，并执行平台级硬超时；生产环境还应配置 `mcp_security.egress_proxy_url`，由受控出口独立阻断私网、链路本地和云元数据地址。历史不兼容版本仍可审计读取，但 Project API 只返回远程 HTTPS origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。
+系统 Main 是项目级编排入口，不要求也不创建项目 System Agent binding。Gateway 只从当前项目收集已启用的 System 资产和已启用、已发布的项目自建资产；其他项目的资产不会进入闭包。Main 可委派当次闭包中的 Agent，但每个被委派 Agent 使用自己精确冻结的模型、Prompt、tool groups、Skill 与 MCP，不继承 Main 的全量资产，也不能递归委派。普通项目或 System Agent 始终只使用自身版本明确引用的 Skill/MCP。每次 Run 会把主 Agent、可委派 Agent、依赖版本和各自模型一起固定，后续发布不会在运行中替换它们。
 
-项目 Agent 页面使用项目自建 Agent 卡片：卡片主体进入详情，已配置、启用且具备执行权限的 Agent 可从卡片直接创建绑定到该 Agent 的私有对话。新建入口会先创建一个仅绑定当前项目与当前账号的可恢复设计会话，再通过对话和澄清让模型生成 `AGENTS.md`、`SOUL.md`、`IDENTITY.md` 与 `USER.md` 四项候选设定；模型不能直接写库、发布或启用资产。用户预览、修改并最终确认后，后端才在一个事务里创建默认停用的 Agent、写入首份完整内部配置并结束设计会话；确认响应只返回设计会话和 Agent，不暴露内部 revision。同一项目的 Agent slug 不可重复，中断的生成可重试，设计消息和候选稿随精确项目/账号隐私范围清理。详情顶部只显示名称与最近更新时间，不提供 Agent 归档；卡片与详情为具备权限的停用态 Agent 提供启用动作，启用态详情提供停用动作。列表不提供删除入口；项目自建 Agent 仅在详情页经过二次确认和 5 秒等待后才可永久删除整个 Agent 及全部设置。已有对话、自动化或 Run snapshot 引用时返回 `409`，不会级联删除私有历史；系统 Agent 永远不可删除。四个名称只是映射到 Agent 内部配置字段的固定逻辑文档，不创建物理文件或独立文件版本。保存会在同一事务中复制当前运行配置、写入新的内部 revision 并移动当前指针；停用状态不会阻止继续编辑。后续新准入 Run 会立即使用新设置，无需重启服务；已经物化的运行持有当次精确 bundle，尚未物化的旧准入或后续副作用仍会重验当前 Agent 指针与权限，并在漂移时按既有安全边界 fail closed。四项内容位于其他项目可配置提示之后，是最高的项目可配置提示层，并紧邻最终平台关键提醒之前；平台安全、授权与隔离规则无论位于模板何处都始终优先，子 Agent 继承相同的准入快照。
+项目 MCP 只提供一次性的“添加 MCP”表单，不再要求先创建空资产、再创建版本、再单独发布。表单明确区分“不需要认证”“请求头”和“查询参数”；需要认证时只填写字段名，不粘贴密钥。项目 Admin 可在同一向导中选择字段结构完全匹配的已启用项目 Credential，或新建一个加密 Credential；MCP 场景的新凭据由系统固定为 `mcp_auth` 类型，不再要求用户理解或填写内部分类。编辑配置复用新增时的双栏表单、认证方式和 Credential 选择。无凭证配置保存后直接发布；有凭证且操作者具备凭据绑定权限时，同一次保存操作会自动完成配置更新、凭据绑定与发布，绑定或发布失败只重试后半段，不重复提交配置；普通 Editor 只能保存尚未生效的配置，不能越权绑定凭据，由项目 Admin 完成绑定。详情不显示审批状态、审批提示或独立审批按钮：未绑定 Credential 时显示“凭据未绑定 · 尚未生效”，绑定完成后显示“已发布”。MCP 创建本身会在同一事务中写入资产与初始不可变配置；没有 Credential 槽位时直接发布，声明任一槽位时在凭据绑定前保持未生效。详情只展示一份当前配置，不提供历史、编号或内部修订选择器。项目自建 MCP 详情头部不重复展示“项目自建”标签，摘要区将当前配置、最近更新和启用状态在桌面端同一行展示；传输方式、超时和 URL 也在桌面端同一行展示，详情不再重复展示 Credential 槽位，凭据选择与创建仍在新增和编辑配置流程中完成。系统 MCP 像系统 Skill 一样直接在列表行启用或停用，存在新配置时通过同一行的“更新”操作同步当前配置，详情页只展示项目使用状态。数据库仍保留内部 revision 与精确快照作为审计和运行准入边界。JSON 配置导入暂未开放。
+
+项目 MCP 不能直接启动 `stdio` 子进程，只提供 `http`/`sse` 远程连接。项目地址可以使用 HTTP 或 HTTPS，并以 `mcp_security.project_remote_allowed_networks` 配置的 CIDR 网段为边界；默认网段覆盖本机回环和常见 IPv4/IPv6 私网，因此 `127.0.0.1`、`10.x`、`172.16–31.x`、`192.168.x` 及 ULA IPv6 地址无需逐 IP 或逐 URL 登记。特殊网络只需新增一条 CIDR。CIDR 只限制目标地址，不限制端口、路径或服务身份，因此只应配置项目确实需要访问的网段。本机非容器部署时 Worker 是同一主机上的独立进程，`127.0.0.1` 就指向该主机。项目地址使用 IP literal 或 `localhost`；`localhost` 会确定性规范化为 `127.0.0.1`，IPv6 回环请显式填写 `[::1]`，普通 DNS 名称不能靠一次解析结果获得网段权限。任意环境变量、静态请求头和 OAuth 配置不会作为普通版本字段保存，认证值必须通过加密 Credential 的 header 或 query slot 提供；query 密钥只会在 Worker 内存中附加到无密钥 base URL，且不能覆盖 base URL 已有的同名参数。Basic 认证在槽位中选择“请求头”并只填写字段名 `Authorization`，实际项目 Credential 的该字段值再填写 `Basic xxxxxxxx`。对于使用 `?key=...` 的 Streamable HTTP 服务，MCP 配置只填写无查询参数的基础地址，项目 Credential 创建 `query` 分组的 `key` 字段，再在保存配置时绑定该 Credential。
+
+使用 HTTP 时，请求头和查询参数中的 Credential 会以明文经过网络，只适用于可信内网；跨越不可信网络时应使用 HTTPS。query 密钥按协议会出现在发送给出口代理和远端服务的 request-target 中，因此代理及上游访问日志必须禁用查询串记录或对其完整脱敏；服务支持 header 鉴权时应优先使用 header。Worker 对工具发现和每次调用重新校验快照与目标网段、禁用重定向和环境代理，并执行平台级硬超时。部署可选启用 `mcp_security.require_egress_proxy` 和 `egress_proxy_url`，由受控出口进一步实施独立网络策略。项目 MCP 在新建或编辑后，只要配置已经发布，发布事务就会同时加入一次持久化工具发现任务；带 Credential 的配置会在凭据绑定并固定完整授权闭包后再加入任务。Worker 只执行 MCP 初始化和工具列表读取，不调用任何工具，详情会显示测试中、工具名称与说明，失败时保留已保存配置并提供“重新测试”。Gateway 和浏览器不会连接外部 MCP，也不会解密 Credential；工具目录只是显示用观测，每次真实 Run 仍会重新发现并校验工具。发现失败、Credential 授权变化或配置变化会分别显示降级、失败或过期说明。历史不兼容配置仍可审计读取，Project MCP 历史 API 继续只返回远程 HTTP(S) origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。只有具备编辑权限的专用 `GET /api/projects/{project_id}/mcp-servers/{asset_id}/configured` 会返回当前可编辑配置中经过校验的完整 IP 路径，且仍不返回内嵌凭据、查询参数、片段或 Credential 值。项目详情不再把“归档”作为主操作：具备当前已发布配置的项目自建 MCP 可停用并重新启用，重新启用时会再次校验定义和 Credential 闭包；详情危险操作区经过二次确认和 5 秒等待后可永久删除未被引用的项目 MCP 及其内部修订、槽位和授权配置。仍被 Agent revision 或历史 Run/授权快照引用时返回 `409`，不会级联删除引用方；系统 MCP 永远不可删除。
+
+项目 Agent 页面使用项目自建 Agent 卡片：卡片主体进入详情，已配置、启用且具备执行权限的 Agent 可从卡片直接创建绑定到该 Agent 的私有对话。新建入口会先创建一个仅绑定当前项目与当前账号的可恢复设计会话，再通过对话和澄清让模型生成 `AGENTS.md`、`SOUL.md`、`IDENTITY.md` 与 `USER.md` 四项候选设定；模型不能直接写库、发布或启用资产。用户预览、修改并最终确认后，后端才在一个事务里创建默认停用的 Agent、写入首份完整内部配置并结束设计会话；确认响应只返回设计会话和 Agent，不暴露内部 revision。同一项目的 Agent slug 不可重复，中断的生成可重试，设计消息和候选稿随精确项目/账号隐私范围清理。详情顶部只显示名称与最近更新时间，不提供 Agent 归档；卡片与详情为具备权限的停用态 Agent 提供启用动作，启用态详情提供停用动作。列表不提供删除入口；项目自建 Agent 仅在详情页经过二次确认和 5 秒等待后才可永久删除整个 Agent 及全部设置。已有对话、自动化或 Run snapshot 引用时返回 `409`，不会级联删除私有历史；系统 Agent 永远不可删除。四个名称只是映射到 Agent 内部配置字段的固定逻辑文档，不创建物理文件或独立文件版本。保存会在同一事务中复制当前运行配置、写入新的内部 revision 并移动当前指针；停用状态不会阻止继续编辑。后续新准入 Run 会立即使用新设置，无需重启服务；已经准入的 Run 继续使用当次固定的精确版本，后续发布不会替换它们。Worker 在物化和每个副作用边界仍会重验项目归属、资产状态、System binding、Credential 闭包与执行权限，停用、解绑或撤销会按安全边界 fail closed。四项内容位于其他项目可配置提示之后，是最高的项目可配置提示层，并紧邻最终平台关键提醒之前；平台安全、授权与隔离规则无论位于模板何处都始终优先；Main 委派时为每个子 Agent 注入其自身的精确准入快照，而不是继承 Main 的全量资产。
 
 Agent 不向用户提供创建版本、选择版本或发布版本的操作。项目与管理员代管项目 API 只保留内部 revision 历史的只读查询；Builder 确认和四项指令保存由后端内部原子维护不可变 revision，Run snapshot 仍固定实际使用的精确配置。
 
@@ -279,4 +291,4 @@ Replay E2E、发布、容器、Helm Chart 与版本校验继续使用各自的�
 
 ## 许可证与致谢
 
-本项目采用 [MIT License](./LICENSE)。感谢 [DeerFlow 上游项目](https://github.com/bytedance/deer-flow)及所有贡献者奠定的 Agent harness、工具和前端基础。
+本项目采用 [MIT License](./LICENSE)。感谢 [ByteDance DeerFlow 上游项目](https://github.com/bytedance/deer-flow)及所有贡献者奠定的 Agent harness、工具和前端基础。

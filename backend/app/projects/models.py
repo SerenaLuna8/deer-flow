@@ -15,6 +15,9 @@ class ProjectRole(StrEnum):
     EDITOR = "editor"
     RUNNER = "runner"
     VIEWER = "viewer"
+    # Internal, non-login identity used only for project-bound channel guests.
+    # It must never be offered by invitations or membership-management APIs.
+    CHANNEL_GUEST = "channel_guest"
 
 
 @dataclass(frozen=True)

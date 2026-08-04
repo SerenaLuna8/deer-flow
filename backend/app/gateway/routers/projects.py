@@ -16,10 +16,11 @@ from app.gateway.deps import (
     get_project_quota_service,
     project_session,
 )
+from app.gateway.public_project_roles import PublicProjectRole
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectMemberQuotaExceeded, ProjectNotFound, ProjectQuotaStateConflict, ProjectSlugConflict, ProjectValidationFailed
-from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectRole, ProjectView
+from app.projects.models import CreateProject, ProjectChanges, ProjectPage, ProjectView
 from app.projects.repository import ProjectRepository
 from app.projects.service import ProjectService
 from app.quotas.models import QuotaUnavailable
@@ -84,7 +85,7 @@ class ProjectResponse(BaseModel):
     display_name: str
     description: str
     icon: str
-    role: ProjectRole
+    role: PublicProjectRole
     capabilities: list[Capability]
     is_pinned: bool
     last_entered_at: datetime | None

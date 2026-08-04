@@ -18,11 +18,13 @@ import {
   useEnableProjectSystemBinding,
   useProjectAssetVersions,
   useRollbackProjectSystemBinding,
+  useSyncCurrentProjectSystemMcpBinding,
   useUpgradeProjectSystemBinding,
   type AssetKind,
   type AssetListKind,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
+import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
@@ -37,8 +39,24 @@ export function canMoveSystemBinding(
   return item.status === "active";
 }
 
-export function bindingVersionLabel(versionNumber?: number): string {
+export function bindingVersionLabel(
+  versionNumber?: number,
+  kind: Exclude<AssetListKind, "credentials"> = "skills",
+): string {
+  if (kind === "mcp-servers") {
+    return "已启用";
+  }
   return versionNumber === undefined ? "已固定版本" : `版本 ${versionNumber}`;
+}
+
+export function systemMcpBindingStatus(
+  item: Pick<ProjectAssetItem, "binding" | "current_published_version_id">,
+): "未启用" | "已启用" | "有配置更新" {
+  if (!item.binding?.enabled) return "未启用";
+  return item.current_published_version_id &&
+    item.binding.version_id !== item.current_published_version_id
+    ? "有配置更新"
+    : "已启用";
 }
 
 export function systemBindingDialogAvailability({
@@ -88,6 +106,7 @@ export function SystemBindingDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const assetKind = BINDING_KIND[kind];
+  const isMcp = kind === "mcp-servers";
   const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
   const enable = useEnableProjectSystemBinding(accountId, projectId, assetKind);
   const upgrade = useUpgradeProjectSystemBinding(
@@ -104,6 +123,10 @@ export function SystemBindingDialog({
     accountId,
     projectId,
     assetKind,
+  );
+  const syncCurrentMcp = useSyncCurrentProjectSystemMcpBinding(
+    accountId,
+    projectId,
   );
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const canMove = canMoveSystemBinding(item);
@@ -127,24 +150,19 @@ export function SystemBindingDialog({
       ),
     [item.scope, kind, published],
   );
-  const firstRuntimeBlockReason = useMemo(
-    () =>
-      kind === "mcp-servers"
-        ? (published
-            .filter(
-              (version) =>
-                "mcp_server_id" in version &&
-                mcpVersionRuntimeBlockReason(version, item.scope) !== null,
-            )
-            .map((version) =>
-              "mcp_server_id" in version
-                ? mcpVersionRuntimeBlockReason(version, item.scope)
-                : null,
-            )
-            .find((reason): reason is string => reason !== null) ?? null)
-        : null,
-    [item.scope, kind, published],
-  );
+  const mcpConfiguration = isMcp
+    ? resolveMcpCurrentConfiguration(
+        history.data?.data ?? [],
+        "system",
+        item.current_published_version_id,
+      )
+    : null;
+  const currentMcpVersion = mcpConfiguration?.version ?? null;
+  const currentMcpRuntimeBlockReason =
+    currentMcpVersion && "mcp_server_id" in currentMcpVersion
+      ? mcpVersionRuntimeBlockReason(currentMcpVersion, item.scope)
+      : null;
+  const firstRuntimeBlockReason = isMcp ? currentMcpRuntimeBlockReason : null;
 
   useEffect(() => {
     if (!open) return;
@@ -159,10 +177,20 @@ export function SystemBindingDialog({
     enable.isPending ||
     upgrade.isPending ||
     rollback.isPending ||
-    disable.isPending;
+    disable.isPending ||
+    syncCurrentMcp.isPending;
   const error =
-    enable.error ?? upgrade.error ?? rollback.error ?? disable.error;
-  const target = published.find((version) => version.id === selectedVersionId);
+    syncCurrentMcp.error ??
+    enable.error ??
+    upgrade.error ??
+    rollback.error ??
+    disable.error;
+  const effectiveSelectedVersionId = isMcp
+    ? (currentMcpVersion?.id ?? "")
+    : selectedVersionId;
+  const target = published.find(
+    (version) => version.id === effectiveSelectedVersionId,
+  );
   const pinned = published.find(
     (version) => version.id === item.binding?.version_id,
   );
@@ -171,13 +199,26 @@ export function SystemBindingDialog({
     historyError: Boolean(history.error),
     historyRetryPending: history.isFetching,
     mutationPending: pending,
-    selectedVersionId,
-    publishedVersionIds: bindablePublished.map((version) => version.id),
+    selectedVersionId: effectiveSelectedVersionId,
+    publishedVersionIds: isMcp
+      ? currentMcpRuntimeBlockReason === null && currentMcpVersion
+        ? [currentMcpVersion.id]
+        : []
+      : bindablePublished.map((version) => version.id),
     boundVersionId: item.binding?.enabled ? item.binding.version_id : null,
   });
 
   function save() {
     if (!availability.canSubmit || !target) return;
+    if (isMcp) {
+      syncCurrentMcp.mutate({
+        assetId: item.id,
+        input: item.binding
+          ? { expected_binding_version: item.binding.version }
+          : {},
+      });
+      return;
+    }
     if (!item.binding?.enabled) {
       enable.mutate({
         asset_id: item.id,
@@ -205,11 +246,17 @@ export function SystemBindingDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {item.binding?.enabled ? "切换启用版本" : "启用到项目"}
+            {isMcp
+              ? "项目使用"
+              : item.binding?.enabled
+                ? "切换启用版本"
+                : "启用到项目"}
           </DialogTitle>
           <DialogDescription>
             {item.display_name}
-            。项目会固定使用你选择的发布版本，系统更新不会自动切换。
+            {isMcp
+              ? ""
+              : "。项目会固定使用你选择的发布版本，系统更新不会自动切换。"}
           </DialogDescription>
         </DialogHeader>
         {history.isLoading ? (
@@ -230,7 +277,7 @@ export function SystemBindingDialog({
               {history.isFetching ? "重试中…" : "重试"}
             </Button>
           </div>
-        ) : canMove ? (
+        ) : canMove && !isMcp ? (
           <label className="grid gap-2 text-sm">
             选择已发布版本
             <select
@@ -240,21 +287,8 @@ export function SystemBindingDialog({
             >
               <option value="">请选择版本</option>
               {published.map((version) => (
-                <option
-                  key={version.id}
-                  value={version.id}
-                  disabled={
-                    kind === "mcp-servers" &&
-                    "mcp_server_id" in version &&
-                    mcpVersionRuntimeBlockReason(version, item.scope) !== null
-                  }
-                >
-                  {bindingVersionLabel(version.version_number)}
-                  {kind === "mcp-servers" &&
-                  "mcp_server_id" in version &&
-                  mcpVersionRuntimeBlockReason(version, item.scope) !== null
-                    ? "（不可用）"
-                    : ""}
+                <option key={version.id} value={version.id}>
+                  {bindingVersionLabel(version.version_number, kind)}
                 </option>
               ))}
             </select>
@@ -265,6 +299,18 @@ export function SystemBindingDialog({
             )}
           </label>
         ) : null}
+        {isMcp && !history.isLoading && !history.error ? (
+          mcpConfiguration?.state === "unconfirmed" ? (
+            <p role="alert" className="text-destructive text-sm">
+              当前配置无法确认
+            </p>
+          ) : mcpConfiguration?.state === "empty" ||
+            currentMcpRuntimeBlockReason ? (
+            <p className="text-muted-foreground text-sm">
+              当前没有可启用的已发布配置。
+            </p>
+          ) : null
+        ) : null}
         {firstRuntimeBlockReason ? (
           <p role="alert" className="text-destructive text-sm">
             {firstRuntimeBlockReason}
@@ -272,13 +318,17 @@ export function SystemBindingDialog({
         ) : null}
         <dl className="grid gap-2 text-sm">
           <div>
-            <dt className="text-muted-foreground text-xs">当前项目版本</dt>
+            <dt className="text-muted-foreground text-xs">
+              当前项目{isMcp ? "配置" : "版本"}
+            </dt>
             <dd data-testid="binding-pinned-version">
-              {pinned
-                ? bindingVersionLabel(pinned.version_number)
-                : item.binding
-                  ? bindingVersionLabel()
-                  : "未绑定"}
+              {isMcp
+                ? systemMcpBindingStatus(item)
+                : pinned
+                  ? bindingVersionLabel(pinned.version_number, kind)
+                  : item.binding
+                    ? bindingVersionLabel(undefined, kind)
+                    : "未绑定"}
             </dd>
           </div>
         </dl>
@@ -303,19 +353,24 @@ export function SystemBindingDialog({
               从项目停用
             </Button>
           )}
-          {canMove && (
+          {canMove && (!isMcp || availability.canSubmit) && (
             <Button
               type="button"
+              data-testid={isMcp ? "system-mcp-binding-submit" : undefined}
               disabled={!availability.canSubmit}
               onClick={save}
             >
-              {!item.binding?.enabled
-                ? "启用到项目"
-                : target &&
-                    pinned &&
-                    target.version_number < pinned.version_number
-                  ? "回退到此版本"
-                  : "切换到新版本"}
+              {isMcp
+                ? item.binding?.enabled
+                  ? "更新到当前配置"
+                  : "启用当前配置"
+                : !item.binding?.enabled
+                  ? "启用到项目"
+                  : target &&
+                      pinned &&
+                      target.version_number < pinned.version_number
+                    ? "回退到此版本"
+                    : "切换到新版本"}
             </Button>
           )}
         </DialogFooter>

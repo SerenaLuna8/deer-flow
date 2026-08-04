@@ -30,6 +30,8 @@ from app.gateway.routers import (
     project_assets,
     project_audit,
     project_automations,
+    project_channel_group_bindings,
+    project_channel_instances,
     project_connections,
     project_input_polish,
     project_invitations,
@@ -169,18 +171,49 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         await _ensure_admin_user()
 
-        # Start IM channel service if any channels are configured
+        # Start the legacy deployment-config channels, then reconcile
+        # database-backed project channel instances under single-writer leases.
+        project_channel_runtime = None
         try:
+            from app.channel_group_bindings.service import (
+                ProjectChannelGroupBindingService,
+            )
             from app.channels.service import start_channel_service
+            from app.project_channels.runtime import ProjectChannelRuntimeCoordinator
+            from deerflow.persistence.engine import get_session_factory
 
+            try:
+                channel_session_factory = get_session_factory()
+            except RuntimeError:
+                channel_session_factory = None
+            if channel_session_factory is not None:
+                app.state.project_channel_group_binding_service = ProjectChannelGroupBindingService(channel_session_factory)
             channel_service = await start_channel_service(startup_config, app=app)
             logger.info("Channel service started: %s", channel_service.get_status())
+            project_channel_runtime = ProjectChannelRuntimeCoordinator(
+                get_session_factory(),
+                channel_service,
+            )
+            app.state.project_channel_runtime_coordinator = project_channel_runtime
+            await project_channel_runtime.start()
         except Exception:
-            logger.exception("No IM channels configured or channel service failed to start")
+            logger.error("Channel runtime failed to start")
 
         try:
             yield
         finally:
+            if project_channel_runtime is not None:
+                try:
+                    await asyncio.wait_for(
+                        project_channel_runtime.stop(),
+                        timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    logger.error("Project channel runtime failed to stop cleanly")
+                if hasattr(app.state, "project_channel_runtime_coordinator"):
+                    del app.state.project_channel_runtime_coordinator
+            if hasattr(app.state, "project_channel_group_binding_service"):
+                del app.state.project_channel_group_binding_service
             try:
                 await auth.close_oidc_service()
             except Exception:
@@ -217,11 +250,13 @@ def create_app() -> FastAPI:
     openapi_url = "/openapi.json" if config.enable_docs else None
 
     app = FastAPI(
-        title="DeerFlow API Gateway",
+        title="ActWeave API Gateway",
         description="""
-## DeerFlow API Gateway
+## ActWeave API Gateway
 
-API Gateway for DeerFlow - A LangGraph-based AI agent backend with sandbox execution capabilities.
+Weave intelligence into action.
+
+API Gateway for ActWeave - A LangGraph-based AI agent backend with sandbox execution capabilities.
 
 ### Features
 
@@ -322,6 +357,8 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(privacy_center.router)
     app.include_router(project_memory.router)
     app.include_router(project_connections.router)
+    app.include_router(project_channel_group_bindings.router)
+    app.include_router(project_channel_instances.router)
     app.include_router(project_input_polish.router)
     app.include_router(admin_assets.admin_router)
     app.include_router(admin_assets.admin_project_router)

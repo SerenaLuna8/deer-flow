@@ -1,6 +1,9 @@
 "use client";
 
-import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
+import {
+  adminAssetErrorMessage,
+  projectMcpCredentialErrorMessage,
+} from "@/components/admin/assets/admin-asset-view-model";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -32,7 +35,7 @@ export function mcpApprovalCopy(
       title: localized?.configureTitle ?? "配置 MCP Credential 授权",
       description:
         localized?.configureDescription ??
-        "为已发布的 packaged System MCP 选择系统 Credential 当前版本。此操作只配置槽位授权，不修改或重新发布 MCP 定义。",
+        "为已发布的 packaged System MCP 选择系统 Credential。此操作只配置槽位授权，不修改或重新发布 MCP 定义。",
       submitLabel: localized?.saveGrants ?? "保存授权",
       emptyOptionalMessage:
         localized?.configureEmptyOptional ??
@@ -40,11 +43,11 @@ export function mcpApprovalCopy(
     } as const;
   }
   return {
-    title: localized?.publishTitle ?? "批准 MCP 版本",
+    title: localized?.publishTitle ?? "批准 MCP 配置",
     description:
       localized?.publishDescription ??
-      "为每个 Credential 槽位选择当前作用域可见的已启用 Credential 当前版本。批准成功后版本才会发布。",
-    submitLabel: localized?.approve ?? "批准并发布",
+      "为每个 Credential 槽位选择当前作用域可见的已启用 Credential。批准成功后配置才会发布。",
+    submitLabel: localized?.approve ?? "批准并发布配置",
     emptyOptionalMessage:
       localized?.publishEmptyOptional ??
       "当前没有可选 Credential；可选槽位可留空并直接批准。",
@@ -237,7 +240,12 @@ export function McpApprovalForm({
       )}
       {Boolean(approvalError) && (
         <p role="alert" className="text-destructive text-sm">
-          {adminAssetErrorMessage(approvalError, t.adminAssets.errors)}
+          {credentialScope === "project"
+            ? projectMcpCredentialErrorMessage(
+                approvalError,
+                t.adminAssets.errors,
+              )
+            : adminAssetErrorMessage(approvalError, t.adminAssets.errors)}
         </p>
       )}
       <DialogFooter>

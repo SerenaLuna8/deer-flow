@@ -75,6 +75,57 @@ describe("formatThreadAsMarkdown", () => {
     expect(md).toContain("public answer");
   });
 
+  it("drops a legacy clarification control reply whose hide flag was lost", () => {
+    const request = {
+      id: "clarification-request",
+      type: "tool",
+      name: "ask_clarification",
+      tool_call_id: "call-legacy",
+      content: "fallback",
+      artifact: {
+        human_input: {
+          version: 1,
+          kind: "human_input_request",
+          source: "ask_clarification",
+          request_id: "clarification:call-legacy",
+          tool_call_id: "call-legacy",
+          question: "Which service should be used?",
+          input_mode: "single_choice",
+          options: [
+            {
+              id: "option-mcp",
+              label: "MCP service",
+              value: "MCP service",
+            },
+          ],
+        },
+      },
+    } as unknown as Message;
+    const legacyReply = human(
+      'For your clarification "Which service should be used?", my answer is: MCP service',
+      {
+        id: "legacy-response",
+        additional_kwargs: {
+          human_input_response: {
+            version: 1,
+            kind: "human_input_response",
+            source: "ask_clarification",
+            request_id: "clarification:call-legacy",
+            response_kind: "option",
+            option_id: "option-mcp",
+            value: "MCP service",
+          },
+        },
+      } as Partial<Message>,
+    );
+
+    const md = formatThreadAsMarkdown(makeThread(), [request, legacyReply]);
+    const json = formatThreadAsJSON(makeThread(), [request, legacyReply]);
+
+    expect(md).not.toContain("For your clarification");
+    expect(json).not.toContain("For your clarification");
+  });
+
   it("does not emit reasoning_content by default", () => {
     const message = ai("final answer", {
       additional_kwargs: {

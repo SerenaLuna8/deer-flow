@@ -3,6 +3,7 @@
 import {
   CheckCircle2Icon,
   CheckIcon,
+  ChevronDownIcon,
   CircleDotIcon,
   CircleIcon,
   ListIcon,
@@ -349,17 +350,138 @@ export function HumanInputCard({
       <section
         aria-label={t.humanInput.answered}
         aria-live="polite"
-        className="border-border/80 bg-muted/35 flex items-center gap-3 rounded-xl border px-4 py-3"
+        className="border-border/80 bg-muted/35 overflow-hidden rounded-xl border"
         data-human-input-state="answered"
         data-testid="human-input-card"
       >
-        <CheckCircle2Icon
-          aria-hidden
-          className="text-success size-5 shrink-0"
-        />
-        <p className="min-w-0 flex-1 text-sm font-medium">
-          {t.humanInput.answeredValue(answeredResponse.value)}
-        </p>
+        <details className="group">
+          <summary className="focus-visible:ring-ring flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset [&::-webkit-details-marker]:hidden">
+            <CheckCircle2Icon
+              aria-hidden
+              className="text-success size-5 shrink-0"
+            />
+            <span className="min-w-0 flex-1 break-words">
+              {t.humanInput.answeredValue(answeredResponse.value)}
+            </span>
+            <ChevronDownIcon
+              aria-hidden
+              className="text-muted-foreground size-4 shrink-0 transition-transform group-open:rotate-180"
+            />
+          </summary>
+
+          <div
+            className="border-border/70 space-y-5 border-t px-4 py-5 sm:px-6"
+            data-testid="human-input-answered-details"
+          >
+            <div className="space-y-2">
+              <h2 className="text-base leading-6 font-semibold">
+                {request.title ?? t.toolCalls.needYourHelp}
+              </h2>
+              {request.context ? (
+                <div className="text-muted-foreground text-sm leading-6">
+                  <MarkdownContent
+                    content={request.context}
+                    isLoading={false}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            <div className="text-foreground text-[15px] leading-7">
+              <MarkdownContent content={request.question} isLoading={false} />
+            </div>
+
+            {options.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                  {t.humanInput.availableOptions}
+                </p>
+                <ul
+                  className="grid gap-2"
+                  aria-label={t.humanInput.availableOptions}
+                >
+                  {options.map((option) => {
+                    const selected =
+                      answeredResponse.response_kind === "option" &&
+                      answeredResponse.option_id === option.id;
+                    return (
+                      <li
+                        key={option.id}
+                        className={cn(
+                          "border-border/70 bg-background/70 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                          selected && "border-success/40 bg-success/5",
+                        )}
+                        data-human-input-option-selected={selected}
+                      >
+                        {selected ? (
+                          <CheckCircle2Icon
+                            aria-hidden
+                            className="text-success size-4 shrink-0"
+                          />
+                        ) : (
+                          <CircleIcon
+                            aria-hidden
+                            className="text-muted-foreground size-4 shrink-0"
+                          />
+                        )}
+                        <span className="min-w-0 flex-1 break-words">
+                          {option.label}
+                        </span>
+                        {selected ? (
+                          <span className="text-success text-xs font-medium">
+                            {t.humanInput.selected}
+                          </span>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
+
+            {fields.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                  {t.humanInput.requestedInformation}
+                </p>
+                <ul
+                  className="grid gap-2"
+                  aria-label={t.humanInput.requestedInformation}
+                >
+                  {fields.map((field) => (
+                    <li
+                      key={field.name}
+                      className="border-border/70 bg-background/70 rounded-lg border px-3 py-2 text-sm"
+                    >
+                      <span className="font-medium">{field.label}</span>
+                      {field.required ? (
+                        <span className="text-muted-foreground ml-1 text-xs">
+                          ({t.humanInput.requiredA11yLabel})
+                        </span>
+                      ) : null}
+                      {(field.options ?? []).length > 0 ? (
+                        <p className="text-muted-foreground mt-1 text-xs leading-5">
+                          {(field.options ?? [])
+                            .map((option) => option.label)
+                            .join(", ")}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            <div className="border-success/30 bg-success/5 rounded-lg border px-3 py-3">
+              <p className="text-success text-xs font-medium tracking-wide uppercase">
+                {t.humanInput.yourAnswer}
+              </p>
+              <p className="mt-1 text-sm leading-6 break-words whitespace-pre-wrap">
+                {answeredResponse.value}
+              </p>
+            </div>
+          </div>
+        </details>
       </section>
     );
   }

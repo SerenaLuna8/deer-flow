@@ -1,6 +1,5 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -10,7 +9,6 @@ import { useProjectPrivateWorkReadiness } from "@/core/private-work/readiness";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
 import {
-  invalidateProjectAssetQueries,
   useProjectDefaultAgent,
   type ProjectDefaultAgent,
   type ProjectAssetList,
@@ -23,7 +21,6 @@ import {
   resolveProjectDefaultAgent,
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
-import { prepareMainProjectChatRuntime } from "./main-project-chat-runtime";
 import { projectNewChatErrorMessage } from "./project-new-chat-error";
 
 type StartChatCandidateState = {
@@ -54,24 +51,19 @@ export async function consumeProjectStartChatIntent({
   scope,
   projectSlug,
   intentId,
-  agent,
   replace,
-  prepareAgent,
   createChat = createProjectChatWithDefaultAgent,
 }: {
   scope: ProjectClientScope;
   projectSlug: string;
   intentId: string;
-  agent: ExecutableProjectAgent;
   replace: (path: string) => void;
-  prepareAgent: (agent: ExecutableProjectAgent) => Promise<void>;
   createChat?: typeof createProjectChatWithDefaultAgent;
 }): Promise<string> {
   const intentKey = `${scope.accountId}:${scope.projectId}:${intentId}`;
   let run = projectStartChatIntentRuns.get(intentKey);
   if (!run) {
     run = Promise.resolve().then(async () => {
-      await prepareAgent(agent);
       return createChat({
         scope,
         projectSlug,
@@ -169,7 +161,6 @@ export function ProjectAgentStartContinuation({
   intentId: string | null;
 }) {
   const router = useRouter();
-  const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
   const canCreate =
     project.capabilities.includes("private_work.create") &&
@@ -230,28 +221,6 @@ export function ProjectAgentStartContinuation({
       scope: privateWork.scope,
       projectSlug: project.slug,
       intentId: stableIntentId,
-      agent: candidate,
-      prepareAgent: async (agent) => {
-        if (defaultResolution.status !== "ready") {
-          throw new Error("项目默认 Agent 当前不可用，请联系项目管理员。");
-        }
-        if (defaultResolution.source === "project") return;
-        const prepared = await prepareMainProjectChatRuntime({
-          projectId: project.id,
-          agent,
-        });
-        if (!prepared.bindingsChanged) return;
-        await Promise.all(
-          (["agents", "skills", "mcp-servers"] as const).map((kind) =>
-            invalidateProjectAssetQueries(
-              queryClient,
-              privateWork.scope.accountId,
-              project.id,
-              kind,
-            ),
-          ),
-        );
-      },
       replace: (path) => router.replace(path),
     }).catch(async (error) =>
       setFailure(
@@ -267,9 +236,7 @@ export function ProjectAgentStartContinuation({
     candidateKey,
     defaultResolution,
     privateWork.scope,
-    project.id,
     project.slug,
-    queryClient,
     refetchDefaultAgent,
     router,
     stableIntentId,

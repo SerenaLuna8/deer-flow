@@ -1,5 +1,5 @@
 {
-  "description": "Canonical DeerFlow documentation MCP definition.",
+  "description": "Canonical ActWeave documentation MCP definition.",
   "transport": "http",
   "url": "https://docs.deerflow.invalid/mcp",
   "env": {},

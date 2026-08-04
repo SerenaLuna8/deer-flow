@@ -93,6 +93,8 @@ def test_docs_endpoints_available_by_default():
 
         app = create_app()
         client = TestClient(app)
+        assert app.title == "ActWeave API Gateway"
+        assert "Weave intelligence into action." in app.description
         assert client.get("/docs").status_code == 200
         assert client.get("/redoc").status_code == 200
         assert client.get("/openapi.json").status_code == 200

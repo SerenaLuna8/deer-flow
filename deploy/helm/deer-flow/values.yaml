@@ -1,4 +1,4 @@
-# DeerFlow Helm chart values
+# ActWeave Helm chart values
 #
 # Copy to my-values.yaml, edit, and install with:
 #   helm install deer-flow deploy/helm/deer-flow -n deer-flow --create-namespace -f my-values.yaml
@@ -6,7 +6,7 @@
 # -- Target namespace (also used as the K8s sandbox namespace for provisioner-spawned Pods).
 namespace: deer-flow
 
-# -- Image registry & tag for the three DeerFlow images you build+push.
+# -- Image registry & tag for the three ActWeave images you build+push.
 #    Required: set `registry` to your registry (e.g. ghcr.io/yourorg).
 image:
   registry: ""              # REQUIRED, e.g. ghcr.io/yourorg
@@ -198,10 +198,10 @@ ingress:
     secretName: ""
     # hosts: []   # defaults to [ingress.host]
 
-# -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
+# -- ActWeave config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 34
+  config_version: 35
   log_level: info
   logging:
     enhance:
@@ -265,8 +265,14 @@ config: |
       use: deerflow.sandbox.tools:bash_tool
 
   mcp_security:
-    project_remote_allowed_endpoints: []
-    require_egress_proxy: true
+    project_remote_allowed_networks:
+      - 127.0.0.0/8
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - ::1/128
+      - fc00::/7
+    require_egress_proxy: false
     egress_proxy_url: null
     discovery_timeout_seconds: 15
     tool_call_timeout_seconds: 60

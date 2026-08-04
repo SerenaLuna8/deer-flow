@@ -20,6 +20,7 @@ class User(BaseModel):
     id: UUID = Field(default_factory=uuid4, description="Primary key")
     email: EmailStr = Field(..., description="Unique email address")
     password_hash: str | None = Field(None, description="bcrypt hash, nullable for OAuth users")
+    principal_type: Literal["human"] = Field(default="human")
     system_role: Literal["system_admin", "user"] = Field(default="user")
     created_at: datetime = Field(default_factory=_utc_now)
 

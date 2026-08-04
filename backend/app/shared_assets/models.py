@@ -81,3 +81,51 @@ class ResolvedSkillSnapshot(ResolvedAssetSnapshot):
 class ResolvedMcpSnapshot(ResolvedAssetSnapshot):
     definition: Mapping[str, object]
     credential_grant_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedRunAssetClosure:
+    """Exact immutable asset closure admitted for one Run.
+
+    ``skills`` and ``mcps`` deliberately keep the canonical Main Agent's
+    current project pool as a prefix.  Any historical versions referenced only
+    by delegated Agents follow that prefix.  The explicit boundary lets the
+    Worker expose only the current pool to Main while retaining every exact
+    historical dependency required to execute a delegated Agent.
+    """
+
+    lead_agent: ResolvedAgentSnapshot
+    delegated_agents: tuple[ResolvedAgentSnapshot, ...]
+    skills: tuple[ResolvedSkillSnapshot, ...]
+    mcps: tuple[ResolvedMcpSnapshot, ...]
+    main_skill_version_ids: tuple[uuid.UUID, ...]
+    main_mcp_version_ids: tuple[uuid.UUID, ...]
+
+    def __post_init__(self) -> None:
+        agents = (self.lead_agent, *self.delegated_agents)
+        snapshots: tuple[ResolvedAssetSnapshot, ...] = (
+            *agents,
+            *self.skills,
+            *self.mcps,
+        )
+        if (
+            type(self.lead_agent) is not ResolvedAgentSnapshot
+            or any(type(item) is not ResolvedAgentSnapshot for item in self.delegated_agents)
+            or any(type(item) is not ResolvedSkillSnapshot for item in self.skills)
+            or any(type(item) is not ResolvedMcpSnapshot for item in self.mcps)
+            or any(not isinstance(value, uuid.UUID) for value in self.main_skill_version_ids)
+            or any(not isinstance(value, uuid.UUID) for value in self.main_mcp_version_ids)
+        ):
+            raise TypeError("run asset closure contains an invalid snapshot")
+        if len({item.version_id for item in agents}) != len(agents):
+            raise ValueError("run asset closure contains duplicate Agent versions")
+        if len({item.version_id for item in self.skills}) != len(self.skills):
+            raise ValueError("run asset closure contains duplicate Skill versions")
+        if len({item.version_id for item in self.mcps}) != len(self.mcps):
+            raise ValueError("run asset closure contains duplicate MCP versions")
+        if tuple(item.version_id for item in self.skills[: len(self.main_skill_version_ids)]) != self.main_skill_version_ids:
+            raise ValueError("Main Skill versions must be the Skill closure prefix")
+        if tuple(item.version_id for item in self.mcps[: len(self.main_mcp_version_ids)]) != self.main_mcp_version_ids:
+            raise ValueError("Main MCP versions must be the MCP closure prefix")
+        if any(item.catalog_generation != self.lead_agent.catalog_generation for item in snapshots):
+            raise ValueError("run asset closure must use one catalog generation")

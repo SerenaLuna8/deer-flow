@@ -9,13 +9,17 @@ import {
   approveProjectMcpVersion,
   configureAdminMcpCredentialGrants,
   changeProjectAssetStatus,
+  createConfiguredProjectMcp,
   createProjectAssetVersion,
   deleteProjectAgent,
+  deleteProjectMcp,
   deleteProjectSkill,
   disableProjectSystemBinding,
   enableProjectSystemBinding,
   forkProjectSkillVersion,
   getProjectDefaultAgent,
+  getProjectMcpEditableConfiguration,
+  getProjectMcpToolInventory,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
   listAdminAssetVersions,
@@ -23,10 +27,13 @@ import {
   listProjectAssetVersions,
   listSystemAssetCatalog,
   publishProjectAssetVersion,
+  requestProjectMcpToolDiscovery,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
   setProjectDefaultAgent,
+  syncCurrentProjectSystemMcpBinding,
   submitProjectMcpVersion,
+  updateConfiguredProjectMcp,
   updateProjectAgentInstructions,
   upgradeProjectSystemBinding,
 } from "@/core/shared-assets/api";
@@ -36,23 +43,30 @@ import {
   useApproveProjectMcpVersion,
   useConfigureAdminMcpCredentialGrants,
   useChangeProjectAssetStatus,
+  useCreateConfiguredProjectMcp,
   useCreateProjectAssetVersion,
   useDeleteProjectAgent,
+  useDeleteProjectMcp,
   useDeleteProjectSkill,
   useDisableProjectSystemBinding,
   useEnableProjectSystemBinding,
   useForkProjectSkillVersion,
   useProjectDefaultAgent,
   useProjectAssetVersions,
+  useProjectMcpEditableConfiguration,
+  useProjectMcpToolInventory,
   useProjectSkillVersionFile,
   useImportProjectSkillArchive,
   useSystemAssetCatalog,
   usePublishProjectAssetVersion,
+  useRequestProjectMcpToolDiscovery,
   useRevokeAdminCredential,
   useRevokeProjectCredential,
   useRollbackProjectSystemBinding,
   useSetProjectDefaultAgent,
+  useSyncCurrentProjectSystemMcpBinding,
   useSubmitProjectMcpVersion,
+  useUpdateConfiguredProjectMcp,
   useUpdateProjectAgentInstructions,
   useUpgradeProjectSystemBinding,
 } from "@/core/shared-assets/hooks";
@@ -69,14 +83,18 @@ rs.mock("@/core/shared-assets/api", () => ({
   approveProjectMcpVersion: rs.fn(),
   configureAdminMcpCredentialGrants: rs.fn(),
   changeProjectAssetStatus: rs.fn(),
+  createConfiguredProjectMcp: rs.fn(),
   createProjectAsset: rs.fn(),
   createProjectAssetVersion: rs.fn(),
   deleteProjectAgent: rs.fn(),
+  deleteProjectMcp: rs.fn(),
   deleteProjectSkill: rs.fn(),
   disableProjectSystemBinding: rs.fn(),
   enableProjectSystemBinding: rs.fn(),
   forkProjectSkillVersion: rs.fn(),
   getProjectDefaultAgent: rs.fn(),
+  getProjectMcpEditableConfiguration: rs.fn(),
+  getProjectMcpToolInventory: rs.fn(),
   getProjectSkillVersionFile: rs.fn(),
   importProjectSkillArchive: rs.fn(),
   listAdminAssetVersions: rs.fn(),
@@ -86,11 +104,14 @@ rs.mock("@/core/shared-assets/api", () => ({
   listProjectAssets: rs.fn(),
   listSystemAssetCatalog: rs.fn(),
   publishProjectAssetVersion: rs.fn(),
+  requestProjectMcpToolDiscovery: rs.fn(),
   revokeAdminCredential: rs.fn(),
   revokeProjectCredential: rs.fn(),
   rollbackProjectSystemBinding: rs.fn(),
   setProjectDefaultAgent: rs.fn(),
+  syncCurrentProjectSystemMcpBinding: rs.fn(),
   submitProjectMcpVersion: rs.fn(),
+  updateConfiguredProjectMcp: rs.fn(),
   updateProjectAgentInstructions: rs.fn(),
   upgradeProjectSystemBinding: rs.fn(),
 }));
@@ -138,12 +159,17 @@ beforeEach(() => {
     approveProjectMcpVersion,
     configureAdminMcpCredentialGrants,
     changeProjectAssetStatus,
+    createConfiguredProjectMcp,
     createProjectAssetVersion,
+    deleteProjectAgent,
+    deleteProjectMcp,
     deleteProjectSkill,
     disableProjectSystemBinding,
     enableProjectSystemBinding,
     forkProjectSkillVersion,
     getProjectDefaultAgent,
+    getProjectMcpEditableConfiguration,
+    getProjectMcpToolInventory,
     getProjectSkillVersionFile,
     importProjectSkillArchive,
     listAdminAssetVersions,
@@ -151,10 +177,13 @@ beforeEach(() => {
     listProjectAssetVersions,
     listSystemAssetCatalog,
     publishProjectAssetVersion,
+    requestProjectMcpToolDiscovery,
     revokeProjectCredential,
     rollbackProjectSystemBinding,
     setProjectDefaultAgent,
+    syncCurrentProjectSystemMcpBinding,
     submitProjectMcpVersion,
+    updateConfiguredProjectMcp,
     updateProjectAgentInstructions,
     upgradeProjectSystemBinding,
   ]) {
@@ -163,6 +192,259 @@ beforeEach(() => {
 });
 
 describe("shared asset hooks", () => {
+  test("adds a configured MCP through the active project scope and refreshes its catalog", async () => {
+    const create = mutation(
+      useCreateConfiguredProjectMcp(accountId, projectId),
+    );
+    const input = {
+      slug: "amap-mcp",
+      display_name: "高德地图 MCP",
+      description: "地图与路线规划",
+      transport: "http" as const,
+      command: null,
+      args: [],
+      url: "https://mcp.amap.com/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
+    };
+
+    await create.mutationFn(input as never);
+    await create.onSuccess();
+
+    expect(createConfiguredProjectMcp).toHaveBeenCalledWith(
+      projectId,
+      input,
+      mutationController.signal,
+    );
+    expect(create.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "mutation",
+      "add-configured",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "mcp-servers",
+      ],
+    });
+  });
+
+  test("updates configured MCP and syncs its System binding through dedicated contracts", async () => {
+    const update = mutation(
+      useUpdateConfiguredProjectMcp(accountId, projectId),
+    );
+    const sync = mutation(
+      useSyncCurrentProjectSystemMcpBinding(accountId, projectId),
+    );
+    const input = {
+      description: "Updated",
+      transport: "http" as const,
+      command: null,
+      args: [],
+      url: "https://mcp.example.test/mcp",
+      env: {},
+      headers: {},
+      oauth: {},
+      routing: {},
+      tool_overrides: {},
+      timeout_seconds: 30,
+      credential_slots: [],
+      expected_asset_version: 2,
+    };
+
+    await update.mutationFn({ assetId, input } as never);
+    await sync.mutationFn({
+      assetId,
+      input: { expected_binding_version: 2 },
+    } as never);
+
+    expect(updateConfiguredProjectMcp).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      input,
+      mutationController.signal,
+    );
+    expect(syncCurrentProjectSystemMcpBinding).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      { expected_binding_version: 2 },
+      mutationController.signal,
+    );
+    expect(update.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "mutation",
+      "update-configured",
+    ]);
+    expect(sync.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "mutation",
+      "sync-current-binding",
+    ]);
+  });
+
+  test("loads the editable MCP projection only through its exact isolated query", async () => {
+    const signal = new AbortController().signal;
+    const configured = useProjectMcpEditableConfiguration(
+      accountId,
+      projectId,
+      assetId,
+      false,
+    ) as unknown as QueryConfig & {
+      enabled: boolean;
+      staleTime: number;
+    };
+
+    await configured.queryFn({ signal });
+
+    expect(configured.queryKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "asset",
+      assetId,
+      "editable-configuration",
+    ]);
+    expect(configured.enabled).toBe(false);
+    expect(configured.staleTime).toBe(0);
+    expect(getProjectMcpEditableConfiguration).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      signal,
+    );
+  });
+
+  test("loads MCP tool inventory under an exact account project asset and version key", async () => {
+    const signal = new AbortController().signal;
+    const inventory = useProjectMcpToolInventory(
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+    ) as unknown as QueryConfig & {
+      enabled: boolean;
+      staleTime: number;
+      refetchInterval: (query: {
+        state: { data?: { data: { status: string } } };
+      }) => number | false;
+      refetchIntervalInBackground: boolean;
+    };
+
+    await inventory.queryFn({ signal });
+
+    expect(inventory.queryKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "asset",
+      assetId,
+      "versions",
+      "version",
+      versionId,
+      "tools",
+    ]);
+    expect(inventory.enabled).toBe(true);
+    expect(inventory.staleTime).toBe(0);
+    expect(
+      inventory.refetchInterval({
+        state: { data: { data: { status: "testing" } } },
+      }),
+    ).toBe(2_000);
+    expect(
+      inventory.refetchInterval({
+        state: { data: { data: { status: "ready" } } },
+      }),
+    ).toBe(false);
+    expect(inventory.refetchIntervalInBackground).toBe(false);
+    expect(getProjectMcpToolInventory).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      versionId,
+      signal,
+    );
+
+    const draftInventory = useProjectMcpToolInventory(
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+      false,
+    ) as unknown as QueryConfig & { enabled: boolean };
+    expect(draftInventory.enabled).toBe(false);
+  });
+
+  test("queues MCP tool discovery and refreshes only the exact inventory", async () => {
+    const discovery = mutation(
+      useRequestProjectMcpToolDiscovery(accountId, projectId),
+    );
+    const variables = { assetId, versionId };
+
+    await discovery.mutationFn(variables as never);
+    await discovery.onSuccess({}, variables as never);
+
+    expect(requestProjectMcpToolDiscovery).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      versionId,
+      mutationController.signal,
+    );
+    expect(discovery.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "mutation",
+      "tool-discovery",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "mcp-servers",
+        "asset",
+        assetId,
+        "versions",
+        "version",
+        versionId,
+        "tools",
+      ],
+    });
+  });
+
   test("loads and updates the default Agent under the exact account and project scope", async () => {
     const signal = new AbortController().signal;
     const query = useProjectDefaultAgent(
@@ -465,6 +747,55 @@ describe("shared asset hooks", () => {
     );
   });
 
+  test("deletes a project MCP through the active scope and evicts its detail", async () => {
+    const remove = mutation(useDeleteProjectMcp(accountId, projectId));
+    const input = { expected_asset_version: 11 };
+
+    await remove.mutationFn({ assetId, input } as never);
+    await remove.onSuccess(undefined, { assetId, input } as never);
+
+    expect(deleteProjectMcp).toHaveBeenCalledWith(
+      projectId,
+      assetId,
+      input,
+      mutationController.signal,
+    );
+    expect(remove.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "mutation",
+      "delete",
+    ]);
+    expect(client.setQueryData).toHaveBeenCalledWith(
+      [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "mcp-servers",
+      ],
+      expect.any(Function),
+    );
+    expect(client.removeQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "mcp-servers",
+        "asset",
+        assetId,
+        "versions",
+      ],
+    });
+  });
+
   test("changes project Skill enablement through the active scope and refreshes the shared list", async () => {
     const toggle = mutation(
       useChangeProjectAssetStatus(accountId, projectId, "skills"),
@@ -504,6 +835,50 @@ describe("shared asset hooks", () => {
         "project",
         projectId,
         "skills",
+      ],
+    });
+    expect(client.invalidateQueries).toHaveBeenCalledTimes(1);
+  });
+
+  test("changes project MCP enablement through the active scope and refreshes the MCP list", async () => {
+    const toggle = mutation(
+      useChangeProjectAssetStatus(accountId, projectId, "mcp-servers"),
+    );
+    const input = { expected_asset_version: 11 };
+
+    await toggle.mutationFn({
+      assetId,
+      action: "suspend",
+      input,
+    } as never);
+    await toggle.onSuccess();
+
+    expect(changeProjectAssetStatus).toHaveBeenCalledWith(
+      projectId,
+      "mcp-servers",
+      assetId,
+      "suspend",
+      input,
+      mutationController.signal,
+    );
+    expect(toggle.mutationKey).toEqual([
+      "account",
+      accountId,
+      "shared-assets",
+      "project",
+      projectId,
+      "mcp-servers",
+      "mutation",
+      "change-status",
+    ]);
+    expect(client.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: [
+        "account",
+        accountId,
+        "shared-assets",
+        "project",
+        projectId,
+        "mcp-servers",
       ],
     });
     expect(client.invalidateQueries).toHaveBeenCalledTimes(1);

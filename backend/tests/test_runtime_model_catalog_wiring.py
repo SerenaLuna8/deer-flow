@@ -21,7 +21,11 @@ from app.private_work.run_admission import (
     PrivateRunAdmissionService,
 )
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord
-from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.private_work.snapshot_repository import (
+    RunAssetSnapshot,
+    RunSnapshotRepository,
+    agent_model_snapshot_purpose,
+)
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
@@ -573,6 +577,106 @@ async def test_worker_uses_exact_materialized_runtime_config_and_restores_contex
 
 
 @pytest.mark.anyio
+async def test_worker_materializes_every_frozen_delegate_agent_model() -> None:
+    context = _private_context()
+    delegate_version_id = uuid.uuid4()
+    execution, authority = _worker_execution(context)
+    execution = replace(
+        execution,
+        snapshot=PersistedRunSnapshot(
+            assets=(
+                RunAssetSnapshot(
+                    asset_kind=AssetKind.AGENT.value,
+                    dependency_order=0,
+                    asset_scope=AssetScope.SYSTEM.value,
+                    asset_id=uuid.uuid4(),
+                    version_id=uuid.uuid4(),
+                    payload_checksum="a" * 64,
+                    catalog_generation=1,
+                ),
+                RunAssetSnapshot(
+                    asset_kind=AssetKind.AGENT.value,
+                    dependency_order=1,
+                    asset_scope=AssetScope.PROJECT.value,
+                    asset_id=uuid.uuid4(),
+                    version_id=delegate_version_id,
+                    payload_checksum="b" * 64,
+                    catalog_generation=1,
+                ),
+            ),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+    )
+    base_config = _base_config()
+    lead_model = _model("db-exact-model")
+    delegate_model = _model("delegate-exact-model")
+    materialized_purposes: list[str] = []
+
+    class Materializer:
+        async def materialize_snapshot(self, **kwargs):
+            purpose = kwargs["purpose"]
+            materialized_purposes.append(purpose)
+            if purpose == "lead":
+                return lead_model
+            if purpose == agent_model_snapshot_purpose(delegate_version_id):
+                return delegate_model
+            raise AssertionError(f"unexpected model purpose: {purpose}")
+
+    class PrivateRuntime:
+        model_ref = "default"
+        skill_root = None
+
+        async def aclose(self) -> None:
+            return None
+
+    class AssetRuntime:
+        async def materialize(self, *_args, **kwargs):
+            captured["delegate_model_names"] = kwargs.get("delegate_model_names")
+            return PrivateRuntime()
+
+    class ProjectCheckpointer:
+        def for_context(self, _context):
+            return SimpleNamespace(
+                set_authorization_boundary=lambda _boundary: None,
+            )
+
+    captured: dict[str, object] = {}
+
+    async def runner(_bridge, run_manager, record, *, ctx, **_kwargs):
+        captured["model_names"] = tuple(model.name for model in ctx.app_config.models)
+        await run_manager.set_status(record.run_id, RunStatus.success)
+
+    executor = RunAgentPrivateExecutor(
+        object(),
+        app_config=base_config,
+        bridge=object(),
+        project_checkpointer=ProjectCheckpointer(),
+        store=object(),
+        event_store=object(),
+        asset_runtime=AssetRuntime(),
+        model_materializer=Materializer(),
+        agent_factory=object(),
+        runner=runner,
+    )
+
+    result = await executor.execute(execution, authority)
+
+    assert result.status == "succeeded"
+    assert materialized_purposes == [
+        "lead",
+        agent_model_snapshot_purpose(delegate_version_id),
+    ]
+    assert captured["model_names"] == (
+        "db-exact-model",
+        "delegate-exact-model",
+    )
+    assert captured["delegate_model_names"] == {
+        delegate_version_id: "delegate-exact-model",
+    }
+
+
+@pytest.mark.anyio
 async def test_worker_model_materialization_failure_is_terminal_and_does_not_enter_runtime() -> None:
     context = _private_context()
     execution, authority = _worker_execution(context)
@@ -607,6 +711,39 @@ async def test_worker_model_materialization_failure_is_terminal_and_does_not_ent
         assert peek_current_app_config() is outer_config
     finally:
         pop_current_app_config()
+
+
+@pytest.mark.anyio
+async def test_worker_treats_exact_asset_runtime_staleness_as_terminal() -> None:
+    context = _private_context()
+    execution, authority = _worker_execution(context)
+    base_config = _base_config()
+
+    class Materializer:
+        async def materialize_snapshot(self, **_kwargs):
+            return _model("db-exact-model")
+
+    class StaleAssetRuntime:
+        async def materialize(self, *_args, **_kwargs):
+            raise PrivateWorkAssetStale("sensitive-stale-detail")
+
+    executor = RunAgentPrivateExecutor(
+        object(),
+        app_config=base_config,
+        bridge=object(),
+        project_checkpointer=object(),
+        store=object(),
+        event_store=object(),
+        asset_runtime=StaleAssetRuntime(),
+        model_materializer=Materializer(),
+        agent_factory=object(),
+    )
+
+    with pytest.raises(PermanentExecutionError) as raised:
+        await executor.execute(execution, authority)
+
+    assert raised.value.public_error_code == "RUN_ASSET_STALE"
+    assert "sensitive-stale-detail" not in str(raised.value)
 
 
 @pytest.mark.anyio

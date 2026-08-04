@@ -1,4 +1,4 @@
-# DeerFlow - Unified Development Environment
+# ActWeave — Weave intelligence into action.
 
 .DEFAULT_GOAL := help
 
@@ -50,7 +50,9 @@ DOCKER = $(RUN_WITH_GIT_BASH) ./scripts/docker.sh
 DEPLOY = $(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
 
 help:
-	@echo "DeerFlow 命令"
+	@echo "ActWeave — Weave intelligence into action."
+	@echo ""
+	@echo "命令"
 	@echo ""
 	@echo "本地服务："
 	@echo "  make dev                              启动开发环境（热更新，入口 localhost:2026）"

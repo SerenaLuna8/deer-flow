@@ -60,9 +60,9 @@ _ACTIVE_USAGE_STREAM_SCOPE: ContextVar[_UsageStreamScope | None] = ContextVar(
 
 
 def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
-    """Map DeerFlow's legacy ``thinking`` toggle to vLLM/Qwen's ``enable_thinking``.
+    """Map ActWeave's legacy ``thinking`` toggle to vLLM/Qwen's ``enable_thinking``.
 
-    DeerFlow originally documented ``extra_body.chat_template_kwargs.thinking``
+    The legacy DeerFlow configuration documented ``extra_body.chat_template_kwargs.thinking``
     for vLLM, but vLLM 0.19.0's Qwen reasoning parser reads
     ``chat_template_kwargs.enable_thinking``. Normalize the payload just before
     it is sent so existing configs keep working and flash mode can truly

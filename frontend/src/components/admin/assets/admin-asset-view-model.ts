@@ -46,6 +46,8 @@ export function adminCredentialTypeLabel(
       return copy.apiKey;
     case "token":
       return copy.token;
+    case "mcp_auth":
+      return copy.mcpAuth;
     case "oauth":
       return copy.oauth;
     case "database":
@@ -80,6 +82,8 @@ export function adminCredentialPayloadGroupLabel(
       return copy.env;
     case "headers":
       return copy.headers;
+    case "query":
+      return copy.query;
     case "oauth":
       return copy.oauth;
     default:
@@ -325,4 +329,36 @@ export function adminAssetErrorMessage(
     return ERROR_MESSAGES[error.code] ?? "操作失败，请稍后重试。";
   }
   return copy?.fallback ?? "操作失败，请稍后重试。";
+}
+
+export function projectMcpVersionErrorMessage(
+  error: unknown,
+  copy?: AdminAssetErrorCopy,
+): string {
+  if (
+    error instanceof SharedAssetApiError &&
+    error.code === "ASSET_VALIDATION_FAILED"
+  ) {
+    return (
+      copy?.mcpVersionValidation ??
+      "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌凭据、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每个凭据槽位只使用 headers 或 query 单一分组且已填写字段。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。"
+    );
+  }
+  return adminAssetErrorMessage(error, copy);
+}
+
+export function projectMcpCredentialErrorMessage(
+  error: unknown,
+  copy?: AdminAssetErrorCopy,
+): string {
+  if (
+    error instanceof SharedAssetApiError &&
+    error.code === "ASSET_VALIDATION_FAILED"
+  ) {
+    return (
+      copy?.mcpCredentialMismatch ??
+      "所选凭据不满足 MCP 槽位要求，或凭据已失效。凭据必须处于启用状态，并且分组和字段名必须与所选槽位的 schema 完全一致（包括大小写）。"
+    );
+  }
+  return adminAssetErrorMessage(error, copy);
 }

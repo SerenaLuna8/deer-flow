@@ -35,10 +35,13 @@ class SQLUserRepository(UserRepository):
 
     @staticmethod
     def _row_to_user(row: UserRow) -> User:
+        if row.principal_type != "human" or row.email is None:
+            raise UserNotFoundError("Login user was not found")
         return User(
             id=UUID(row.id),
             email=row.email,
             password_hash=row.password_hash,
+            principal_type="human",
             system_role=row.system_role,  # type: ignore[arg-type]
             # Normalize any legacy naive timestamp so downstream comparisons
             # remain reliable.
@@ -55,6 +58,7 @@ class SQLUserRepository(UserRepository):
             id=str(user.id),
             email=user.email,
             password_hash=user.password_hash,
+            principal_type="human",
             system_role=user.system_role,
             created_at=user.created_at,
             oauth_provider=user.oauth_provider,
@@ -70,7 +74,14 @@ class SQLUserRepository(UserRepository):
         user.email = normalize_email(user.email)
         row = self._user_to_row(user)
         async with self._sf() as session:
-            existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
+            existing = (
+                select(UserRow.id)
+                .where(
+                    UserRow.principal_type == "human",
+                    func.lower(UserRow.email) == user.email,
+                )
+                .limit(1)
+            )
             if await session.scalar(existing) is not None:
                 raise ValueError(f"Email already registered: {user.email}")
             session.add(row)
@@ -82,12 +93,24 @@ class SQLUserRepository(UserRepository):
         return user
 
     async def get_user_by_id(self, user_id: str) -> User | None:
+        statement = select(UserRow).where(
+            UserRow.id == user_id,
+            UserRow.principal_type == "human",
+        )
         async with self._sf() as session:
-            row = await session.get(UserRow, user_id)
+            row = (await session.execute(statement)).scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
 
     async def get_user_by_email(self, email: str) -> User | None:
-        stmt = select(UserRow).where(func.lower(UserRow.email) == normalize_email(email)).order_by(UserRow.created_at, UserRow.id).limit(1)
+        stmt = (
+            select(UserRow)
+            .where(
+                UserRow.principal_type == "human",
+                func.lower(UserRow.email) == normalize_email(email),
+            )
+            .order_by(UserRow.created_at, UserRow.id)
+            .limit(1)
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
             row = result.scalars().first()
@@ -95,7 +118,14 @@ class SQLUserRepository(UserRepository):
 
     async def update_user(self, user: User) -> User:
         async with self._sf() as session:
-            row = await session.get(UserRow, str(user.id))
+            row = (
+                await session.execute(
+                    select(UserRow).where(
+                        UserRow.id == str(user.id),
+                        UserRow.principal_type == "human",
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None:
                 # Hard fail on concurrent delete: callers (reset_admin,
                 # password change handlers, _ensure_admin_user) all
@@ -110,6 +140,7 @@ class SQLUserRepository(UserRepository):
                     select(UserRow.id)
                     .where(
                         func.lower(UserRow.email) == canonical_email,
+                        UserRow.principal_type == "human",
                         UserRow.id != str(user.id),
                     )
                     .limit(1)
@@ -132,17 +163,28 @@ class SQLUserRepository(UserRepository):
         return user
 
     async def count_users(self) -> int:
-        stmt = select(func.count()).select_from(UserRow)
+        stmt = select(func.count()).select_from(UserRow).where(UserRow.principal_type == "human")
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
     async def count_admin_users(self) -> int:
-        stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "system_admin")
+        stmt = (
+            select(func.count())
+            .select_from(UserRow)
+            .where(
+                UserRow.principal_type == "human",
+                UserRow.system_role == "system_admin",
+            )
+        )
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
-        stmt = select(UserRow).where(UserRow.oauth_provider == provider, UserRow.oauth_id == oauth_id)
+        stmt = select(UserRow).where(
+            UserRow.principal_type == "human",
+            UserRow.oauth_provider == provider,
+            UserRow.oauth_id == oauth_id,
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()

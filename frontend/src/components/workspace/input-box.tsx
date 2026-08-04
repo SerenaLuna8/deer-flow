@@ -75,7 +75,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { privateWorkQueryKey } from "@/core/private-work/query-keys";
-import { useProjectSlashSkills } from "@/core/shared-assets";
+import { useProjectRuntimeSlashSkills } from "@/core/shared-assets";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -276,6 +276,7 @@ export function InputBox({
   extraHeader,
   isWelcomeMode,
   threadId,
+  agentMetadata,
   draftConversationScope = threadId,
   initialValue,
   onContextChange,
@@ -310,6 +311,7 @@ export function InputBox({
    */
   isWelcomeMode?: boolean;
   threadId: string;
+  agentMetadata?: Record<string, unknown> | null;
   draftConversationScope?: string;
   initialValue?: string;
   onContextChange?: (
@@ -348,7 +350,8 @@ export function InputBox({
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
   const removeAttachment = attachments.remove;
-  const { skills, isLoading: skillsLoading } = useProjectSlashSkills();
+  const { skills, isLoading: skillsLoading } =
+    useProjectRuntimeSlashSkills(agentMetadata);
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);

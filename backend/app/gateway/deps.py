@@ -236,6 +236,9 @@ async def gateway_platform_runtime(
         from app.private_work.connection_service import ProjectConnectionService
         from app.private_work.file_service import PrivateFileService
         from app.private_work.file_streaming import PrivateFileStreamer
+        from app.private_work.human_input_response import (
+            CheckpointHumanInputResponsePromoter,
+        )
         from app.private_work.memory_service import PrivateMemoryService
         from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
@@ -249,7 +252,7 @@ async def gateway_platform_runtime(
             SystemModelMaterializer,
         )
         from deerflow.config.mcp_security_config import McpSecurityConfig
-        from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
+        from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
 
         model_catalog = SystemModelCatalogService(sf)
@@ -293,7 +296,9 @@ async def gateway_platform_runtime(
             mcp_security = McpSecurityConfig.model_validate(raw_mcp_security)
         else:
             mcp_security = McpSecurityConfig()
-        mcp_endpoint_policy = ExactMcpEndpointPolicy(frozenset(mcp_security.project_remote_allowed_endpoints))
+        mcp_endpoint_policy = NetworkMcpEndpointPolicy(
+            mcp_security.project_remote_allowed_networks,
+        )
         app.state.mcp_endpoint_policy = mcp_endpoint_policy
 
         app.state.private_file_service = PrivateFileService(
@@ -314,6 +319,10 @@ async def gateway_platform_runtime(
             endpoint_policy=mcp_endpoint_policy,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
+            human_input_response_promoter=CheckpointHumanInputResponsePromoter(
+                app.state.project_scoped_checkpointer,
+                config,
+            ),
         )
         app.state.private_run_service = PrivateRunService(
             sf,

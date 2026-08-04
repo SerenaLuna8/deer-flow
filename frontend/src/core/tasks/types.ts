@@ -18,7 +18,7 @@ export interface Subtask {
   statusSource?: SubtaskStatusSource;
   subagent_type: string;
   description: string;
-  /** Effective DeerFlow model selected for this delegated run. */
+  /** Effective ActWeave model selected for this delegated run. */
   modelName?: string;
   /** Latest cumulative token snapshot reported by the delegated run. */
   usage?: TokenUsage;

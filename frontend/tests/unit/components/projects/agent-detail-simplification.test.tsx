@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ProjectAssetDetailHeader } from "@/components/projects/assets/project-asset-detail-sheet";
 import {
+  adminProjectAssetDetailLifecycleActions,
   projectAssetCanCreateVersion,
   projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
@@ -100,6 +101,16 @@ describe("Agent detail simplification", () => {
       ),
     ).toEqual([]);
     expect(
+      adminProjectAssetDetailLifecycleActions("mcp-servers", AGENT),
+    ).toEqual(["archive", "suspend"]);
+    expect(
+      projectAssetDetailLifecycleActions(
+        "agents",
+        { ...AGENT, current_published_version_id: null },
+        AGENT.capabilities,
+      ),
+    ).toEqual(["suspend"]);
+    expect(
       projectAssetDetailLifecycleActions(
         "agents",
         {
@@ -116,14 +127,39 @@ describe("Agent detail simplification", () => {
         AGENT,
         AGENT.capabilities,
       ),
-    ).toEqual(["archive", "suspend"]);
+    ).toEqual(["suspend"]);
+    expect(
+      projectAssetDetailLifecycleActions(
+        "mcp-servers",
+        { ...AGENT, status: "suspended" },
+        AGENT.capabilities,
+      ),
+    ).toEqual(["activate"]);
+    expect(
+      projectAssetDetailLifecycleActions(
+        "mcp-servers",
+        { ...AGENT, status: "archived" },
+        AGENT.capabilities,
+      ),
+    ).toEqual([]);
+    expect(
+      projectAssetDetailLifecycleActions(
+        "mcp-servers",
+        { ...AGENT, current_published_version_id: null },
+        AGENT.capabilities,
+      ),
+    ).toEqual([]);
   });
 
   test("allows permanent deletion only for editable project Agents", () => {
     expect(projectAssetCanDelete("agents", AGENT)).toBe(true);
     expect(projectAssetCanDelete("skills", AGENT)).toBe(true);
+    expect(projectAssetCanDelete("mcp-servers", AGENT)).toBe(true);
+    expect(projectAssetCanDelete("agents", { ...AGENT, scope: "system" })).toBe(
+      false,
+    );
     expect(
-      projectAssetCanDelete("agents", { ...AGENT, scope: "system" }),
+      projectAssetCanDelete("mcp-servers", { ...AGENT, scope: "system" }),
     ).toBe(false);
     expect(
       projectAssetCanDelete("agents", {

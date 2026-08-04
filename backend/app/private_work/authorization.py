@@ -21,6 +21,7 @@ _EXECUTABLE_ROLES = (
     ProjectRole.ADMIN.value,
     ProjectRole.EDITOR.value,
     ProjectRole.RUNNER.value,
+    ProjectRole.CHANNEL_GUEST.value,
 )
 
 

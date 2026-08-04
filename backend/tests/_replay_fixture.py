@@ -136,7 +136,7 @@ async def prepare_replay_runtime_catalog(
 ) -> None:
     """Idempotently seed the PostgreSQL authorities needed by replay.
 
-    The caller must point at a disposable, fully initialized DeerFlow database.
+    The caller must point at a disposable, fully initialized ActWeave database.
     ``scenario-model`` becomes the default model, while memory and summarization
     are disabled to remove background/debounced model calls from the fixture.
     """

@@ -151,7 +151,7 @@ class TestLlmCallbacks:
                 {
                     "id": "call-1",
                     "name": "search",
-                    "args": {"query": "DeerFlow"},
+                    "args": {"query": "ActWeave"},
                 }
             ],
             additional_kwargs={"reasoning_content": "需要调用工具"},

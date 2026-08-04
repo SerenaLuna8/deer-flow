@@ -8,7 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from support.m4_private_work import (
     LANGGRAPH_CHECKPOINT_TABLES,
@@ -70,6 +70,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
+    ChannelConversationRow,
     ChannelCredentialCipher,
 )
 from deerflow.persistence.feedback import FeedbackRepository
@@ -858,6 +859,10 @@ async def test_channel_delivery_is_atomically_deduped_across_admission_instances
             provider="slack",
             external_account_id="release-channel-user",
             workspace_id="release-workspace",
+            metadata={
+                "agent_asset_id": str(scenario.seed.project_agent_id),
+                "agent_scope": "project",
+            },
         )
         assert await repository.set_thread_id(
             scope=scenario.seed.owner_a_scope,
@@ -931,6 +936,65 @@ async def test_channel_delivery_is_atomically_deduped_across_admission_instances
             ).digest
         )
         assert stored_digest != "Release-Delivery-Opaque"
+
+        async with scenario.seed.factory() as session, session.begin():
+            await session.execute(
+                delete(ChannelConversationRow).where(
+                    ChannelConversationRow.connection_id == connection["id"],
+                    ChannelConversationRow.external_conversation_id == "release-conversation",
+                    ChannelConversationRow.external_topic_id == "release-topic",
+                )
+            )
+        replacement_thread_id = "release-channel-delivery-dedupe-replacement"
+        await scenario.thread_service.create(
+            scenario.seed.owner_a,
+            thread_id=replacement_thread_id,
+            agent=ThreadAgentRef(
+                scenario.seed.project_agent_id,
+                "project",
+            ),
+        )
+        assert await repository.set_thread_id(
+            scope=scenario.seed.owner_a_scope,
+            connection_id=connection["id"],
+            provider="slack",
+            external_conversation_id="release-conversation",
+            external_topic_id="release-topic",
+            thread_id=replacement_thread_id,
+        )
+        replay = await PrivateRunAdmissionService(
+            scenario.seed.factory,
+        ).admit(
+            scenario.seed.owner_a,
+            replacement_thread_id,
+            PrivateRunCreate(run_id=str(uuid.uuid4())),
+            server_context=server_context,
+        )
+        assert replay.inbound_delivery_replay is True
+        assert replay.run.run_id == first.run.run_id
+        async with scenario.seed.factory() as session:
+            remapped_counts = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM channel_inbound_deliveries
+                         WHERE connection_id=:connection_id),
+                        (SELECT count(*) FROM runs
+                         WHERE thread_id IN (:thread_id, :replacement_thread_id)),
+                        (SELECT count(*) FROM jobs
+                         WHERE run_id IN (
+                           SELECT run_id FROM runs
+                           WHERE thread_id IN (:thread_id, :replacement_thread_id)
+                         ))"""
+                    ),
+                    {
+                        "connection_id": connection["id"],
+                        "thread_id": thread_id,
+                        "replacement_thread_id": replacement_thread_id,
+                    },
+                )
+            ).one()
+        assert tuple(remapped_counts) == (1, 1, 1)
     finally:
         await scenario.close()
 
@@ -950,6 +1014,10 @@ async def test_same_provider_delivery_id_isolated_by_conversation_topic(
             provider="slack",
             external_account_id="release-channel-user",
             workspace_id="release-workspace",
+            metadata={
+                "agent_asset_id": str(scenario.seed.project_agent_id),
+                "agent_scope": "project",
+            },
         )
         admitted = []
         for topic_id in ("release-topic-a", "release-topic-b"):
@@ -1038,6 +1106,10 @@ async def test_channel_delivery_binding_rolls_back_with_failed_admission_hooks(
             provider="slack",
             external_account_id="release-channel-user",
             workspace_id="release-workspace",
+            metadata={
+                "agent_asset_id": str(scenario.seed.project_agent_id),
+                "agent_scope": "project",
+            },
         )
         assert await repository.set_thread_id(
             scope=scenario.seed.owner_a_scope,
@@ -1748,7 +1820,7 @@ async def test_memory_connection_and_secret_zero_persistence(
             scenario.seed.factory,
             repository=connection_repository,
         )
-        challenge = await connection_service.begin_connect(
+        challenge = await connection_service.begin_legacy_connect(
             scenario.seed.owner_a,
             "slack",
             scenario.seed.project_agent_id,
@@ -1758,13 +1830,14 @@ async def test_memory_connection_and_secret_zero_persistence(
             challenge.state,
             "release-external-account",
             "release-workspace",
+            channel_instance_id="slack",
         )
         assert [item["id"] for item in await connection_service.list(scenario.seed.owner_a)] == [connection["id"]]
         assert await connection_service.list(scenario.seed.owner_b) == []
         assert await connection_service.list(scenario.seed.project_b_owner_a) == []
         assert await connection_service.list(scenario.seed.viewer) == []
         with pytest.raises(PrivateWorkForbidden):
-            await connection_service.begin_connect(
+            await connection_service.begin_legacy_connect(
                 scenario.seed.viewer,
                 "slack",
                 scenario.seed.project_agent_id,

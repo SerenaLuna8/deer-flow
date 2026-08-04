@@ -356,6 +356,61 @@ class TestAgentConstruction:
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
+    def test_create_agent_applies_exact_runtime_agent_model_settings(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from deerflow.config.agents_config import AgentModelSettings
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="exact-model")])
+        captured: dict[str, dict] = {}
+
+        def fake_create_chat_model(**kwargs):
+            captured["model"] = kwargs
+            return object()
+
+        monkeypatch.setattr(executor_module, "create_chat_model", fake_create_chat_model)
+        monkeypatch.setattr(executor_module, "create_agent", lambda **_kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **_kwargs: [],
+            ),
+        )
+        settings = AgentModelSettings(
+            temperature=0.4,
+            max_tokens=4096,
+            thinking_enabled=True,
+            reasoning_effort="high",
+        )
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="exact-model",
+            agent_model_settings=settings,
+        )
+
+        executor._create_agent()
+
+        assert captured["model"] == {
+            "name": "exact-model",
+            "thinking_enabled": True,
+            "reasoning_effort": "high",
+            "model_overrides": {
+                "temperature": 0.4,
+                "max_tokens": 4096,
+            },
+            "app_config": app_config,
+            "attach_tracing": False,
+        }
+
     @pytest.mark.anyio
     async def test_load_skill_messages_uses_exact_runtime_skills(
         self,

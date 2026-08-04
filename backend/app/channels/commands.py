@@ -8,6 +8,8 @@ required.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/help", "/models"})
 
 # These former commands are intentionally tombstoned instead of becoming
@@ -15,6 +17,14 @@ KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/help", "/models"})
 # active commands; the manager recognizes them defensively and returns the
 # stable unsupported-command response without admitting a project Run.
 REMOVED_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/bootstrap", "/goal", "/memory", "/new", "/status"})
+
+
+@dataclass(frozen=True, slots=True)
+class GroupBindCommand:
+    """Classification result for the provider-facing group bind command."""
+
+    matched: bool
+    code: str | None = None
 
 
 def extract_connect_code(text: str) -> str | None:
@@ -26,6 +36,24 @@ def extract_connect_code(text: str) -> str | None:
     if command in {"/connect", "connect"}:
         return parts[1]
     return None
+
+
+def parse_group_bind_command(text: str) -> GroupBindCommand:
+    """Classify an exact group bind command with optional leading mentions."""
+    parts = text.strip().split()
+    command_index = 0
+    while command_index < len(parts) and parts[command_index].startswith("@"):
+        command_index += 1
+    if command_index >= len(parts) or parts[command_index].lower() != "/bind-project":
+        return GroupBindCommand(matched=False)
+    if len(parts) != command_index + 2:
+        return GroupBindCommand(matched=True)
+    return GroupBindCommand(matched=True, code=parts[command_index + 1])
+
+
+def extract_group_bind_code(text: str) -> str | None:
+    """Extract a valid group binding code for compatibility callers."""
+    return parse_group_bind_command(text).code
 
 
 def is_known_channel_command(text: str) -> bool:

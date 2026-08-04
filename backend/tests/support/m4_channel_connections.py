@@ -18,7 +18,7 @@ class M4ChannelConnectionRuntime:
     service: ProjectConnectionService
 
     async def begin_connect(self, provider: str) -> str:
-        challenge = await self.service.begin_connect(
+        challenge = await self.service.begin_legacy_connect(
             self.seed.owner_a,
             provider,
             self.seed.project_agent_id,

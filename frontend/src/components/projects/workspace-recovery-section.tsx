@@ -1,9 +1,18 @@
 "use client";
 
-import { RotateCcwIcon } from "lucide-react";
+import {
+  ArchiveRestoreIcon,
+  ChevronDownIcon,
+  RotateCcwIcon,
+} from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -118,34 +127,48 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
   return (
     <section
       aria-labelledby="workspace-recovery-title"
-      aria-label="可恢复项目"
-      className="border-border/70 bg-card mb-8 rounded-2xl border p-5"
+      className="border-border/80 bg-card mb-8 overflow-hidden rounded-xl border"
     >
-      <div className="mb-4 flex items-center gap-2">
-        <RotateCcwIcon aria-hidden className="text-primary size-5" />
-        <h2 id="workspace-recovery-title" className="font-semibold">
-          可恢复项目
-        </h2>
-      </div>
-      {projects.isLoading ? (
-        <Skeleton className="h-16 rounded-xl" />
-      ) : projects.error ? (
-        <p role="alert" className="text-muted-foreground text-sm">
-          {projectErrorMessage(projects.error)}
-        </p>
-      ) : recoverable.length ? (
-        <ul className="space-y-3">
-          {recoverable.map((project) => (
-            <RecoverableProjectRow
-              key={project.id}
-              project={project}
-              userId={userId}
+      <Collapsible defaultOpen>
+        <h2 id="workspace-recovery-title">
+          <CollapsibleTrigger
+            data-testid="workspace-recovery-toggle"
+            className="group hover:bg-muted/50 focus-visible:ring-ring/50 flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-inset"
+          >
+            <span className="flex items-center gap-2 font-semibold">
+              <ArchiveRestoreIcon aria-hidden className="text-primary size-5" />
+              可恢复项目
+            </span>
+            <ChevronDownIcon
+              aria-hidden
+              className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-180"
             />
-          ))}
-        </ul>
-      ) : (
-        <p className="text-muted-foreground text-sm">暂无可恢复项目。</p>
-      )}
+          </CollapsibleTrigger>
+        </h2>
+        <CollapsibleContent>
+          <div className="border-t px-5 py-5">
+            {projects.isLoading ? (
+              <Skeleton className="h-16 rounded-xl" />
+            ) : projects.error ? (
+              <p role="alert" className="text-muted-foreground text-sm">
+                {projectErrorMessage(projects.error)}
+              </p>
+            ) : recoverable.length ? (
+              <ul className="space-y-3">
+                {recoverable.map((project) => (
+                  <RecoverableProjectRow
+                    key={project.id}
+                    project={project}
+                    userId={userId}
+                  />
+                ))}
+              </ul>
+            ) : (
+              <p className="text-muted-foreground text-sm">暂无可恢复项目。</p>
+            )}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
     </section>
   );
 }

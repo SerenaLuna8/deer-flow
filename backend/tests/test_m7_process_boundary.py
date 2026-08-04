@@ -359,7 +359,7 @@ def test_gateway_and_scheduler_cannot_import_worker_graph_execution() -> None:
 
 def _scheduler_config(database_url: str) -> str:
     return f"""\
-config_version: 34
+config_version: 35
 log_level: warning
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
@@ -378,7 +378,7 @@ scheduler:
 """
 
 
-def test_scheduler_child_config_obeys_v34_yaml_authority_boundary() -> None:
+def test_scheduler_child_config_obeys_v35_yaml_authority_boundary() -> None:
     raw = yaml.safe_load(_scheduler_config("postgresql://localhost/deerflow_test_scheduler_fixture"))
 
     config = AppConfig.model_validate(
@@ -388,7 +388,7 @@ def test_scheduler_child_config_obeys_v34_yaml_authority_boundary() -> None:
 
     assert "models" not in raw
     assert "memory" not in raw
-    assert raw["config_version"] == 34
+    assert raw["config_version"] == 35
     assert config.scheduler.enabled is True
 
 

@@ -339,6 +339,69 @@ async def test_inbound_revoke_between_resolve_and_admission_persists_nothing(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_inbound_admission_rejects_stale_thread_after_connection_agent_change(
+    migrated_postgres_database_url: str,
+) -> None:
+    from app.private_work.run_admission import PrivateRunInboundAuthority
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"m7-inbound-stale-agent-{uuid.uuid4()}"
+    run_id = str(uuid.uuid4())
+    repository = ChannelConnectionRepository(seed.factory)
+    try:
+        await _create_thread(seed, thread_id)
+        connection = await repository.upsert_connection(
+            scope=seed.owner_a.resource_scope,
+            provider="slack",
+            external_account_id="external-a",
+            workspace_id="workspace-a",
+            metadata={
+                "agent_asset_id": str(seed.system_agent_id),
+                "agent_scope": "system",
+            },
+        )
+        assert await repository.set_thread_id(
+            scope=seed.owner_a.resource_scope,
+            connection_id=connection["id"],
+            provider="slack",
+            external_conversation_id="chat-a",
+            external_topic_id="topic-a",
+            thread_id=thread_id,
+        )
+
+        with pytest.raises(PrivateWorkNotFound):
+            await PrivateRunAdmissionService(seed.factory).admit(
+                seed.owner_a,
+                thread_id,
+                PrivateRunCreate(run_id=run_id),
+                server_context=PrivateRunAdmissionServerContext(
+                    inbound_authority=PrivateRunInboundAuthority(
+                        connection_id=connection["id"],
+                        provider="slack",
+                        external_account_id="external-a",
+                        workspace_id="workspace-a",
+                        external_conversation_id="chat-a",
+                        external_topic_id="topic-a",
+                    ),
+                    inbound_delivery=PrivateRunInboundDelivery(
+                        "delivery-stale-agent",
+                    ),
+                ),
+            )
+
+        async with seed.factory() as session:
+            run_count = await session.scalar(
+                text("SELECT count(*) FROM runs WHERE run_id=:run_id"),
+                {"run_id": run_id},
+            )
+        assert run_count == 0
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_admission_quota_rejection_leaves_no_partial_rows(
     migrated_postgres_database_url: str,
 ) -> None:

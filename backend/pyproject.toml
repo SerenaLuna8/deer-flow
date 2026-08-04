@@ -1,7 +1,7 @@
 [project]
 name = "deer-flow"
 version = "2.1.0"
-description = "LangGraph-based AI agent system with sandbox execution capabilities"
+description = "ActWeave — Weave intelligence into action. A LangGraph-based AI agent system with sandbox execution."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -22,6 +22,7 @@ dependencies = [
     "pyjwt>=2.13.0",
     "email-validator>=2.0.0",
     "e2b-code-interpreter>=2.8.1",
+    "python-socks[asyncio]>=2.8.2,<3",
 ]
 
 [project.optional-dependencies]

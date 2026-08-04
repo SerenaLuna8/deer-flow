@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Start the DeerFlow project-first stack with a fresh PostgreSQL database and make dev.
+description: Start the ActWeave project-first stack with a fresh PostgreSQL database and make dev.
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -45,11 +45,11 @@ settings. It does not write model definitions or model API keys.
 
 ### Initialize PostgreSQL
 
-DeerFlow supports only a fresh PostgreSQL target. Runtime startup never creates a database, repairs its schema, or upgrades an old database in place. The application role must already exist.
+ActWeave supports only a fresh PostgreSQL target. Runtime startup never creates a database, repairs its schema, or upgrades an old database in place. The application role must already exist.
 
 ```bash
 export POSTGRES_ADMIN_URL='<administrator URL for the postgres maintenance database>'
-export DATABASE_URL='<fresh DeerFlow target database URL>'
+export DATABASE_URL='<fresh ActWeave target database URL>'
 make setup-db
 make check-db
 ```

@@ -157,6 +157,7 @@ async def test_project_channel_launcher_uses_resolved_owner_scope_and_durable_ru
     }
     assert body.context == {
         "channel_name": "slack",
+        "channel_instance_id": "slack",
         "channel_user_id": "external-user",
     }
     assert state.state == {

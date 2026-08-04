@@ -18,7 +18,7 @@ const persistedMessageSchema = z
     type: z.string().min(1),
     content: z.union([z.string(), z.array(z.unknown())]),
   })
-  // LangChain messages are an extensible third-party union. The DeerFlow
+  // LangChain messages are an extensible third-party union. The ActWeave
   // wrapper below stays strict while this nested payload preserves supported
   // provider/tool-specific fields.
   .passthrough();

@@ -312,9 +312,10 @@ class TestChannelBase:
         fut.set_exception(RuntimeError("boom"))
 
         with caplog.at_level(logging.ERROR):
-            ch._log_future_error(fut, "prepare_inbound", "m1")
+            ch._log_future_error(fut, "prepare_inbound", "raw-provider-message-id")
 
-        assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
+        assert "prepare_inbound failed: boom" in caplog.text
+        assert "raw-provider-message-id" not in caplog.text
 
     def test_channel_capabilities_match_channel_defaults(self):
         from app.channels.dingtalk import DingTalkChannel
@@ -706,7 +707,13 @@ class TestChannelManager:
             text="x",
             metadata={"team_id": "T1", "message_id": "m1"},
         )
-        assert ChannelManager._inbound_dedupe_key(with_workspace) == ("slack", "T1", "C1", "m1")
+        assert ChannelManager._inbound_dedupe_key(with_workspace) == (
+            "slack",
+            "slack",
+            "T1",
+            "C1",
+            "m1",
+        )
 
         without_workspace = InboundMessage(
             channel_name="slack",
@@ -1026,7 +1033,17 @@ class _BoundIdentityRepo:
         self.lookups: list[dict[str, str | None]] = []
         self.thread_sets: list[dict[str, str | None]] = []
 
-    async def find_connection_by_external_identity(self, *, provider: str, external_account_id: str, workspace_id: str | None = None):
+    async def find_connection_by_external_identity(
+        self,
+        *,
+        provider: str,
+        channel_instance_id: str | None = None,
+        external_account_id: str,
+        workspace_id: str | None = None,
+        expected_connection_id: str | None = None,
+        expected_scope: object | None = None,
+    ):
+        del channel_instance_id
         self.lookups.append(
             {
                 "provider": provider,
@@ -1036,6 +1053,10 @@ class _BoundIdentityRepo:
         )
         for connection in self.connections:
             if connection.get("provider") == provider and connection.get("external_account_id") == external_account_id and connection.get("workspace_id") == workspace_id:
+                if expected_connection_id is not None and connection.get("id") != expected_connection_id:
+                    continue
+                if expected_scope is not None and (connection.get("project_id") != expected_scope.project_id or connection.get("owner_user_id") != expected_scope.owner_user_id):
+                    continue
                 return connection
         return None
 
@@ -1082,6 +1103,7 @@ class TestChannelManagerBoundIdentityPolicy:
         async def go():
             owner_id = uuid.uuid4()
             project_id = uuid.uuid4()
+            channel_instance_id = str(uuid.uuid4())
             context = PrivateWorkContext.from_project(
                 ProjectContext(
                     user_id=owner_id,
@@ -1101,6 +1123,7 @@ class TestChannelManagerBoundIdentityPolicy:
                 created=False,
                 authority=PrivateRunInboundAuthority(
                     connection_id="server-connection",
+                    channel_instance_id=channel_instance_id,
                     provider="slack",
                     external_account_id="U-platform",
                     workspace_id="T123",
@@ -1146,11 +1169,14 @@ class TestChannelManagerBoundIdentityPolicy:
             try:
                 inbound = InboundMessage(
                     channel_name="slack",
+                    channel_instance_id=channel_instance_id,
                     chat_id="C123",
                     user_id="U-platform",
                     text="question",
                     workspace_id="T123",
                     topic_id="1710000000.000100",
+                    resolved_conversation_id="a" * 64,
+                    resolved_topic_id="b" * 64,
                     owner_user_id="forged-owner",
                     project_id=str(uuid.uuid4()),
                     connection_id="forged-connection",
@@ -1173,8 +1199,11 @@ class TestChannelManagerBoundIdentityPolicy:
             assert outbound_received[0].text == "Which environment?"
             assert outbound_received[0].thread_id == "project-thread"
             assert outbound_received[0].connection_id == "server-connection"
+            assert outbound_received[0].channel_instance_id == channel_instance_id
             assert outbound_received[0].owner_user_id == str(owner_id)
             assert outbound_received[0].private_scope == context.resource_scope
+            assert outbound_received[0].resolved_conversation_id == "a" * 64
+            assert outbound_received[0].resolved_topic_id == "b" * 64
             assert outbound_received[0].metadata["project_id"] == str(project_id)
             assert outbound_received[0].metadata["message_id"] == "m-1"
             assert outbound_received[0].metadata["sender_staff_id"] == "staff-1"
@@ -2710,7 +2739,8 @@ class TestSlackSendRetry:
 class TestSlackAllowedUsers:
     @staticmethod
     def _submit_coro(coro, loop):
-        coro.close()
+        del loop
+        asyncio.run(coro)
         return MagicMock()
 
     def test_numeric_allowed_users_match_string_event_user_id(self):

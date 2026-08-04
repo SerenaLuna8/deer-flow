@@ -18,7 +18,7 @@ class ModelRefResolver(Protocol):
 def resolve_model_ref(config: Any, model_ref: str) -> ModelConfig | Any | None:
     """Resolve the stable ``default`` alias or an exact logical model name.
 
-    ``default`` follows DeerFlow's existing model-selection contract: the first
+    ``default`` follows ActWeave's existing model-selection contract: the first
     configured logical model is the default. Provider model identifiers are
     deliberately ignored; Agent and Run records only carry logical names.
     """

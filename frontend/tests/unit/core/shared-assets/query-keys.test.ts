@@ -12,6 +12,7 @@ import {
   adminProjectAssetVersionsKey,
   projectAssetKey,
   projectAssetVersionsKey,
+  projectMcpEditableConfigurationKey,
   projectSkillVersionFileKey,
 } from "@/core/shared-assets/query-keys";
 
@@ -77,6 +78,33 @@ describe("shared asset query isolation", () => {
         "asset-1",
         "version-2",
         "references/guide.md",
+      ),
+    );
+  });
+
+  test("editable MCP configuration has an exact cache isolated from redacted history", () => {
+    const key = projectMcpEditableConfigurationKey(
+      "u1",
+      ADMIN_PROJECT_ID,
+      ADMIN_ASSET_ID,
+    );
+    expect(key).toEqual([
+      "account",
+      "u1",
+      "shared-assets",
+      "project",
+      ADMIN_PROJECT_ID,
+      "mcp-servers",
+      "asset",
+      ADMIN_ASSET_ID,
+      "editable-configuration",
+    ]);
+    expect(key).not.toEqual(
+      projectAssetVersionsKey(
+        "u1",
+        ADMIN_PROJECT_ID,
+        "mcp-servers",
+        ADMIN_ASSET_ID,
       ),
     );
   });

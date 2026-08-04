@@ -43,10 +43,10 @@ async def test_admission_persists_pending_snapshot_before_runtime_calls(migrated
     from app.shared_assets.resolver import ProjectAssetResolver
 
     class Resolver(ProjectAssetResolver):
-        async def resolve_project_asset_snapshot_in_session(self, session, context, selection):
+        async def resolve_run_asset_closure_in_session(self, session, context, selection):
             calls.append("resolve")
             assert selection == AssetSelection(AssetKind.AGENT, seed.project_agent_id)
-            return await super().resolve_project_asset_snapshot_in_session(session, context, selection)
+            return await super().resolve_run_asset_closure_in_session(session, context, selection)
 
     try:
         async with seed.factory() as session, session.begin():
@@ -378,18 +378,24 @@ async def test_admission_fails_closed_on_scope_drift_without_partial_run_or_snap
             from app.shared_assets.resolver import ProjectAssetResolver
 
             class ScopeMismatchResolver(ProjectAssetResolver):
-                async def resolve_project_asset_snapshot_in_session(
+                async def resolve_run_asset_closure_in_session(
                     self,
                     session,
                     context,
                     selection,
                 ):
-                    snapshot = await super().resolve_project_asset_snapshot_in_session(
+                    snapshot = await super().resolve_run_asset_closure_in_session(
                         session,
                         context,
                         selection,
                     )
-                    return dataclasses.replace(snapshot, scope=AssetScope.SYSTEM)
+                    return dataclasses.replace(
+                        snapshot,
+                        lead_agent=dataclasses.replace(
+                            snapshot.lead_agent,
+                            scope=AssetScope.SYSTEM,
+                        ),
+                    )
 
             service = PrivateRunAdmissionService(
                 seed.factory,
@@ -462,8 +468,8 @@ async def test_admission_rejects_non_executable_agent_but_ignores_unrelated_gene
         from app.shared_assets.resolver import ProjectAssetResolver
 
         class RacingResolver(ProjectAssetResolver):
-            async def resolve_project_asset_snapshot_in_session(self, session, context, selection):
-                snapshot = await super().resolve_project_asset_snapshot_in_session(session, context, selection)
+            async def resolve_run_asset_closure_in_session(self, session, context, selection):
+                snapshot = await super().resolve_run_asset_closure_in_session(session, context, selection)
                 await session.execute(text("UPDATE asset_catalog_state SET generation=generation+1 WHERE id=1"))
                 return snapshot
 
@@ -512,7 +518,7 @@ async def test_concurrent_same_thread_admission_serializes_the_empty_active_run_
             return current
 
     class BarrierResolver(ProjectAssetResolver):
-        async def resolve_project_asset_snapshot_in_session(
+        async def resolve_run_asset_closure_in_session(
             self,
             session,
             context,
@@ -520,7 +526,7 @@ async def test_concurrent_same_thread_admission_serializes_the_empty_active_run_
         ):
             resolver_entered.set()
             await asyncio.wait_for(release_resolver.wait(), timeout=5)
-            return await super().resolve_project_asset_snapshot_in_session(
+            return await super().resolve_run_asset_closure_in_session(
                 session,
                 context,
                 selection,

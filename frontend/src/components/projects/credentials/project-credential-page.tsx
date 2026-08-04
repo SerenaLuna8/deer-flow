@@ -19,7 +19,7 @@ export function ProjectCredentialPage() {
         className="mb-5"
         eyebrow={`${project.display_name} · 安全连接`}
         title="项目凭证"
-        description="管理项目运行所需的环境变量、请求头和 OAuth 字段。"
+        description="管理项目运行所需的环境变量、请求头、查询参数和 OAuth 字段。"
         icon={<KeyRoundIcon aria-hidden className="size-4" />}
       />
 

@@ -183,17 +183,6 @@ async function mockProjectPrivateData(page: Page) {
       }
       if (request.method() === "POST" && path.endsWith("/slack/connect")) {
         connectBody = request.postDataJSON();
-        connection = {
-          id: CONNECTION_ID,
-          provider: "slack",
-          status: "connected",
-          external_account_id: "slack-user",
-          external_account_name: "Project Slack",
-          workspace_id: "workspace-1",
-          workspace_name: "Research Workspace",
-          scopes: ["chat:write"],
-          metadata: {},
-        };
         return json(route, {
           provider: "slack",
           mode: "binding_code",
@@ -235,9 +224,40 @@ async function mockProjectPrivateData(page: Page) {
         ],
       }),
   );
+  await page.route(`**/api/projects/${PROJECT_ID}/channel-instances`, (route) =>
+    json(route, {
+      instances: [
+        {
+          id: "41000000-0000-4000-8000-000000000001",
+          provider: "slack",
+          display_name: "Slack",
+          status: "running",
+          enabled: true,
+          configured: true,
+          credential_configured: true,
+          public_config: {},
+          updated_at: "2026-08-03T08:00:00Z",
+          last_error: null,
+        },
+      ],
+    }),
+  );
 
   return {
     connectBody: () => connectBody,
+    completeConnection: () => {
+      connection = {
+        id: CONNECTION_ID,
+        provider: "slack",
+        status: "connected",
+        external_account_id: "slack-user",
+        external_account_name: "Project Slack",
+        workspace_id: "workspace-1",
+        workspace_name: "Research Workspace",
+        scopes: ["chat:write"],
+        metadata: {},
+      };
+    },
     exportCount: () => exportCount,
   };
 }
@@ -269,15 +289,62 @@ test("project Connections lists, connects, and disconnects imperatively", async 
   const state = await mockProjectPrivateData(page);
 
   await page.goto("/projects/research-lab/connections");
-  const slack = page.getByRole("listitem").filter({ hasText: "Slack" });
+  const configuration = page.getByRole("region", { name: "渠道配置" });
+  const runningStatus = configuration.getByRole("status", {
+    name: "渠道状态：运行正常",
+  });
+  await expect(runningStatus).toBeVisible();
+  await expect(runningStatus).toHaveAttribute("data-status", "running");
+  await expect(configuration.locator('[data-slot="badge"]')).toHaveCount(0);
+  await expect(configuration.getByRole("button")).toHaveCount(0);
+
+  const slack = page
+    .getByRole("region", { name: "我的连接" })
+    .getByRole("listitem")
+    .filter({ hasText: "Slack" });
+  let popupCount = 0;
+  page.on("popup", (popup) => {
+    popupCount += 1;
+    void popup.close();
+  });
   await slack.getByRole("button", { name: "连接" }).click();
   await page.getByRole("button", { name: /Project Analyst/ }).click();
 
-  await expect(slack.getByText("Project Slack")).toBeVisible();
+  const guide = page.getByRole("dialog", { name: "完成 Slack 连接" });
+  await expect(guide).toBeVisible();
+  await expect(guide.getByText("/connect bind-code")).toBeVisible();
+  await expect(guide.getByText("10 分钟内有效")).toBeVisible();
+  const [guideBox, copyButtonBox] = await Promise.all([
+    guide.boundingBox(),
+    guide.getByRole("button", { name: "复制命令" }).boundingBox(),
+  ]);
+  expect(guideBox).not.toBeNull();
+  expect(copyButtonBox).not.toBeNull();
+  expect(copyButtonBox!.x + copyButtonBox!.width).toBeLessThanOrEqual(
+    guideBox!.x + guideBox!.width,
+  );
+  expect(popupCount).toBe(0);
   expect(state.connectBody()).toEqual({
     agent_asset_id: AGENT_ID,
     agent_scope: "project",
   });
+
+  await guide.getByRole("button", { name: "我已发送，检查连接" }).click();
+  await expect(
+    guide.getByText("尚未检测到连接。请先在 Slack 中发送命令，再重新检查。"),
+  ).toBeVisible();
+
+  await guide.getByRole("button", { name: "稍后完成" }).click();
+  await expect(guide).toBeHidden();
+  await expect(slack.getByRole("button", { name: "继续连接" })).toBeVisible();
+
+  state.completeConnection();
+  await expect(guide).toBeVisible();
+  await expect(guide.getByRole("status")).toContainText("连接成功");
+  await expect(page.getByText("Slack 已连接")).toBeVisible();
+  await guide.getByRole("button", { name: "完成" }).click();
+  await expect(guide).toBeHidden();
+  await expect(slack.getByText("Project Slack")).toBeVisible();
 
   await slack.getByRole("button", { name: "断开" }).click();
   await expect(slack.getByText("未连接")).toBeVisible();

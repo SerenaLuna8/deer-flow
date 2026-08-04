@@ -9,7 +9,6 @@ import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-m
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Project } from "@/core/projects/types";
 import {
-  invalidateProjectAssetQueries,
   useProjectAssets,
   useProjectDefaultAgent,
   type ProjectAssetList,
@@ -20,7 +19,6 @@ import {
   createProjectChatWithDefaultAgent,
   resolveProjectDefaultAgent,
 } from "./agent-selector-dialog";
-import { prepareMainProjectChatRuntime } from "./main-project-chat-runtime";
 import { projectNewChatErrorMessage } from "./project-new-chat-error";
 
 export function useProjectNewChat(project: Project) {
@@ -85,24 +83,6 @@ export function useProjectNewChat(project: Project) {
 
     setIsCreating(true);
     try {
-      if (resolution.source === "main") {
-        const prepared = await prepareMainProjectChatRuntime({
-          projectId: project.id,
-          agent: resolution.agent,
-        });
-        if (prepared.bindingsChanged) {
-          await Promise.all(
-            (["agents", "skills", "mcp-servers"] as const).map((kind) =>
-              invalidateProjectAssetQueries(
-                queryClient,
-                privateWork.scope.accountId,
-                project.id,
-                kind,
-              ),
-            ),
-          );
-        }
-      }
       await createProjectChatWithDefaultAgent({
         scope: privateWork.scope,
         projectSlug: project.slug,
@@ -133,7 +113,6 @@ export function useProjectNewChat(project: Project) {
     isCreating,
     isLoading,
     privateWork.scope,
-    project.id,
     project.slug,
     queryClient,
     refetchDefaultAgent,

@@ -85,7 +85,11 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
 )
 from app.shared_assets.model_refs import ModelRefResolver
-from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
+from app.shared_assets.models import (
+    AssetKind,
+    AssetSelection,
+    ResolvedRunAssetClosure,
+)
 from app.shared_assets.resolver import ProjectAssetResolver
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.scheduled_task_runs import (
@@ -631,12 +635,12 @@ class AutomationDispatcher:
                     task,
                     occurrence,
                 )
-                resolved = await self._resolver.resolve_project_asset_snapshot_in_session(
+                resolved = await self._resolver.resolve_run_asset_closure_in_session(
                     session,
                     project,
                     AssetSelection(AssetKind.AGENT, task.agent_asset_id),
                 )
-                if type(resolved) is not ResolvedAgentSnapshot or resolved.scope.value != task.agent_scope:
+                if type(resolved) is not ResolvedRunAssetClosure or resolved.lead_agent.scope.value != task.agent_scope:
                     raise AutomationConflict(context.request_id)
                 run_metadata = {
                     "scheduled_task_id": task.id,

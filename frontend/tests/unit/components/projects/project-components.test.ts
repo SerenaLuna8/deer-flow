@@ -75,6 +75,29 @@ describe("project presentation contracts", () => {
     );
   });
 
+  test("keeps system MCP binding actions on the list instead of the detail sheet", () => {
+    const listSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/assets/project-asset-page-shell.tsx",
+      ),
+      "utf8",
+    );
+    const detailSource = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/assets/project-asset-detail-sheet.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(listSource).toContain("useSyncCurrentProjectSystemMcpBinding");
+    expect(listSource).toContain("systemMcpBindingNeedsUpdate");
+    expect(detailSource).not.toContain("SystemBindingDialog");
+    expect(detailSource).not.toContain("bindingOpen");
+    expect(detailSource).not.toContain('"启用到项目"');
+  });
+
   test("project overview uses a compact identity header", () => {
     const html = renderToStaticMarkup(
       createElement(ProjectHeader, { project }),
@@ -96,6 +119,57 @@ describe("project presentation contracts", () => {
       "utf8",
     );
     expect(source).not.toContain("你的项目");
+  });
+
+  test("workspace presents projects as a compact library with one create entry", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-workbench.tsx"),
+      "utf8",
+    );
+    const headerSource = source.slice(
+      source.indexOf("<header"),
+      source.indexOf("</header>"),
+    );
+    const toolbarSource = source.slice(
+      source.indexOf('data-testid="project-toolbar"'),
+      source.indexOf('<section aria-label="项目列表">'),
+    );
+    const pageIntroSource = source.slice(
+      source.indexOf("<WorkspaceBody"),
+      source.indexOf('data-testid="project-toolbar"'),
+    );
+    const emptyStateSource = readFileSync(
+      resolve(process.cwd(), "src/components/projects/project-empty-state.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain('aria-label="筛选项目"');
+    expect(source).not.toContain('data-testid="project-create-card"');
+    expect(source.match(/创建项目/gu)).toHaveLength(1);
+    expect(emptyStateSource).not.toContain("创建项目");
+    expect(headerSource).toContain("工作空间");
+    expect(pageIntroSource).not.toContain("工作空间");
+    expect(pageIntroSource).not.toContain("创建、搜索和整理你参与的项目。");
+    expect(toolbarSource).toContain("创建项目");
+    expect(source).toContain('aria-pressed={filter === "all"}');
+    expect(source).toContain('aria-pressed={filter === "pinned"}');
+    expect(source).toContain("ChevronDownIcon");
+    expect(source).not.toContain("FolderKanbanIcon");
+    expect(source).not.toContain("多项目工作空间");
+  });
+
+  test("workspace recovery stays available in a compact disclosure", () => {
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/components/projects/workspace-recovery-section.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(source).toContain("Collapsible");
+    expect(source).toContain('data-testid="workspace-recovery-toggle"');
+    expect(source).toContain("data-[state=open]:rotate-180");
   });
 
   test("project editing keeps the existing icon without exposing a text field", () => {
@@ -136,6 +210,8 @@ describe("project presentation contracts", () => {
     expect(html).toContain("Shared research");
     expect(html).toContain("编辑项目");
     expect(html).toContain("进入项目");
+    expect(html).toContain("lucide-arrow-right");
+    expect(html).toContain("text-selection");
     expect(html).not.toContain("Admin");
     expect(html).not.toContain("active");
     expect(html).not.toContain("3 位成员");

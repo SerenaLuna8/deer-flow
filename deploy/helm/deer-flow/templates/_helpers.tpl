@@ -1,5 +1,5 @@
 {{/*
-Common helpers for the DeerFlow chart.
+Common helpers for the ActWeave chart.
 */}}
 
 {{- define "deer-flow.name" -}}
@@ -37,7 +37,7 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/* Fully-qualified image refs for the three DeerFlow images.
+{{/* Fully-qualified image refs for the three ActWeave images.
      When `image.registry` is empty, omit the prefix so the ref is
      `deer-flow-gateway:latest` (local-image mode, imagePullPolicy: Never). */}}
 {{- define "deer-flow.gatewayImage" -}}

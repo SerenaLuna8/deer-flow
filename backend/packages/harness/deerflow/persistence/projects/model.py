@@ -87,7 +87,10 @@ class ProjectMembershipRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
 
     __table_args__ = (
-        CheckConstraint("role IN ('admin', 'editor', 'runner', 'viewer')", name="ck_project_memberships_role"),
+        CheckConstraint(
+            "role IN ('admin', 'editor', 'runner', 'viewer', 'channel_guest')",
+            name="ck_project_memberships_role",
+        ),
         CheckConstraint("status IN ('active', 'left', 'removed')", name="ck_project_memberships_status"),
         CheckConstraint("end_reason IS NULL OR end_reason IN ('left', 'removed')", name="ck_project_memberships_end_reason"),
         CheckConstraint("version >= 1", name="ck_project_memberships_version"),
@@ -96,6 +99,13 @@ class ProjectMembershipRow(Base):
             name="ck_project_memberships_activation_generation",
         ),
         UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
+        UniqueConstraint(
+            "project_id",
+            "user_id",
+            "id",
+            "role",
+            name="uq_project_memberships_guest_identity",
+        ),
         Index("ix_project_memberships_user_id", "user_id"),
     )
 

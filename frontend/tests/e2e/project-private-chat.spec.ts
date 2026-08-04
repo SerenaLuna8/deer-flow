@@ -320,7 +320,7 @@ async function mockPrivateWork(
                     {
                       type: "ai",
                       id: "msg-ai-1",
-                      content: "Hello from DeerFlow!",
+                      content: "Hello from ActWeave!",
                     },
                   ])
                 : []),
@@ -1727,7 +1727,7 @@ test("project detail loads history and streams without legacy private-work calls
   const textarea = page.getByPlaceholder(/how can i assist you/i);
   await textarea.fill("Hello from project");
   await textarea.press("Enter");
-  await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+  await expect(page.getByText("Hello from ActWeave!")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Branch conversation" }),
   ).toBeVisible();
@@ -2064,7 +2064,7 @@ test("project goal and compact commands use only scoped control routes", async (
   goalGate.release();
   await goalResponse;
   await expect(
-    page.getByText("Hello from DeerFlow!", { exact: true }),
+    page.getByText("Hello from ActWeave!", { exact: true }),
   ).toBeVisible();
   await page.evaluate(
     () =>
@@ -2327,7 +2327,7 @@ test("project regenerate prepares from scoped history before a scoped run", asyn
       {
         type: "ai",
         id: "msg-ai-1",
-        content: "Hello from DeerFlow!",
+        content: "Hello from ActWeave!",
       },
     ],
   });
@@ -4188,7 +4188,7 @@ test("project chat stop aborts the scoped in-flight stream", async ({
   await page.getByLabel("Submit").click();
   releaseStream();
   await expect(textarea).toBeEnabled();
-  await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
+  await expect(page.getByText("Hello from ActWeave!")).toHaveCount(0);
 });
 
 test("project chat keeps a failed durable Run visible with recovery guidance", async ({

@@ -1,6 +1,6 @@
 ---
 title: Agent 与线程
-description: 了解 DeerFlow 中 Agent 与线程的关系，以及如何管理自定义 Agent 和对话线程。
+description: 了解 ActWeave 中 Agent 与线程的关系，以及如何管理自定义 Agent 和对话线程。
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -12,14 +12,24 @@ import { Callout, Steps } from "nextra/components";
   是配置单元——它们定义了一组能力。线程是对话实例，带有持久化状态和历史记录。
 </Callout>
 
-## 自定义 Agent
+## Agent
 
-DeerFlow 允许你创建多个具有不同专业领域的自定义 Agent。每个 Agent 使用 DeerFlow Harness 相同的 Lead Agent 运行时，但具有不同的：
+### Main 与项目默认 Agent
+
+Main 是项目级编排 Agent，也是项目未指定自定义默认 Agent 时的回退项。每次 Run 都由服务端解析当前项目内所有有效的系统资产，以及当前项目自建且已启用、已发布的 Agent、Skill 和 MCP，并把精确版本冻结到 Run 快照中。Main 可以委派给本次准入的其他 Agent，但绝不会加载其他项目的资产。Main 不要求项目 Agent 绑定，浏览器也不会替它启用或调整依赖绑定。
+
+项目管理员可以把一个已启用、已发布的项目 Agent 设为默认 Agent。已配置的默认 Agent 如果失效会直接阻止创建，不会静默回退到 Main。
+
+### 自定义 Agent
+
+ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每个 Agent 使用 ActWeave Harness 相同的 Lead Agent 运行时，但具有不同的：
 
 - 模型（例如为一个 Agent 使用 GPT-4o，为另一个使用 Claude）
 - 系统提示和指令
 - 技能（例如专注于数据分析的 Agent 只加载数据分析技能）
 - 工具访问（通过工具组）
+
+与 Main 不同，自建 Agent 只加载该 Agent 版本明确引用的 Skill 和 MCP 精确版本；没有引用的项目资产不会自动继承。
 
 ### 创建自定义 Agent
 
@@ -27,7 +37,7 @@ DeerFlow 允许你创建多个具有不同专业领域的自定义 Agent。每�
 
 #### 通过界面
 
-1. 打开 DeerFlow 应用并进入一个项目。
+1. 打开 ActWeave 应用并进入一个项目。
 2. 点击项目菜单中的 **Agents**（Agent 管理）。
 3. 点击 **New Agent**（新建 Agent）。
 4. 填写名称、描述和配置。
@@ -60,13 +70,15 @@ Agent 定义、版本、发布状态和项目绑定存储在 PostgreSQL 中，�
 
 线程在你发送第一条消息时创建。线程 ID 是自动生成的 UUID（由前端生成），用于标识所有后续请求中的对话。
 
+输入框中的 Skill 提示跟随线程 Agent：Main 显示当前项目的全部有效 Skill，自建 Agent 只显示其选定版本明确引用的 Skill。历史 `/skill` 消息仍使用项目展示目录解析，因此不会因为当前 Agent 或版本变化而失去可读性。
+
 ### 执行
 
 每次你发送消息，LangGraph 从最新检查点恢复线程状态，运行 Lead Agent，并更新状态。流式事件在 Agent 工作时发送到浏览器。
 
 ### 线程持久化配置
 
-DeerFlow 在每次 Agent 轮次后通过项目 scoped PostgreSQL checkpointer 保存线程状态。这允许：
+ActWeave 在每次 Agent 轮次后通过项目 scoped PostgreSQL checkpointer 保存线程状态。这允许：
 
 - 在服务器重启后恢复线程。
 - 在长时间间隔后继续对话。

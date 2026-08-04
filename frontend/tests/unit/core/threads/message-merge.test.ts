@@ -633,7 +633,7 @@ test("mergeMessages lets a visible live message replace overlapping hidden histo
   ]);
 });
 
-test("getSummarizationMiddlewareMessages matches DeerFlow summarization update keys", () => {
+test("getSummarizationMiddlewareMessages matches ActWeave summarization update keys", () => {
   const removeAll = {
     id: "__remove_all__",
     type: "remove",

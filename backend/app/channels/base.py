@@ -10,6 +10,7 @@ from concurrent.futures import CancelledError as FutureCancelledError
 from typing import Any, TypeVar
 
 from app.channels.commands import extract_connect_code
+from app.channels.instance_identity import normalize_channel_instance_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ class Channel(ABC):
 
     def __init__(self, name: str, bus: MessageBus, config: dict[str, Any]) -> None:
         self.name = name
+        self.channel_instance_id = normalize_channel_instance_id(
+            name,
+            config.get("channel_instance_id"),
+        )
         self.bus = bus
         self.config = config
         self._running = False
@@ -108,16 +113,17 @@ class Channel(ABC):
 
     def _log_future_error(self, fut: Any, name: str, msg_id: Any) -> None:
         """Callback for concurrent futures scheduled from channel worker threads."""
+        del msg_id
         try:
             exc = fut.exception()
         except (asyncio.CancelledError, FutureCancelledError, asyncio.InvalidStateError):
             return
         except Exception:
-            logger.exception("[%s] failed to inspect future for %s (msg_id=%s)", self.name, name, msg_id)
+            logger.exception("[%s] failed to inspect future for %s", self.name, name)
             return
 
         if exc:
-            logger.error("[%s] %s failed for msg_id=%s: %s", self.name, name, msg_id, exc)
+            logger.error("[%s] %s failed: %s", self.name, name, exc)
 
     def _pending_connect_code(self, text: str) -> str | None:
         """Return the one-time bind code if *text* is a ``/connect <code>`` command
@@ -147,6 +153,7 @@ class Channel(ABC):
         """Convenience factory for creating InboundMessage instances."""
         return InboundMessage(
             channel_name=self.name,
+            channel_instance_id=self.channel_instance_id,
             chat_id=chat_id,
             user_id=user_id,
             text=text,
@@ -157,6 +164,18 @@ class Channel(ABC):
             metadata=metadata or {},
         )
 
+    async def _has_instance_authority(self) -> bool:
+        """Revalidate this exact adapter before an external or durable side effect.
+
+        The shared guard bypasses explicit legacy instances and fails closed for
+        database-managed instances when their fenced lease is no longer current.
+        """
+
+        return await self.bus.is_instance_side_effect_allowed(
+            self.channel_instance_id,
+            provider=self.name,
+        )
+
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         """Outbound callback registered with the bus.
 
@@ -165,7 +184,10 @@ class Channel(ABC):
         File uploads are skipped entirely when the text send fails to avoid
         partial deliveries (files without accompanying text).
         """
-        if msg.channel_name == self.name:
+        if msg.channel_name == self.name and msg.channel_instance_id == self.channel_instance_id:
+            # The lease can be lost after MessageBus selected this listener.
+            if not await self._has_instance_authority():
+                return
             try:
                 await self.send(msg)
             except Exception:
@@ -173,6 +195,8 @@ class Channel(ABC):
                 return  # Do not attempt file uploads when the text message failed
 
             for attachment in msg.attachments:
+                if not await self._has_instance_authority():
+                    return
                 try:
                     success = await self.send_file(msg, attachment)
                     if not success:
@@ -191,8 +215,8 @@ class Channel(ABC):
 
         Args:
             msg: The inbound message, possibly containing file metadata in msg.files.
-            thread_id: The resolved DeerFlow thread ID for sandbox path context.
-            user_id: Optional DeerFlow storage user ID for user-scoped channel workers.
+            thread_id: The resolved ActWeave thread ID for sandbox path context.
+            user_id: Optional ActWeave storage user ID for user-scoped channel workers.
 
         Returns:
             The (possibly modified) InboundMessage, with text and/or files updated as needed.

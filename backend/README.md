@@ -1,6 +1,6 @@
-# DeerFlow Backend
+# ActWeave Backend
 
-DeerFlow 后端由 FastAPI Gateway、独立 Worker 和可选独立 Scheduler 组成。Gateway 负责认证、项目授权、准入和查询；Worker 独占 Agent graph 执行；Scheduler 只负责 Automation 到期准入。业务数据和运行状态均持久化到 PostgreSQL。
+ActWeave 后端由 FastAPI Gateway、独立 Worker 和可选独立 Scheduler 组成。Gateway 负责认证、项目授权、准入和查询；Worker 独占 Agent graph 执行；Scheduler 只负责 Automation 到期准入。业务数据和运行状态均持久化到 PostgreSQL。
 
 ## 目录
 

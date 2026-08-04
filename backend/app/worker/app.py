@@ -27,6 +27,7 @@ from app.system_runtime_settings.materializer import (
     SystemRuntimePolicyMaterializer,
 )
 from app.system_settings import SystemModelMaterializer
+from app.worker.mcp_discovery import McpToolDiscoveryJobHandler
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
@@ -36,7 +37,8 @@ from deerflow.config.database_config import (
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.logging_config import configure_logging
-from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
+from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
+from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
 from deerflow.persistence import close_engine, get_session_factory, init_engine
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.runtime import make_store
@@ -74,8 +76,8 @@ async def run_worker(
             )
         else:
             mcp_security = McpSecurityConfig()
-        mcp_endpoint_policy = ExactMcpEndpointPolicy(
-            frozenset(mcp_security.project_remote_allowed_endpoints),
+        mcp_endpoint_policy = NetworkMcpEndpointPolicy(
+            mcp_security.project_remote_allowed_networks,
         )
     except Exception:
         raise WorkerConfigurationUnavailable() from None
@@ -152,6 +154,10 @@ async def run_worker(
         )
         active_handlers = handlers
         if active_handlers is None:
+            mcp_http_client_factory = make_secure_mcp_http_client_factory(
+                proxy_url=mcp_security.egress_proxy_url,
+                timeout_seconds=mcp_security.discovery_timeout_seconds,
+            )
             bridge = PostgresStreamBridge(session_factory)
             raw_checkpointer = await stack.enter_async_context(
                 make_checkpointer(config),
@@ -194,6 +200,13 @@ async def run_worker(
                     session_factory,
                     audit=retention_audit_sink,
                     quota=quota_enforcer,
+                    job_repository_builder=repository_builder,
+                ),
+                "mcp_discovery": McpToolDiscoveryJobHandler(
+                    session_factory,
+                    endpoint_policy=mcp_endpoint_policy,
+                    http_client_factory=mcp_http_client_factory,
+                    discovery_timeout_seconds=(mcp_security.discovery_timeout_seconds),
                     job_repository_builder=repository_builder,
                 ),
             }

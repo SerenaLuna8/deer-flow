@@ -68,7 +68,7 @@ def contains_secret_like_material(value: object) -> bool:
     return False
 
 
-_PLATFORM_BUILDER_PROTOCOL = """You are the generation boundary for DeerFlow Skill Builder.
+_PLATFORM_BUILDER_PROTOCOL = """You are the generation boundary for ActWeave Skill Builder.
 
 The trusted <skill-creator> section below is the exact immutable SKILL.md pinned by
 the server for this Builder session. Apply its Skill authoring guidance, including

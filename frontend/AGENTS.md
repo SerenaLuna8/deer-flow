@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This is the source of truth for DeerFlow frontend work. The repository-level
+This is the source of truth for ActWeave frontend work. The repository-level
 [AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide owns the final M7
 project-first routes, authorization, cache isolation, and frontend gates.
 
@@ -120,8 +120,26 @@ from an old account/project must never update the new scope.
 Project clients use `/api/projects/{project_id}/private-work` for Thread, Run, file,
 artifact, input-polish, and durable SSE operations. Project Memory uses
 `/api/projects/{project_id}/memory`; Connections use
-`/api/projects/{project_id}/connections`; Automation uses
+`/api/projects/{project_id}/connections`; Admin group binding uses
+`/api/projects/{project_id}/channel-group-bindings`; safe project provider configuration uses
+`/api/projects/{project_id}/channel-instances`; Automation uses
 `/api/projects/{project_id}/automations`.
+
+Channel instance GET state is account/project scoped and may be cached. Provider Secret writes
+must use direct imperative authenticated requests, must never enter TanStack Query/Mutation
+variables or cache, and must be cleared from the form immediately after submission. All members
+may read bounded provider status; only the server-issued `project.channels.manage` capability
+shows configuration, enable/disable, or delete controls. Personal external-account and Agent
+selection remains a separate `private_work.create` flow.
+
+The current group-binding surface is Feishu-only although the backend DTO is provider-neutral.
+Only `project.channels.manage` may see or mutate it. The Admin chooses an available Agent, receives
+one `/bind-project` command, copies it to the target Feishu group, and explicitly checks completion.
+The resulting rows show only group name, Agent, running/disabled state, and recent activity, with
+compact change-Agent, enable/disable, and delete actions. Do not fetch or render message bodies,
+Thread/Run content, raw provider identifiers, or guest identities. Group guests are not web users
+and their owner-scoped Threads must not be merged into the normal signed-in conversation menu.
+Personal `p2p /connect` UI and behavior remain independent.
 
 Chats, Memory, Connections, and Automation navigation require a non-static build, server
 readiness `ready`, and `private_work.read_own`. Create/run/upload/connect controls additionally
@@ -151,7 +169,7 @@ requests remain root-stream only; namespaced child custom frames cannot update r
 Do not object-spread the LangGraph SDK stream handle: it exposes enumerable lazy getters, and
 `toolCalls` can traverse a transient sparse message array while `RemoveMessage(__remove_all__)`
 compaction rebuilds message-tuple indexes. Preserve the handle with property descriptors and
-override only DeerFlow's normalized `messages`, scoped `values`, and local `stop` projection.
+override only ActWeave's normalized `messages`, scoped `values`, and local `stop` projection.
 
 Conversation history is a lead-Agent projection. Historical rows tagged with a subagent or
 middleware caller are hidden, and their tool results are filtered by the issuing AI
@@ -309,7 +327,12 @@ deletion only from its detail sheet, using the same five-second delayed confirma
 removing the Agent plus all of its settings only after the scoped DELETE succeeds. Referenced Agents
 remain visible and the API returns conflict rather than deleting Threads, Automations, or Run
 snapshots. Reversible Agent enable/disable actions use neutral styling; the detail action is labeled
-“删除”, and only that permanent action uses destructive styling. MCP archive remains independent.
+“删除”, and only that permanent action uses destructive styling. Project MCP details follow the
+same reversible enable/disable wording for assets with a current Published version and do not
+show archive as a primary action. A project-owned MCP with `shared_assets.edit` exposes permanent
+deletion only from the detail danger zone, using the five-second confirmation pattern; System MCP
+items never expose deletion. A conflict keeps the MCP visible when an Agent or historical Run
+snapshot still references it.
 
 Global `/admin/assets` Agent, Skill, and MCP pages render the packaged PostgreSQL catalog as
 read-only governance metadata. They must not expose definition create/edit, new-version,
@@ -347,26 +370,112 @@ and a Skill version with no declared requirements shows an explanatory empty sta
 secret editor.
 
 Project MCP authoring exposes only `http` and `sse`. The URL is required and described as a
-Worker-reachable, operator-approved exact HTTPS endpoint; project `stdio` and
+Worker-reachable HTTP or HTTPS endpoint whose host is exactly `localhost` or a canonical IPv4 or
+bracketed IPv6 literal. Ordinary DNS hostnames are rejected and never resolved, avoiding a
+validation/connection DNS TOCTOU boundary. Exact `localhost` is matched case-insensitively and
+deterministically normalized to `127.0.0.1`; IPv6 loopback must be written explicitly as `[::1]`.
+Every IP must belong to an
+administrator-configured CIDR range, whose defaults cover common local and private networks.
+CIDR policy is platform configuration: the form neither asks the user to select a network nor
+tries to infer membership, and the backend remains authoritative. Embedded credentials, query
+parameters, and fragments are rejected. Header and query Credentials travel in plaintext over
+HTTP, so HTTP is only for trusted private networks and untrusted links must use HTTPS. Project `stdio` and
 `streamable_http` are never offered for new versions. Literal env/header and OAuth editors are
-not exposed; authentication is configured through header Credential slots. Historical
+not exposed; authentication is configured through encrypted Credential slots targeting either
+`headers` or `query`. New forms default to `http`, label it as Streamable HTTP, and persist only
+the secret-free base URL. Pasting a query strips it immediately and explains that query values
+belong in a Credential; create failures distinguish an operator CIDR-policy/startup-restart issue
+from approval failures where the Credential group and field names do not exactly match the slot.
+Project Credential create/replace dialogs accept `query` fields without caching or returning
+their values. Historical
 unsupported versions remain readable with an explicit blocked reason; Project MCP history
-exposes only the remote HTTPS origin, never a persisted path or query. Publish, binding, and
+exposes only the remote HTTP(S) origin, never a persisted path or query. Publish, binding, and
 Agent dependency selection stay disabled. The backend policy remains authoritative, and
 mutation failures stay visible in the active dialog without clearing the user's safe inputs.
+The dedicated
+`GET /api/projects/{project_id}/mcp-servers/{asset_id}/configured` authoring query is the only
+exception to origin-only presentation: it requires edit authority, returns the safe current or
+actionable pending configuration with its complete validated IP-literal path, and still never
+returns userinfo, query parameters, fragments, or Credential values. Edit UI must wait for this
+exact account/project/asset-scoped query and must not fall back to a history projection.
+Initial project MCP creation is one “添加 MCP” dialog and one configured-create mutation, never
+a bare asset create followed by a separate revision create/publish request. The base form shows
+name, slug, description, transport, and URL, followed by explicit `headers`, `query`, or no-auth
+choices. For an authenticated MCP, the form accepts field names only and shows only active project
+Credentials whose current payload schema exactly matches that group and ordered field list; an
+authorized Admin may create a fixed-schema Credential through the imperative secret-write API.
+That contextual create flow hides the generic type field and fixes `credential_type` to
+`mcp_auth`; generic Credential-management create surfaces keep the editable type field. Existing
+MCP Credential eligibility remains scope/status/current-schema based and must not filter by type.
+`mcp_auth` is display/classification metadata, not an approval or runtime authorization boundary.
+Configured create and edit still persist only the secret-free MCP definition. Editing reuses the
+same two-column form, authentication choices, compatible-Credential selector, and contextual
+Credential creation flow as initial creation. No-auth save publishes immediately. When an Admin
+with `mcp.credentials.approve` selects a matching Credential, the same save action follows the
+configured create or PUT with approval automatically; approval failure keeps the pending version
+and retries approval only, never repeats the configured mutation. An Editor without that capability
+submits the pending version for Admin handoff and cannot bypass approval. This approval state is an
+internal authorization boundary only: project MCP UI describes it as Credential binding, renders
+`pending_approval` as “凭据未绑定 · 尚未生效”, and exposes no approval prompt, status, or separate
+“批准并发布配置” action. Selection waits for the invalidated catalog to return
+the authoritative `ProjectAssetItem` before opening details and never fabricates capabilities or
+bindings from the aggregate response. The dedicated configured PUT atomically creates the next
+internal revision and advances it directly to Published or Pending Approval; it must never leave a
+user-inaccessible Draft.
+
+All MCP surfaces present one logical configuration. They render no history selector, revision
+number, rollback target, or user-facing version terminology; project, admin-project, and system
+catalog details select only the safe current or actionable pending configuration and fail closed
+when the exact pointer cannot be confirmed. System MCP binding has no revision picker: its
+`sync-current` mutation resolves and locks the current Published revision on the server while the
+persisted binding and Run snapshots continue to pin the exact internal revision. System MCP
+binding controls are list-only like System Skill: the row switch enables the server-authoritative
+current configuration or disables the existing binding, and an enabled stale binding exposes one
+compact inline update action. The detail sheet keeps “当前配置”“项目使用”“最近更新” in one
+three-column summary row but never exposes binding actions. A project-owned MCP detail header does
+not repeat a “项目自建” badge. Its summary renders current configuration, recent update, and the
+lifecycle badge in one desktop row; the action row contains only actions. The connection summary
+renders transport, timeout, and URL in one desktop row with a wider URL column. MCP details do not
+render Credential slots or grant state; Credential selection and creation remain confined to
+configured create/edit flows. System-owned MCP details retain the “系统提供” source badge. Internal
+API/type names remain version-based. JSON import is intentionally absent for now.
 This restriction is scope-specific: packaged System MCP retains the runtime-supported `stdio`,
 `sse`, and `http` transports plus their existing env/header/OAuth credential capabilities;
 only transports or definitions that the private runtime cannot execute are blocked.
+Published MCP details load the service-tool inventory through a separate project/account/asset/
+version query. The table shows original provider tool names and plain-text descriptions from the
+last Worker discovery, never endpoint, schema, routing, Credential, or raw error data. Drafts do
+not query it. The UI distinguishes initial loading, request failure with retry, never discovered,
+testing, ready empty, degraded with last-known tools, failed, and stale after version or
+Credential-grant changes. Publishing a project configuration automatically admits one Worker
+discovery, including after Credential approval. While it is queued or running, the exact inventory
+query polls every two seconds; polling stops at a terminal status. Editable and executable project
+MCP details expose “Test service/Retest”, which submits another discovery Job and refreshes only
+that exact inventory. System MCP and users missing either capability do not see the action. Opening
+the sheet only reads/polls Gateway state and never makes the browser contact MCP. The inventory
+remains display-only and cannot be used to infer runtime health or skip Worker discovery.
 Agent cards expose the project default as read-only state to project members; only a member with
 `shared_assets.manage_bindings` may set an active, published, executable project Agent as the
 default or restore Main. Ordinary new-conversation entry points and Builder continuation share
 one project-new-chat path: they omit explicit Agent fields so Gateway resolves the current
 default atomically. Agent-card chat remains an explicit override, and a configured but invalid
 default fails closed rather than silently switching to Main. Agent cards, the Agent selector,
-project-new-chat, Connections, and Automation creation/resume/manual-run all use the same
-fail-closed MCP dependency assessment. When no project default is configured, Main re-reads the
-exact published dependency versions on every start and enables or moves the required System
-bindings before creating the Thread; an existing Main binding never bypasses that recheck.
+project-new-chat, Connections, and Automation creation/resume/manual-run use the same fail-closed
+MCP dependency assessment for project and ordinary System Agents. Main is the one exception: it is
+a project-scoped orchestrator, remains selectable without a project Agent binding, and is never
+offered through the System-Agent binding action. The browser must not read Main's static
+Skill/MCP references, enable or move bindings, or fan out dependency requests before creating a
+Thread, Connection, Automation, or group binding. Gateway resolves Main's effective current-project
+System and project-owned Agent/Skill/MCP closure and the Run freezes exact versions; assets from
+another project are never eligible. An ordinary project or System Agent continues to use only the
+exact Skill/MCP versions referenced by its selected version.
+
+Composer slash-Skill suggestions follow the Thread Agent. Main shows every effective Skill in the
+entered project. An ordinary project or System Agent shows only Skills referenced by its selected
+Agent version. This runtime catalog is account+project scoped and fails closed while the Agent
+version is unresolved. Historical human-message rendering intentionally keeps the broader visible
+project catalog so an old `/skill` message does not degrade merely because the current Agent or
+version changed.
 
 ## Automation
 
@@ -442,7 +551,12 @@ Human-input replies are ordinary human messages with `hide_from_ui: true` and th
 response in the fourth `sendMessage(..., options)` argument under
 `options.additionalKwargs`. The normal composer remains available while a request is open; a
 visible ordinary HumanMessage closes only the latest unanswered request. An open request still
-blocks history-rewriting edit-and-rerun.
+blocks history-rewriting edit-and-rerun. Gateway treats visibility as server-owned and restores
+the hidden flag only after the response exactly matches the latest open `ask_clarification`
+request. The transcript also applies the same request/source/option/canonical-text checks when
+hiding legacy responses persisted before that server promotion existed. Answered cards are
+read-only disclosures: collapsed by default, but expandable to review the original request,
+options, and submitted value.
 
 Edit-and-rerun is limited to the latest complete user turn. Its prepare request, optimistic mask,
 query invalidation, abort handling, and stream submission stay under the active

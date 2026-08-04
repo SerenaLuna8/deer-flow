@@ -39,7 +39,10 @@ class BindingCodeChannelConnectionConfig(BaseModel):
 
 
 class ChannelConnectionsConfig(BaseModel):
-    """Top-level provider availability for project connection APIs."""
+    """Legacy deployment-config provider availability.
+
+    These flags do not gate database-backed project channel instances.
+    """
 
     enabled: bool = False
     slack: SlackChannelConnectionConfig = Field(default_factory=SlackChannelConnectionConfig)

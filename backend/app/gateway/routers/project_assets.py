@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import fields as dataclass_fields
 from dataclasses import is_dataclass
 from datetime import datetime
+from ipaddress import ip_address
 from typing import Annotated, Any, Literal, NoReturn
 from urllib.parse import urlsplit
 
@@ -68,7 +69,8 @@ from app.shared_assets.skill_service import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
 )
-from deerflow.mcp_definition_policy import ExactMcpEndpointPolicy
+from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
+from deerflow.mcp_endpoint_policy import validate_remote_mcp_endpoint_syntax
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -230,6 +232,14 @@ class DisableSystemBindingRequest(_StrictModel):
     expected_binding_version: int = Field(ge=1)
 
 
+class SyncCurrentSystemMcpBindingRequest(_StrictModel):
+    expected_binding_version: int | None = Field(
+        default=None,
+        ge=1,
+        strict=True,
+    )
+
+
 class BindingResponse(_StrictModel):
     project_id: uuid.UUID
     kind: AssetKind
@@ -322,6 +332,23 @@ class McpVersionRequest(_StrictModel):
     timeout_seconds: int = 30
     credential_slots: list[McpSlotRequest] = Field(default_factory=list)
     expected_asset_version: int = Field(ge=1)
+
+
+class McpConfiguredRequest(_StrictModel):
+    slug: str
+    display_name: str
+    description: str = ""
+    transport: Literal["sse", "http"] = "http"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    oauth: dict[str, Any] = Field(default_factory=dict)
+    routing: dict[str, Any] = Field(default_factory=dict)
+    tool_overrides: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = 30
+    credential_slots: list[McpSlotRequest] = Field(default_factory=list)
 
 
 class McpApproveRequest(_StrictModel):
@@ -564,6 +591,12 @@ class McpVersionResponse(_StrictModel):
     request_id: str
 
 
+class McpConfiguredResponse(_StrictModel):
+    item: AssetItemResponse
+    version: McpVersionItemResponse
+    request_id: str
+
+
 class CredentialVersionResponse(_StrictModel):
     data: CredentialVersionItemResponse
     request_id: str
@@ -581,6 +614,59 @@ class SkillVersionHistoryResponse(_StrictModel):
 
 class McpVersionHistoryResponse(_StrictModel):
     data: list[McpVersionItemResponse]
+    request_id: str
+
+
+class McpToolResponse(_StrictModel):
+    name: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_-]+$")
+    description: str = Field(max_length=4096)
+
+
+class McpToolInventoryItemResponse(_StrictModel):
+    status: Literal[
+        "never_discovered",
+        "testing",
+        "ready",
+        "degraded",
+        "failed",
+        "stale",
+    ]
+    tools: list[McpToolResponse] = Field(max_length=128)
+    last_attempt_at: datetime | None
+    last_success_at: datetime | None
+    error_code: (
+        Literal[
+            "mcp_discovery_unavailable",
+            "mcp_catalog_invalid",
+        ]
+        | None
+    )
+
+
+class McpToolInventoryResponse(_StrictModel):
+    data: McpToolInventoryItemResponse
+    request_id: str
+
+
+class McpToolDiscoveryAttemptItemResponse(_StrictModel):
+    id: uuid.UUID
+    mcp_server_id: uuid.UUID
+    mcp_server_version_id: uuid.UUID
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    requested_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_code: (
+        Literal[
+            "mcp_discovery_unavailable",
+            "mcp_catalog_invalid",
+        ]
+        | None
+    )
+
+
+class McpToolDiscoveryAttemptResponse(_StrictModel):
+    data: McpToolDiscoveryAttemptItemResponse
     request_id: str
 
 
@@ -703,7 +789,7 @@ def get_skill_service(request: Request) -> SkillService:
 
 def get_mcp_service(request: Request) -> McpService:
     endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
-    if not isinstance(endpoint_policy, ExactMcpEndpointPolicy):
+    if not isinstance(endpoint_policy, NetworkMcpEndpointPolicy):
         request_id = get_current_trace_id() or generate_trace_id()
         raise_asset_domain(AssetStorageUnavailable(request_id))
     return McpService(
@@ -874,6 +960,20 @@ async def _version_call(actor, operation, response_model: type[_StrictModel]):
         raise_asset_domain(exc)
 
 
+def _configured_mcp_response(result, request_id: str) -> McpConfiguredResponse:
+    return McpConfiguredResponse(
+        item=_asset_item(result.asset),
+        version=McpVersionItemResponse.model_validate(
+            _response_data(
+                result.version,
+                redact_project_mcp=True,
+                editable_project_mcp=True,
+            )
+        ),
+        request_id=request_id,
+    )
+
+
 async def _version_history(actor, operation, response_model: type[_StrictModel]):
     try:
         versions = await operation()
@@ -904,7 +1004,7 @@ def _is_project_asset_actor(actor: object) -> bool:
 
 
 def _redacted_project_mcp_url(value: object) -> str | None:
-    """Expose only a non-secret HTTPS origin from historical Project rows."""
+    """Expose only a non-secret HTTP(S) origin from historical Project rows."""
 
     if not isinstance(value, str):
         return None
@@ -914,18 +1014,43 @@ def _redacted_project_mcp_url(value: object) -> str | None:
         port = parsed.port
     except ValueError:
         return None
-    if parsed.scheme.casefold() != "https" or not hostname or parsed.username is not None or parsed.password is not None:
+    scheme = parsed.scheme.casefold()
+    if scheme not in {"http", "https"} or not hostname or "*" in hostname or parsed.username is not None or parsed.password is not None or "#" in value or parsed.netloc.endswith(":") or (port is not None and not 1 <= port <= 65535):
         return None
     authority = f"[{hostname}]" if ":" in hostname else hostname
     if port is not None:
         authority = f"{authority}:{port}"
-    return f"https://{authority}"
+    return f"{scheme}://{authority}"
+
+
+def _editable_project_mcp_url(value: object) -> str | None:
+    """Expose a path only for a structurally safe IP-literal endpoint.
+
+    The service revalidates the selected current definition against the
+    process-frozen CIDR policy before this response projection is reached.
+    Unsafe or non-current-compatible values fall back to the historical
+    origin-only representation.
+    """
+
+    origin = _redacted_project_mcp_url(value)
+    if origin is None or not isinstance(value, str):
+        return origin
+    try:
+        endpoint = validate_remote_mcp_endpoint_syntax(value)
+        hostname = urlsplit(endpoint).hostname
+        if hostname is None:
+            return origin
+        ip_address(hostname)
+    except ValueError:
+        return origin
+    return endpoint
 
 
 def _response_data(
     value: object,
     *,
     redact_project_mcp: bool = False,
+    editable_project_mcp: bool = False,
 ) -> object:
     """Copy immutable domain views into ordinary response-safe containers."""
     if is_dataclass(value) and not isinstance(value, type):
@@ -933,6 +1058,7 @@ def _response_data(
             field.name: _response_data(
                 getattr(value, field.name),
                 redact_project_mcp=redact_project_mcp,
+                editable_project_mcp=editable_project_mcp,
             )
             for field in dataclass_fields(value)
         }
@@ -947,7 +1073,8 @@ def _response_data(
             if redact_project_mcp:
                 response["command"] = None
                 response["args"] = []
-                response["url"] = _redacted_project_mcp_url(getattr(value, "url", None))
+                project_url = getattr(value, "url", None)
+                response["url"] = _editable_project_mcp_url(project_url) if editable_project_mcp else _redacted_project_mcp_url(project_url)
                 response["oauth"] = {}
                 response["routing"] = {}
                 response["tool_overrides"] = {}
@@ -957,6 +1084,7 @@ def _response_data(
             str(key): _response_data(
                 item,
                 redact_project_mcp=redact_project_mcp,
+                editable_project_mcp=editable_project_mcp,
             )
             for key, item in value.items()
         }
@@ -965,6 +1093,7 @@ def _response_data(
             _response_data(
                 item,
                 redact_project_mcp=redact_project_mcp,
+                editable_project_mcp=editable_project_mcp,
             )
             for item in value
         ]
@@ -1020,7 +1149,7 @@ async def _read_skill_archive_upload(
     return bytes(payload), filename
 
 
-def _mcp_definition(body: McpVersionRequest) -> McpDefinition:
+def _mcp_definition(body: McpVersionRequest | McpConfiguredRequest) -> McpDefinition:
     return McpDefinition(
         description=body.description,
         transport=body.transport,
@@ -1133,6 +1262,17 @@ def register_asset_routes(
 
     async def create_mcp_version(asset_id: uuid.UUID, body: McpVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _version_call(actor, lambda: service.create_version(actor, asset_id, _mcp_definition(body), expected_asset_version=body.expected_asset_version), McpVersionResponse)
+
+    async def delete_mcp(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
+        try:
+            await service.delete(
+                actor,
+                asset_id,
+                expected_asset_version=body.expected_asset_version,
+            )
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     async def get_mcp_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), McpVersionHistoryResponse)
@@ -1262,10 +1402,19 @@ def register_asset_routes(
             status_code=status.HTTP_204_NO_CONTENT,
             name="delete_project_skill",
         )
+        router.add_api_route(
+            "/mcp-servers/{asset_id}",
+            delete_mcp,
+            methods=["DELETE"],
+            response_model=None,
+            status_code=status.HTTP_204_NO_CONTENT,
+            name="delete_project_mcp",
+        )
     if include_shared_asset_mutations:
         add_status_route("agents", "activate", get_agent_service)
         add_status_route("agents", "suspend", get_agent_service)
         add_status_route("mcp-servers", "archive", get_mcp_service)
+        add_status_route("mcp-servers", "activate", get_mcp_service)
         add_status_route("mcp-servers", "suspend", get_mcp_service)
         add_status_route("skills", "activate", get_skill_service)
         add_status_route("skills", "suspend", get_skill_service)
@@ -1506,6 +1655,67 @@ async def list_project_mcp_servers(
     return await _list_assets(context, AssetKind.MCP, service, binding_service)
 
 
+@project_router.post(
+    "/mcp-servers/configured",
+    response_model=McpConfiguredResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_project_configured_mcp(
+    body: McpConfiguredRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    try:
+        result = await service.create_project_configured(
+            context,
+            CreateMcpServer(body.slug, body.display_name),
+            _mcp_definition(body),
+        )
+        return _configured_mcp_response(result, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.put(
+    "/mcp-servers/{asset_id}/configured",
+    response_model=McpConfiguredResponse,
+)
+async def update_project_configured_mcp(
+    asset_id: uuid.UUID,
+    body: McpVersionRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    try:
+        result = await service.update_project_configured(
+            context,
+            asset_id,
+            _mcp_definition(body),
+            expected_asset_version=body.expected_asset_version,
+        )
+        return _configured_mcp_response(result, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.get(
+    "/mcp-servers/{asset_id}/configured",
+    response_model=McpConfiguredResponse,
+)
+async def get_project_configured_mcp(
+    asset_id: uuid.UUID,
+    response: Response,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        result = await service.get_project_configured(context, asset_id)
+        return _configured_mcp_response(result, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
 @project_router.get("/credentials", response_model=ScopedCredentialListResponse)
 async def list_project_credentials(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
@@ -1607,10 +1817,34 @@ def _register_binding_routes(segment: str, kind: AssetKind) -> None:
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
+    async def sync_current_mcp(
+        asset_id: uuid.UUID,
+        body: SyncCurrentSystemMcpBindingRequest,
+        context: Annotated[ProjectContext, Depends(project_asset_context)],
+        service: Annotated[BindingService, Depends(get_binding_service)],
+    ):
+        try:
+            view = await service.sync_current_mcp(
+                context,
+                asset_id,
+                expected_binding_version=body.expected_binding_version,
+            )
+            return _binding_response(view, context.request_id)
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+
     project_router.add_api_route(path, enable, methods=["POST"], response_model=BindingResponse, status_code=status.HTTP_201_CREATED, name=f"enable_system_{segment}_binding")
     project_router.add_api_route(f"{path}/{{asset_id}}/disable", disable, methods=["POST"], response_model=BindingResponse, name=f"disable_system_{segment}_binding")
     project_router.add_api_route(f"{path}/{{asset_id}}/upgrade", upgrade, methods=["POST"], response_model=BindingResponse, name=f"upgrade_system_{segment}_binding")
     project_router.add_api_route(f"{path}/{{asset_id}}/rollback", rollback, methods=["POST"], response_model=BindingResponse, name=f"rollback_system_{segment}_binding")
+    if kind is AssetKind.MCP:
+        project_router.add_api_route(
+            f"{path}/{{asset_id}}/sync-current",
+            sync_current_mcp,
+            methods=["POST"],
+            response_model=BindingResponse,
+            name="sync_current_system_mcp_binding",
+        )
 
 
 for _segment, _kind in _BINDING_KINDS.items():
@@ -1622,3 +1856,87 @@ register_asset_routes(
     project_asset_context,
     include_project_asset_delete=True,
 )
+
+
+@project_router.get(
+    "/mcp-servers/{asset_id}/versions/{version_id}/tools",
+    response_model=McpToolInventoryResponse,
+)
+async def get_project_mcp_tool_inventory(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    response: Response,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    try:
+        view = await service.get_tool_inventory(context, asset_id, version_id)
+        response.headers["Cache-Control"] = "private, no-store"
+        return McpToolInventoryResponse(
+            data=McpToolInventoryItemResponse.model_validate(
+                _response_data(view),
+            ),
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+def _mcp_tool_discovery_attempt_response(
+    view: object,
+    request_id: str,
+) -> McpToolDiscoveryAttemptResponse:
+    return McpToolDiscoveryAttemptResponse(
+        data=McpToolDiscoveryAttemptItemResponse(
+            id=getattr(view, "id"),
+            mcp_server_id=getattr(view, "mcp_server_id"),
+            mcp_server_version_id=getattr(view, "mcp_server_version_id"),
+            status=getattr(view, "status"),
+            requested_at=getattr(view, "requested_at"),
+            started_at=getattr(view, "started_at"),
+            completed_at=getattr(view, "completed_at"),
+            error_code=getattr(view, "error_code"),
+        ),
+        request_id=request_id,
+    )
+
+
+@project_router.post(
+    "/mcp-servers/{asset_id}/versions/{version_id}/tool-discovery",
+    response_model=McpToolDiscoveryAttemptResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_project_mcp_tool_discovery(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+):
+    try:
+        view = await service.request_tool_discovery(context, asset_id, version_id)
+        return _mcp_tool_discovery_attempt_response(view, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.get(
+    "/mcp-servers/{asset_id}/versions/{version_id}/tool-discovery",
+    response_model=McpToolDiscoveryAttemptResponse,
+)
+async def get_project_mcp_tool_discovery_attempt(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpService, Depends(get_mcp_service)],
+    attempt_id: uuid.UUID | None = None,
+):
+    try:
+        view = await service.get_tool_discovery_attempt(
+            context,
+            asset_id,
+            version_id,
+            attempt_id=attempt_id,
+        )
+        return _mcp_tool_discovery_attempt_response(view, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)

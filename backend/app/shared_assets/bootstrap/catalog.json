@@ -89,7 +89,7 @@
       "version": 1,
       "payload_path": "content/public-skills/github-deep-research-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "01ccc5ed04854abeda7be80013676f8c4c9539ab8c3d46b9a4e569a4e137fa6b"
+      "sha256": "40166480d45fa196761cd05e156bfb1d6f3e303620188de9dcaf299154ef2f58"
     },
     {
       "source_key": "builtin:skill:newsletter-generation",
@@ -109,7 +109,7 @@
       "version": 1,
       "payload_path": "content/public-skills/skill-creator-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "0e57b341197334cc303297ea02397774111ba778f6bd778eb8e3d9bf04326efa"
+      "sha256": "068793e0cf7488504c2d8ac9a3386d7fc8b6fd8ab431e2229a6846b38b16726f"
     },
     {
       "source_key": "builtin:skill:surprise-me",
@@ -129,7 +129,7 @@
       "version": 1,
       "payload_path": "content/public-skills/systematic-literature-review-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "4190ad7d4db02836a1d38e6383dbe3d65632ff2b9867a0a8b558d776f1223c87"
+      "sha256": "cbc9978a0723c1c2a57303543818e2efbe9981d3db1eb780a699868851d567df"
     },
     {
       "source_key": "builtin:skill:web-design-guidelines",
@@ -145,10 +145,10 @@
       "source_key": "builtin:mcp:deerflow-docs",
       "kind": "mcp",
       "slug": "deerflow-docs",
-      "display_name": "DeerFlow Docs",
+      "display_name": "ActWeave Docs",
       "version": 1,
       "payload_path": "content/deerflow-docs-v1.mcp.json",
-      "sha256": "8b5d24e0e23150cf43ad66d40d46751b3492acc95d6e112c1fa7564e3fa37deb"
+      "sha256": "6be8c3d123effac0f9fac447901f9171516b57c6d40e7b5f0694254b1885fcda"
     },
     {
       "source_key": "builtin:agent:project-assistant",
@@ -157,7 +157,7 @@
       "display_name": "Main",
       "version": 1,
       "payload_path": "content/project-assistant-v1.agent.json",
-      "sha256": "773217fba6f7a3182b2cac920ef310ed08422fc0a6b79e3b4eae70d843ac1196"
+      "sha256": "a846b076ff31718cfc4c17a9d40927b14762c724b91371cf9cf41e35f92a823f"
     }
   ]
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# serve.sh — Unified DeerFlow service launcher
+# serve.sh — Unified ActWeave service launcher
 #
 # Usage:
 #   ./scripts/serve.sh [--dev|--prod] [--daemon] [--stop|--restart]
@@ -195,7 +195,7 @@ _is_port_listening() {
     local port=$1 status
 
     if command -v lsof >/dev/null 2>&1; then
-        # All local DeerFlow services bind an IPv4 socket. An unrelated
+        # All local ActWeave services bind an IPv4 socket. An unrelated
         # IPv6-only listener (for example [::1]:8001) does not conflict with
         # that socket and must not block startup.
         if lsof -nP -a -i4TCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
@@ -336,7 +336,7 @@ else
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
-# so pin DeerFlow-owned state to the expected backend runtime directory and
+# so pin ActWeave-owned state to the expected backend runtime directory and
 # create it before uvicorn builds its reload exclude filter.
 if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
     export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
@@ -390,7 +390,7 @@ RUNTIME_ROOT="$REPO_ROOT"
 LOG_ROOT="$RUNTIME_ROOT/logs"
 
 if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    echo "✗ No DeerFlow config file found."
+    echo "✗ No ActWeave config file found."
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
 fi
@@ -437,7 +437,7 @@ SCHEDULER_ENABLED="$(
     cd backend && PYTHONPATH=. uv run python -c \
         "from deerflow.config import get_app_config; print('true' if get_app_config().scheduler.enabled else 'false')"
 )" || {
-    echo "✗ Unable to resolve scheduler.enabled from DeerFlow config."
+    echo "✗ Unable to resolve scheduler.enabled from ActWeave config."
     exit 1
 }
 
@@ -445,7 +445,7 @@ SCHEDULER_ENABLED="$(
 
 echo ""
 echo "=========================================="
-echo "  Starting DeerFlow"
+echo "  Starting ActWeave"
 echo "=========================================="
 echo ""
 echo "  Mode: $MODE_LABEL"
@@ -596,7 +596,7 @@ run_service "Nginx" \
 
 echo ""
 echo "=========================================="
-echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
+echo "  ✓ ActWeave is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
 echo "  🌐 http://localhost:2026"

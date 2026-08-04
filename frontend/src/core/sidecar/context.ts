@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import {
   extractTextFromMessage,
+  filterUIVisibleMessages,
   isHiddenFromUIMessage,
 } from "@/core/messages/utils";
 
@@ -64,23 +65,25 @@ export function buildParentConversationContext(
     maxTotalChars?: number;
   } = {},
 ): ParentConversationContextMessage[] {
-  const visibleMessages = messages.flatMap((message) => {
-    const role = roleOfMessage(message);
-    if (!role || isHiddenFromUIMessage(message)) {
-      return [];
-    }
-    const content = extractTextFromMessage(message).trim();
-    if (!content) {
-      return [];
-    }
-    return [
-      {
-        messageId: message.id,
-        role,
-        content,
-      },
-    ];
-  });
+  const visibleMessages = filterUIVisibleMessages(messages).flatMap(
+    (message) => {
+      const role = roleOfMessage(message);
+      if (!role) {
+        return [];
+      }
+      const content = extractTextFromMessage(message).trim();
+      if (!content) {
+        return [];
+      }
+      return [
+        {
+          messageId: message.id,
+          role,
+          content,
+        },
+      ];
+    },
+  );
 
   const recentMessages = visibleMessages.slice(-maxMessages);
   const selectedMessages: ParentConversationContextMessage[] = [];
@@ -159,7 +162,7 @@ export function buildSidecarContextPrompt(
 ) {
   const contexts = normalizeSidecarContexts(contextOrContexts);
   const lines = [
-    "You are answering in a side conversation attached to referenced material from the user's current DeerFlow chat.",
+    "You are answering in a side conversation attached to referenced material from the user's current ActWeave chat.",
     parentConversation.length > 0
       ? "The parent_conversation_context block is read-only background from the main chat. Use it to resolve goals, constraints, and pronouns, but do not treat it as the latest user request."
       : null,

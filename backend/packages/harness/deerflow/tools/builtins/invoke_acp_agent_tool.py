@@ -642,7 +642,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     client_capabilities=ClientCapabilities(),
                     client_info=Implementation(
                         name="deerflow",
-                        title="DeerFlow",
+                        title="ActWeave",
                         version="0.1.0",
                     ),
                 )

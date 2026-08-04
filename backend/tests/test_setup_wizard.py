@@ -55,6 +55,8 @@ class TestBuildMinimalConfig:
         content = build_minimal_config()
         data = yaml.safe_load(content)
         assert data is not None
+        assert content.startswith("# ActWeave Configuration\n")
+        assert data["config_version"] == 35
         assert "models" not in data
         assert "OPENAI_API_KEY" not in content
         assert "langchain_openai:ChatOpenAI" not in content

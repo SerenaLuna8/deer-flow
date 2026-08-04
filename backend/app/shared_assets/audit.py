@@ -44,6 +44,8 @@ _ACTIONS: dict[str, AuditAction] = {
     "mcp.publish": AuditAction.ASSET_PUBLISHED,
     "mcp.archive": AuditAction.ASSET_DEPRECATED,
     "mcp.suspend": AuditAction.ASSET_DEPRECATED,
+    "mcp.activate": AuditAction.ASSET_UPDATED,
+    "mcp.delete": AuditAction.ASSET_DELETED,
     "credential.create": AuditAction.ASSET_CREDENTIAL_CREATED,
     "credential.replace": AuditAction.ASSET_CREDENTIAL_REPLACED,
     "credential.revoke": AuditAction.ASSET_CREDENTIAL_REVOKED,
@@ -52,6 +54,7 @@ _ACTIONS: dict[str, AuditAction] = {
     "binding.enable": AuditAction.ASSET_BOUND,
     "binding.upgrade": AuditAction.ASSET_BOUND,
     "binding.rollback": AuditAction.ASSET_BOUND,
+    "binding.sync_current": AuditAction.ASSET_BOUND,
     "binding.disable": AuditAction.ASSET_UNBOUND,
 }
 

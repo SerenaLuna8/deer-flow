@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeerFlow Interactive Setup Wizard.
+"""ActWeave Interactive Setup Wizard.
 
 Usage:
     uv run python scripts/setup_wizard.py
@@ -41,8 +41,9 @@ def main() -> int:
         env_path = project_root / ".env"
 
         print()
-        print(bold("Welcome to DeerFlow Setup!"))
-        print("This wizard will help you configure DeerFlow in a few minutes.")
+        print(bold("Welcome to ActWeave Setup!"))
+        print("Weave intelligence into action.")
+        print("This wizard will help you configure ActWeave in a few minutes.")
         print()
 
         if config_path.exists():
@@ -144,7 +145,7 @@ def main() -> int:
         print("Next steps:")
         print(f"  {cyan('make install')}    # Install dependencies (first time only)")
         print(f"  {cyan('make setup-db')}   # Initialize a new empty PostgreSQL database")
-        print(f"  {cyan('make dev')}        # Start DeerFlow")
+        print(f"  {cyan('make dev')}        # Start ActWeave")
         print(f"  Sign in as a system administrator, then open {cyan(model_setup.admin_path)} to configure and activate a model.")
         print()
         print(f"Run {cyan('make doctor')} to verify your setup at any time.")

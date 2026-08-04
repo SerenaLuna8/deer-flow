@@ -26,6 +26,7 @@ from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.config import get_app_config
+from deerflow.config.agents_config import AgentModelSettings
 from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.error_codes import (
     SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR_CODE,
@@ -495,6 +496,7 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         runtime_skills: tuple[Skill, ...] = (),
         agent_prompt_bundle: object | None = None,
+        agent_model_settings: AgentModelSettings | None = None,
         skill_scoped_secrets: Mapping[
             str,
             Mapping[str, str],
@@ -536,13 +538,16 @@ class SubagentExecutor:
                 authorization checks.
             run_read_only_mounts: Exact server-issued read-only mounts admitted
                 for the parent Run.
-            deerflow_trace_id: DeerFlow request-level correlation id propagated
+            deerflow_trace_id: ActWeave request-level correlation id propagated
                 from the parent run for Langfuse metadata correlation.
             runtime_skills: Exact immutable Skill objects admitted for the
                 parent Run.
             agent_prompt_bundle: Exact immutable Agent instruction fields
                 admitted for the parent Run. The object is never logged or
                 copied into trace metadata.
+            agent_model_settings: Exact immutable model settings admitted for
+                a dynamic runtime Agent. Static subagents retain their current
+                fixed non-thinking behavior when this is ``None``.
             skill_scoped_secrets: Exact Worker-admitted Skill-path environment
                 bindings. Values remain only in runtime context and are copied
                 so parent and child execution cannot mutate one another.
@@ -583,6 +588,12 @@ class SubagentExecutor:
         self.deerflow_trace_id = deerflow_trace_id
         self._runtime_skills = tuple(runtime_skills)
         self._agent_prompt_bundle = agent_prompt_bundle
+        if agent_model_settings is not None and not isinstance(
+            agent_model_settings,
+            AgentModelSettings,
+        ):
+            raise TypeError("agent_model_settings must be AgentModelSettings")
+        self._agent_model_settings = agent_model_settings
         self._skill_scoped_secrets = {path: dict(values) for path, values in (skill_scoped_secrets or {}).items()}
         self._skill_secret_provider = skill_secret_provider
 
@@ -614,7 +625,20 @@ class SubagentExecutor:
         self.app_config = app_config
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        model_kwargs: dict[str, object] = {
+            "name": self.model_name,
+            "thinking_enabled": False,
+            "app_config": app_config,
+            "attach_tracing": False,
+        }
+        if self._agent_model_settings is not None:
+            model_kwargs["thinking_enabled"] = bool(self._agent_model_settings.thinking_enabled)
+            if self._agent_model_settings.reasoning_effort is not None:
+                model_kwargs["reasoning_effort"] = self._agent_model_settings.reasoning_effort
+            sampling_overrides = self._agent_model_settings.sampling_overrides()
+            if sampling_overrides:
+                model_kwargs["model_overrides"] = sampling_overrides
+        model = create_chat_model(**model_kwargs)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 

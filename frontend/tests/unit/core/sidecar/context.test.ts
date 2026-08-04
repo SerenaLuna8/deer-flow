@@ -116,6 +116,58 @@ test("builds compact parent conversation context from visible messages", () => {
   ]);
 });
 
+test("omits a verified legacy clarification control reply from parent context", () => {
+  const parentContext = buildParentConversationContext([
+    {
+      type: "tool",
+      id: "clarification-request",
+      name: "ask_clarification",
+      tool_call_id: "call-legacy",
+      content: "fallback",
+      artifact: {
+        human_input: {
+          version: 1,
+          kind: "human_input_request",
+          source: "ask_clarification",
+          request_id: "clarification:call-legacy",
+          tool_call_id: "call-legacy",
+          question: "Which service should be used?",
+          input_mode: "free_text",
+        },
+      },
+    },
+    {
+      type: "human",
+      id: "legacy-response",
+      content:
+        'For your clarification "Which service should be used?", my answer is: Use MCP',
+      additional_kwargs: {
+        human_input_response: {
+          version: 1,
+          kind: "human_input_response",
+          source: "ask_clarification",
+          request_id: "clarification:call-legacy",
+          response_kind: "text",
+          value: "Use MCP",
+        },
+      },
+    },
+    {
+      type: "ai",
+      id: "public-answer",
+      content: "I will query it through MCP.",
+    },
+  ] as never);
+
+  expect(parentContext).toEqual([
+    {
+      role: "assistant",
+      messageId: "public-answer",
+      content: "I will query it through MCP.",
+    },
+  ]);
+});
+
 test("renders parent conversation as read-only background in sidecar prompt", () => {
   const prompt = buildSidecarContextPrompt(
     [

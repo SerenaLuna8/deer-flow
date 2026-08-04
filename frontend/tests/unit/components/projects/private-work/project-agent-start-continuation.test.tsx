@@ -44,18 +44,7 @@ const catalog: ProjectAssetList = {
       created_at: "2026-07-15T00:00:00Z",
       updated_at: "2026-07-15T00:00:00Z",
       capabilities: ["shared_assets.read", "shared_assets.execute"],
-      binding: {
-        project_id: "11111111-1111-4111-8111-111111111111",
-        kind: "agent",
-        asset_id: "33333333-3333-4333-8333-333333333333",
-        version_id: VERSION_ID,
-        enabled: true,
-        version: 1,
-        created_by_user_id: "user-1",
-        updated_by_user_id: "user-1",
-        created_at: "2026-07-15T00:00:00Z",
-        updated_at: "2026-07-15T00:00:00Z",
-      },
+      binding: null,
     },
   ],
   request_id: "request-agents",
@@ -144,12 +133,6 @@ describe("project Agent start-chat continuation", () => {
 
   test("creates the first Chat and consumes start_chat with replace navigation", async () => {
     const calls: unknown[] = [];
-    const agent = projectStartChatCandidate(catalog, projectDefault, {
-      requested: true,
-      canCreate: true,
-      readinessStatus: "ready",
-    })!;
-
     await consumeProjectStartChatIntent({
       scope: {
         accountId: "99999999-9999-4999-8999-999999999999",
@@ -157,10 +140,6 @@ describe("project Agent start-chat continuation", () => {
       },
       projectSlug: "alpha",
       intentId: "intent-first",
-      agent,
-      prepareAgent: async (selected) => {
-        calls.push(["prepare", selected.id]);
-      },
       createChat: async (input) => {
         calls.push(["create", Object.hasOwn(input, "agent")]);
         input.navigate("/projects/alpha/chats/first");
@@ -170,18 +149,12 @@ describe("project Agent start-chat continuation", () => {
     });
 
     expect(calls).toEqual([
-      ["prepare", agent.id],
       ["create", false],
       ["replace", "/projects/alpha/chats/first"],
     ]);
   });
 
   test("coalesces the same start_chat intent across project-shell remounts", async () => {
-    const agent = projectStartChatCandidate(catalog, projectDefault, {
-      requested: true,
-      canCreate: true,
-      readinessStatus: "ready",
-    })!;
     let releaseCreate: ((threadId: string) => void) | undefined;
     const pendingCreate = new Promise<string>((resolve) => {
       releaseCreate = resolve;
@@ -195,8 +168,6 @@ describe("project Agent start-chat continuation", () => {
       },
       projectSlug: "alpha",
       intentId: "intent-remount",
-      agent,
-      prepareAgent: async () => undefined,
       createChat: async () => {
         createCount += 1;
         return pendingCreate;

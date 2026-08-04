@@ -1016,7 +1016,7 @@ export function mergeMessages(
  * Object spread would invoke every enumerable getter immediately, and the SDK
  * tool-call getter then reads `.type` from a sparse slot and crashes the page.
  * Copying property descriptors preserves the lazy SDK surface while the three
- * fields consumed by DeerFlow use the already-normalized UI projection.
+ * fields consumed by ActWeave use the already-normalized UI projection.
  */
 export function overlayThreadProjection<T extends object>(
   thread: T,

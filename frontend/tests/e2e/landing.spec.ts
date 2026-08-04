@@ -2,42 +2,18 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-test.describe("Landing page", () => {
-  test("renders the header and hero section", async ({ page }) => {
-    await page.goto("/");
-
-    await expect(
-      page.locator("header").first().getByText("DeerFlow", { exact: true }),
-    ).toBeVisible();
-    await expect(page.locator("h1")).toHaveCount(1);
-    await expect(page.locator("h1")).toContainText("DeerFlow");
-
-    // "Get Started" call-to-action button in hero
-    await expect(
-      page.getByRole("link", { name: /get started/i }),
-    ).toBeVisible();
-  });
-
-  test("does not overflow at 320px width", async ({ page }) => {
-    const width = 320;
-    await page.setViewportSize({ width, height: 812 });
-    await page.goto("/");
-
-    await expect
-      .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
-      .toBeLessThanOrEqual(width);
-    await expect(page.locator("main").first()).toBeInViewport();
-  });
-
-  test("Get Started link navigates to workspace", async ({ page }) => {
+test.describe("Root entry", () => {
+  test("opens the authenticated workspace without rendering the landing page", async ({
+    page,
+  }) => {
     mockLangGraphAPI(page);
 
     await page.goto("/");
 
-    const getStarted = page.getByRole("link", { name: /get started/i });
-    await getStarted.click();
-
-    await page.waitForURL("**/workspace");
     await expect(page).toHaveURL(/\/workspace$/);
+    await expect(page.getByTestId("project-workbench")).toBeVisible();
+    await expect(page.getByRole("link", { name: /get started/i })).toHaveCount(
+      0,
+    );
   });
 });

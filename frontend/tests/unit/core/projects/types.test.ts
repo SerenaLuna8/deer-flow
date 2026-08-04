@@ -98,6 +98,7 @@ describe("project contracts", () => {
       "project.enter",
       "project.pin",
       "project.members.manage",
+      "project.channels.manage",
       "shared_assets.read",
       "shared_assets.execute",
       "shared_assets.edit",

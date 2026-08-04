@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -33,8 +34,17 @@ class UserRow(Base):
     # Preserve the existing UUID-string storage used by persisted data and APIs.
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
 
-    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    # Channel guests are deliberately non-login principals and therefore have
+    # no email identity.  Every public/authenticated account remains ``human``
+    # and keeps the canonical non-null email contract.
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    principal_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="human",
+        server_default=text("'human'"),
+    )
 
     # "system_admin" | "user" — kept as plain string to avoid enum migrations
     # when new roles are introduced.
@@ -58,7 +68,32 @@ class UserRow(Base):
 
     __table_args__ = (
         CheckConstraint("system_role IN ('system_admin', 'user')", name="ck_users_system_role"),
-        Index("ix_users_email", func.lower(email), unique=True),
+        CheckConstraint(
+            "principal_type IN ('human', 'channel_guest')",
+            name="ck_users_principal_type",
+        ),
+        CheckConstraint(
+            "(oauth_provider IS NULL AND oauth_id IS NULL) OR (oauth_provider IS NOT NULL AND oauth_id IS NOT NULL)",
+            name="ck_users_oauth_identity_shape",
+        ),
+        CheckConstraint(
+            "(principal_type = 'human' AND email IS NOT NULL) OR "
+            "(principal_type = 'channel_guest' AND email IS NULL AND password_hash IS NULL "
+            "AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' "
+            "AND needs_setup IS FALSE AND token_version = 0)",
+            name="ck_users_channel_guest_identity",
+        ),
+        UniqueConstraint(
+            "id",
+            "principal_type",
+            name="uq_users_id_principal_type",
+        ),
+        Index(
+            "ix_users_email",
+            func.lower(email),
+            unique=True,
+            postgresql_where=text("email IS NOT NULL"),
+        ),
         Index(
             "idx_users_oauth_identity",
             "oauth_provider",

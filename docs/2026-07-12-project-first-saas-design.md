@@ -3,13 +3,13 @@
 - 日期：2026-07-12
 - 状态：已完成
 - 当前完成度：M1–M8 已正式完成，共 8/8（100%）
-- 代码仓库：DeerFlow 单体仓库
+- 代码仓库：ActWeave 单体仓库
 - 数据库：PostgreSQL
 - 权限边界：业务层、仓储层和数据库模型约束
 
 ## 1. 文档目的
 
-本文档是 DeerFlow 项目优先、多用户 SaaS V1 的唯一设计基线。当前实现事实以代码、PostgreSQL
+本文档是 ActWeave 项目优先、多用户 SaaS V1 的唯一设计基线。当前实现事实以代码、PostgreSQL
 `full_schema_v1` 完整快照和自动化发布门禁为准。
 
 M1–M8 已正式完成。M7 已收敛为 PostgreSQL schema 基线、project/admin API、project-scoped
@@ -37,12 +37,12 @@ V1 采用以下不可变更基线；如需改变，必须先修订本文档并�
 14. 上传和产物的权威副本存入 PostgreSQL；沙箱和本地目录只保存运行期间的临时副本。
 15. V1 不接入邮件发送服务。邀请通过一次性链接传递。
 16. 项目删除撤销窗口和成员退出后的私有数据冻结期均为 30 天。
-17. 保留现有 DeerFlow 对话、流式响应、输入区、文件侧栏、运行控制和长任务体验。
+17. 保留现有 ActWeave 对话、流式响应、输入区、文件侧栏、运行控制和长任务体验。
 18. Agent、Skill、MCP 分为系统级和项目级；系统资产仍由平台保存并通过项目绑定固定具体版本。项目 Agent 页面只展示项目自建 Agent，不展示系统 Agent；新会话固定使用当前项目已启用的系统 Main Agent。
 19. 系统 Agent、Skill 和 MCP 只由 packaged、版本化且 digest 校验的 bootstrap catalog 写入 PostgreSQL；运行时不扫描仓库或用户目录。
 20. 系统 MCP 使用系统 credential，启用该 MCP 的项目共享该 credential；项目 MCP 只能使用同项目 credential。
 21. `system_admin` 可以只读治理系统 Agent、Skill、MCP 的 catalog 元数据，管理系统 credential/grant，并 override 任意项目的共享资产及 credential/grant；系统 Agent、Skill、MCP 定义和版本只能通过 packaged bootstrap catalog 写入，不能在线创建、修改、发布、归档或停用。该平台 override 不授予成员管理或用户私有内容访问权。
-22. 数据库级数据保护和生命周期管理由部署基础设施负责；DeerFlow 只负责应用 schema 初始化与运行时读写。
+22. 数据库级数据保护和生命周期管理由部署基础设施负责；ActWeave 只负责应用 schema 初始化与运行时读写。
 23. 系统通知是账号级持久化资源。工作区顶部使用铃铛和未读角标展示；向已注册邮箱发出的项目邀请生成可操作站内通知，未注册邮箱不预建站内通知，仍通过一次性邀请链接完成兑换。
 
 ## 3. 产品目标
@@ -235,7 +235,7 @@ authenticated user
 - 完整 schema 初始化器；
 - 文件和向量数据。
 
-宿主机运行 DeerFlow 时连接 `127.0.0.1:5432`。容器内运行时使用 Docker Compose 服务名，不能使用容器自身的 `127.0.0.1`。
+宿主机运行 ActWeave 时连接 `127.0.0.1:5432`。容器内运行时使用 Docker Compose 服务名，不能使用容器自身的 `127.0.0.1`。
 
 应用启动时如果 PostgreSQL 不可用、目标数据库不存在或 schema 版本不兼容，应立即失败，不允许降级。
 

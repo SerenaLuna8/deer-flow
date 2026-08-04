@@ -86,6 +86,10 @@ from deerflow.sandbox.sandbox import (
     AuthorizationRevoked,
 )
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, get_sandbox_provider
+from deerflow.subagents.runtime_catalog import (
+    RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
+    trusted_runtime_agent_catalog,
+)
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
@@ -324,6 +328,7 @@ def _build_runtime_context(
                 "__memory_authority",
                 "memory_authority",
                 GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
+                RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
                 "stop_reason",
             }:
                 continue
@@ -354,6 +359,7 @@ class PrivateAgentRuntime(Protocol):
     skill_root: Any
     skills: tuple[Any, ...]
     prompt_bundle: Any
+    agent_catalog: Any
 
     async def materialize_skill_scoped_secrets(
         self,
@@ -424,6 +430,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         existing_context.pop("__memory_authority", None)
         existing_context.pop("memory_authority", None)
         existing_context.pop(GUARDRAIL_ATTRIBUTION_CONTEXT_KEY, None)
+        existing_context.pop(RUNTIME_AGENT_CATALOG_CONTEXT_KEY, None)
         existing_context.pop("stop_reason", None)
         if "private_scope" in runtime_context or "__run_read_only_mounts" in runtime_context:
             existing_context["thread_id"] = runtime_context["thread_id"]
@@ -455,9 +462,12 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         ):
             if key in runtime_context:
                 existing_context[key] = runtime_context[key]
+        runtime_agent_catalog = trusted_runtime_agent_catalog(runtime_context.get(RUNTIME_AGENT_CATALOG_CONTEXT_KEY))
+        if runtime_agent_catalog is not None:
+            existing_context[RUNTIME_AGENT_CATALOG_CONTEXT_KEY] = runtime_agent_catalog
         return
 
-    config["context"] = {
+    installed_context = {
         key: value
         for key, value in runtime_context.items()
         if key
@@ -465,8 +475,13 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "stop_reason",
             _SLASH_SKILL_ACTIVATION_RUN_KEY,
             VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+            RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
         }
     }
+    runtime_agent_catalog = trusted_runtime_agent_catalog(runtime_context.get(RUNTIME_AGENT_CATALOG_CONTEXT_KEY))
+    if runtime_agent_catalog is not None:
+        installed_context[RUNTIME_AGENT_CATALOG_CONTEXT_KEY] = runtime_agent_catalog
+    config["context"] = installed_context
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
@@ -944,6 +959,9 @@ async def run_agent(
                 runtime_ctx["__agent_prompt_bundle"] = prompt_bundle
             runtime_ctx["__runtime_skills"] = tuple(getattr(ctx.private_agent_runtime, "skills", ()))
             runtime_ctx["__runtime_mcp_tools"] = tuple(getattr(ctx.private_agent_runtime, "mcp_tools", ()))
+            runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(ctx.private_agent_runtime, "agent_catalog", None))
+            if runtime_agent_catalog is not None:
+                runtime_ctx[RUNTIME_AGENT_CATALOG_CONTEXT_KEY] = runtime_agent_catalog
             skill_secret_provider = getattr(
                 ctx.private_agent_runtime,
                 "materialize_skill_scoped_secrets",

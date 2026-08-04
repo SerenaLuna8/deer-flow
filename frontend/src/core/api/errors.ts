@@ -10,12 +10,19 @@
 export class GatewayApiError extends Error {
   readonly status: number;
   readonly code: string | null;
+  readonly fields: readonly string[];
 
-  constructor(status: number, code: string | null, message: string) {
+  constructor(
+    status: number,
+    code: string | null,
+    message: string,
+    fields: readonly string[] = [],
+  ) {
     super(message);
     this.name = "GatewayApiError";
     this.status = status;
     this.code = code;
+    this.fields = [...fields];
   }
 }
 
@@ -34,11 +41,23 @@ export async function throwGatewayApiError(
     body.detail !== null &&
     "code" in body.detail
   ) {
-    const detail = body.detail as { code?: unknown; message?: unknown };
+    const detail = body.detail as {
+      code?: unknown;
+      message?: unknown;
+      fields?: unknown;
+    };
+    const fields =
+      Array.isArray(detail.fields) &&
+      detail.fields.every(
+        (field): field is string => typeof field === "string" && field.length > 0,
+      )
+        ? detail.fields
+        : [];
     throw new GatewayApiError(
       response.status,
       typeof detail.code === "string" ? detail.code : null,
       typeof detail.message === "string" ? detail.message : fallback,
+      fields,
     );
   }
   throw new GatewayApiError(response.status, null, fallback);

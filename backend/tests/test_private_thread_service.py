@@ -282,7 +282,50 @@ async def test_private_thread_service_builtin_main_fallback_resolves_complete_de
         actor,
         AssetSelection(AssetKind.AGENT, main_id),
     )
-    executable_check.assert_awaited_once_with(session, context, selected)
+    executable_check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_builtin_main_is_executable_without_a_project_system_agent_binding() -> None:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.private_work.context import PrivateWorkContext
+    from app.private_work.executable_agent import require_executable_agent
+    from app.private_work.thread_repository import ThreadAgentRef
+    from app.projects.capabilities import capabilities_for
+    from app.projects.context import ProjectContext
+    from app.projects.models import ProjectRole
+
+    main_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    actor = ProjectContext(
+        user_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.RUNNER,
+        capabilities=capabilities_for(ProjectRole.RUNNER),
+        membership_version=1,
+        request_id="req-main-no-binding",
+    )
+    context = PrivateWorkContext.from_project(actor)
+    asset_result = Mock()
+    asset_result.scalar_one_or_none.return_value = SimpleNamespace(
+        id=main_id,
+        source_key="builtin:agent:project-assistant",
+        current_published_version_id=version_id,
+    )
+    version_result = Mock()
+    version_result.scalar_one_or_none.return_value = version_id
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.side_effect = [asset_result, version_result]
+
+    await require_executable_agent(
+        session,
+        context,
+        ThreadAgentRef(main_id, "system"),
+    )
+
+    assert session.execute.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -399,11 +442,14 @@ async def test_private_thread_service_configured_default_fails_closed_when_agent
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
-async def test_private_thread_service_builtin_main_fallback_fails_closed_without_binding(
+async def test_private_thread_service_builtin_main_fallback_does_not_require_binding(
     seed: M4ThreadSeed,
 ) -> None:
-    from app.private_work.errors import PrivateWorkDefaultAgentUnavailable
+    from sqlalchemy import update
+
+    from app.private_work.thread_service import _BUILTIN_MAIN_AGENT_SOURCE_KEY
     from deerflow.persistence.shared_assets import ProjectSystemAgentBindingRow
+    from deerflow.persistence.shared_assets.agent_model import AgentRow
 
     async with seed.factory() as session:
         async with session.begin():
@@ -413,14 +459,17 @@ async def test_private_thread_service_builtin_main_fallback_fails_closed_without
             )
             assert binding is not None
             binding.enabled = False
+            await session.execute(update(AgentRow).where(AgentRow.id == seed.system_agent_id).values(source_key=_BUILTIN_MAIN_AGENT_SOURCE_KEY))
 
     service, _raw, _scoped = _service(seed)
-    with pytest.raises(PrivateWorkDefaultAgentUnavailable):
-        await service.create(
-            seed.owner_a,
-            thread_id="unavailable-main-thread",
-            agent=None,
-        )
+    created = await service.create(
+        seed.owner_a,
+        thread_id="available-main-thread",
+        agent=None,
+    )
+
+    assert created.agent_asset_id == seed.system_agent_id
+    assert created.agent_scope == "system"
 
 
 class _FailingRootSaver(InMemorySaver):

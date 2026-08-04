@@ -49,7 +49,7 @@ class SchemaSetupRequired(RuntimeError):
     code = "DATABASE_SETUP_REQUIRED"
 
     def __init__(self) -> None:
-        super().__init__("DATABASE_SETUP_REQUIRED: run `make setup-db` before starting DeerFlow")
+        super().__init__("DATABASE_SETUP_REQUIRED: run `make setup-db` before starting ActWeave")
 
 
 async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:

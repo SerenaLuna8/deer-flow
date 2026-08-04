@@ -23,18 +23,29 @@ from app.private_work.asset_runtime import (
     PrivateAssetRuntime,
     PrivateSkillManifest,
 )
+from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkUnavailable
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from app.shared_assets.crypto import encrypt_credential_payload
 from app.shared_assets.keyring import CredentialKeyring
 from app.shared_assets.models import (
     AssetKind,
     AssetScope,
     ResolvedMcpSnapshot,
+    ResolvedSkillSnapshot,
+    SkillArchiveFile,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.config.app_config import (
+    AppConfig,
+    pop_current_app_config,
+    push_current_app_config,
+)
+from deerflow.config.model_config import ModelConfig
 from deerflow.mcp.definition import ExactMcpEndpointPolicy
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.skills.types import (
@@ -45,6 +56,59 @@ from deerflow.skills.types import (
 
 _TEST_PROJECT_MCP_ENDPOINT = "https://private-runtime-mcp.example.test/exact"
 _TEST_PROJECT_MCP_ENDPOINT_POLICY = ExactMcpEndpointPolicy(frozenset({_TEST_PROJECT_MCP_ENDPOINT}))
+
+
+def test_skill_tree_isolates_current_and_historical_versions_of_one_asset(
+    tmp_path: Path,
+) -> None:
+    from app.private_work.asset_runtime import _write_skill_tree
+
+    asset_id = uuid.uuid4()
+    current_version_id = uuid.uuid4()
+    historical_version_id = uuid.uuid4()
+
+    def snapshot(version_id: uuid.UUID, body: str) -> ResolvedSkillSnapshot:
+        return ResolvedSkillSnapshot(
+            kind=AssetKind.SKILL,
+            scope=AssetScope.PROJECT,
+            asset_id=asset_id,
+            version_id=version_id,
+            checksum=hashlib.sha256(body.encode()).hexdigest(),
+            catalog_generation=1,
+            dependency_version_ids=(),
+            files=(
+                SkillArchiveFile(
+                    path="SKILL.md",
+                    content=(f"---\nname: shared-skill\ndescription: exact\n---\n{body}\n").encode(),
+                    media_type="text/markdown",
+                ),
+            ),
+            secret_requirements=(),
+        )
+
+    root = tmp_path / "runtime-skills"
+    root.mkdir()
+    manifests, skills = _write_skill_tree(
+        root,
+        (
+            snapshot(current_version_id, "current"),
+            snapshot(historical_version_id, "historical"),
+        ),
+    )
+
+    assert tuple(item.relative_root for item in manifests) == (
+        asset_id.hex,
+        f".versions/{asset_id.hex}/{historical_version_id.hex}",
+    )
+    assert tuple(skill.name for skill in skills) == (
+        "shared-skill",
+        "shared-skill",
+    )
+    assert skills[0].skill_file.read_text(encoding="utf-8").endswith("current\n")
+    assert skills[1].skill_file.read_text(encoding="utf-8").endswith("historical\n")
+    assert skills[0].skill_dir not in skills[1].skill_dir.parents
+    assert skills[1].skill_dir not in skills[0].skill_dir.parents
+    assert not (skills[0].skill_dir / historical_version_id.hex).exists()
 
 
 def test_private_agent_runtime_exposes_redacted_immutable_prompt_bundle(
@@ -94,6 +158,159 @@ def test_private_agent_runtime_exposes_redacted_immutable_prompt_bundle(
             "user-prompt-sentinel",
         ):
             assert sentinel not in rendered
+
+
+@pytest.mark.anyio
+async def test_private_runtime_delegate_catalog_keeps_exact_skills_isolated(
+    tmp_path: Path,
+) -> None:
+    lead_skill_id = uuid.uuid4()
+    lead_skill_version_id = uuid.uuid4()
+    delegate_skill_id = uuid.uuid4()
+    delegate_skill_version_id = uuid.uuid4()
+
+    def runtime_skill(name: str, asset_id: uuid.UUID) -> Skill:
+        root = tmp_path / "custom" / asset_id.hex
+        root.mkdir(parents=True)
+        skill_file = root / "SKILL.md"
+        skill_file.write_text(
+            f"---\nname: {name}\ndescription: test\n---\n",
+            encoding="utf-8",
+        )
+        return Skill(
+            name=name,
+            description="test",
+            license=None,
+            skill_dir=root,
+            skill_file=skill_file,
+            relative_path=Path(asset_id.hex),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+            runtime_read_only=True,
+        )
+
+    lead_skill = runtime_skill("lead-current", lead_skill_id)
+    delegate_skill = runtime_skill("delegate-exact", delegate_skill_id)
+    lead_skill_manifest = PrivateSkillManifest(
+        asset_id=lead_skill_id,
+        version_id=lead_skill_version_id,
+        relative_root=lead_skill_id.hex,
+    )
+    delegate_skill_manifest = PrivateSkillManifest(
+        asset_id=delegate_skill_id,
+        version_id=delegate_skill_version_id,
+        relative_root=delegate_skill_id.hex,
+    )
+    lead_manifest = PrivateAgentManifest(
+        agent_asset_id=uuid.uuid4(),
+        agent_version_id=uuid.uuid4(),
+        checksum="a" * 64,
+        catalog_generation=1,
+        description="Main",
+        payload_schema_version=2,
+        agents_instructions="",
+        soul="",
+        identity="",
+        user_context="",
+        model_ref="lead-model",
+        tool_groups=("task",),
+        skills=(lead_skill_manifest,),
+        mcps=(),
+    )
+    delegate_agent_version_id = uuid.uuid4()
+    delegate_manifest = PrivateAgentManifest(
+        agent_asset_id=uuid.uuid4(),
+        agent_version_id=delegate_agent_version_id,
+        checksum="b" * 64,
+        catalog_generation=1,
+        description="Only the exact delegated profile",
+        payload_schema_version=2,
+        agents_instructions="delegate instructions",
+        soul="delegate soul",
+        identity="delegate identity",
+        user_context="delegate context",
+        model_ref="default",
+        tool_groups=("file:read",),
+        skills=(delegate_skill_manifest,),
+        mcps=(),
+        runtime_key="project/researcher",
+    )
+    runtime = PrivateAgentRuntime(
+        context=SimpleNamespace(request_id="delegate-catalog"),  # type: ignore[arg-type]
+        run_id="exact-run",
+        resolver=object(),  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        safe_manifest=lead_manifest,
+        skill_root=tmp_path,
+        skills=(lead_skill,),
+        mcp_snapshots=(),
+        authorization_boundary=object(),
+        delegate_manifests=(delegate_manifest,),
+        all_skill_manifests=(lead_skill_manifest, delegate_skill_manifest),
+        all_skills=(lead_skill, delegate_skill),
+        delegate_model_names={
+            delegate_agent_version_id: "delegate-model",
+        },
+    )
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="lead-model",
+                display_name="Lead",
+                description="",
+                use="langchain_openai.ChatOpenAI",
+                model="lead-provider-model",
+            ),
+            ModelConfig(
+                name="delegate-model",
+                display_name="Delegate",
+                description="",
+                use="langchain_openai.ChatOpenAI",
+                model="delegate-provider-model",
+            ),
+        ],
+        sandbox={
+            "use": "deerflow.sandbox.local:LocalSandboxProvider",
+        },
+    )
+
+    push_current_app_config(app_config)
+    try:
+        await runtime.discover_mcp_tools()
+    finally:
+        pop_current_app_config()
+
+    profile = runtime.agent_catalog.get("project/researcher")
+    assert profile is not None
+    assert tuple(skill.name for skill in runtime.skills) == ("lead-current",)
+    assert tuple(skill.name for skill in profile.runtime_skills) == ("delegate-exact",)
+    assert profile.model_name == "delegate-model"
+    assert profile.tool_groups == ("file:read",)
+    assert runtime.agent_catalog.names == ("project/researcher",)
+
+    mismatched_runtime = PrivateAgentRuntime(
+        context=SimpleNamespace(request_id="delegate-model-mismatch"),  # type: ignore[arg-type]
+        run_id="mismatched-run",
+        resolver=object(),  # type: ignore[arg-type]
+        session_factory=object(),  # type: ignore[arg-type]
+        safe_manifest=lead_manifest,
+        skill_root=tmp_path,
+        skills=(lead_skill,),
+        mcp_snapshots=(),
+        authorization_boundary=object(),
+        delegate_manifests=(dataclasses.replace(delegate_manifest, model_ref="lead-model"),),
+        all_skill_manifests=(lead_skill_manifest, delegate_skill_manifest),
+        all_skills=(lead_skill, delegate_skill),
+        delegate_model_names={
+            delegate_agent_version_id: "delegate-model",
+        },
+    )
+    push_current_app_config(app_config)
+    try:
+        with pytest.raises(PrivateWorkAssetStale):
+            await mismatched_runtime.discover_mcp_tools()
+    finally:
+        pop_current_app_config()
 
 
 @pytest.mark.anyio
@@ -543,6 +760,245 @@ def _project_mcp_asset_runtime(session_factory, **kwargs) -> PrivateAssetRuntime
         http_client_factory=_policy_test_http_client_factory,
         **kwargs,
     )
+
+
+class _InventoryTransaction:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _InventorySession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def begin(self):
+        return _InventoryTransaction()
+
+
+class _InventorySessionFactory:
+    def __call__(self):
+        return _InventorySession()
+
+
+def _issued_inventory_context() -> PrivateWorkContext:
+    return PrivateWorkContext.from_project(
+        ProjectContext(
+            user_id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=frozenset(),
+            membership_version=1,
+            request_id="request-mcp-inventory",
+        )
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("run_active", "closure_matches", "expected_writes"),
+    [
+        (True, True, 1),
+        (False, True, 0),
+        (True, False, 0),
+    ],
+)
+async def test_worker_inventory_write_requires_active_run_and_exact_grant_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_active: bool,
+    closure_matches: bool,
+    expected_writes: int,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+
+    context = _issued_inventory_context()
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        definition={
+            "transport": "http",
+            "url": _TEST_PROJECT_MCP_ENDPOINT,
+            "timeout_seconds": 1,
+        },
+    )
+    runtime._context = context
+    runtime._session_factory = _InventorySessionFactory()
+    grant_id = uuid.uuid4()
+    snapshot = dataclasses.replace(
+        runtime._mcp_snapshots[0],
+        credential_grant_ids=(grant_id,),
+    )
+    persisted_grant = SimpleNamespace(
+        mcp_version_id=snapshot.version_id,
+        credential_slot_id=uuid.uuid4(),
+        credential_grant_id=grant_id,
+        credential_version_id=uuid.uuid4(),
+    )
+    run_asset = SimpleNamespace(
+        asset_kind=AssetKind.MCP.value,
+        version_id=snapshot.version_id,
+        asset_id=snapshot.asset_id,
+        asset_scope=snapshot.scope.value,
+        payload_checksum=snapshot.checksum,
+    )
+    snapshots = SimpleNamespace(
+        list_assets_in_session=AsyncMock(return_value=(run_asset,)),
+        list_mcp_grants_in_session=AsyncMock(return_value=(persisted_grant,)),
+        current_mcp_grants_in_session=AsyncMock(
+            return_value=(persisted_grant,) if closure_matches else (),
+        ),
+    )
+    inventory = SimpleNamespace(
+        record_success=AsyncMock(),
+        record_failure=AsyncMock(),
+    )
+
+    monkeypatch.setattr(
+        runtime_module.PrivateRunAuthorizationService,
+        "is_active",
+        AsyncMock(return_value=run_active),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "resolve_project_context_in_transaction",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "PrivateRunRepository",
+        lambda _session: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(status="running")),
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "RunSnapshotRepository",
+        lambda *_args, **_kwargs: snapshots,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "McpToolInventoryRepository",
+        lambda _session: inventory,
+    )
+
+    await runtime._persist_mcp_tool_inventory(
+        context,
+        snapshot,
+        tools=(
+            SimpleNamespace(
+                provider_name="maps_geo",
+                description="将地址转换为经纬度坐标。",
+            ),
+        ),
+        error_code=None,
+    )
+
+    assert inventory.record_success.await_count == expected_writes
+    assert inventory.record_failure.await_count == 0
+    if expected_writes:
+        call = inventory.record_success.await_args.kwargs
+        assert call["project_id"] == context.project_id
+        assert call["mcp_server_id"] == snapshot.asset_id
+        assert call["mcp_server_version_id"] == snapshot.version_id
+        assert call["payload_checksum"] == snapshot.checksum
+        assert call["tools"] == (
+            {
+                "name": "maps_geo",
+                "description": "将地址转换为经纬度坐标。",
+            },
+        )
+
+
+@pytest.mark.anyio
+async def test_worker_inventory_observation_failure_or_timeout_never_breaks_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.private_work import asset_runtime as runtime_module
+
+    context = _issued_inventory_context()
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        definition={
+            "transport": "http",
+            "url": _TEST_PROJECT_MCP_ENDPOINT,
+            "timeout_seconds": 1,
+        },
+    )
+    runtime._context = context
+    snapshot = runtime._mcp_snapshots[0]
+
+    async def fail_storage(*_args, **_kwargs):
+        raise RuntimeError("storage detail sentinel")
+
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_persist_mcp_tool_inventory",
+        fail_storage,
+    )
+    await runtime._record_mcp_tool_inventory(
+        snapshot,
+        error_code="mcp_discovery_unavailable",
+    )
+
+    async def wait_forever(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_MCP_TOOL_INVENTORY_WRITE_TIMEOUT_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_persist_mcp_tool_inventory",
+        wait_forever,
+    )
+    await asyncio.wait_for(
+        runtime._record_mcp_tool_inventory(
+            snapshot,
+            error_code="mcp_discovery_unavailable",
+        ),
+        timeout=0.5,
+    )
+
+
+@pytest.mark.anyio
+async def test_worker_inventory_observation_preserves_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _issued_inventory_context()
+    runtime = _private_mcp_runtime(
+        tmp_path,
+        definition={
+            "transport": "http",
+            "url": _TEST_PROJECT_MCP_ENDPOINT,
+            "timeout_seconds": 1,
+        },
+    )
+    runtime._context = context
+
+    async def cancel(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_persist_mcp_tool_inventory",
+        cancel,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime._record_mcp_tool_inventory(
+            runtime._mcp_snapshots[0],
+            error_code="mcp_discovery_unavailable",
+        )
 
 
 @pytest.mark.anyio
@@ -1280,7 +1736,7 @@ async def test_worker_rejects_project_remote_without_http_client_factory(
         },
     ],
 )
-async def test_worker_rejects_project_remote_oauth_and_non_header_slots_before_client(
+async def test_worker_rejects_project_remote_oauth_and_unsupported_slots_before_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     unsafe_definition: dict[str, object],
@@ -1873,7 +2329,7 @@ async def test_materialize_uses_asset_before_generation_lock_order_without_deadl
     materialized_runtime = None
 
     class BarrierResolver(ProjectAssetResolver):
-        async def resolve_project_asset_snapshot_in_session(
+        async def resolve_run_asset_snapshot_in_session(
             self,
             session,
             context,
@@ -1881,7 +2337,7 @@ async def test_materialize_uses_asset_before_generation_lock_order_without_deadl
         ):
             resolver_entered.set()
             await asyncio.wait_for(writer_committed.wait(), timeout=5)
-            return await super().resolve_project_asset_snapshot_in_session(
+            return await super().resolve_run_asset_snapshot_in_session(
                 session,
                 context,
                 selection,
@@ -1946,10 +2402,8 @@ async def test_materialize_uses_asset_before_generation_lock_order_without_deadl
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-@pytest.mark.parametrize("drift", ["persisted_checksum", "current_agent_version"])
-async def test_materialize_fails_closed_on_exact_checksum_or_current_binding_drift(
+async def test_materialize_fails_closed_on_persisted_checksum_drift(
     migrated_postgres_database_url: str,
-    drift: str,
 ) -> None:
     seed = await seed_m4_thread_database(migrated_postgres_database_url)
     thread_id = f"runtime-exact-drift-{uuid.uuid4()}"
@@ -1966,45 +2420,77 @@ async def test_materialize_fails_closed_on_exact_checksum_or_current_binding_dri
             PrivateRunCreate(),
         )
         async with seed.factory() as session, session.begin():
-            if drift == "persisted_checksum":
-                await session.execute(
-                    text(
-                        """UPDATE run_asset_versions
-                        SET payload_checksum=:checksum
-                        WHERE run_id=:run_id AND dependency_order=0"""
-                    ),
-                    {"checksum": "f" * 64, "run_id": admitted.run.run_id},
-                )
-            else:
-                version_id = uuid.uuid4()
-                await session.execute(
-                    text(
-                        """INSERT INTO agent_versions
-                        (id,agent_id,version_number,workflow_status,description,soul,
-                         model_ref,tool_groups,payload_checksum,created_by_user_id)
-                        SELECT :version_id,agent_id,version_number+1,'draft',description,soul,
-                               model_ref,tool_groups,:checksum,created_by_user_id
-                        FROM agent_versions
-                        WHERE id=:old_version_id"""
-                    ),
-                    {
-                        "version_id": version_id,
-                        "old_version_id": admitted.snapshot.assets[0].version_id,
-                        "checksum": "e" * 64,
-                    },
-                )
-                await session.execute(
-                    text("UPDATE agent_versions SET workflow_status='published' WHERE id=:version_id"),
-                    {"version_id": version_id},
-                )
-                await session.execute(
-                    text("UPDATE agents SET current_published_version_id=:version_id WHERE id=:agent_id"),
-                    {"version_id": version_id, "agent_id": seed.project_agent_id},
-                )
+            await session.execute(
+                text(
+                    """UPDATE run_asset_versions
+                    SET payload_checksum=:checksum
+                    WHERE run_id=:run_id AND dependency_order=0"""
+                ),
+                {"checksum": "f" * 64, "run_id": admitted.run.run_id},
+            )
 
         with pytest.raises(PrivateWorkAssetStale):
             await PrivateAssetRuntime(seed.factory).materialize(seed.owner_a, admitted)
     finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_materialize_keeps_frozen_project_agent_after_later_publish(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_m4_thread_database(migrated_postgres_database_url)
+    thread_id = f"runtime-exact-later-publish-{uuid.uuid4()}"
+    runtime = None
+    try:
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+        admitted = await PrivateRunAdmissionService(seed.factory).admit(
+            seed.owner_a,
+            thread_id,
+            PrivateRunCreate(),
+        )
+        frozen_version_id = admitted.snapshot.assets[0].version_id
+        later_version_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO agent_versions
+                    (id,agent_id,version_number,workflow_status,description,soul,
+                     model_ref,tool_groups,payload_checksum,created_by_user_id)
+                    SELECT :version_id,agent_id,version_number+1,'published',description,soul,
+                           model_ref,tool_groups,:checksum,created_by_user_id
+                    FROM agent_versions
+                    WHERE id=:old_version_id"""
+                ),
+                {
+                    "version_id": later_version_id,
+                    "old_version_id": frozen_version_id,
+                    "checksum": "e" * 64,
+                },
+            )
+            await session.execute(
+                text("UPDATE agents SET current_published_version_id=:version_id WHERE id=:agent_id"),
+                {
+                    "version_id": later_version_id,
+                    "agent_id": seed.project_agent_id,
+                },
+            )
+
+        runtime = await PrivateAssetRuntime(seed.factory).materialize(
+            seed.owner_a,
+            admitted,
+        )
+
+        assert runtime.agent_version_id == frozen_version_id
+    finally:
+        if runtime is not None:
+            await runtime.aclose()
         await seed.engine.dispose()
 
 

@@ -64,7 +64,7 @@ def test_normal_markdown_chinese_quotes_and_code_blocks_keep_their_content() -> 
 - `inline_code`
 
 ```python
-print("你好，DeerFlow")
+print("你好，ActWeave")
 ```
 
 It's still readable.
@@ -80,7 +80,7 @@ It's still readable.
     rendered = prompt_module.render_agent_prompt_bundle(bundle)
 
     assert rendered.count(markdown) == 4
-    assert rendered.count('print("你好，DeerFlow")') == 4
+    assert rendered.count('print("你好，ActWeave")') == 4
     assert rendered.count("It's still readable.") == 4
 
 

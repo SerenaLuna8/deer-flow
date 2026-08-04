@@ -195,7 +195,7 @@ describe("project shell navigation", () => {
   test("renders a branded, grouped navigation with the current route announced", () => {
     const html = renderShell(adminProject);
 
-    expect(html).toContain("DeerFlow");
+    expect(html).toContain("ActWeave");
     expect(html).toContain("Alpha Project");
     expect(html).not.toMatch(/>工作<\/p>/u);
     expect(html).toContain("能力");
@@ -215,7 +215,7 @@ describe("project shell navigation", () => {
     const expanded = renderExpandedDesktopNav(adminProject);
     const collapsed = renderCollapsedDesktopNav(adminProject);
 
-    expect(expanded).toContain("DeerFlow");
+    expect(expanded).toContain("ActWeave");
     expect(expanded).not.toContain("Alpha Project");
     expect(expanded).toContain("h-[4.75rem]");
     expect(collapsed).toContain("h-[4.75rem]");

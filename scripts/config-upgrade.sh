@@ -121,6 +121,10 @@ MIGRATIONS = {
         'description': 'Move live agent, registration and quota policy leaves to PostgreSQL system settings',
         'remove_paths': sorted(DATABASE_RUNTIME_YAML_PATH_TOMBSTONES),
     },
+    35: {
+        'description': 'Replace exact project MCP endpoints with bounded CIDR network policy',
+        'migrate_mcp_endpoint_policy': True,
+    },
     # Future migrations go here:
     # 2: {
     #     'description': '...',
@@ -132,6 +136,7 @@ MIGRATIONS = {
 migrated = []
 keys_to_remove = []
 paths_to_remove = []
+migrate_mcp_endpoint_policy = False
 for version in range(user_version + 1, example_version + 1):
     migration = MIGRATIONS.get(version)
     if not migration:
@@ -143,9 +148,31 @@ for version in range(user_version + 1, example_version + 1):
             migrated.append(f'{old} -> {new}')
     keys_to_remove.extend(migration.get('remove_keys', []))
     paths_to_remove.extend(migration.get('remove_paths', []))
+    migrate_mcp_endpoint_policy = migrate_mcp_endpoint_policy or migration.get('migrate_mcp_endpoint_policy', False)
 
 # Re-parse after text migrations
 user = yaml.safe_load(raw_text) or {}
+if migrate_mcp_endpoint_policy:
+    if 'mcp_security' not in user:
+        user['mcp_security'] = {}
+    mcp_security = user['mcp_security']
+    if not isinstance(mcp_security, dict):
+        print('✗ Cannot migrate mcp_security because the existing value is not a mapping.')
+        print('  Configure mcp_security.project_remote_allowed_networks explicitly.')
+        print('  No files were changed.')
+        sys.exit(1)
+    if 'project_remote_allowed_endpoints' in mcp_security:
+        retired_endpoints = mcp_security['project_remote_allowed_endpoints']
+        if retired_endpoints != []:
+            print('✗ Cannot migrate nonempty mcp_security.project_remote_allowed_endpoints to CIDR policy automatically.')
+            print('  Remove the retired endpoint list and configure mcp_security.project_remote_allowed_networks explicitly.')
+            print('  No files were changed.')
+            sys.exit(1)
+        mcp_security.pop('project_remote_allowed_endpoints')
+        migrated.append('mcp_security.project_remote_allowed_endpoints=[] -> project_remote_allowed_networks=[] (deny all)')
+    if 'project_remote_allowed_networks' not in mcp_security:
+        mcp_security['project_remote_allowed_networks'] = []
+        migrated.append('v34 implicit project MCP deny-all -> project_remote_allowed_networks=[]')
 removed = []
 for key in keys_to_remove:
     if key in user:

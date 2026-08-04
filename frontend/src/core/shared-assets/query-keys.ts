@@ -158,6 +158,38 @@ export function projectSkillVersionFileKey(
   ] as const;
 }
 
+export function projectMcpToolInventoryKey(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  versionId: string,
+) {
+  return [
+    ...projectAssetVersionsKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      assetIdSchema.parse(assetId),
+    ),
+    "version",
+    assetIdSchema.parse(versionId),
+    "tools",
+  ] as const;
+}
+
+export function projectMcpEditableConfigurationKey(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return [
+    ...projectAssetKey(accountId, projectId, "mcp-servers"),
+    "asset",
+    assetIdSchema.parse(assetId),
+    "editable-configuration",
+  ] as const;
+}
+
 export function projectSkillCredentialBindingsKey(
   accountId: string,
   projectId: string,

@@ -5,7 +5,7 @@ import importlib
 import uuid
 from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -34,6 +34,8 @@ from app.shared_assets.mcp_service import (
     McpAssetView,
     McpCredentialSlotView,
     McpDefinition,
+    McpToolInventoryView,
+    McpToolView,
     McpVersionView,
 )
 from app.shared_assets.models import AssetKind, AssetScope, WorkflowStatus
@@ -141,6 +143,151 @@ def _client(
     if skill_service is not None:
         app.dependency_overrides[project_assets.get_skill_service] = lambda: skill_service
     return TestClient(app)
+
+
+def test_project_mcp_tool_inventory_returns_only_bounded_safe_metadata() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    service.get_tool_inventory.return_value = McpToolInventoryView(
+        status="degraded",
+        tools=(
+            McpToolView(
+                name="maps_weather",
+                description="根据城市名称查询天气",
+            ),
+            McpToolView(
+                name="maps_direction_driving",
+                description="根据起终点规划驾车路线",
+            ),
+        ),
+        last_attempt_at=NOW,
+        last_success_at=NOW,
+        error_code="mcp_discovery_unavailable",
+    )
+
+    response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions/{version_id}/tools")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json() == {
+        "data": {
+            "status": "degraded",
+            "tools": [
+                {
+                    "name": "maps_weather",
+                    "description": "根据城市名称查询天气",
+                },
+                {
+                    "name": "maps_direction_driving",
+                    "description": "根据起终点规划驾车路线",
+                },
+            ],
+            "last_attempt_at": NOW.isoformat().replace("+00:00", "Z"),
+            "last_success_at": NOW.isoformat().replace("+00:00", "Z"),
+            "error_code": "mcp_discovery_unavailable",
+        },
+        "request_id": "req-project-assets",
+    }
+    service.get_tool_inventory.assert_awaited_once()
+    actor, called_asset_id, called_version_id = service.get_tool_inventory.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert called_asset_id == asset_id
+    assert called_version_id == version_id
+
+
+def test_project_mcp_tool_inventory_exposes_active_discovery_as_testing() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    service.get_tool_inventory.return_value = McpToolInventoryView(
+        status="testing",  # type: ignore[arg-type]
+        tools=(
+            McpToolView(
+                name="maps_weather",
+                description="Last successful observation",
+            ),
+        ),
+        last_attempt_at=NOW,
+        last_success_at=NOW,
+        error_code=None,
+    )
+
+    response = _client(mcp_service=service).get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions/{version_id}/tools")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "status": "testing",
+        "tools": [
+            {
+                "name": "maps_weather",
+                "description": "Last successful observation",
+            }
+        ],
+        "last_attempt_at": NOW.isoformat().replace("+00:00", "Z"),
+        "last_success_at": NOW.isoformat().replace("+00:00", "Z"),
+        "error_code": None,
+    }
+
+
+def test_project_mcp_tool_discovery_post_enqueues_and_get_reads_attempt() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    attempt_id = uuid.uuid4()
+    attempt = SimpleNamespace(
+        id=attempt_id,
+        mcp_server_id=asset_id,
+        mcp_server_version_id=version_id,
+        status="queued",
+        requested_at=NOW,
+        started_at=None,
+        completed_at=None,
+        error_code=None,
+    )
+    service.request_tool_discovery.return_value = attempt
+    service.get_tool_discovery_attempt.return_value = attempt
+    client = _client(mcp_service=service)
+
+    created = client.post(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions/{version_id}/tool-discovery")
+    latest = client.get(f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions/{version_id}/tool-discovery")
+    exact = client.get(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/versions/{version_id}/tool-discovery",
+        params={"attempt_id": str(attempt_id)},
+    )
+
+    expected = {
+        "data": {
+            "id": str(attempt_id),
+            "mcp_server_id": str(asset_id),
+            "mcp_server_version_id": str(version_id),
+            "status": "queued",
+            "requested_at": NOW.isoformat().replace("+00:00", "Z"),
+            "started_at": None,
+            "completed_at": None,
+            "error_code": None,
+        },
+        "request_id": "req-project-assets",
+    }
+    assert created.status_code == 202
+    assert created.json() == expected
+    assert latest.status_code == 200
+    assert latest.json() == expected
+    assert exact.status_code == 200
+    assert exact.json() == expected
+    service.request_tool_discovery.assert_awaited_once()
+    service.get_tool_discovery_attempt.assert_any_await(
+        ANY,
+        asset_id,
+        version_id,
+        attempt_id=None,
+    )
+    service.get_tool_discovery_attempt.assert_any_await(
+        ANY,
+        asset_id,
+        version_id,
+        attempt_id=attempt_id,
+    )
 
 
 def test_project_asset_list_separates_scopes() -> None:
@@ -917,6 +1064,88 @@ def test_project_mcp_history_never_replays_signed_endpoint_details() -> None:
     assert "/private/path" not in response.text
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://localhost:8771/api/mcp?mode=read", "http://localhost:8771"),
+        ("http://127.0.0.1:8772/api/mcp", "http://127.0.0.1:8772"),
+        ("http://[::1]:8773/api/mcp", "http://[::1]:8773"),
+        ("https://mcp.internal/api/mcp", "https://mcp.internal"),
+    ],
+)
+def test_project_mcp_url_redaction_preserves_http_or_https_origin(
+    url: str,
+    expected: str,
+) -> None:
+    assert project_assets._redacted_project_mcp_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "http://127.0.0.1:8771/api/mcp",
+            "http://127.0.0.1:8771/api/mcp",
+        ),
+        (
+            "http://[::1]:8772/private/mcp/",
+            "http://[::1]:8772/private/mcp/",
+        ),
+    ],
+)
+def test_project_mcp_editable_url_preserves_safe_ip_literal_path(
+    url: str,
+    expected: str,
+) -> None:
+    assert project_assets._editable_project_mcp_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "http://127.0.0.1:8771/api/mcp?token=must-never-return",
+            "http://127.0.0.1:8771",
+        ),
+        (
+            "http://user:password@127.0.0.1:8771/api/mcp",
+            None,
+        ),
+        (
+            "http://127.0.0.1:8771/api/mcp#must-never-return",
+            None,
+        ),
+        (
+            "https://mcp.internal/api/mcp",
+            "https://mcp.internal",
+        ),
+    ],
+)
+def test_project_mcp_editable_url_falls_back_to_origin_only_for_unsafe_or_non_ip_urls(
+    url: str,
+    expected: str | None,
+) -> None:
+    assert project_assets._editable_project_mcp_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://localhost:8771/api/mcp",
+        "http://user:password@localhost:8771/api/mcp",
+        "http://localhost:8771/api/mcp#fragment",
+        "http://localhost:8771/api/mcp#",
+        "http:///api/mcp",
+        "http://localhost:/api/mcp",
+        "http://localhost:0/api/mcp",
+        "http://localhost:65536/api/mcp",
+        "http://localhost:not-a-port/api/mcp",
+    ],
+)
+def test_project_mcp_url_redaction_rejects_invalid_origins(url: str) -> None:
+    assert project_assets._redacted_project_mcp_url(url) is None
+
+
 def test_project_mcp_version_mutation_serializes_after_committing_domain_result() -> None:
     service = AsyncMock()
     asset_id = uuid.uuid4()
@@ -959,6 +1188,305 @@ def test_project_mcp_version_mutation_serializes_after_committing_domain_result(
     assert response.json()["data"]["definition"]["tool_overrides"] == {}
     assert "must-never-return" not in response.text
     assert response.json()["data"]["credential_slots"][0]["payload_schema"] == {"headers": ["Authorization"]}
+
+
+def test_project_configured_mcp_route_accepts_one_strict_flat_request() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = _mcp_version_with_read_only_mappings(asset_id)
+    service.create_project_configured.return_value = SimpleNamespace(
+        asset=McpAssetView(
+            id=asset_id,
+            scope=AssetScope.PROJECT,
+            project_id=PROJECT_ID,
+            slug="analytics-mcp",
+            display_name="Analytics MCP",
+            status="active",
+            current_published_version_id=None,
+            version=3,
+            created_by_user_id=str(uuid.uuid4()),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        version=version,
+    )
+    client = _client(mcp_service=service)
+    body = {
+        "slug": "analytics-mcp",
+        "display_name": "Analytics MCP",
+        "description": "Analytics tools",
+        "transport": "http",
+        "command": None,
+        "args": [],
+        "url": "https://analytics.example.test/mcp",
+        "env": {},
+        "headers": {"X-Client": "deerflow"},
+        "oauth": {},
+        "routing": {},
+        "tool_overrides": {},
+        "timeout_seconds": 45,
+        "credential_slots": [
+            {
+                "name": "api-key",
+                "purpose": "Authenticate analytics requests",
+                "payload_schema": {"headers": ["Authorization"]},
+                "required": True,
+            }
+        ],
+    }
+
+    response = client.post(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/configured",
+        json=body,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["item"]["id"] == str(asset_id)
+    assert response.json()["item"]["version"] == 3
+    assert response.json()["version"]["mcp_server_id"] == str(asset_id)
+    assert response.json()["version"]["workflow_status"] == "pending_approval"
+    assert response.json()["version"]["definition"]["url"] == "https://analytics.example.test"
+    assert response.json()["version"]["definition"]["headers"] == {}
+    assert "must-never-return" not in response.text
+    service.create_project_configured.assert_awaited_once()
+    actor, command, definition = service.create_project_configured.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert command == project_assets.CreateMcpServer(
+        "analytics-mcp",
+        "Analytics MCP",
+    )
+    assert definition.description == "Analytics tools"
+    assert definition.transport == "http"
+    assert definition.url == "https://analytics.example.test/mcp"
+    assert definition.headers == {"X-Client": "deerflow"}
+    assert [slot.name for slot in definition.credential_slots] == ["api-key"]
+
+    rejected = client.post(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/configured",
+        json={**body, "expected_asset_version": 1},
+    )
+
+    assert rejected.status_code == 422
+    assert service.create_project_configured.await_count == 1
+
+
+def test_project_configured_mcp_update_route_accepts_definition_and_exact_revision_only() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    editable_url = "http://127.0.0.1:8771/new-mcp"
+    version = dataclasses.replace(
+        _mcp_version_with_read_only_mappings(asset_id),
+        workflow_status=WorkflowStatus.PUBLISHED,
+        definition=dataclasses.replace(
+            _mcp_version_with_read_only_mappings(asset_id).definition,
+            url=editable_url,
+        ),
+        credential_slots=(),
+        submitted_at=None,
+    )
+    service.update_project_configured.return_value = SimpleNamespace(
+        asset=McpAssetView(
+            id=asset_id,
+            scope=AssetScope.PROJECT,
+            project_id=PROJECT_ID,
+            slug="analytics-mcp",
+            display_name="Analytics MCP",
+            status="active",
+            current_published_version_id=version.id,
+            version=9,
+            created_by_user_id=str(uuid.uuid4()),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        version=version,
+    )
+    client = _client(mcp_service=service)
+    body = {
+        "description": "Updated analytics tools",
+        "transport": "http",
+        "command": None,
+        "args": [],
+        "url": editable_url,
+        "env": {},
+        "headers": {},
+        "oauth": {},
+        "routing": {},
+        "tool_overrides": {},
+        "timeout_seconds": 60,
+        "credential_slots": [],
+        "expected_asset_version": 7,
+    }
+
+    response = client.put(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/configured",
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["item"]["version"] == 9
+    assert response.json()["version"]["workflow_status"] == "published"
+    assert response.json()["version"]["definition"]["url"] == editable_url
+    service.update_project_configured.assert_awaited_once()
+    actor, called_asset_id, definition = service.update_project_configured.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert called_asset_id == asset_id
+    assert definition.description == "Updated analytics tools"
+    assert definition.url == editable_url
+    assert service.update_project_configured.await_args.kwargs == {
+        "expected_asset_version": 7,
+    }
+
+    for forbidden_field in (
+        "slug",
+        "display_name",
+        "workflow_status",
+        "credential_versions",
+        "version_id",
+    ):
+        rejected = client.put(
+            f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/configured",
+            json={**body, forbidden_field: "forbidden"},
+        )
+        assert rejected.status_code == 422
+    assert service.update_project_configured.await_count == 1
+
+
+def test_project_configured_mcp_get_returns_only_the_current_validated_editable_path() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    version = dataclasses.replace(
+        _mcp_version_with_read_only_mappings(asset_id),
+        workflow_status=WorkflowStatus.PUBLISHED,
+        definition=dataclasses.replace(
+            _mcp_version_with_read_only_mappings(asset_id).definition,
+            url="http://127.0.0.1:8771/api/mcp",
+        ),
+        credential_slots=(),
+        submitted_at=None,
+    )
+    asset = McpAssetView(
+        id=asset_id,
+        scope=AssetScope.PROJECT,
+        project_id=PROJECT_ID,
+        slug="analytics-mcp",
+        display_name="Analytics MCP",
+        status="active",
+        current_published_version_id=version.id,
+        version=9,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service.get_project_configured.return_value = SimpleNamespace(
+        asset=asset,
+        version=version,
+    )
+
+    response = _client(mcp_service=service).get(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/configured",
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json()["item"]["id"] == str(asset_id)
+    assert response.json()["version"]["id"] == str(version.id)
+    assert response.json()["version"]["definition"]["url"] == ("http://127.0.0.1:8771/api/mcp")
+    assert response.json()["version"]["definition"]["headers"] == {}
+    actor, selected_asset_id = service.get_project_configured.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert selected_asset_id == asset_id
+
+
+def test_configured_mcp_route_is_project_only_in_openapi() -> None:
+    app = FastAPI()
+    app.include_router(project_assets.project_router)
+    app.include_router(admin_assets.admin_router)
+    app.include_router(admin_assets.admin_project_router)
+    openapi = app.openapi()
+    path = "/api/projects/{project_id}/mcp-servers/configured"
+
+    assert openapi["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/McpConfiguredRequest",
+    }
+    assert openapi["paths"][path]["post"]["responses"]["201"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/McpConfiguredResponse",
+    }
+    request_schema = openapi["components"]["schemas"]["McpConfiguredRequest"]
+    assert request_schema["additionalProperties"] is False
+    assert {"slug", "display_name"}.issubset(request_schema["properties"])
+    assert "expected_asset_version" not in request_schema["properties"]
+    assert "/api/admin/assets/mcp-servers/configured" not in openapi["paths"]
+    assert "/api/admin/projects/{project_id}/assets/mcp-servers/configured" not in openapi["paths"]
+    update_path = "/api/projects/{project_id}/mcp-servers/{asset_id}/configured"
+    assert openapi["paths"][update_path]["put"]["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/McpVersionRequest",
+    }
+    assert openapi["paths"][update_path]["put"]["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/McpConfiguredResponse",
+    }
+    assert "/api/admin/assets/mcp-servers/{asset_id}/configured" not in openapi["paths"]
+    assert "/api/admin/projects/{project_id}/assets/mcp-servers/{asset_id}/configured" not in openapi["paths"]
+
+
+def test_project_mcp_activate_and_delete_routes_forward_strict_expected_revision() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    current_version_id = uuid.uuid4()
+    service.activate.return_value = McpAssetView(
+        id=asset_id,
+        scope=AssetScope.PROJECT,
+        project_id=PROJECT_ID,
+        slug="managed-mcp",
+        display_name="Managed MCP",
+        status="active",
+        current_published_version_id=current_version_id,
+        version=5,
+        created_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    client = _client(mcp_service=service)
+
+    activate = client.post(
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}/activate",
+        json={"expected_asset_version": 4},
+    )
+    deleted = client.request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}",
+        json={"expected_asset_version": 5},
+    )
+    invalid = client.request(
+        "DELETE",
+        f"/api/projects/{PROJECT_ID}/mcp-servers/{asset_id}",
+        json={"expected_asset_version": 5, "unexpected": True},
+    )
+
+    assert activate.status_code == 200
+    assert activate.json()["item"]["status"] == "active"
+    assert deleted.status_code == 204
+    assert not deleted.content
+    assert invalid.status_code == 422
+    service.activate.assert_awaited_once()
+    assert service.activate.await_args.kwargs == {"expected_asset_version": 4}
+    service.delete.assert_awaited_once()
+    assert service.delete.await_args.kwargs == {"expected_asset_version": 5}
+
+
+def test_mcp_delete_route_is_project_only_in_openapi() -> None:
+    app = FastAPI()
+    app.include_router(project_assets.project_router)
+    app.include_router(admin_assets.admin_router)
+    app.include_router(admin_assets.admin_project_router)
+    paths = app.openapi()["paths"]
+
+    project_path = paths["/api/projects/{project_id}/mcp-servers/{asset_id}"]
+    assert project_path["delete"]["responses"]["204"]["description"] == "Successful Response"
+    assert project_path["delete"]["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ExpectedAssetVersionRequest",
+    }
+    assert "delete" not in paths["/api/admin/assets/mcp-servers/{asset_id}"]
+    assert "delete" not in paths["/api/admin/projects/{project_id}/assets/mcp-servers/{asset_id}"]
 
 
 @pytest.mark.parametrize("transport", ("stdio", "streamable_http"))
@@ -1296,6 +1824,79 @@ def test_project_binding_route_uses_typed_selection_and_forbids_extra_input() ->
     assert response.json()["request_id"] == "req-project-assets"
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "asset_validation_failed"
+
+
+def test_project_system_mcp_sync_current_route_never_accepts_a_version_id() -> None:
+    service = AsyncMock()
+    asset_id = uuid.uuid4()
+    current_version_id = uuid.uuid4()
+    service.sync_current_mcp.return_value = SystemAssetBinding(
+        project_id=PROJECT_ID,
+        kind=AssetKind.MCP,
+        asset_id=asset_id,
+        version_id=current_version_id,
+        enabled=True,
+        version=1,
+        created_by_user_id=str(uuid.uuid4()),
+        updated_by_user_id=str(uuid.uuid4()),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    client = _client(binding_service=service)
+
+    response = client.post(
+        f"/api/projects/{PROJECT_ID}/system-mcp-bindings/{asset_id}/sync-current",
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["asset_id"] == str(asset_id)
+    assert response.json()["version_id"] == str(current_version_id)
+    service.sync_current_mcp.assert_awaited_once()
+    actor, called_asset_id = service.sync_current_mcp.await_args.args
+    assert actor.project_id == PROJECT_ID
+    assert called_asset_id == asset_id
+    assert service.sync_current_mcp.await_args.kwargs == {
+        "expected_binding_version": None,
+    }
+
+    for rejected_body in (
+        {"version_id": str(uuid.uuid4())},
+        {"asset_id": str(asset_id)},
+        {"unexpected": True},
+        {"expected_binding_version": True},
+        {"expected_binding_version": "4"},
+        {"expected_binding_version": 4.0},
+        {"expected_binding_version": 0},
+    ):
+        rejected = client.post(
+            f"/api/projects/{PROJECT_ID}/system-mcp-bindings/{asset_id}/sync-current",
+            json=rejected_body,
+        )
+        assert rejected.status_code == 422
+    assert service.sync_current_mcp.await_count == 1
+
+
+def test_project_system_mcp_sync_current_openapi_is_strict_and_project_only() -> None:
+    app = FastAPI()
+    app.include_router(project_assets.project_router)
+    app.include_router(admin_assets.admin_router)
+    app.include_router(admin_assets.admin_project_router)
+    openapi = app.openapi()
+    path = "/api/projects/{project_id}/system-mcp-bindings/{asset_id}/sync-current"
+    operation = openapi["paths"][path]["post"]
+
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/SyncCurrentSystemMcpBindingRequest",
+    }
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/BindingResponse",
+    }
+    schema = openapi["components"]["schemas"]["SyncCurrentSystemMcpBindingRequest"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"]) == {"expected_binding_version"}
+    assert "/api/admin/assets/system-mcp-bindings/{asset_id}/sync-current" not in openapi["paths"]
+    assert "/api/admin/projects/{project_id}/assets/system-mcp-bindings/{asset_id}/sync-current" not in openapi["paths"]
 
 
 def test_project_asset_session_initialization_failure_uses_asset_503_contract(

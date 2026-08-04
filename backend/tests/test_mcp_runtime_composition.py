@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from deerflow.config.mcp_security_config import McpSecurityConfig
-from deerflow.mcp.definition import ExactMcpEndpointPolicy
+from deerflow.mcp.definition import NetworkMcpEndpointPolicy
 
 
 def test_worker_executor_injects_operator_mcp_security_policy(
@@ -23,10 +23,10 @@ def test_worker_executor_injects_operator_mcp_security_policy(
         "PrivateAssetRuntime",
         CapturingAssetRuntime,
     )
-    endpoint = "https://mcp.example.test/tools"
+    endpoint = "https://10.8.0.42/tools"
     app_config = SimpleNamespace(
         mcp_security=McpSecurityConfig(
-            project_remote_allowed_endpoints=(endpoint,),
+            project_remote_allowed_networks=("10.0.0.0/8",),
             require_egress_proxy=True,
             egress_proxy_url="http://egress-proxy.internal:3128",
             discovery_timeout_seconds=47,
@@ -46,7 +46,7 @@ def test_worker_executor_injects_operator_mcp_security_policy(
 
     endpoint_policy = captured["endpoint_policy"]
     assert endpoint_policy.allows(endpoint) is True  # type: ignore[union-attr]
-    assert endpoint_policy.allows("https://other.example.test/tools") is False  # type: ignore[union-attr]
+    assert endpoint_policy.allows("https://192.168.1.42/tools") is False  # type: ignore[union-attr]
     assert captured["http_client_factory"] is not None
     assert captured["discovery_timeout_seconds"] == 47
     assert captured["tool_call_timeout_seconds"] == 23
@@ -62,8 +62,7 @@ def test_run_admission_and_scheduler_share_operator_endpoint_policy() -> None:
     from app.private_work.run_admission import PrivateRunAdmissionService
     from app.reliability.execution import PrivateRunJobHandler
 
-    endpoint = "https://mcp.example.test/tools"
-    policy = ExactMcpEndpointPolicy(frozenset({endpoint}))
+    policy = NetworkMcpEndpointPolicy(("10.0.0.0/8",))
 
     admission = PrivateRunAdmissionService(  # type: ignore[arg-type]
         object(),
@@ -89,7 +88,7 @@ def test_agent_chat_runtime_and_controls_share_operator_endpoint_policy() -> Non
     from app.private_work.asset_runtime import PrivateAssetRuntime
     from app.private_work.chat_controls import ProjectChatControlService
 
-    policy = ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test/tools"}))
+    policy = NetworkMcpEndpointPolicy(("10.0.0.0/8",))
 
     asset_runtime = PrivateAssetRuntime(  # type: ignore[arg-type]
         object(),
@@ -117,7 +116,7 @@ def test_gateway_mcp_authoring_reuses_startup_endpoint_policy(
 ) -> None:
     from app.gateway.routers import project_assets
 
-    policy = ExactMcpEndpointPolicy(frozenset({"https://mcp.example.test/tools"}))
+    policy = NetworkMcpEndpointPolicy(("10.0.0.0/8",))
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(

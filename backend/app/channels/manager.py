@@ -1,4 +1,4 @@
-"""ChannelManager — consumes inbound messages and dispatches them to the DeerFlow agent via Gateway."""
+"""ChannelManager — consumes inbound messages and dispatches them to the ActWeave agent via Gateway."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ import httpx
 from langgraph_sdk.errors import ConflictError
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS, is_removed_channel_command
+from app.channels.instance_authority import ChannelInstanceAuthorityLost
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -33,6 +35,7 @@ from app.gateway.internal_auth import create_internal_auth_headers
 from app.private_work.connection_inbound import (
     ConnectionInboundResolver,
     ProjectInboundDispatcher,
+    ProviderIdentity,
 )
 from app.private_work.errors import PrivateWorkNotFound
 from deerflow.config.agents_config import load_agent_config
@@ -67,8 +70,11 @@ STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulat
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
-BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
-BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
+BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from ActWeave Settings, complete the in-channel connect step, then send your message again."
+BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the ActWeave operator."
+GROUP_BINDING_REQUIRED_MESSAGE = "当前群聊尚未启用 ActWeave，请联系项目管理员完成群聊绑定。"
+GROUP_BINDING_UNAVAILABLE_MESSAGE = "群聊连接验证暂时不可用，请稍后重试或联系项目管理员。"
+GROUP_BINDING_AGENT_UNAVAILABLE_MESSAGE = "当前群聊配置的 Agent 不可用，请联系项目管理员重新选择。"
 INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
 INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
@@ -315,6 +321,7 @@ def _thread_channel_metadata(msg: InboundMessage) -> dict[str, Any]:
     channel_source: dict[str, Any] = {
         "type": "im_channel",
         "provider": msg.channel_name,
+        "channel_instance_id": msg.channel_instance_id,
         "chat_id": msg.chat_id,
     }
     if msg.topic_id:
@@ -530,13 +537,13 @@ def _safe_user_id_for_run(raw_user_id: str) -> str:
 
 
 def _channel_storage_user_id(msg: InboundMessage) -> str | None:
-    """Resolve the canonical DeerFlow user id for a channel-triggered message.
+    """Resolve the canonical ActWeave user id for a channel-triggered message.
 
     Single source of truth for both the agent **run identity**
     (``_resolve_run_params`` → ``run_context["user_id"]``) and the **file/artifact
     storage bucket** (``receive_file`` / ``_ingest_inbound_files`` /
     ``_prepare_artifact_delivery``), so the bucket the agent reads/writes always
-    matches where channel files are staged. Only a server-resolved DeerFlow owner
+    matches where channel files are staged. Only a server-resolved ActWeave owner
     is accepted. An unbound provider sender returns ``None`` and must be rejected
     before project-private file ingestion rather than creating a filesystem
     identity from the external platform user.
@@ -758,7 +765,7 @@ def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
 
 
 class ChannelManager:
-    """Core dispatcher that bridges IM channels to the DeerFlow agent.
+    """Core dispatcher that bridges IM channels to the ActWeave agent.
 
     It reads from the MessageBus inbound queue, creates/reuses threads on
     Gateway's LangGraph-compatible API, sends messages via ``runs.wait``, and publishes
@@ -789,11 +796,12 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._private_inbound_dispatcher = private_inbound_dispatcher
+        self._instance_authority_guard = bus.instance_authority_guard
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
         # chat don't race to create duplicate threads (see _get_or_create_thread).
-        self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
+        self._thread_create_locks: dict[tuple[str, str, str, str | None], asyncio.Lock] = {}
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
@@ -801,15 +809,18 @@ class ChannelManager:
         # Insertion order == chronological (keys are never re-inserted), so an
         # OrderedDict lets us evict expired/overflow entries from the front in
         # O(k) instead of scanning all entries on every inbound message.
-        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
+        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str, str], float] = OrderedDict()
 
     @staticmethod
-    def _channel_supports_streaming(channel_name: str) -> bool:
+    def _channel_supports_streaming(
+        channel_name: str,
+        channel_instance_id: str | None = None,
+    ) -> bool:
         from .service import get_channel_service
 
         service = get_channel_service()
         if service:
-            channel = service.get_channel(channel_name)
+            channel = service.get_channel_instance(channel_instance_id) if channel_instance_id is not None else service.get_channel(channel_name)
             if channel is not None:
                 return channel.supports_streaming
         return CHANNEL_CAPABILITIES.get(channel_name, {}).get("supports_streaming", False)
@@ -856,8 +867,8 @@ class ChannelManager:
         configurable["checkpoint_ns"] = ""
         configurable["thread_id"] = thread_id
 
-        # ``user_id`` drives DeerFlow-owned memory, files, and thread buckets.
-        # For browser-connected IM channels, prefer the DeerFlow account that
+        # ``user_id`` drives ActWeave-owned memory, files, and thread buckets.
+        # For browser-connected IM channels, prefer the ActWeave account that
         # owns the connection. Preserve the raw platform user under
         # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
@@ -1021,6 +1032,12 @@ class ChannelManager:
             except asyncio.CancelledError:
                 break
 
+            if not await self.bus.is_instance_side_effect_allowed(
+                msg.channel_instance_id,
+                provider=msg.channel_name,
+            ):
+                continue
+
             # Dedupe before logging "received" so a provider retrying an event N
             # times does not log N accepts; duplicates are logged once as ignored.
             # Note: this manager-level dedupe only guards the agent run / final
@@ -1030,9 +1047,8 @@ class ChannelManager:
             if self._is_duplicate_inbound(msg):
                 continue
             logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                "[Manager] received inbound: channel=%s, type=%s, text_len=%d, files=%d",
                 msg.channel_name,
-                msg.chat_id,
                 msg.msg_type.value,
                 len(msg.text or ""),
                 len(msg.files),
@@ -1041,7 +1057,9 @@ class ChannelManager:
             task.add_done_callback(self._log_task_error)
 
     @staticmethod
-    def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
+    def _inbound_dedupe_key(
+        msg: InboundMessage,
+    ) -> tuple[str, str, str, str, str] | None:
         metadata = msg.metadata or {}
         message_id = extract_provider_delivery_id(msg)
         if message_id is None:
@@ -1053,7 +1071,13 @@ class ChannelManager:
         workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
         if not workspace_id:
             return None
-        return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
+        return (
+            msg.channel_instance_id,
+            msg.channel_name,
+            str(workspace_id),
+            msg.chat_id,
+            message_id,
+        )
 
     def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
         key = self._inbound_dedupe_key(msg)
@@ -1074,10 +1098,8 @@ class ChannelManager:
 
         if key in self._recent_inbound_events:
             logger.info(
-                "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
+                "[Manager] duplicate inbound ignored: channel=%s",
                 msg.channel_name,
-                msg.chat_id,
-                key[-1],
             )
             return True
 
@@ -1108,6 +1130,11 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
+            if not await self.bus.is_instance_side_effect_allowed(
+                msg.channel_instance_id,
+                provider=msg.channel_name,
+            ):
+                return
             # Former channel commands remain explicit unsupported controls. A
             # provider may deliver an unknown slash token as CHAT (for dynamic
             # slash-skill support), so normalize tombstones before routing and
@@ -1117,6 +1144,11 @@ class ChannelManager:
 
             if self._should_dispatch_project_inbound(msg):
                 async with self._semaphore:
+                    if not await self.bus.is_instance_side_effect_allowed(
+                        msg.channel_instance_id,
+                        provider=msg.channel_name,
+                    ):
+                        return
                     await self._handle_project_inbound_chat(msg)
                 return
 
@@ -1132,31 +1164,33 @@ class ChannelManager:
                 return
 
             async with self._semaphore:
+                if not await self.bus.is_instance_side_effect_allowed(
+                    msg.channel_instance_id,
+                    provider=msg.channel_name,
+                ):
+                    return
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
                     await self._handle_chat(msg, bound_identity_checked=True)
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
-                "Invalid channel session config for %s (chat=%s): %s",
+                "Invalid channel session config for %s: %s",
                 msg.channel_name,
-                msg.chat_id,
                 exc,
             )
             await self._send_error(msg, str(exc))
         except SlashSkillCommandResolutionError as exc:
             logger.warning(
-                "Slash skill command resolution failed for %s (chat=%s): %s",
+                "Slash skill command resolution failed for %s: %s",
                 msg.channel_name,
-                msg.chat_id,
                 exc,
             )
             await self._send_error(msg, str(exc))
         except Exception:
             logger.exception(
-                "Error handling message from %s (chat=%s)",
+                "Error handling message from %s",
                 msg.channel_name,
-                msg.chat_id,
             )
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
@@ -1176,6 +1210,21 @@ class ChannelManager:
         return parse_slash_skill_reference(msg.text) is not None
 
     async def _handle_project_inbound_chat(self, msg: InboundMessage) -> None:
+        group_rejection_message = None
+        if msg.metadata.get("group_binding_required") is True:
+            group_rejection_message = GROUP_BINDING_REQUIRED_MESSAGE
+        elif msg.metadata.get("group_binding_agent_unavailable") is True:
+            group_rejection_message = GROUP_BINDING_AGENT_UNAVAILABLE_MESSAGE
+        elif msg.metadata.get("group_binding_unavailable") is True:
+            group_rejection_message = GROUP_BINDING_UNAVAILABLE_MESSAGE
+        if group_rejection_message is not None:
+            await self._reject_unbound_channel_message(
+                msg,
+                bound_identity_rejection=_BoundIdentityRejection(
+                    message=group_rejection_message,
+                ),
+            )
+            return
         dispatcher = self._private_inbound_dispatcher
         if dispatcher is None:
             await self._reject_unbound_channel_message(
@@ -1187,6 +1236,8 @@ class ChannelManager:
             return
         try:
             result = await dispatcher.dispatch(msg)
+        except ChannelInstanceAuthorityLost:
+            return
         except PrivateWorkNotFound:
             await self._reject_unbound_channel_message(
                 msg,
@@ -1219,6 +1270,7 @@ class ChannelManager:
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel_name=msg.channel_name,
+                channel_instance_id=resolved.authority.channel_instance_id,
                 chat_id=msg.chat_id,
                 thread_id=resolved.thread_id,
                 text=response_text,
@@ -1226,6 +1278,8 @@ class ChannelManager:
                 connection_id=resolved.connection_id,
                 owner_user_id=str(resolved.context.user_id),
                 private_scope=resolved.context.resource_scope,
+                resolved_conversation_id=msg.resolved_conversation_id,
+                resolved_topic_id=msg.resolved_topic_id,
                 metadata=metadata,
             )
         )
@@ -1246,18 +1300,36 @@ class ChannelManager:
 
         # The manager is the run-creation security boundary, so it does not
         # trust mutable InboundMessage identity fields by themselves. Re-read
-        # the binding by provider identity before creating DeerFlow threads or
+        # the binding by provider identity before creating ActWeave threads or
         # runs. If the asserted identity does not match, keep only the
         # server-side connection fields as outbound routing hints.
         connection = await self._connection_repo.find_connection_by_external_identity(
             provider=msg.channel_name,
+            channel_instance_id=persisted_channel_instance_id(
+                msg.channel_name,
+                msg.channel_instance_id,
+            ),
             external_account_id=msg.user_id,
             workspace_id=msg.workspace_id or None,
+            expected_connection_id=msg.connection_id,
+            expected_scope=msg.private_scope,
         )
         if connection is None:
             return _BoundIdentityRejection()
 
         try:
+            ConnectionInboundResolver._require_connection_instance(
+                connection,
+                ProviderIdentity(
+                    provider=msg.channel_name,
+                    channel_instance_id=msg.channel_instance_id,
+                    external_account_id=msg.user_id,
+                    workspace_id=msg.workspace_id,
+                    external_conversation_id=(msg.resolved_conversation_id or msg.chat_id),
+                    external_topic_id=(msg.resolved_topic_id if msg.resolved_conversation_id is not None else msg.topic_id),
+                ),
+                "channel-bound-identity",
+            )
             account_id, _project_id, owner_user_id, connection_id = ConnectionInboundResolver._connection_coordinates(
                 connection,
                 "channel-bound-identity",
@@ -1278,18 +1350,21 @@ class ChannelManager:
         bound_identity_rejection: _BoundIdentityRejection,
     ) -> None:
         logger.info(
-            "[Manager] rejecting unbound channel message: channel=%s, chat_id=%s",
+            "[Manager] rejecting unbound channel message: channel=%s",
             msg.channel_name,
-            msg.chat_id,
         )
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
+            channel_instance_id=msg.channel_instance_id,
             chat_id=msg.chat_id,
             thread_id="",
             text=bound_identity_rejection.message,
             thread_ts=msg.thread_ts,
             connection_id=bound_identity_rejection.outbound_connection_id,
             owner_user_id=bound_identity_rejection.outbound_owner_user_id,
+            private_scope=msg.private_scope,
+            resolved_conversation_id=msg.resolved_conversation_id,
+            resolved_topic_id=msg.resolved_topic_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
@@ -1366,7 +1441,10 @@ class ChannelManager:
             return preferred_thread_id
         thread_id = thread["thread_id"]
         await self._store_thread_id(msg, thread_id)
-        logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
+        logger.info(
+            "[Manager] new thread created through Gateway: thread_id=%s",
+            thread_id,
+        )
         return thread_id
 
     async def _get_or_create_thread(self, client, msg: InboundMessage) -> tuple[str, bool]:
@@ -1383,7 +1461,12 @@ class ChannelManager:
         if thread_id:
             return thread_id, False
 
-        key = (msg.channel_name, msg.chat_id, msg.topic_id)
+        key = (
+            msg.channel_instance_id,
+            msg.channel_name,
+            msg.chat_id,
+            msg.topic_id,
+        )
         lock = self._thread_create_locks.setdefault(key, asyncio.Lock())
         try:
             async with lock:
@@ -1496,6 +1579,7 @@ class ChannelManager:
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel_name=msg.channel_name,
+                        channel_instance_id=msg.channel_instance_id,
                         chat_id=msg.chat_id,
                         thread_id=thread_id,
                         text=display_text,
@@ -1503,6 +1587,9 @@ class ChannelManager:
                         thread_ts=msg.thread_ts,
                         connection_id=msg.connection_id,
                         owner_user_id=msg.owner_user_id,
+                        private_scope=msg.private_scope,
+                        resolved_conversation_id=msg.resolved_conversation_id,
+                        resolved_topic_id=msg.resolved_topic_id,
                         metadata=_response_metadata(msg.metadata),
                     )
                 )
@@ -1546,6 +1633,7 @@ class ChannelManager:
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel_name=msg.channel_name,
+                    channel_instance_id=msg.channel_instance_id,
                     chat_id=msg.chat_id,
                     thread_id=thread_id,
                     text=response_text,
@@ -1555,6 +1643,9 @@ class ChannelManager:
                     thread_ts=msg.thread_ts,
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
+                    private_scope=msg.private_scope,
+                    resolved_conversation_id=msg.resolved_conversation_id,
+                    resolved_topic_id=msg.resolved_topic_id,
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
@@ -1568,12 +1659,16 @@ class ChannelManager:
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel_name=msg.channel_name,
+                    channel_instance_id=msg.channel_instance_id,
                     chat_id=msg.chat_id,
                     thread_id="",
                     text=_unknown_command_reply(command),
                     thread_ts=msg.thread_ts,
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
+                    private_scope=msg.private_scope,
+                    resolved_conversation_id=msg.resolved_conversation_id,
+                    resolved_topic_id=msg.resolved_topic_id,
                     metadata=_slim_metadata(msg.metadata),
                 )
             )
@@ -1622,12 +1717,16 @@ class ChannelManager:
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
+            channel_instance_id=msg.channel_instance_id,
             chat_id=msg.chat_id,
             thread_id=await self._lookup_thread_id(msg) or "",
             text=reply,
             thread_ts=msg.thread_ts,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
+            private_scope=msg.private_scope,
+            resolved_conversation_id=msg.resolved_conversation_id,
+            resolved_topic_id=msg.resolved_topic_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
@@ -1660,12 +1759,16 @@ class ChannelManager:
     async def _send_error(self, msg: InboundMessage, error_text: str) -> None:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
+            channel_instance_id=msg.channel_instance_id,
             chat_id=msg.chat_id,
             thread_id=await self._lookup_thread_id(msg) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
+            private_scope=msg.private_scope,
+            resolved_conversation_id=msg.resolved_conversation_id,
+            resolved_topic_id=msg.resolved_topic_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)

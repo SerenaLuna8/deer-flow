@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  FolderKanbanIcon,
+  ChevronDownIcon,
   LogOutIcon,
   PlusIcon,
   SearchIcon,
@@ -116,7 +116,7 @@ export function ProjectWorkbench({
       />
       <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b px-4 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="text-primary font-serif text-lg">DeerFlow</span>
+          <span className="text-primary font-serif text-lg">ActWeave</span>
           <span className="text-muted-foreground hidden text-sm sm:inline">
             工作空间
           </span>
@@ -130,6 +130,10 @@ export function ProjectWorkbench({
                 <span className="hidden max-w-56 truncate sm:inline">
                   {accountEmail}
                 </span>
+                <ChevronDownIcon
+                  aria-hidden
+                  className="hidden size-4 sm:block"
+                />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-64">
@@ -169,64 +173,74 @@ export function ProjectWorkbench({
         </div>
       </header>
       <WorkspaceBody className="overflow-y-auto">
-        <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-          <div className="mb-8 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <div className="text-primary mb-2 flex items-center gap-2 text-sm font-medium">
-                <FolderKanbanIcon size={18} /> 多项目工作空间
-              </div>
-              <h1 className="text-3xl font-semibold tracking-tight">
-                工作空间
-              </h1>
-              <p className="text-muted-foreground mt-2">
-                创建、搜索和整理你参与的项目。
-              </p>
-            </div>
-            <Button type="button" onClick={() => setCreateOpen(true)}>
-              <PlusIcon size={16} /> 创建项目
-            </Button>
-          </div>
-
-          <div className="mb-6 flex max-w-3xl flex-col gap-3 sm:flex-row">
+        <main className="mx-auto w-full max-w-[1440px] px-4 py-8 sm:px-6 sm:py-14 lg:px-12">
+          <div
+            data-testid="project-toolbar"
+            className="border-border/80 bg-card mb-8 grid gap-3 rounded-xl border p-5 shadow-xs lg:grid-cols-[minmax(24rem,1fr)_18.5rem_minmax(17rem,auto)] lg:items-center"
+          >
             <div className="relative min-w-0 flex-1">
               <SearchIcon className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
               <Input
                 aria-label="搜索项目"
-                className="pl-9"
+                className="h-12 pl-9 text-base shadow-none"
                 placeholder="搜索名称或项目标识"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
             </div>
-            <select
+            <div
+              role="group"
               aria-label="筛选项目"
-              className="border-input bg-background h-9 rounded-md border px-3 text-sm shadow-xs"
-              value={filter}
-              onChange={(event) =>
-                setFilter(event.target.value as ProjectListFilter)
-              }
+              className="bg-muted grid grid-cols-2 rounded-lg p-1"
             >
-              <option value="all">全部项目</option>
-              <option value="pinned">仅看置顶</option>
-            </select>
+              <Button
+                type="button"
+                variant={filter === "all" ? "outline" : "ghost"}
+                className="aria-pressed:border-border aria-pressed:bg-background h-10 min-w-36 border-transparent text-base shadow-none aria-pressed:shadow-xs"
+                aria-pressed={filter === "all"}
+                onClick={() => setFilter("all")}
+              >
+                全部项目
+              </Button>
+              <Button
+                type="button"
+                variant={filter === "pinned" ? "outline" : "ghost"}
+                className="aria-pressed:border-border aria-pressed:bg-background h-10 min-w-36 border-transparent text-base shadow-none aria-pressed:shadow-xs"
+                aria-pressed={filter === "pinned"}
+                onClick={() => setFilter("pinned")}
+              >
+                仅看置顶
+              </Button>
+            </div>
+            <div className="flex items-center justify-between gap-4 lg:justify-end">
+              <div
+                aria-live="polite"
+                aria-atomic="true"
+                className="text-muted-foreground flex min-h-9 min-w-20 items-center text-base"
+              >
+                {!projectsQuery.isLoading && !projectsQuery.error
+                  ? `${projects.length} 个项目`
+                  : null}
+              </div>
+              <Button
+                type="button"
+                size="lg"
+                className="h-12 shrink-0 px-6"
+                onClick={() => setCreateOpen(true)}
+              >
+                <PlusIcon size={16} /> 创建项目
+              </Button>
+            </div>
           </div>
 
           <section aria-label="项目列表">
-            {!projectsQuery.isLoading && !projectsQuery.error && (
-              <div className="mb-4 flex justify-end">
-                <span className="text-muted-foreground text-sm">
-                  {projects.length} 个项目
-                </span>
-              </div>
-            )}
-
             {projectsQuery.isLoading ? (
               <div
                 data-testid="project-loading"
-                className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3"
+                className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 xl:gap-8"
               >
                 {[0, 1, 2].map((item) => (
-                  <Skeleton key={item} className="h-80 rounded-xl" />
+                  <Skeleton key={item} className="h-[23.5rem] rounded-xl" />
                 ))}
               </div>
             ) : projectsQuery.error ? (
@@ -252,14 +266,13 @@ export function ProjectWorkbench({
               <ProjectEmptyState
                 search={search}
                 filtered={filter === "pinned"}
-                onCreate={() => setCreateOpen(true)}
                 onClearSearch={() => setSearch("")}
                 onClearFilter={() => setFilter("all")}
               />
             ) : (
               <div
                 data-testid="project-grid"
-                className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3"
+                className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 xl:gap-8"
               >
                 {projects.map((project) => (
                   <ProjectCardWithActions

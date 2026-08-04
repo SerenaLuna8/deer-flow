@@ -21,6 +21,14 @@ export type AgentMcpDependencyAssessment = {
   reason: string | null;
 };
 
+export const MAIN_PROJECT_AGENT_SLUG = "project-assistant";
+
+export function isMainProjectAgent(
+  agent: Pick<ProjectAssetItem, "scope" | "slug">,
+): boolean {
+  return agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG;
+}
+
 function selectedAgentVersion(
   agent: ProjectAssetItem,
   history: VersionHistoryResponse,
@@ -42,6 +50,9 @@ export function agentMcpDependencyAssessment(
   history: VersionHistoryResponse | undefined,
   mcpVersions: readonly ScopedMcpVersion[] | undefined,
 ): AgentMcpDependencyAssessment {
+  if (isMainProjectAgent(agent)) {
+    return { status: "ready", reason: null };
+  }
   if (!history || !mcpVersions) {
     return { status: "loading", reason: null };
   }
@@ -158,12 +169,13 @@ export function useAgentMcpDependencyRuntime({
       ),
       queryFn: ({ signal }: { signal: AbortSignal }) =>
         listProjectAssetVersions(projectId, "agents", agent.id, signal),
-      enabled: shouldLoad,
+      enabled: shouldLoad && !isMainProjectAgent(agent),
     })),
   });
   const requiredVersionIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [index, agent] of agents.entries()) {
+      if (isMainProjectAgent(agent)) continue;
       const history = histories[index]?.data;
       if (!history) continue;
       const version = selectedAgentVersion(agent, history);
@@ -185,6 +197,12 @@ export function useAgentMcpDependencyRuntime({
     shouldLoad &&
     (histories.some((history) => history.isLoading) || runtime.isLoading);
   const assessments = agents.map((agent, index) => {
+    if (isMainProjectAgent(agent)) {
+      return {
+        status: "ready",
+        reason: null,
+      } satisfies AgentMcpDependencyAssessment;
+    }
     if (!shouldLoad || isLoading) {
       return {
         status: "loading",

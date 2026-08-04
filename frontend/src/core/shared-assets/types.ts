@@ -29,7 +29,31 @@ export const MCP_TRANSPORTS = [
   "streamable_http",
 ] as const;
 export const CREDENTIAL_GRANT_STATUSES = ["active", "revoked"] as const;
-export const CREDENTIAL_PAYLOAD_GROUPS = ["env", "headers", "oauth"] as const;
+export const MCP_TOOL_INVENTORY_STATUSES = [
+  "never_discovered",
+  "testing",
+  "ready",
+  "degraded",
+  "failed",
+  "stale",
+] as const;
+export const MCP_TOOL_DISCOVERY_ATTEMPT_STATUSES = [
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+export const MCP_TOOL_INVENTORY_ERROR_CODES = [
+  "mcp_discovery_unavailable",
+  "mcp_catalog_invalid",
+] as const;
+export const CREDENTIAL_PAYLOAD_GROUPS = [
+  "env",
+  "headers",
+  "query",
+  "oauth",
+] as const;
 
 export const assetKindSchema = z.enum(ASSET_KINDS);
 export const assetListKindSchema = z.enum(ASSET_LIST_KINDS);
@@ -40,6 +64,13 @@ export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
 export const skillFilePreviewStatusSchema = z.enum(SKILL_FILE_PREVIEW_STATUSES);
 export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
 export const credentialGrantStatusSchema = z.enum(CREDENTIAL_GRANT_STATUSES);
+export const mcpToolInventoryStatusSchema = z.enum(MCP_TOOL_INVENTORY_STATUSES);
+export const mcpToolDiscoveryAttemptStatusSchema = z.enum(
+  MCP_TOOL_DISCOVERY_ATTEMPT_STATUSES,
+);
+export const mcpToolInventoryErrorCodeSchema = z.enum(
+  MCP_TOOL_INVENTORY_ERROR_CODES,
+);
 export const credentialPayloadGroupSchema = z.enum(CREDENTIAL_PAYLOAD_GROUPS);
 export const assetIdSchema = z.string().uuid();
 export const assetCapabilitiesSchema = z.array(capabilitySchema);
@@ -149,6 +180,7 @@ const credentialPayloadStructureSchema = z
   .object({
     env: credentialFieldListSchema.optional(),
     headers: credentialFieldListSchema.optional(),
+    query: credentialFieldListSchema.optional(),
     oauth: credentialFieldListSchema.optional(),
   })
   .strict()
@@ -479,6 +511,109 @@ export const mcpVersionSchema = z
   })
   .strict();
 
+export const mcpToolSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(255)
+      .regex(/^[A-Za-z0-9_-]+$/),
+    description: z.string().max(4096),
+  })
+  .strict();
+
+export const mcpToolInventorySchema = z
+  .object({
+    status: mcpToolInventoryStatusSchema,
+    tools: z.array(mcpToolSchema).max(128),
+    last_attempt_at: z.string().datetime({ offset: true }).nullable(),
+    last_success_at: z.string().datetime({ offset: true }).nullable(),
+    error_code: mcpToolInventoryErrorCodeSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const invalid = (message: string) =>
+      context.addIssue({ code: "custom", message });
+    if (
+      new Set(value.tools.map((tool) => tool.name)).size !== value.tools.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "MCP tool names must be unique",
+        path: ["tools"],
+      });
+    }
+    if (
+      value.status === "never_discovered" &&
+      (value.tools.length > 0 ||
+        value.last_attempt_at !== null ||
+        value.last_success_at !== null ||
+        value.error_code !== null)
+    ) {
+      invalid("Never-discovered MCP inventory cannot contain observations");
+    }
+    if (value.status === "testing" && value.error_code !== null) {
+      invalid("Testing MCP inventory cannot contain an error");
+    }
+    if (
+      value.status === "ready" &&
+      (value.last_attempt_at === null ||
+        value.last_success_at === null ||
+        value.error_code !== null)
+    ) {
+      invalid("Ready MCP inventory requires a successful observation");
+    }
+    if (
+      value.status === "degraded" &&
+      (value.last_attempt_at === null ||
+        value.last_success_at === null ||
+        value.error_code === null)
+    ) {
+      invalid("Degraded MCP inventory requires success and failure metadata");
+    }
+    if (
+      value.status === "failed" &&
+      (value.tools.length > 0 ||
+        value.last_attempt_at === null ||
+        value.error_code === null)
+    ) {
+      invalid("Failed MCP inventory cannot expose stale tools");
+    }
+    if (
+      value.status === "stale" &&
+      (value.tools.length > 0 || value.error_code !== null)
+    ) {
+      invalid("Stale MCP inventory cannot expose another closure's tools");
+    }
+  });
+
+export const mcpToolInventoryResponseSchema = z
+  .object({
+    data: mcpToolInventorySchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const mcpToolDiscoveryAttemptSchema = z
+  .object({
+    id: assetIdSchema,
+    mcp_server_id: assetIdSchema,
+    mcp_server_version_id: assetIdSchema,
+    status: mcpToolDiscoveryAttemptStatusSchema,
+    requested_at: z.string().datetime({ offset: true }),
+    started_at: z.string().datetime({ offset: true }).nullable(),
+    completed_at: z.string().datetime({ offset: true }).nullable(),
+    error_code: mcpToolInventoryErrorCodeSchema.nullable(),
+  })
+  .strict();
+
+export const mcpToolDiscoveryAttemptResponseSchema = z
+  .object({
+    data: mcpToolDiscoveryAttemptSchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
 export const credentialVersionSchema = z
   .object({
     id: assetIdSchema,
@@ -509,6 +644,155 @@ export const skillVersionResponseSchema = z
 export const mcpVersionResponseSchema = z
   .object({ data: mcpVersionSchema, request_id: z.string().min(1) })
   .strict();
+const configuredMcpVersionSchema = mcpVersionSchema.extend({
+  workflow_status: z.enum(["published", "pending_approval"]),
+});
+export const configuredMcpResponseSchema = z
+  .object({
+    item: assetSummarySchema,
+    version: configuredMcpVersionSchema,
+    request_id: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.item.id !== value.version.mcp_server_id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Configured MCP response asset and version must match",
+      });
+    }
+    if (
+      value.version.workflow_status === "published" &&
+      value.item.current_published_version_id !== value.version.id
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Published configured MCP must be the current version",
+        path: ["item", "current_published_version_id"],
+      });
+    }
+    const hasCredentialSlots = value.version.credential_slots.length > 0;
+    const expectedWorkflowStatus = hasCredentialSlots
+      ? "pending_approval"
+      : "published";
+    if (value.version.workflow_status !== expectedWorkflowStatus) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Configured MCP response workflow must match its Credential slots",
+        path: ["version", "workflow_status"],
+      });
+    }
+    if (
+      value.version.workflow_status === "pending_approval" &&
+      value.version.supersedes_version_id !==
+        value.item.current_published_version_id
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Pending configured MCP must extend the current published configuration",
+        path: ["version", "supersedes_version_id"],
+      });
+    }
+  });
+
+const projectMcpEditableVersionSchema = mcpVersionSchema.extend({
+  workflow_status: z.enum(["published", "pending_approval"]),
+});
+
+function editableMcpSlotsMatch(
+  version: z.infer<typeof projectMcpEditableVersionSchema>,
+): boolean {
+  if (
+    version.definition.credential_slots.length !==
+    version.credential_slots.length
+  ) {
+    return false;
+  }
+  return version.credential_slots.every((slot, index) => {
+    const definitionSlot = version.definition.credential_slots[index];
+    if (
+      slot.name !== definitionSlot?.name ||
+      slot.purpose !== definitionSlot.purpose ||
+      slot.required !== definitionSlot.required
+    ) {
+      return false;
+    }
+    const groups = Object.keys(slot.payload_schema);
+    const definitionGroups = Object.keys(definitionSlot.payload_schema);
+    return (
+      groups.length === definitionGroups.length &&
+      groups.every((group) => {
+        const fields = slot.payload_schema[group] ?? [];
+        const definitionFields = definitionSlot.payload_schema[group] ?? [];
+        return (
+          fields.length === definitionFields.length &&
+          fields.every(
+            (field, fieldIndex) => field === definitionFields[fieldIndex],
+          )
+        );
+      })
+    );
+  });
+}
+
+export const projectMcpEditableConfigurationResponseSchema = z
+  .object({
+    item: assetSummarySchema,
+    version: projectMcpEditableVersionSchema,
+    request_id: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      !projectConfiguredMcpDefinitionInputSchema.safeParse(
+        value.version.definition,
+      ).success ||
+      !editableMcpSlotsMatch(value.version)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Editable MCP configuration must contain one safe Project definition",
+        path: ["version", "definition"],
+      });
+    }
+    if (
+      value.item.scope !== "project" ||
+      value.item.project_id === null ||
+      value.item.id !== value.version.mcp_server_id
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Editable MCP configuration must belong to one Project asset",
+        path: ["item", "id"],
+      });
+    }
+    if (
+      value.version.workflow_status === "published" &&
+      value.item.current_published_version_id !== value.version.id
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Editable published MCP configuration must be the current version",
+        path: ["item", "current_published_version_id"],
+      });
+    }
+    if (
+      value.version.workflow_status === "pending_approval" &&
+      value.version.supersedes_version_id !==
+        value.item.current_published_version_id
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Editable pending MCP configuration must extend the current published version",
+        path: ["version", "supersedes_version_id"],
+      });
+    }
+  });
 export const credentialVersionResponseSchema = z
   .object({ data: credentialVersionSchema, request_id: z.string().min(1) })
   .strict();
@@ -710,32 +994,169 @@ export const skillVersionInputSchema = z
     expected_asset_version: z.number().int().positive(),
   })
   .strict();
+const mcpCredentialSlotInputSchema = z
+  .object({
+    name: mcpCredentialSlotNameSchema,
+    purpose: z.string().default(""),
+    payload_schema: stringListMapSchema,
+    required: z.boolean().default(true),
+  })
+  .strict();
+
+const mcpDefinitionInputCommonShape = {
+  description: z.string().default(""),
+  command: z.string().nullable().default(null),
+  args: z.array(z.string()).default([]),
+  url: z.string().nullable().default(null),
+  env: stringMapSchema.default({}),
+  headers: stringMapSchema.default({}),
+  oauth: safeJsonObjectSchema.default({}),
+  routing: safeJsonObjectSchema.default({}),
+  tool_overrides: safeJsonObjectSchema.default({}),
+  timeout_seconds: z.number().int().positive().default(30),
+};
+
 export const mcpVersionInputSchema = z
   .object({
-    description: z.string().default(""),
+    ...mcpDefinitionInputCommonShape,
     transport: mcpTransportSchema.default("stdio"),
-    command: z.string().nullable().default(null),
-    args: z.array(z.string()).default([]),
-    url: z.string().nullable().default(null),
-    env: stringMapSchema.default({}),
-    headers: stringMapSchema.default({}),
-    oauth: safeJsonObjectSchema.default({}),
-    routing: safeJsonObjectSchema.default({}),
-    tool_overrides: safeJsonObjectSchema.default({}),
-    timeout_seconds: z.number().int().positive().default(30),
-    credential_slots: z
-      .array(
-        z
-          .object({
-            name: mcpCredentialSlotNameSchema,
-            purpose: z.string().default(""),
-            payload_schema: stringListMapSchema,
-            required: z.boolean().default(true),
-          })
-          .strict(),
-      )
-      .default([]),
+    credential_slots: z.array(mcpCredentialSlotInputSchema).default([]),
     expected_asset_version: z.number().int().positive(),
+  })
+  .strict();
+
+function configuredProjectMcpRawHostname(value: string): string | null {
+  const authority = value.slice(value.indexOf("://") + 3).split("/", 1)[0];
+  if (!authority || authority.includes("@")) return null;
+  if (authority.startsWith("[")) {
+    const closingBracket = authority.indexOf("]");
+    if (closingBracket < 0) return null;
+    const remainder = authority.slice(closingBracket + 1);
+    if (remainder && !/^:\d+$/u.test(remainder)) return null;
+    return authority.slice(0, closingBracket + 1);
+  }
+  const portSeparator = authority.lastIndexOf(":");
+  if (portSeparator < 0) return authority;
+  if (!/^\d+$/u.test(authority.slice(portSeparator + 1))) return null;
+  return authority.slice(0, portSeparator);
+}
+
+export function isSafeConfiguredProjectMcpUrl(value: string | null): boolean {
+  if (
+    !value?.trim() ||
+    value !== value.trim() ||
+    value.includes("\\") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    /[\u0000-\u0020\u007f]/u.test(value) ||
+    !/^https?:\/\/[^/\\?#]+/iu.test(value)
+  ) {
+    return false;
+  }
+  const rawHostname = configuredProjectMcpRawHostname(value);
+  if (!rawHostname) return false;
+  try {
+    const parsed = new URL(value);
+    const isExactLocalhost = rawHostname.toLowerCase() === "localhost";
+    const isCanonicalIpv4 = /^\d+(?:\.\d+){3}$/u.test(rawHostname);
+    const isCanonicalIpv6 =
+      rawHostname.startsWith("[") && rawHostname.endsWith("]");
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      !parsed.username &&
+      !parsed.password &&
+      (isExactLocalhost
+        ? parsed.hostname === "localhost"
+        : rawHostname === parsed.hostname) &&
+      (isExactLocalhost || isCanonicalIpv4 || isCanonicalIpv6) &&
+      parsed.port !== "0" &&
+      !rawHostname.includes("*")
+    );
+  } catch {
+    return false;
+  }
+}
+
+const projectConfiguredMcpCredentialPayloadSchema = z
+  .object({
+    headers: credentialFieldListSchema.optional(),
+    query: credentialFieldListSchema.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length === 1, {
+    message:
+      "Configured project MCP Credential slots support exactly one headers or query group",
+  });
+
+const projectConfiguredMcpCredentialSlotInputSchema =
+  mcpCredentialSlotInputSchema.extend({
+    payload_schema: projectConfiguredMcpCredentialPayloadSchema,
+  });
+
+const projectConfiguredMcpDefinitionObjectSchema = z
+  .object({
+    ...mcpDefinitionInputCommonShape,
+    transport: z.enum(["sse", "http"]).default("http"),
+    credential_slots: z
+      .array(projectConfiguredMcpCredentialSlotInputSchema)
+      .default([]),
+  })
+  .strict();
+
+type ProjectConfiguredMcpDefinitionInput = z.infer<
+  typeof projectConfiguredMcpDefinitionObjectSchema
+>;
+
+function validateProjectConfiguredMcpDefinition(
+  value: ProjectConfiguredMcpDefinitionInput,
+  context: z.RefinementCtx,
+): void {
+  if (!isSafeConfiguredProjectMcpUrl(value.url)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "Configured project MCP URL must use localhost or a canonical IPv4/IPv6 literal without credentials, query parameters, or fragments",
+      path: ["url"],
+    });
+  }
+  const slotNames = value.credential_slots.map((slot) => slot.name);
+  if (new Set(slotNames).size !== slotNames.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Configured project MCP Credential slot names must be unique",
+      path: ["credential_slots"],
+    });
+  }
+}
+
+export const projectConfiguredMcpDefinitionInputSchema =
+  projectConfiguredMcpDefinitionObjectSchema.superRefine(
+    validateProjectConfiguredMcpDefinition,
+  );
+
+export const createConfiguredMcpInputSchema =
+  projectConfiguredMcpDefinitionObjectSchema
+    .extend({
+      slug: z
+        .string()
+        .trim()
+        .min(3)
+        .max(63)
+        .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u),
+      display_name: z.string().trim().min(1).max(120),
+    })
+    .strict()
+    .superRefine(validateProjectConfiguredMcpDefinition);
+
+export const updateConfiguredMcpInputSchema =
+  projectConfiguredMcpDefinitionObjectSchema
+    .extend({ expected_asset_version: z.number().int().positive() })
+    .strict()
+    .superRefine(validateProjectConfiguredMcpDefinition);
+
+export const syncCurrentSystemMcpBindingInputSchema = z
+  .object({
+    expected_binding_version: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -743,6 +1164,7 @@ export const credentialPayloadSchema = z
   .object({
     env: credentialFieldMapSchema.optional(),
     headers: credentialFieldMapSchema.optional(),
+    query: credentialFieldMapSchema.optional(),
     oauth: credentialFieldMapSchema.optional(),
   })
   .strict()
@@ -820,6 +1242,13 @@ export const disableSystemBindingInputSchema = z
 
 export type AssetKind = z.infer<typeof assetKindSchema>;
 export type AssetListKind = z.infer<typeof assetListKindSchema>;
+export type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
+export type ProjectAssetStatusAction<Kind extends MutableAssetListKind> =
+  Kind extends MutableAssetListKind ? "activate" | "suspend" : never;
+export type AdminProjectAssetStatusAction<Kind extends MutableAssetListKind> =
+  Kind extends "skills" | "agents"
+    ? "activate" | "suspend"
+    : "archive" | "suspend";
 export type AssetScope = z.infer<typeof assetScopeSchema>;
 export type AssetStatus = z.infer<typeof assetStatusSchema>;
 export type CredentialPayloadGroup = z.infer<
@@ -830,8 +1259,24 @@ export type AssetSummary = z.infer<typeof assetSummarySchema>;
 export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
 export type ProjectCredentialItem = z.infer<typeof projectCredentialItemSchema>;
 export type AssetVersion = z.infer<typeof assetVersionSchema>;
+export type McpTool = z.infer<typeof mcpToolSchema>;
+export type McpToolInventory = z.infer<typeof mcpToolInventorySchema>;
+export type McpToolInventoryResponse = z.infer<
+  typeof mcpToolInventoryResponseSchema
+>;
+export type McpToolDiscoveryAttempt = z.infer<
+  typeof mcpToolDiscoveryAttemptSchema
+>;
+export type McpToolDiscoveryAttemptResponse = z.infer<
+  typeof mcpToolDiscoveryAttemptResponseSchema
+>;
 export type VersionResponse = z.infer<typeof versionResponseSchema>;
 export type AgentVersionResponse = z.infer<typeof agentVersionResponseSchema>;
+export type McpVersionResponse = z.infer<typeof mcpVersionResponseSchema>;
+export type ConfiguredMcpResponse = z.infer<typeof configuredMcpResponseSchema>;
+export type ProjectMcpEditableConfigurationResponse = z.infer<
+  typeof projectMcpEditableConfigurationResponseSchema
+>;
 export type VersionHistoryResponse = z.infer<
   typeof versionHistoryResponseSchema
 >;
@@ -878,6 +1323,15 @@ export type SkillCredentialBindingsInput = z.input<
   typeof skillCredentialBindingsInputSchema
 >;
 export type McpVersionInput = z.input<typeof mcpVersionInputSchema>;
+export type CreateConfiguredMcpInput = z.input<
+  typeof createConfiguredMcpInputSchema
+>;
+export type UpdateConfiguredMcpInput = z.input<
+  typeof updateConfiguredMcpInputSchema
+>;
+export type SyncCurrentSystemMcpBindingInput = z.input<
+  typeof syncCurrentSystemMcpBindingInputSchema
+>;
 export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<
   typeof expectedAssetVersionInputSchema

@@ -1,4 +1,8 @@
-import type { AssetScope, AssetVersion } from "./types";
+import {
+  isSafeConfiguredProjectMcpUrl,
+  type AssetScope,
+  type AssetVersion,
+} from "./types";
 
 export const MCP_RUNTIME_TRANSPORTS = ["sse", "http"] as const;
 export const SYSTEM_MCP_RUNTIME_TRANSPORTS = ["stdio", "sse", "http"] as const;
@@ -24,59 +28,34 @@ export type McpRuntimeBlockMessages = {
 };
 
 export const UNSUPPORTED_MCP_VERSION_MESSAGE =
-  "当前仅支持 SSE 或 HTTP。此历史版本可以查看，但不能发布、绑定或用于 Agent。";
+  "当前仅支持 SSE 或 HTTP。此历史配置可以查看，但不能发布、绑定或用于 Agent。";
 export const UNSUPPORTED_SYSTEM_MCP_VERSION_MESSAGE =
-  "当前 Private runtime 仅支持 stdio、SSE 或 HTTP。此系统历史版本可以查看，但不能绑定或用于 Agent。";
+  "当前 Private runtime 仅支持 stdio、SSE 或 HTTP。此系统历史配置可以查看，但不能绑定或用于 Agent。";
 
 const DEFAULT_RUNTIME_BLOCK_MESSAGES: McpRuntimeBlockMessages = {
   unsupportedProjectTransport: UNSUPPORTED_MCP_VERSION_MESSAGE,
   unsupportedSystemTransport: UNSUPPORTED_SYSTEM_MCP_VERSION_MESSAGE,
   missingProjectUrl:
-    "当前传输方式缺少 URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+    "当前传输方式缺少 URL。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
   invalidProjectUrl:
-    "当前 Project MCP 需要无凭据、无查询参数的绝对 HTTPS URL。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+    "当前 Project MCP 需要无内嵌凭据、无查询参数或片段的绝对 HTTP 或 HTTPS URL，主机仅支持精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不解析普通 DNS 主机名。localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 必须属于管理员配置的允许网段。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
   projectOAuth:
-    "当前 Project MCP 不支持版本内 OAuth 配置。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+    "当前 Project MCP 不支持配置内 OAuth。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
   projectHeadersOnly:
-    "当前 Project MCP Credential 槽位仅支持 headers。此历史版本可以查看，但不能发布、绑定或用于 Agent。",
+    "当前 Project MCP Credential 槽位仅支持 headers 或 query。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
   missingSystemCommand:
     "当前 stdio 系统 MCP 缺少 command，不能绑定或用于 Agent。",
   missingSystemUrl: "当前远程系统 MCP 缺少 URL，不能绑定或用于 Agent。",
   systemEnvOnly:
     "当前 stdio 系统 MCP Credential 槽位仅支持 env，不能绑定或用于 Agent。",
   systemRemoteCredentialsOnly:
-    "当前远程系统 MCP Credential 槽位仅支持 headers 或 oauth，不能绑定或用于 Agent。",
+    "当前远程系统 MCP Credential 槽位仅支持 headers、query 或 oauth，不能绑定或用于 Agent。",
 };
 
 export function isMcpRuntimeTransport(
   transport: string,
 ): transport is McpRuntimeTransport {
   return MCP_RUNTIME_TRANSPORTS.includes(transport as McpRuntimeTransport);
-}
-
-function isProjectRemoteMcpUrl(value: string): boolean {
-  if (value.length === 0 || value !== value.trim() || value.includes("\\"))
-    return false;
-  try {
-    const parsed = new URL(value);
-    const hostname = parsed.hostname.toLowerCase().replace(/\.$/u, "");
-    return (
-      parsed.protocol === "https:" &&
-      !parsed.username &&
-      !parsed.password &&
-      !parsed.search &&
-      !parsed.hash &&
-      parsed.port !== "0" &&
-      hostname.includes(".") &&
-      hostname !== "localhost" &&
-      !hostname.endsWith(".localhost") &&
-      !hostname.includes("*") &&
-      !hostname.includes(":") &&
-      !/^\d+(?:\.\d+){3}$/u.test(hostname)
-    );
-  } catch {
-    return false;
-  }
 }
 
 export function mcpVersionRuntimeBlockReason(
@@ -97,7 +76,7 @@ export function mcpVersionRuntimeBlockReason(
     if (!version.definition.url?.trim()) {
       return messages.missingProjectUrl;
     }
-    if (!isProjectRemoteMcpUrl(version.definition.url)) {
+    if (!isSafeConfiguredProjectMcpUrl(version.definition.url)) {
       return messages.invalidProjectUrl;
     }
     if (Object.keys(version.definition.oauth).length > 0) {
@@ -105,7 +84,9 @@ export function mcpVersionRuntimeBlockReason(
     }
     if (
       credentialSchemas.some(
-        (sections) => sections.length !== 1 || sections[0] !== "headers",
+        (sections) =>
+          sections.length !== 1 ||
+          (sections[0] !== "headers" && sections[0] !== "query"),
       )
     ) {
       return messages.projectHeadersOnly;
@@ -128,7 +109,9 @@ export function mcpVersionRuntimeBlockReason(
     return messages.missingSystemUrl;
   }
   const allowedCredentialSection =
-    transport === "stdio" ? new Set(["env"]) : new Set(["headers", "oauth"]);
+    transport === "stdio"
+      ? new Set(["env"])
+      : new Set(["headers", "query", "oauth"]);
   if (
     credentialSchemas.some(
       (sections) =>
@@ -165,11 +148,11 @@ export function mcpDependencyRuntimeBlockReason(
   for (const versionId of requiredVersionIds) {
     const entry = byId.get(versionId);
     if (!entry) {
-      return "Agent 引用的 MCP 版本无法确认，请先改用当前项目可用的 MCP 版本。";
+      return "Agent 引用的 MCP 配置无法确认，请先改用当前项目可用的 MCP 配置。";
     }
     const reason = mcpVersionRuntimeBlockReason(entry.version, entry.scope);
     if (reason) {
-      return `该 MCP 版本当前不能作为 Agent 依赖：${reason}`;
+      return `该 MCP 配置当前不能作为 Agent 依赖：${reason}`;
     }
   }
   return null;

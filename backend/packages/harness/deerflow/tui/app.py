@@ -180,7 +180,7 @@ class DeerFlowTUI(App):
             yield Static(id="transcript")
         yield Static(id="status")
         yield Static(id="palette")
-        yield ComposerInput(placeholder="Message DeerFlow…   ( / for commands )", id="composer")
+        yield ComposerInput(placeholder="Message ActWeave…   ( / for commands )", id="composer")
 
     def on_mount(self) -> None:
         self._load_session_info()

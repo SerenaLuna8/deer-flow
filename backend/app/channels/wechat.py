@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.private_work.errors import PrivateWorkError
 
@@ -664,6 +665,8 @@ class WechatChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, chat_id: str, context_token: str, code: str) -> bool:
+        if not await self._has_instance_authority():
+            return True
         connection_service = self.config.get("connection_service")
         if (self._connection_repo is None and connection_service is None) or not code:
             return False
@@ -680,6 +683,7 @@ class WechatChannel(Channel):
                     code,
                     chat_id,
                     chat_id,
+                    channel_instance_id=self.channel_instance_id,
                     metadata=metadata,
                     status="connected",
                 )
@@ -687,19 +691,25 @@ class WechatChannel(Channel):
                 await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
                 return True
         else:
-            state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
+            instance_id = persisted_channel_instance_id("wechat", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="wechat",
+                channel_instance_id=instance_id,
+                state=code,
+            )
             if state is None:
                 await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
                 return True
             await self._connection_repo.upsert_connection(
                 owner_user_id=state["owner_user_id"],
                 provider="wechat",
+                channel_instance_id=instance_id,
                 external_account_id=chat_id,
                 workspace_id=chat_id,
                 metadata=metadata,
                 status="connected",
             )
-        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        await self._send_connection_reply(chat_id, context_token, "WeChat connected to ActWeave.")
         return True
 
     async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:

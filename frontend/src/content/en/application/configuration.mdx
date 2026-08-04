@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Configure the final project-scoped DeerFlow application.
+description: Configure the final project-scoped ActWeave application.
 ---
 
 # Configuration
@@ -23,6 +23,40 @@ assets. System admins manage the model catalog and system assets; project
 members manage project assets and bindings in authenticated settings. Secrets
 use encrypted Credential envelopes and are never stored in browser query
 caches.
+
+## Project MCP networks
+
+Config version 35 controls project MCP targets by CIDR network instead of
+registering each URL or IP separately:
+
+```yaml
+mcp_security:
+  project_remote_allowed_networks:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - ::1/128
+    - fc00::/7
+  require_egress_proxy: false
+  egress_proxy_url: null
+```
+
+Project MCP URLs accept only canonical IPv4 literals, bracketed IPv6 literals,
+or exact `localhost`. `localhost` is handled as `127.0.0.1`; use `[::1]`
+explicitly for IPv6 loopback. Ordinary DNS names do not gain network authority
+from a one-time DNS lookup. An empty network list denies every project remote
+MCP; only explicit `0.0.0.0/0` and `::/0` entries allow every IP. CIDRs constrain
+the destination address, not its port, path, or service identity, so grant only
+the networks project members need.
+
+HTTP is suitable only for a trusted, isolated network because header/query
+Credentials cross it in plaintext. Use HTTPS across untrusted links; an IP HTTPS
+certificate must contain the matching IP SAN. When controlled egress is enabled,
+the proxy must independently enforce an equivalent network policy, and
+`127.0.0.1` refers to the proxy's network namespace rather than the Worker.
+`mcp_security` is captured by Gateway, Scheduler, and Worker at startup, so all
+of those processes must restart after a change.
 
 Gateway, Worker and Scheduler validate the configured database and schema at startup. Use the explicit database setup/migration commands before starting application processes.
 

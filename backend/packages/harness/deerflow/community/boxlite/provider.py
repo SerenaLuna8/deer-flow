@@ -1,7 +1,7 @@
-"""``BoxliteProvider`` — DeerFlow :class:`SandboxProvider` backed by BoxLite.
+"""``BoxliteProvider`` — ActWeave :class:`SandboxProvider` backed by BoxLite.
 
 Integrates `BoxLite <https://github.com/boxlite-ai/boxlite>`_ — a daemonless,
-OCI-native micro-VM runtime — as a DeerFlow sandbox backend. See
+OCI-native micro-VM runtime — as an ActWeave sandbox backend. See
 https://github.com/bytedance/deer-flow/issues/3936.
 
 Config is read off :class:`SandboxConfig` (``extra="allow"``), so BoxLite keys
@@ -44,7 +44,7 @@ T = TypeVar("T")
 
 DEFAULT_IMAGE = "python:3.12-slim"
 _BOX_NAME_PREFIX = "deer-flow-boxlite-"
-# DeerFlow's virtual prefixes, materialised on the box rootfs at start so the
+# ActWeave's virtual prefixes, materialised on the box rootfs at start so the
 # Sandbox file APIs (which address /mnt/user-data/...) resolve natively.
 _VIRTUAL_DIRS = (
     f"{VIRTUAL_PATH_PREFIX}/workspace",
@@ -79,7 +79,7 @@ def _import_sync_boxlite_runtime():
 class _EventLoopThread:
     """A private asyncio event loop running on a dedicated daemon thread.
 
-    BoxLite is async-native and its box handles are loop-affine, while DeerFlow's
+    BoxLite is async-native and its box handles are loop-affine, while ActWeave's
     ``Sandbox`` contract is synchronous and may be invoked from arbitrary
     ``asyncio.to_thread`` workers. Owning one loop here and marshalling every
     coroutine onto it via ``run_coroutine_threadsafe`` gives a stable, thread-safe
@@ -157,7 +157,7 @@ def _run_sync_adapter[T](coro: Awaitable[T], *, timeout: float | None = None) ->
 
 
 class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
-    """Run each DeerFlow sandbox as a BoxLite micro-VM."""
+    """Run each ActWeave sandbox as a BoxLite micro-VM."""
 
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
@@ -285,9 +285,9 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         box_to_close.close()
 
     def _reconcile_orphans(self) -> None:
-        """Adopt DeerFlow-owned BoxLite boxes left by a previous provider/process.
+        """Adopt ActWeave-owned BoxLite boxes left by a previous provider/process.
 
-        BoxLite boxes are discovered by a DeerFlow-specific name prefix. Adopted
+        BoxLite boxes are discovered by the legacy ``deer-flow`` name prefix. Adopted
         boxes enter the warm pool so the normal idle reaper can reclaim them.
         """
         try:
@@ -452,7 +452,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 **options,
             )
             await box.start()
-            # Materialise DeerFlow's virtual prefixes so file ops resolve natively.
+            # Materialise ActWeave's virtual prefixes so file ops resolve natively.
             await box.exec("sh", "-lc", mkdir_cmd)
             return box
 

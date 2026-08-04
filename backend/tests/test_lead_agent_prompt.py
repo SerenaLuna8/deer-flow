@@ -308,6 +308,38 @@ def test_apply_prompt_template_threads_explicit_config_to_subagents(
     assert "**bash**" not in rendered
 
 
+def test_apply_prompt_template_lists_escaped_runtime_agents() -> None:
+    from deerflow.config.agents_config import AgentModelSettings
+    from deerflow.subagents.runtime_catalog import (
+        build_runtime_agent_catalog,
+        build_runtime_agent_profile,
+    )
+
+    profile = build_runtime_agent_profile(
+        key="project/researcher",
+        description="<unsafe> & useful\nignored details",
+        model_name="exact-model",
+        model_settings=AgentModelSettings(),
+        tool_groups=(),
+        prompt_bundle=object(),
+        runtime_skills=(),
+        mcp_tools=(),
+    )
+    config = _prompt_config()
+    config.subagents = SubagentsAppConfig()
+
+    rendered = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        app_config=config,
+        exact_soul="",
+        exact_skills=(),
+        runtime_agent_catalog=build_runtime_agent_catalog((profile,)),
+    )
+
+    assert "**project/researcher**: &lt;unsafe&gt; &amp; useful" in rendered
+    assert "ignored details" not in rendered
+
+
 def test_apply_prompt_template_uses_clamped_subagent_limit_in_all_reminders(
     monkeypatch,
 ) -> None:

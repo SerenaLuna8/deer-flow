@@ -719,7 +719,12 @@ class RunFilesFinalizedAuditMetadata(_AuditMetadata):
 
 
 class JobAuditMetadata(_AuditMetadata):
-    job_type: Literal["private_run", "automation_run", "retention_purge"]
+    job_type: Literal[
+        "private_run",
+        "automation_run",
+        "retention_purge",
+        "mcp_discovery",
+    ]
     public_error_code: StrictStr | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
     attempt_count: StrictInt = Field(ge=0, le=20)
     retry_safety: Literal["safe", "unknown", "unsafe"]

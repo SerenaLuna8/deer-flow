@@ -78,6 +78,7 @@ import {
   type CredentialMetadata,
   type ReplaceCredentialInput,
 } from "@/core/shared-assets";
+import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { cn } from "@/lib/utils";
 
 import {
@@ -301,7 +302,11 @@ function VersionDetail({ version }: { version: AssetVersion }) {
     >
       <dl className="grid min-w-0 gap-4">
         <AdminTechnicalValue
-          label={t.adminAssets.common.versionId}
+          label={
+            "mcp_server_id" in version
+              ? t.adminAssets.common.mcpConfigurationId
+              : t.adminAssets.common.versionId
+          }
           value={version.id}
         />
         {"payload_checksum" in version ? (
@@ -487,11 +492,13 @@ function VersionDetail({ version }: { version: AssetVersion }) {
 
 export function VersionTimeline({
   versions,
+  kind,
   currentVersionId,
   configureCredentialGrantsVersionId,
   onConfigureCredentialGrants,
 }: {
   versions: AssetVersion[];
+  kind?: AssetListKind;
   currentVersionId?: string | null;
   configureCredentialGrantsVersionId?: string | null;
   onConfigureCredentialGrants?: (version: McpVersion) => void;
@@ -509,12 +516,55 @@ export function VersionTimeline({
     null;
   const effectiveSelectedVersionId = selectedVersion?.id ?? null;
   const canSwitchVersions = versions.length > 1;
+  const isMcpTimeline =
+    kind === "mcp-servers" ||
+    versions.some((version) => "mcp_server_id" in version);
 
   if (versions.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        {t.adminAssets.version.none}
+        {isMcpTimeline
+          ? t.adminAssets.version.mcpNone
+          : t.adminAssets.version.none}
       </p>
+    );
+  }
+
+  if (isMcpTimeline) {
+    const currentConfiguration = resolveMcpCurrentConfiguration(
+      versions,
+      "system",
+      currentVersionId,
+    );
+    if (currentConfiguration.state !== "ready") {
+      return (
+        <p role="alert" className="text-destructive text-sm">
+          当前配置无法确认
+        </p>
+      );
+    }
+    const version = currentConfiguration.version;
+    return (
+      <div className="min-w-0 space-y-3">
+        <div className="flex items-center gap-3">
+          <AssetStatusBadge status={versionStatus(version)} />
+          <time className="text-muted-foreground ml-auto text-xs">
+            {new Date(version.created_at).toLocaleString(locale)}
+          </time>
+        </div>
+        {version.id === configureCredentialGrantsVersionId &&
+        version.credential_slots.length > 0 &&
+        onConfigureCredentialGrants ? (
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => onConfigureCredentialGrants(version)}
+          >
+            {t.adminAssets.version.configureGrants}
+          </Button>
+        ) : null}
+        <VersionDetail version={version} />
+      </div>
     );
   }
 
@@ -980,7 +1030,11 @@ function SelectedAssetDetail({
             </div>
             <AdminTechnicalValue
               className="sm:col-span-2"
-              label={t.adminAssets.common.currentPublishedVersion}
+              label={
+                kind === "mcp-servers"
+                  ? t.adminAssets.common.currentPublishedMcpConfiguration
+                  : t.adminAssets.common.currentPublishedVersion
+              }
               value={asset.current_published_version_id}
             />
             <AdminTechnicalValue
@@ -1016,21 +1070,27 @@ function SelectedAssetDetail({
       </section>
 
       <section
-        aria-label={t.adminAssets.common.versionHistory}
+        aria-label={
+          kind === "mcp-servers"
+            ? t.adminAssets.common.currentPublishedMcpConfiguration
+            : t.adminAssets.common.versionHistory
+        }
         className="border-border/70 min-w-0 border-t pt-5"
       >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold">
-            {t.adminAssets.common.versionHistory}
-          </h3>
-          {!history.isLoading && !history.error ? (
-            <span className="text-muted-foreground text-xs tabular-nums">
-              {t.adminAssets.common.versionCount(
-                history.data?.data.length ?? 0,
-              )}
-            </span>
-          ) : null}
-        </div>
+        {kind !== "mcp-servers" ? (
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold">
+              {t.adminAssets.common.versionHistory}
+            </h3>
+            {!history.isLoading && !history.error ? (
+              <span className="text-muted-foreground text-xs tabular-nums">
+                {t.adminAssets.common.versionCount(
+                  history.data?.data.length ?? 0,
+                )}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {history.isLoading ? (
           <Skeleton className="h-40 w-full" />
         ) : history.error ? (
@@ -1047,6 +1107,7 @@ function SelectedAssetDetail({
           </div>
         ) : (
           <VersionTimeline
+            kind={kind}
             versions={history.data?.data ?? []}
             currentVersionId={
               asset?.current_published_version_id ??

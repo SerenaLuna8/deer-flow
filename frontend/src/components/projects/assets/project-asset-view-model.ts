@@ -1,7 +1,11 @@
-import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
+import {
+  adminAssetErrorMessage,
+  projectMcpVersionErrorMessage,
+} from "@/components/admin/assets/admin-asset-view-model";
 import type { Capability } from "@/core/projects/types";
 import {
   SharedAssetApiError,
+  type AdminProjectAssetStatusAction,
   type AssetListKind,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
@@ -31,12 +35,22 @@ export function projectAssetCreateErrorMessage(
   return adminAssetErrorMessage(error);
 }
 
+export function projectConfiguredMcpErrorMessage(error: unknown): string {
+  if (error instanceof SharedAssetApiError && error.status === 409) {
+    return "当前项目已存在相同标识的 MCP。请修改名称或标识后重试。";
+  }
+  return projectMcpVersionErrorMessage(error);
+}
+
+export function projectMcpDeleteErrorMessage(error: unknown): string {
+  if (error instanceof SharedAssetApiError && error.status === 409) {
+    return "该 MCP 状态已变化，或仍被 Agent、历史运行或 Credential 授权快照引用；刷新并解除引用后重试。";
+  }
+  return adminAssetErrorMessage(error);
+}
+
 export type ProjectAssetDetailLifecycleAction<Kind extends MutableAssetKind> =
-  Kind extends "skills"
-    ? never
-    : Kind extends "agents"
-      ? "activate" | "suspend"
-      : "archive" | "suspend";
+  Kind extends "skills" ? never : "activate" | "suspend";
 
 export function projectAssetCanCreateVersion(
   kind: MutableAssetKind,
@@ -70,9 +84,9 @@ export function projectAssetDetailLifecycleActions<
     "shared_assets.manage_bindings",
   );
   if (kind === "agents") {
-    const canManageAgent =
+    const canManageLifecycle =
       canSuspend && item.capabilities.includes("shared_assets.manage_bindings");
-    if (!canManageAgent) {
+    if (!canManageLifecycle) {
       return [] as ProjectAssetDetailLifecycleAction<Kind>[];
     }
     return (
@@ -84,22 +98,65 @@ export function projectAssetDetailLifecycleActions<
           : []
     ) as ProjectAssetDetailLifecycleAction<Kind>[];
   }
-  const canArchive = item.capabilities.includes("shared_assets.edit");
+  if (kind === "mcp-servers") {
+    const canManageLifecycle =
+      canSuspend && item.capabilities.includes("shared_assets.manage_bindings");
+    if (
+      !canManageLifecycle ||
+      item.status === "archived" ||
+      item.current_published_version_id === null
+    ) {
+      return [] as ProjectAssetDetailLifecycleAction<Kind>[];
+    }
+    return (
+      item.status === "active"
+        ? ["suspend" as const]
+        : item.status === "suspended"
+          ? ["activate" as const]
+          : []
+    ) as ProjectAssetDetailLifecycleAction<Kind>[];
+  }
+  return [] as ProjectAssetDetailLifecycleAction<Kind>[];
+}
 
+export type AdminProjectAssetDetailLifecycleAction<
+  Kind extends MutableAssetKind,
+> = AdminProjectAssetStatusAction<Kind>;
+
+export function adminProjectAssetDetailLifecycleActions<
+  Kind extends MutableAssetKind,
+>(
+  kind: Kind,
+  item: ProjectLifecycleItem,
+): AdminProjectAssetDetailLifecycleAction<Kind>[] {
+  if (kind === "skills") {
+    return [] as AdminProjectAssetDetailLifecycleAction<Kind>[];
+  }
+  if (kind === "agents") {
+    return projectAssetDetailLifecycleActions(
+      kind,
+      item,
+      item.capabilities,
+    ) as AdminProjectAssetDetailLifecycleAction<Kind>[];
+  }
+  const canArchive = item.capabilities.includes("shared_assets.edit");
+  const canSuspend = item.capabilities.includes(
+    "shared_assets.manage_bindings",
+  );
   if (item.status === "active") {
     return [
       ...(canArchive ? ["archive" as const] : []),
       ...(canSuspend ? ["suspend" as const] : []),
-    ] as ProjectAssetDetailLifecycleAction<Kind>[];
+    ] as AdminProjectAssetDetailLifecycleAction<Kind>[];
   }
   if (item.status === "archived") {
     return (
       canSuspend ? ["suspend" as const] : []
-    ) as ProjectAssetDetailLifecycleAction<Kind>[];
+    ) as AdminProjectAssetDetailLifecycleAction<Kind>[];
   }
   return (
     canArchive ? ["archive" as const] : []
-  ) as ProjectAssetDetailLifecycleAction<Kind>[];
+  ) as AdminProjectAssetDetailLifecycleAction<Kind>[];
 }
 
 export type ProjectSkillStatusToggleState = {
@@ -110,6 +167,19 @@ export type ProjectSkillStatusToggleState = {
 
 export function projectSkillStatusToggleState(
   item: ProjectSkillStatusItem,
+): ProjectSkillStatusToggleState {
+  return projectStatusToggleState(item, "请先发布版本");
+}
+
+export function projectMcpStatusToggleState(
+  item: ProjectSkillStatusItem,
+): ProjectSkillStatusToggleState {
+  return projectStatusToggleState(item, "请先发布配置");
+}
+
+function projectStatusToggleState(
+  item: ProjectSkillStatusItem,
+  unpublishedReason: string,
 ): ProjectSkillStatusToggleState {
   const checked = item.scope === "project" && item.status === "active";
   const canManage =
@@ -126,7 +196,7 @@ export function projectSkillStatusToggleState(
       canManage &&
       item.status === "suspended" &&
       item.current_published_version_id === null
-        ? "请先发布版本"
+        ? unpublishedReason
         : null,
   };
 }
@@ -136,7 +206,7 @@ export function projectAssetCanDelete(
   item: ProjectAssetDeleteItem,
 ): boolean {
   return (
-    (kind === "skills" || kind === "agents") &&
+    (kind === "skills" || kind === "agents" || kind === "mcp-servers") &&
     item.scope === "project" &&
     item.capabilities.includes("shared_assets.edit")
   );

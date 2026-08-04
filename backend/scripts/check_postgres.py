@@ -1,4 +1,4 @@
-"""只读检查 DeerFlow PostgreSQL 连接与 schema 健康状态。"""
+"""只读检查 ActWeave PostgreSQL 连接与 schema 健康状态。"""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "asset_catalog_state",
     "audit_logs",
     "auth_sessions",
+    "channel_external_principals",
     "channel_connections",
     "channel_conversations",
     "channel_credentials",
@@ -58,8 +59,14 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "mcp_server_versions",
     "mcp_servers",
     "mcp_version_credential_slots",
+    "project_mcp_tool_inventories",
     "project_invitation_rate_limits",
     "project_invitations",
+    "project_channel_credential_bindings",
+    "project_channel_group_binding_challenges",
+    "project_channel_group_bindings",
+    "project_channel_instance_leases",
+    "project_channel_instances",
     "project_default_agents",
     "project_memberships",
     "project_quotas",
@@ -217,7 +224,7 @@ def print_result(result: PostgresCheckResult) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argparse.ArgumentParser(description="只读检查 DeerFlow PostgreSQL 数据库").parse_args(argv)
+    argparse.ArgumentParser(description="只读检查 ActWeave PostgreSQL 数据库").parse_args(argv)
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         print("错误: 必须显式设置 DATABASE_URL", file=sys.stderr)

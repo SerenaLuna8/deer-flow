@@ -21,7 +21,12 @@ from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.trace_context import normalize_trace_id
 
-JobType = Literal["private_run", "automation_run", "retention_purge"]
+JobType = Literal[
+    "private_run",
+    "automation_run",
+    "retention_purge",
+    "mcp_discovery",
+]
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
@@ -59,7 +64,12 @@ class EnqueueJob:
     def __post_init__(self) -> None:
         if type(self.scope) is not JobScope:
             raise TypeError("JobScope is required")
-        if self.job_type not in {"private_run", "automation_run", "retention_purge"}:
+        if self.job_type not in {
+            "private_run",
+            "automation_run",
+            "retention_purge",
+            "mcp_discovery",
+        }:
             raise ValueError("unsupported job type")
         if _SHA256_HEX.fullmatch(self.idempotency_key) is None:
             raise ValueError("idempotency_key must be a lowercase SHA-256 digest")
@@ -77,9 +87,13 @@ class EnqueueJob:
         elif self.job_type == "automation_run":
             if self.scope.owner_user_id is None or not self.run_id or not self.occurrence_id:
                 raise ValueError("automation_run requires owner, run, and occurrence authority")
-        elif self.run_id is not None or self.occurrence_id is not None:
+        elif self.job_type == "retention_purge" and (self.run_id is not None or self.occurrence_id is not None):
             raise ValueError(
                 "retention_purge requires project or exact former-owner authority",
+            )
+        elif self.job_type == "mcp_discovery" and (self.scope.owner_user_id is None or self.run_id is not None or self.occurrence_id is not None):
+            raise ValueError(
+                "mcp_discovery requires project owner authority without Run or occurrence",
             )
         normalized_trace_id = normalize_trace_id(self.origin_trace_id)
         if self.job_type in {"private_run", "automation_run"}:
@@ -87,7 +101,7 @@ class EnqueueJob:
                 raise ValueError("Run jobs require a valid origin trace")
             object.__setattr__(self, "origin_trace_id", normalized_trace_id)
         elif self.origin_trace_id is not None:
-            raise ValueError("retention_purge does not accept an origin trace")
+            raise ValueError(f"{self.job_type} does not accept an origin trace")
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,7 +537,15 @@ class JobRepository:
         claimed_at = self._now(now)
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
-        job_types = sorted(capabilities & {"private_run", "automation_run", "retention_purge"})
+        job_types = sorted(
+            capabilities
+            & {
+                "private_run",
+                "automation_run",
+                "retention_purge",
+                "mcp_discovery",
+            }
+        )
         if not job_types:
             return None
         claimable = sa.or_(

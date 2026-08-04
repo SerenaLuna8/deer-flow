@@ -5,7 +5,23 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -13,6 +29,292 @@ from deerflow.persistence.base import Base
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class ProjectChannelInstanceRow(Base):
+    """One dynamically managed provider application for one project.
+
+    ``public_config`` is deliberately separate from the exact project
+    Credential version pinned by :class:`ProjectChannelCredentialBindingRow`.
+    Provider secrets never belong in this row.
+    """
+
+    __tablename__ = "project_channel_instances"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    desired_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="disabled",
+        server_default="disabled",
+    )
+    observed_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="stopped",
+        server_default="stopped",
+    )
+    public_config: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    provider_identity_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    updated_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        onupdate=_utc_now,
+        server_default=text("now()"),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="pk_project_channel_instances"),
+        CheckConstraint(
+            "provider ~ '^[a-z][a-z0-9_-]{0,31}$'",
+            name="ck_project_channel_instances_provider",
+        ),
+        CheckConstraint(
+            "desired_status IN ('enabled', 'disabled')",
+            name="ck_project_channel_instances_desired_status",
+        ),
+        CheckConstraint(
+            "observed_status IN ('stopped', 'starting', 'running', 'stopping', 'error')",
+            name="ck_project_channel_instances_observed_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(public_config) = 'object' AND public_config::text !~* '\"[^\"]*(secret|token|password|api_key|private_key)[^\"]*\"[[:space:]]*:'",
+            name="ck_project_channel_instances_public_config",
+        ),
+        CheckConstraint(
+            "provider_identity_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_project_channel_instances_identity_digest",
+        ),
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_project_channel_instances_revision",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "id",
+            name="uq_project_channel_instances_project_id",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "id",
+            "provider",
+            name="uq_project_channel_instances_project_provider",
+        ),
+        ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_project_channel_instances_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["created_by_user_id"],
+            ["users.id"],
+            name="fk_project_channel_instances_creator",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["updated_by_user_id"],
+            ["users.id"],
+            name="fk_project_channel_instances_updater",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "uq_project_channel_instances_live_provider",
+            "project_id",
+            "provider",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "uq_project_channel_instances_live_identity",
+            "provider",
+            "provider_identity_digest",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "ix_project_channel_instances_runtime",
+            "desired_status",
+            "observed_status",
+            "id",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+
+class ProjectChannelInstanceLeaseRow(Base):
+    """Single-writer lease with monotonic fencing for a channel instance."""
+
+    __tablename__ = "project_channel_instance_leases"
+
+    channel_instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    holder_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    lease_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    fencing_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        onupdate=_utc_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "channel_instance_id",
+            name="pk_project_channel_instance_leases",
+        ),
+        CheckConstraint(
+            "lease_token_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_project_channel_instance_leases_token_hash",
+        ),
+        CheckConstraint(
+            "fencing_generation >= 1",
+            name="ck_project_channel_instance_leases_generation",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "channel_instance_id"],
+            ["project_channel_instances.project_id", "project_channel_instances.id"],
+            name="fk_project_channel_instance_leases_instance",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_project_channel_instance_leases_expiry",
+            "lease_expires_at",
+            "channel_instance_id",
+        ),
+    )
+
+
+class ProjectChannelCredentialBindingRow(Base):
+    """Immutable history of exact project Credential versions for one instance."""
+
+    __tablename__ = "project_channel_credential_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    channel_instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    credential_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        server_default=text("now()"),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "id",
+            name="pk_project_channel_credential_bindings",
+        ),
+        CheckConstraint(
+            "binding_revision >= 1",
+            name="ck_project_channel_credential_bindings_revision",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'revoked')",
+            name="ck_project_channel_credential_bindings_status",
+        ),
+        CheckConstraint(
+            "(status = 'active' AND revoked_at IS NULL AND revoked_by_user_id IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)",
+            name="ck_project_channel_credential_bindings_revocation",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "channel_instance_id"],
+            ["project_channel_instances.project_id", "project_channel_instances.id"],
+            name="fk_project_channel_credential_bindings_instance",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "credential_id"],
+            ["credentials.project_id", "credentials.id"],
+            name="fk_project_channel_credential_bindings_project_credential",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["credential_id", "credential_version_id"],
+            ["credential_versions.credential_id", "credential_versions.id"],
+            name="fk_project_channel_credential_bindings_credential_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["created_by_user_id"],
+            ["users.id"],
+            name="fk_project_channel_credential_bindings_creator",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["revoked_by_user_id"],
+            ["users.id"],
+            name="fk_project_channel_credential_bindings_revoker",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "channel_instance_id",
+            "id",
+            name="uq_project_channel_credential_bindings_scope_id",
+        ),
+        Index(
+            "uq_project_channel_credential_bindings_active_instance",
+            "project_id",
+            "channel_instance_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_project_channel_credential_bindings_credential",
+            "project_id",
+            "credential_id",
+            "credential_version_id",
+            "status",
+        ),
+    )
 
 
 class ChannelConnectionRow(Base):
@@ -38,16 +340,38 @@ class ChannelConnectionRow(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    # NULL is a migration-only compatibility boundary for deployment-owned
+    # ``config.yaml`` providers. Every project-managed UI/API connection must
+    # carry a concrete instance UUID and satisfy the composite project FK.
+    channel_instance_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        UniqueConstraint(
+        ForeignKeyConstraint(
+            ["project_id", "channel_instance_id"],
+            ["project_channel_instances.project_id", "project_channel_instances.id"],
+            name="fk_channel_connections_project_instance",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "uq_channel_connection_owner_legacy_identity",
             "project_id",
             "owner_user_id",
             "provider",
             "external_account_id",
             "workspace_id",
-            name="uq_channel_connection_owner_provider_identity",
+            unique=True,
+            postgresql_where=text("channel_instance_id IS NULL"),
+        ),
+        Index(
+            "uq_channel_connection_owner_instance_identity",
+            "project_id",
+            "owner_user_id",
+            "channel_instance_id",
+            "external_account_id",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("channel_instance_id IS NOT NULL"),
         ),
         UniqueConstraint("project_id", "owner_user_id", "id", name="uq_channel_connections_private_scope"),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_connections_project", ondelete="RESTRICT"),
@@ -59,19 +383,27 @@ class ChannelConnectionRow(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint("status IN ('connected', 'frozen', 'revoked')", name="ck_channel_connections_status"),
-        Index("idx_channel_connections_event_lookup", "provider", "workspace_id", "bot_user_id"),
+        Index("idx_channel_connections_event_lookup", "channel_instance_id", "provider", "workspace_id", "bot_user_id"),
         # Enforce the single-active-owner invariant at the database layer: at most
         # one non-revoked row may exist per external identity. This makes ownership
         # transfer race-safe (concurrent connects from different owners can no
         # longer both commit a connected row). PostgreSQL enforces the partial
         # unique predicate used by the runtime schema.
         Index(
-            "uq_channel_connection_active_identity",
+            "uq_channel_connection_active_legacy_identity",
             "provider",
             "external_account_id",
             "workspace_id",
             unique=True,
-            postgresql_where=text("status = 'connected'"),
+            postgresql_where=text("status = 'connected' AND channel_instance_id IS NULL"),
+        ),
+        Index(
+            "uq_channel_connection_active_instance_identity",
+            "channel_instance_id",
+            "external_account_id",
+            "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'connected' AND channel_instance_id IS NOT NULL"),
         ),
     )
 
@@ -109,8 +441,16 @@ class ChannelOAuthStateRow(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+    # See ChannelConnectionRow.channel_instance_id: NULL is legacy-only.
+    channel_instance_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "channel_instance_id"],
+            ["project_channel_instances.project_id", "project_channel_instances.id"],
+            name="fk_channel_oauth_states_project_instance",
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_channel_oauth_states_project", ondelete="RESTRICT"),
         ForeignKeyConstraint(["owner_user_id"], ["users.id"], name="fk_channel_oauth_states_owner", ondelete="RESTRICT"),
         ForeignKeyConstraint(
@@ -228,21 +568,13 @@ class ChannelInboundDeliveryRow(Base):
                 "project_id",
                 "owner_user_id",
                 "connection_id",
-                "provider",
-                "external_conversation_id",
-                "external_topic_id",
-                "thread_id",
             ],
             [
-                "channel_conversations.project_id",
-                "channel_conversations.owner_user_id",
-                "channel_conversations.connection_id",
-                "channel_conversations.provider",
-                "channel_conversations.external_conversation_id",
-                "channel_conversations.external_topic_id",
-                "channel_conversations.thread_id",
+                "channel_connections.project_id",
+                "channel_connections.owner_user_id",
+                "channel_connections.id",
             ],
-            name="fk_channel_inbound_deliveries_conversation",
+            name="fk_channel_inbound_deliveries_connection",
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(

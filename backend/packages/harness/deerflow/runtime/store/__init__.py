@@ -1,4 +1,4 @@
-"""Store provider for the DeerFlow runtime.
+"""Store provider for the ActWeave runtime.
 
 Re-exports the public API of both the async provider (for long-running
 servers) and the sync provider (for CLI tools and the embedded client).

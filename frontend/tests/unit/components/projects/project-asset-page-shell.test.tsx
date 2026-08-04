@@ -3,17 +3,30 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   createProjectAgentDeleteSnapshot,
+  createProjectMcpDeleteSnapshot,
   createProjectSkillDeleteSnapshot,
-  projectAssetDetailCanManageSystemBinding,
+  projectAssetEditBaseVersion,
+  projectAssetDetailContentVersion,
+  projectAssetDetailPreferredVersionId,
   projectAssetDetailShowsVersionHistory,
   projectAssetDetailSummaryGridColumns,
+  projectAssetDiscardCopy,
+  projectAssetDetailRevisionCopy,
+  projectAssetDetailVersionTerms,
+  projectAssetLifecycleActionLabel,
+  projectMcpCurrentConfigurationLabel,
+  projectMcpEditableConfigurationEnabled,
+  projectMcpSystemUsageLabel,
   ProjectAssetDetailHeader,
+  ProjectMcpDangerZone,
   ProjectSkillDetailActions,
   versionActionDisabled,
   versionPublishDisabled,
 } from "@/components/projects/assets/project-asset-detail-sheet";
 import {
   closeCompletedVersionDialog,
+  configuredMcpSelectionReady,
+  configuredMcpSuccessMessage,
   createdProjectAssetSelectionReady,
   createdSkillSelectionReady,
   defaultProjectAssetSource,
@@ -21,26 +34,36 @@ import {
   handleRequestedVersion,
   importedSkillSelectionReady,
   projectAssetSourceOptions,
+  projectAssetEmptyMessage,
+  projectAssetPrimaryActionLabel,
   ProjectAssetListView,
+  projectSystemBindingListAction,
   rememberRequestedVersion,
   systemBindingToggleState,
+  systemMcpBindingNeedsUpdate,
   versionDialogSubmissionMatches,
 } from "@/components/projects/assets/project-asset-page-shell";
 import {
   projectAssetCreateErrorMessage,
+  projectConfiguredMcpErrorMessage,
   projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
+  projectMcpDeleteErrorMessage,
+  projectMcpStatusToggleState,
   projectSkillStatusToggleState,
 } from "@/components/projects/assets/project-asset-view-model";
 import {
   ProjectAgentDeleteConfirmation,
+  ProjectMcpDeleteConfirmation,
   ProjectSkillDeleteConfirmation,
   skillDeleteSecondsRemaining,
 } from "@/components/projects/assets/project-skill-delete-dialog";
 import { Dialog } from "@/components/ui/dialog";
 import { Sheet } from "@/components/ui/sheet";
 import {
+  resolveMcpCurrentConfiguration,
   SharedAssetApiError,
+  type AssetVersion,
   type ProjectAssetItem,
   type ProjectAssetList,
 } from "@/core/shared-assets";
@@ -107,6 +130,167 @@ const catalog: ProjectAssetList = {
 };
 
 describe("project asset list", () => {
+  test("uses one add action and clear success states for configured MCP creation", () => {
+    const selection = {
+      assetId: PROJECT_ASSET_ID,
+      versionId: LATEST_VERSION_ID,
+    };
+
+    expect(projectAssetPrimaryActionLabel("mcp-servers")).toBe("添加 MCP");
+    expect(projectAssetPrimaryActionLabel("skills")).toBe("新建 Skill");
+    expect(projectAssetEmptyMessage("mcp-servers", "project")).toBe(
+      "尚未添加项目 MCP。",
+    );
+    expect(configuredMcpSuccessMessage("published")).toContain("已添加");
+    expect(configuredMcpSuccessMessage("published")).toContain("已添加并发布");
+    expect(configuredMcpSuccessMessage("pending_approval")).toContain(
+      "凭据尚未绑定",
+    );
+    expect(configuredMcpSuccessMessage("pending_approval")).not.toContain(
+      "审批",
+    );
+    expect(configuredMcpSelectionReady(catalog, selection)).toEqual(selection);
+    expect(
+      configuredMcpSelectionReady({ ...catalog, project_items: [] }, selection),
+    ).toBeNull();
+  });
+
+  test("uses configuration terms only for MCP details", () => {
+    expect(projectAssetDetailVersionTerms("mcp-servers", "project")).toEqual({
+      current: "当前配置",
+      history: "",
+      edit: "编辑配置",
+      empty: "尚未保存配置。",
+    });
+    expect(projectAssetDetailVersionTerms("skills", "project")).toEqual({
+      current: "当前发布",
+      history: "版本",
+      edit: "创建新版本",
+      empty: "尚未创建版本。",
+    });
+    const mcpRevision = projectAssetDetailRevisionCopy("mcp-servers");
+    const skillRevision = projectAssetDetailRevisionCopy("skills");
+    expect(mcpRevision.label(3)).toBe("配置");
+    expect(mcpRevision.publish).toBe("发布配置");
+    expect(mcpRevision).not.toHaveProperty("approve");
+    expect(mcpRevision.technical).toBe("配置技术信息");
+    expect(
+      [
+        mcpRevision.label(3),
+        mcpRevision.publishedFallback,
+        mcpRevision.pinnedFallback,
+        mcpRevision.updateAvailable,
+        mcpRevision.viewAria,
+        mcpRevision.loading,
+        mcpRevision.publish,
+        mcpRevision.technical,
+      ].join(" "),
+    ).not.toContain("版本");
+    expect(skillRevision.label(3)).toBe("版本 3");
+    expect(skillRevision.publish).toBe("发布版本");
+    expect(skillRevision.technical).toBe("版本技术信息");
+    expect(projectAssetDiscardCopy("mcp-servers")).toEqual({
+      title: "放弃未保存的配置修改？",
+      description: "关闭详情会清除当前编辑副本，已保存的 MCP 配置不会受影响。",
+    });
+    expect(
+      Object.values(projectAssetDiscardCopy("mcp-servers")).join(" "),
+    ).not.toContain("版本");
+    expect(projectAssetDiscardCopy("skills").title).toBe(
+      "放弃未保存的文件修改？",
+    );
+  });
+
+  test("loads and uses only the successful editable Project MCP projection", () => {
+    const editableItem: ProjectAssetItem = {
+      ...catalog.project_items[0]!,
+      capabilities: ["shared_assets.read", "shared_assets.edit"],
+    };
+    expect(
+      projectMcpEditableConfigurationEnabled(true, "mcp-servers", editableItem),
+    ).toBe(true);
+    expect(
+      projectMcpEditableConfigurationEnabled(
+        false,
+        "mcp-servers",
+        editableItem,
+      ),
+    ).toBe(false);
+    expect(
+      projectMcpEditableConfigurationEnabled(true, "skills", editableItem),
+    ).toBe(false);
+    expect(
+      projectMcpEditableConfigurationEnabled(true, "mcp-servers", {
+        ...editableItem,
+        scope: "system",
+      }),
+    ).toBe(false);
+    expect(
+      projectMcpEditableConfigurationEnabled(true, "mcp-servers", {
+        ...editableItem,
+        capabilities: ["shared_assets.read"],
+      }),
+    ).toBe(false);
+
+    const historyVersion = {
+      id: LATEST_VERSION_ID,
+      definition: { url: "http://127.0.0.1:8771" },
+    } as AssetVersion;
+    const editableVersion = {
+      ...historyVersion,
+      definition: { url: "http://127.0.0.1:8771/api/mcp" },
+    } as AssetVersion;
+    const editableResponse = {
+      version: editableVersion,
+    } as never;
+
+    expect(
+      projectAssetEditBaseVersion(
+        "mcp-servers",
+        historyVersion,
+        editableResponse,
+        true,
+      ),
+    ).toBe(editableVersion);
+    expect(
+      projectAssetEditBaseVersion(
+        "mcp-servers",
+        historyVersion,
+        editableResponse,
+        false,
+      ),
+    ).toBeNull();
+    expect(
+      projectAssetDetailContentVersion(
+        "mcp-servers",
+        historyVersion,
+        editableResponse,
+        true,
+      ),
+    ).toBe(editableVersion);
+    expect(
+      projectAssetDetailContentVersion(
+        "mcp-servers",
+        historyVersion,
+        editableResponse,
+        false,
+      ),
+    ).toBe(historyVersion);
+  });
+
+  test("explains configured MCP conflicts and list failures without raw detail", () => {
+    const conflict = new SharedAssetApiError(
+      409,
+      "ASSET_CONFLICT",
+      "private backend detail",
+    );
+    const message = projectConfiguredMcpErrorMessage(conflict);
+
+    expect(message).toContain("已存在");
+    expect(message).toContain("标识");
+    expect(message).not.toContain("private backend detail");
+  });
+
   test("hides system-provided Agents without removing other system asset sources", () => {
     expect(projectAssetSourceOptions("agents")).toEqual([
       ["project", "项目自建"],
@@ -193,8 +377,135 @@ describe("project asset list", () => {
     );
   });
 
-  test("routes system MCP binding through the version-aware dialog instead of a quick switch", () => {
+  test("keeps system MCP enablement on the list with an inline current-config update", () => {
+    const systemMcp = {
+      ...catalog.system_items[0]!,
+      binding: {
+        ...catalog.system_items[0]!.binding!,
+        kind: "mcp" as const,
+      },
+    };
     const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="mcp-servers"
+        data={{ ...catalog, system_items: [systemMcp] }}
+        source="system"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+        onSyncSystemMcpBinding={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('role="switch"');
+    expect(html).toContain("停用 Research Agent");
+    expect(html).toContain(">更新<");
+    expect(html).toContain("查看 Research Agent 详情");
+    expect(html).not.toContain("管理绑定");
+    expect(html).not.toContain("有新配置");
+    expect(html).not.toContain(
+      new Date(systemMcp.updated_at).toLocaleDateString("zh-CN"),
+    );
+    expect(html).not.toContain("lucide-arrow-right");
+  });
+
+  test("renders project MCP with the same direct enable switch and compact row", () => {
+    const projectMcp: ProjectAssetItem = {
+      ...catalog.project_items[0]!,
+      display_name: "Transfer MCP",
+      slug: "transfer-mcp",
+      status: "active",
+      current_published_version_id: LATEST_VERSION_ID,
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.edit",
+        "shared_assets.manage_bindings",
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="mcp-servers"
+        data={{ ...catalog, project_items: [projectMcp] }}
+        source="project"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+        onToggleProjectAssetStatus={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("查看 Transfer MCP 详情");
+    expect(html).toContain('role="switch"');
+    expect(html).toContain("停用 Transfer MCP");
+    expect(html).not.toContain("已有发布配置");
+    expect(html).not.toContain(
+      new Date(projectMcp.updated_at).toLocaleDateString("zh-CN"),
+    );
+    expect(html).not.toContain("lucide-arrow-right");
+  });
+
+  test("maps project MCP lifecycle to a reversible enable switch", () => {
+    const projectMcp: ProjectAssetItem = {
+      ...catalog.project_items[0]!,
+      scope: "project",
+      status: "active",
+      current_published_version_id: LATEST_VERSION_ID,
+      capabilities: [
+        "shared_assets.read",
+        "shared_assets.edit",
+        "shared_assets.manage_bindings",
+      ],
+    };
+
+    expect(projectMcpStatusToggleState(projectMcp)).toEqual({
+      checked: true,
+      disabled: false,
+      disabledReason: null,
+    });
+    expect(
+      projectMcpStatusToggleState({ ...projectMcp, status: "suspended" }),
+    ).toEqual({
+      checked: false,
+      disabled: false,
+      disabledReason: null,
+    });
+    expect(
+      projectMcpStatusToggleState({
+        ...projectMcp,
+        status: "suspended",
+        current_published_version_id: null,
+      }),
+    ).toEqual({
+      checked: false,
+      disabled: true,
+      disabledReason: "请先发布配置",
+    });
+  });
+
+  test("renders an unbound system MCP as a directly enabled list switch", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="mcp-servers"
+        data={{
+          ...catalog,
+          system_items: [{ ...catalog.system_items[0]!, binding: null }],
+        }}
+        source="system"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+        onSyncSystemMcpBinding={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('role="switch"');
+    expect(html).toContain("启用 Research Agent");
+    expect(html).not.toContain('disabled=""');
+    expect(html).not.toContain("管理绑定");
+  });
+
+  test("keeps MCP list binding pending and conflict feedback on its row", () => {
+    const optimisticDisable = renderToStaticMarkup(
       <ProjectAssetListView
         kind="mcp-servers"
         data={catalog}
@@ -202,35 +513,199 @@ describe("project asset list", () => {
         selectedAssetId={null}
         onSelect={() => undefined}
         onToggleSystemBinding={() => undefined}
+        onSyncSystemMcpBinding={() => undefined}
+        bindingIntent={{ assetId: SYSTEM_ID, checked: false }}
+      />,
+    );
+    expect(optimisticDisable).toContain('aria-busy="true"');
+    expect(optimisticDisable).toContain('disabled=""');
+    expect(optimisticDisable).toContain("启用 Research Agent");
+
+    const conflict = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="mcp-servers"
+        data={catalog}
+        source="system"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+        onSyncSystemMcpBinding={() => undefined}
+        bindingErrorAssetId={SYSTEM_ID}
+        bindingError={
+          new SharedAssetApiError(409, "ASSET_CONFLICT", "private raw")
+        }
+      />,
+    );
+    expect(conflict).toContain('role="alert"');
+    expect(conflict).toContain("状态已变化");
+    expect(conflict).not.toContain("private raw");
+  });
+
+  test("disables MCP enablement when there is no published configuration", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAssetListView
+        kind="mcp-servers"
+        data={{
+          ...catalog,
+          system_items: [
+            {
+              ...catalog.system_items[0]!,
+              binding: null,
+              current_published_version_id: null,
+            },
+          ],
+        }}
+        source="system"
+        selectedAssetId={null}
+        onSelect={() => undefined}
+        onToggleSystemBinding={() => undefined}
+        onSyncSystemMcpBinding={() => undefined}
       />,
     );
 
-    expect(html).toContain("管理绑定");
-    expect(html).toContain("查看 Research Agent 详情");
-    expect(html).not.toContain('role="switch"');
+    expect(html).toContain('disabled=""');
+    expect(html).toContain("没有可启用的已发布配置");
   });
 
-  test("keeps system Skill binding controls on the list only", () => {
-    const systemAsset = catalog.system_items[0]!;
-
-    expect(
-      projectAssetDetailCanManageSystemBinding("skills", systemAsset),
-    ).toBe(false);
-    expect(
-      projectAssetDetailCanManageSystemBinding("agents", systemAsset),
-    ).toBe(false);
-    expect(
-      projectAssetDetailCanManageSystemBinding("mcp-servers", systemAsset),
-    ).toBe(true);
-  });
-
-  test("keeps Agent revisions internal while preserving Skill and MCP version history", () => {
+  test("keeps MCP and Agent revisions internal while preserving Skill history", () => {
     expect(projectAssetDetailShowsVersionHistory("agents")).toBe(false);
     expect(projectAssetDetailShowsVersionHistory("skills")).toBe(true);
-    expect(projectAssetDetailShowsVersionHistory("mcp-servers")).toBe(true);
+    expect(projectAssetDetailShowsVersionHistory("mcp-servers")).toBe(false);
   });
 
-  test("places the three system Skill summary fields in one row", () => {
+  test("shows the latest project MCP configuration without exposing its revision", () => {
+    const latestPendingId = "66666666-6666-4666-8666-666666666666";
+    const stalePendingId = "88888888-8888-4888-8888-888888888888";
+    const priorPublishedId = "99999999-9999-4999-8999-999999999999";
+
+    expect(
+      projectAssetDetailPreferredVersionId(
+        "mcp-servers",
+        "project",
+        [
+          {
+            id: "77777777-7777-4777-8777-777777777777",
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 4,
+            workflow_status: "pending_approval",
+            supersedes_version_id: LATEST_VERSION_ID,
+          },
+          {
+            id: latestPendingId,
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 6,
+            workflow_status: "pending_approval",
+            supersedes_version_id: LATEST_VERSION_ID,
+          },
+          {
+            id: stalePendingId,
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 7,
+            workflow_status: "pending_approval",
+            supersedes_version_id: priorPublishedId,
+          },
+          {
+            id: LATEST_VERSION_ID,
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 5,
+            workflow_status: "published",
+            supersedes_version_id: priorPublishedId,
+          },
+        ] as never,
+        LATEST_VERSION_ID,
+      ),
+    ).toBe(latestPendingId);
+    expect(
+      projectAssetDetailPreferredVersionId(
+        "mcp-servers",
+        "project",
+        [
+          {
+            id: stalePendingId,
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 7,
+            workflow_status: "pending_approval",
+            supersedes_version_id: priorPublishedId,
+          },
+          {
+            id: LATEST_VERSION_ID,
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 5,
+            workflow_status: "published",
+            supersedes_version_id: priorPublishedId,
+          },
+        ] as never,
+        LATEST_VERSION_ID,
+      ),
+    ).toBe(LATEST_VERSION_ID);
+    expect(
+      projectAssetDetailPreferredVersionId(
+        "skills",
+        "project",
+        [{ id: latestPendingId }, { id: LATEST_VERSION_ID }],
+        LATEST_VERSION_ID,
+      ),
+    ).toBe(LATEST_VERSION_ID);
+    expect(
+      projectAssetDetailPreferredVersionId(
+        "mcp-servers",
+        "system",
+        [
+          {
+            id: LATEST_VERSION_ID,
+            mcp_server_id: SYSTEM_ID,
+            version_number: 5,
+            workflow_status: "published",
+          },
+        ] as never,
+        null,
+      ),
+    ).toBe("");
+    expect(
+      resolveMcpCurrentConfiguration(
+        [
+          {
+            id: LATEST_VERSION_ID,
+            mcp_server_id: PROJECT_ASSET_ID,
+            version_number: 5,
+            workflow_status: "published",
+          },
+        ] as never,
+        "project",
+        priorPublishedId,
+      ).state,
+    ).toBe("unconfirmed");
+    expect(projectMcpCurrentConfigurationLabel("pending_approval")).toBe(
+      "凭据未绑定 · 尚未生效",
+    );
+    expect(projectMcpCurrentConfigurationLabel("published")).toBe("已发布");
+  });
+
+  test("summarizes system MCP use without configuration numbers", () => {
+    const systemMcp = catalog.system_items[0]!;
+
+    expect(projectMcpSystemUsageLabel({ ...systemMcp, binding: null })).toBe(
+      "未启用",
+    );
+    expect(
+      projectMcpSystemUsageLabel({
+        ...systemMcp,
+        binding: { ...systemMcp.binding!, enabled: false },
+      }),
+    ).toBe("未启用");
+    expect(projectMcpSystemUsageLabel(systemMcp)).toBe("有配置更新");
+    expect(
+      projectMcpSystemUsageLabel({
+        ...systemMcp,
+        binding: {
+          ...systemMcp.binding!,
+          version_id: systemMcp.current_published_version_id!,
+        },
+      }),
+    ).toBe("已启用");
+  });
+
+  test("places MCP configuration, update time and lifecycle status in one row", () => {
     expect(projectAssetDetailSummaryGridColumns("skills", "system")).toBe(
       "sm:grid-cols-3",
     );
@@ -238,7 +713,10 @@ describe("project asset list", () => {
       "sm:grid-cols-2",
     );
     expect(projectAssetDetailSummaryGridColumns("mcp-servers", "system")).toBe(
-      "sm:grid-cols-2",
+      "sm:grid-cols-3",
+    );
+    expect(projectAssetDetailSummaryGridColumns("mcp-servers", "project")).toBe(
+      "sm:grid-cols-3",
     );
   });
 
@@ -262,7 +740,7 @@ describe("project asset list", () => {
         selectedAssetId={null}
         onSelect={() => undefined}
         onToggleSystemBinding={() => undefined}
-        onToggleProjectSkillStatus={() => undefined}
+        onToggleProjectAssetStatus={() => undefined}
       />,
     );
 
@@ -271,6 +749,28 @@ describe("project asset list", () => {
     expect(html).toContain("启用 Meeting Brief");
     expect(html).not.toContain("已暂停");
     expect(html).not.toContain(">暂停<");
+  });
+
+  test("keeps project MCP ownership and lifecycle status out of the detail header", () => {
+    const projectMcp: ProjectAssetItem = {
+      ...catalog.project_items[0]!,
+      status: "active",
+    };
+    const html = renderToStaticMarkup(
+      <Sheet open>
+        <ProjectAssetDetailHeader
+          kind="mcp-servers"
+          item={projectMcp}
+          statusPending={false}
+          onToggleProjectSkillStatus={() => undefined}
+        />
+      </Sheet>,
+    );
+
+    expect(html).toContain(projectMcp.display_name);
+    expect(html).toContain(projectMcp.slug);
+    expect(html).not.toContain("项目自建");
+    expect(html).not.toContain(">启用<");
   });
 
   test("blocks enabling an unpublished project Skill with a publish-first hint", () => {
@@ -293,7 +793,7 @@ describe("project asset list", () => {
         selectedAssetId={null}
         onSelect={() => undefined}
         onToggleSystemBinding={() => undefined}
-        onToggleProjectSkillStatus={() => undefined}
+        onToggleProjectAssetStatus={() => undefined}
       />,
     );
 
@@ -479,6 +979,69 @@ describe("project asset list", () => {
       disabled: true,
       targetVersionId: null,
     });
+  });
+
+  test("derives server-authoritative MCP list binding mutations", () => {
+    const systemMcp = {
+      ...catalog.system_items[0]!,
+      binding: {
+        ...catalog.system_items[0]!.binding!,
+        kind: "mcp" as const,
+      },
+    };
+    const unbound = { ...systemMcp, binding: null };
+    const disabled = {
+      ...systemMcp,
+      binding: { ...systemMcp.binding, enabled: false },
+    };
+    const current = {
+      ...systemMcp,
+      binding: {
+        ...systemMcp.binding,
+        version_id: systemMcp.current_published_version_id!,
+      },
+    };
+
+    expect(
+      projectSystemBindingListAction("mcp-servers", unbound, true),
+    ).toEqual({
+      type: "sync-current",
+      assetId: SYSTEM_ID,
+      input: {},
+    });
+    expect(
+      projectSystemBindingListAction("mcp-servers", disabled, true),
+    ).toEqual({
+      type: "sync-current",
+      assetId: SYSTEM_ID,
+      input: { expected_binding_version: 7 },
+    });
+    expect(
+      projectSystemBindingListAction("mcp-servers", current, true),
+    ).toBeNull();
+    expect(
+      projectSystemBindingListAction("mcp-servers", systemMcp, true, true),
+    ).toEqual({
+      type: "sync-current",
+      assetId: SYSTEM_ID,
+      input: { expected_binding_version: 7 },
+    });
+    expect(
+      projectSystemBindingListAction("mcp-servers", systemMcp, false),
+    ).toEqual({
+      type: "disable",
+      assetId: SYSTEM_ID,
+      input: { expected_binding_version: 7 },
+    });
+    expect(
+      projectSystemBindingListAction(
+        "mcp-servers",
+        { ...unbound, current_published_version_id: null },
+        true,
+      ),
+    ).toBeNull();
+    expect(systemMcpBindingNeedsUpdate(systemMcp)).toBe(true);
+    expect(systemMcpBindingNeedsUpdate(current)).toBe(false);
   });
 
   test("does not present optimistic revisions or UUID pointers as content versions", () => {
@@ -685,6 +1248,78 @@ describe("project asset list", () => {
     expect(agentWaiting).toContain("全部设置");
     expect(agentWaiting).not.toContain("版本");
     expect(agentWaiting).toContain("确认删除（5 秒）");
+  });
+
+  test("places project MCP deletion in a dedicated danger zone and confirms permanently", () => {
+    const projectMcp = {
+      ...catalog.project_items[0]!,
+      display_name: "Project MCP",
+    };
+    const systemMcp = catalog.system_items[0]!;
+
+    expect(projectAssetCanDelete("mcp-servers", projectMcp)).toBe(true);
+    expect(projectAssetCanDelete("mcp-servers", systemMcp)).toBe(false);
+    expect(projectAssetLifecycleActionLabel("mcp-servers", "suspend")).toBe(
+      "停用",
+    );
+    expect(projectAssetLifecycleActionLabel("mcp-servers", "activate")).toBe(
+      "重新启用",
+    );
+
+    const dangerZone = renderToStaticMarkup(
+      <ProjectMcpDangerZone
+        actionPending={false}
+        canDelete
+        onDelete={() => undefined}
+      />,
+    );
+    expect(dangerZone).toContain("危险区");
+    expect(dangerZone).toContain("删除 MCP");
+    expect(dangerZone).not.toContain("归档");
+    expect(
+      renderToStaticMarkup(
+        <ProjectMcpDangerZone
+          actionPending={false}
+          canDelete={false}
+          onDelete={() => undefined}
+        />,
+      ),
+    ).toBe("");
+
+    const confirmation = renderToStaticMarkup(
+      <Dialog open>
+        <ProjectMcpDeleteConfirmation
+          mcpName="Project MCP"
+          remainingSeconds={0}
+          pending={false}
+          errorMessage={null}
+          onCancel={() => undefined}
+          onConfirm={() => undefined}
+        />
+      </Dialog>,
+    );
+    expect(confirmation).toContain("永久删除 MCP");
+    expect(confirmation).toContain("配置与 Credential 槽位");
+    expect(confirmation).toContain("不可恢复");
+    expect(confirmation).toContain("不会级联删除");
+    expect(confirmation).not.toContain("版本");
+
+    const snapshot = createProjectMcpDeleteSnapshot(projectMcp, 3_000);
+    expect(snapshot).toEqual({
+      assetId: projectMcp.id,
+      mcpName: "Project MCP",
+      expectedAssetVersion: projectMcp.version,
+      startedAt: 3_000,
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+
+    expect(
+      projectMcpDeleteErrorMessage(
+        new SharedAssetApiError(409, "ASSET_CONFLICT", "Asset state conflict"),
+      ),
+    ).toBe(
+      "该 MCP 状态已变化，或仍被 Agent、历史运行或 Credential 授权快照引用；刷新并解除引用后重试。",
+    );
   });
 
   test("freezes the confirmed Skill identity and revision for the full delay", () => {

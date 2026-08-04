@@ -323,7 +323,7 @@ class RunJournal(BaseCallbackHandler):
         logger.debug("on_llm_end %s: tags=%s", run_id, tags)
         # LangChain groups candidate generations per model input. The graph
         # consumes the first candidate from each group; alternatives must not
-        # enter DeerFlow's authoritative conversation history.
+        # enter ActWeave's authoritative conversation history.
         for candidates in response.generations:
             if not candidates:
                 continue

@@ -1,7 +1,7 @@
 """Request trace context helpers.
 
-The value stored here is DeerFlow's request-level correlation id. It is
-separate from Langfuse's own trace id and from DeerFlow run ids.
+The value stored here is ActWeave's request-level correlation id. It is
+separate from Langfuse's own trace id and from ActWeave run ids.
 """
 
 from __future__ import annotations

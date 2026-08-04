@@ -52,7 +52,7 @@ class TestTitleMiddlewareCoreLogic:
         middleware = TitleMiddleware()
         tool_call = {
             "name": "lookup",
-            "args": {"query": "DeerFlow"},
+            "args": {"query": "ActWeave"},
             "id": "call-1",
             "type": "tool_call",
         }

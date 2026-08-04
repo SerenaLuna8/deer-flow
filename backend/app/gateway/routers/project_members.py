@@ -12,6 +12,7 @@ from app.gateway.deps import (
     get_project_quota_enforcer,
     project_session,
 )
+from app.gateway.public_project_roles import PublicProjectRole
 from app.gateway.routers.project_governance import (
     GOVERNANCE_DOMAIN_ERRORS,
     GovernanceRoute,
@@ -33,7 +34,7 @@ router = APIRouter(
 
 class MembershipMutationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    role: ProjectRole
+    role: PublicProjectRole
     version: int = Field(ge=1)
 
 
@@ -46,7 +47,7 @@ class MembershipResponse(BaseModel):
     membership_id: uuid.UUID
     user_id: uuid.UUID
     account_email: str
-    role: ProjectRole
+    role: PublicProjectRole
     status: str
     version: int
     joined_at: datetime
@@ -96,7 +97,7 @@ async def patch_member(
         ).change_role(
             context,
             membership_id,
-            body.role,
+            ProjectRole(body.role),
             body.version,
         )
         return _response(view)

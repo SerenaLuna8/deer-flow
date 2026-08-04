@@ -209,11 +209,11 @@ function ProjectBrand() {
   return (
     <Link
       href="/workspace"
-      aria-label="DeerFlow 工作空间"
+      aria-label="ActWeave 工作空间"
       className="focus-visible:ring-ring inline-flex items-baseline gap-2 rounded-md focus-visible:ring-2 focus-visible:outline-none"
     >
       <span className="text-primary font-serif text-xl leading-none">
-        DeerFlow
+        ActWeave
       </span>
       <span className="text-muted-foreground text-xs">项目空间</span>
     </Link>
