@@ -1,7 +1,7 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR1—PR4 已完成，等待检查点 A）
+- 状态：执行中（PR1—PR4 与检查点 A 已完成，下一阶段 PR5）
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
@@ -166,7 +166,8 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 | PR1 | 完成 | `29bbf77d` | 旧 Memory 聚焦测试 45 passed；随机 PostgreSQL 1 passed |
 | PR2 | 完成 | `7c2a4030` | 后端全量 714 passed、27 skipped；随机 PostgreSQL 5 passed、0 skipped；前端全量 121 passed；Python lint/format 与前端 lint/typecheck 通过 |
 | PR3 | 完成 | `82f111da` | 后端核心门禁 756 passed、0 skipped；PR3 聚焦单元测试 6 passed；PR3 随机 PostgreSQL 9 passed；Python lint/format 通过 |
-| PR4 | 完成 | 本次 PR4 提交 | 后端核心门禁 781 passed、0 skipped；PR4 聚焦单元测试 17 passed；PR4 随机 PostgreSQL 8 passed；Python lint/format 通过 |
+| PR4 | 完成 | `22609495` | 后端核心门禁 781 passed、0 skipped；PR4 聚焦单元测试 17 passed；PR4 随机 PostgreSQL 8 passed；Python lint/format 通过 |
+| 检查点 A | 完成 | 本次检查点提交 | 固定样例 64 条/8 Batch；precision 100%；recall 100%；secret、scope、duplicate、batch error 均为 0；PR2—PR4 随机 PostgreSQL 21 passed；后端核心 787 passed、0 skipped |
 
 PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
 `shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
@@ -466,6 +467,22 @@ project + owner + namespace + run + successful attempt + ordered source item ide
 - 全部达标：可以进入 PR5；
 - 任一项不达标：只调整 Extractor Prompt、过滤规则或 typed output，然后重跑；
 - 模型或环境不可用：记录“未验证”，停止，不为此建设替代基础设施。
+
+### 10.5 本次执行结果
+
+检查点 A 已使用数据库模型目录中的 `deepseek-v4` 完成真实无 tracing 调用，结果见
+[memory-extractor-checkpoint-a-report.json](./memory-extractor-checkpoint-a-report.json)：
+
+- 固定中英文样例 64 条，按作用域组成 8 个 Batch；
+- 期望 Candidate 35 条，匹配 35 条，无额外 Candidate；
+- precision 100%，recall 100%；
+- secret 泄漏、跨作用域词泄漏、重复 Candidate、批次错误均为 0；
+- 8 次调用总耗时 45.875 秒；当前非 Run one-shot 接口不返回持久 token usage，报告明确记为 unavailable，没有伪写为 0；
+- PR2—PR4 随机 PostgreSQL 结构与可靠性证据 21 passed、0 skipped，覆盖作用域、重放幂等和 Candidate 不进入 v1 召回；当前后端核心门禁 787 passed、0 skipped。
+
+首轮 Prompt v1 未达质量线；只按本节允许范围补充类型定义和负例规则，并把固定采样温度设为
+0，形成 `memory-extract-prompt-v2` / `memory-extractor-v2` 后达标。没有增加表、服务、Gate、
+签名、外部审核或专用调用账本，因此允许进入 PR5。
 
 ## 11. PR5：定时 Consolidator 与 Fact Revision
 

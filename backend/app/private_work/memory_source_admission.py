@@ -57,8 +57,8 @@ _MAX_SOURCE_ITEM_CHARS = 64_000
 _SOURCE_ITEM_HMAC_DOMAIN = b"deerflow.memory.source-item.v1\x00"
 _SOURCE_IDENTITY_VERSION = "memory-source-identity-v1"
 _SOURCE_BATCH_ID_NAMESPACE = uuid.UUID("b8234c20-0a08-5a5a-a310-20db22f76c42")
-MEMORY_EXTRACT_PROMPT_VERSION = "memory-extract-prompt-v1"
-MEMORY_EXTRACTOR_VERSION = "memory-extractor-v1"
+MEMORY_EXTRACT_PROMPT_VERSION = "memory-extract-prompt-v2"
+MEMORY_EXTRACTOR_VERSION = "memory-extractor-v2"
 MEMORY_EXTRACT_OUTPUT_SCHEMA_VERSION = "memory-candidate-v1"
 
 

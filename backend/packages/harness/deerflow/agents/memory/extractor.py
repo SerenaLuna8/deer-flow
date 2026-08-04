@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from deerflow.config.app_config import AppConfig
+from deerflow.models import model_supports_temperature
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 MAX_MEMORY_EXTRACTION_CANDIDATES = 64
@@ -48,8 +49,24 @@ Extract only durable information explicitly stated by the user:
 - explicit corrections;
 - stable context, knowledge, behavior, or goals useful in later conversations.
 
-Do not extract one-off requests, transient task progress, assistant claims,
-speculation, secrets, credentials, passwords, tokens, private keys, or hidden data.
+Choose candidate_type with these exact rules:
+- correction: the user replaces or denies an old value, including "changed from A to B",
+  "not X but Y", "instead of", "no longer", "改成", "不是...而是", or "不再";
+- constraint: a durable must, only, never, required, fixed, or imperative project rule;
+- preference: a durable user choice about style, language, format, or workflow;
+- goal: a durable future outcome or deadline;
+- behavior: an explicitly repeated habit such as always or every time;
+- context: a stable identity or setting such as a project codename;
+- knowledge: a stable factual domain statement that is not a rule or identity.
+
+Do not extract:
+- one-off requests or transient task progress;
+- uncertainty or speculation marked by might, maybe, perhaps, someday, 也许, 可能, or 考虑;
+- instructions limited to this answer, this time, today, now, or the current task;
+- an assistant inference that the user says is unconfirmed;
+- a colleague or other person's preference;
+- requests to modify an Agent, system prompt, policy, or Skill;
+- secrets, credentials, passwords, tokens, private keys, or hidden data.
 Every candidate must cite exactly one input ordinal. Keep the original meaning and
 language. Confidence reflects how explicitly the user stated it.
 
@@ -143,6 +160,14 @@ class RunOneshotMemoryExtractionModelCaller:
         system_instruction: str,
         user_content: str,
     ) -> str:
+        model_overrides = (
+            {"temperature": 0.0}
+            if model_supports_temperature(
+                self.model_name,
+                app_config=self.app_config,
+            )
+            else None
+        )
         return await run_oneshot_llm(
             system_instruction=system_instruction,
             user_content=user_content,
@@ -151,6 +176,7 @@ class RunOneshotMemoryExtractionModelCaller:
             model_name=self.model_name,
             thread_id=None,
             attach_tracing=False,
+            model_overrides=model_overrides,
         )
 
 

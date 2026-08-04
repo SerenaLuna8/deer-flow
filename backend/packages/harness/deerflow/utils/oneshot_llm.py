@@ -16,6 +16,7 @@ helper stops at the extracted raw text.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -39,6 +40,7 @@ async def run_oneshot_llm(
     model_name: str | None = None,
     thread_id: str | None = None,
     attach_tracing: bool = True,
+    model_overrides: Mapping[str, object] | None = None,
 ) -> str:
     """Run a single non-graph system+user LLM turn and return the raw text.
 
@@ -52,6 +54,8 @@ async def run_oneshot_llm(
         attach_tracing: Attach configured tracing callbacks to the model. Sensitive
             auxiliary calls can disable this so prompt bodies are not exported to
             tracing providers.
+        model_overrides: Optional bounded request sampling overrides accepted by
+            the shared model factory.
 
     Returns:
         The extracted plain-text content of the model response (uncleaned).
@@ -61,6 +65,7 @@ async def run_oneshot_llm(
         thinking_enabled=False,
         app_config=app_config,
         attach_tracing=attach_tracing,
+        model_overrides=model_overrides,
     )
     invoke_config: dict = {"run_name": run_name}
     if attach_tracing:

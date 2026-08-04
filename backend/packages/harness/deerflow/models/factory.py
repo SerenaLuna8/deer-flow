@@ -174,6 +174,23 @@ def _provider_model_field_names(model_class: type[BaseChatModel]) -> set[str]:
     return names
 
 
+def model_supports_temperature(
+    name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+) -> bool:
+    """Return whether the configured provider declares a temperature field."""
+
+    config = app_config or get_app_config()
+    if name is None:
+        name = config.models[0].name
+    model_config = config.get_model_config(name)
+    if model_config is None:
+        raise ValueError(f"Model {name} not found in config") from None
+    model_class = resolve_class(model_config.use, BaseChatModel)
+    return "temperature" in _provider_model_field_names(model_class)
+
+
 def _validated_agent_model_overrides(
     model_class: type[BaseChatModel],
     model_name: str,

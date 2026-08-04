@@ -14,6 +14,7 @@ from deerflow.agents.memory.extractor import (
     MemoryExtractionUnsafe,
     RunOneshotMemoryExtractionModelCaller,
 )
+from deerflow.models import model_supports_temperature
 
 
 class _ModelCaller:
@@ -34,6 +35,24 @@ class _ModelCaller:
         return self._response
 
 
+def test_model_temperature_support_detects_codex_adapter() -> None:
+    model_config = SimpleNamespace(
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+    )
+    app_config = SimpleNamespace(
+        models=[SimpleNamespace(name="codex-cli-test")],
+        get_model_config=lambda _name: model_config,
+    )
+
+    assert (
+        model_supports_temperature(
+            "codex-cli-test",
+            app_config=app_config,
+        )
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_default_model_caller_disables_tracing(
     monkeypatch: pytest.MonkeyPatch,
@@ -45,6 +64,11 @@ async def test_default_model_caller_disables_tracing(
         return '{"candidates":[]}'
 
     monkeypatch.setattr(extractor_module, "run_oneshot_llm", run_oneshot_llm)
+    monkeypatch.setattr(
+        extractor_module,
+        "model_supports_temperature",
+        lambda *_args, **_kwargs: True,
+    )
     caller = RunOneshotMemoryExtractionModelCaller(
         app_config=SimpleNamespace(),
         model_name="memory-test",
@@ -58,7 +82,39 @@ async def test_default_model_caller_disables_tracing(
     assert calls[0]["model_name"] == "memory-test"
     assert calls[0]["attach_tracing"] is False
     assert calls[0]["run_name"] == "memory_extract"
+    assert calls[0]["model_overrides"] == {"temperature": 0.0}
     assert response == '{"candidates":[]}'
+
+
+@pytest.mark.asyncio
+async def test_default_model_caller_skips_temperature_for_unsupported_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def run_oneshot_llm(**kwargs):
+        calls.append(kwargs)
+        return '{"candidates":[]}'
+
+    monkeypatch.setattr(extractor_module, "run_oneshot_llm", run_oneshot_llm)
+    monkeypatch.setattr(
+        extractor_module,
+        "model_supports_temperature",
+        lambda *_args, **_kwargs: False,
+    )
+    caller = RunOneshotMemoryExtractionModelCaller(
+        app_config=SimpleNamespace(),
+        model_name="codex-cli-test",
+    )
+
+    assert (
+        await caller(
+            system_instruction="fixed",
+            user_content='{"items":[]}',
+        )
+        == '{"candidates":[]}'
+    )
+    assert calls[0]["model_overrides"] is None
 
 
 @pytest.mark.asyncio
@@ -119,6 +175,9 @@ async def test_extractor_uses_only_ordered_source_items_and_returns_strict_candi
     system_instruction, user_content = caller.calls[0]
     assert "<current_memory>" not in system_instruction
     assert "Thread Summary:" not in system_instruction
+    assert "changed from A to B" in system_instruction
+    assert "might, maybe, perhaps" in system_instruction
+    assert "colleague" in system_instruction
     assert "tool" not in user_content.lower()
     assert json.loads(user_content) == {
         "items": [
