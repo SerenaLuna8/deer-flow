@@ -309,6 +309,8 @@ class MemoryConsolidateJobHandler:
         if claim.job_type != "memory_consolidate" or claim.scope.owner_user_id is None or not claim.namespace or claim.run_id is not None or claim.occurrence_id is not None:
             return JobOutcome.cancelled()
         await authority.heartbeat()
+        if authority.cancel_requested:
+            return JobOutcome.cancelled()
         try:
             allowed, work = await self._load_work(claim)
         except asyncio.CancelledError:

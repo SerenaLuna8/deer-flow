@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSessionTransaction,
 )
 
+from app.private_work.memory_v2_export import iter_memory_v2_export_records
 from app.private_work.retention_jobs import (
     RetentionJobAdmission,
     former_owner_retention_key,
@@ -523,6 +524,14 @@ class PrivacyCenterService:
                         "created_at": _iso(row.created_at),
                     },
                 )
+
+            async for record_type, data in iter_memory_v2_export_records(
+                self._session,
+                project_id=scope[0],
+                owner_user_id=scope[1],
+                namespace=None,
+            ):
+                yield _export_line(record_type, data=data)
 
             files = (
                 select(PrivateFileRow)

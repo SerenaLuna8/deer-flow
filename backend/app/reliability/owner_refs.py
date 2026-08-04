@@ -224,15 +224,27 @@ class AuditHmacKeyring:
     def memory_source_ref(self, payload: bytes) -> MemorySourceRef:
         """Return a domain-separated source digest using the active key."""
 
+        return self.memory_source_refs(payload)[0]
+
+    def memory_source_refs(self, payload: bytes) -> tuple[MemorySourceRef, ...]:
+        """Return active and retained source refs for suppression checks."""
+
         if type(payload) is not bytes or not payload:
             raise ValueError("Memory source reference requires bytes")
-        return MemorySourceRef(
-            key_id=self.active_key_id,
-            hmac_hex=hmac.new(
-                self._keys[self.active_key_id],
-                _MEMORY_SOURCE_DOMAIN + payload,
-                hashlib.sha256,
-            ).hexdigest(),
+        key_ids = (
+            self.active_key_id,
+            *sorted(set(self._keys) - {self.active_key_id}),
+        )
+        return tuple(
+            MemorySourceRef(
+                key_id=key_id,
+                hmac_hex=hmac.new(
+                    self._keys[key_id],
+                    _MEMORY_SOURCE_DOMAIN + payload,
+                    hashlib.sha256,
+                ).hexdigest(),
+            )
+            for key_id in key_ids
         )
 
     @staticmethod

@@ -12,6 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
 from app.quotas.integration import ProjectQuotaEnforcer
+from deerflow.persistence.private_work.memory_v2_management import (
+    MemoryV2ManagementRepository,
+)
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
@@ -447,6 +450,12 @@ async def purge_private_scope(
     await session.execute(
         text(f"DELETE FROM channel_connections WHERE project_id=:project_id{owner_clause}"),
         parameters,
+    )
+
+    await MemoryV2ManagementRepository(session).purge_scope(
+        project_id=project_id,
+        owner_user_id=owner_user_id,
+        now=parameters["purged_at"],
     )
 
     await session.execute(

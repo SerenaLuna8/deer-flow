@@ -125,6 +125,33 @@ class OperationalAuditSink:
             job_id=_uuid(job_id),
         )
 
+    async def memory_changed(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        resource_id: uuid.UUID,
+        operation: str,
+        affected_count: int,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            AuditAction.MEMORY_CHANGED,
+            AuditTarget(
+                AuditTargetKind.MEMORY,
+                _uuid(resource_id),
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "operation": operation,
+                "affected_count": affected_count,
+            },
+            request_id=context.request_id,
+        )
+
     async def member_role_changed(
         self,
         session: AsyncSession,

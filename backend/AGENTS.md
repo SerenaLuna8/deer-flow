@@ -640,6 +640,18 @@ erased by `memory_retention_purge` at the exact cutoff frozen on admission while
 remain. Both consolidation and retention lock and recheck the current policy in their settlement
 transaction, so pausing keeps the backlog and cannot commit a Fact or erase Candidate text after
 the pause has linearized.
+
+Gateway exposes the additive `/api/projects/{project_id}/memory/v2/*` management surface while all
+v1 Memory routes remain available. Reads list scoped Candidates/Facts and their Revision/Evidence
+history; writes use Candidate `updated_at` or Fact `version` CAS for accept/reject, user Revision,
+disable/restore, and irreversible hard forget. Hard forget erases every derived body, writes
+source/lineage suppression, and retained audit-HMAC keys remain eligible when a replay is checked
+after key rotation. Owner export is streaming NDJSON and excludes HMAC/checksum material. Thread
+or Run deletion first suppresses and erases its source lineage while preserving accepted Fact
+content; Thread deletion conflicts with an active/finalizing Run. A deleted Run referenced by its
+immutable Job is retained only as a hidden scrubbed shell, with Run events, feedback, artifacts,
+and removable admitted snapshots deleted explicitly.
+
 Candidates and v2 Facts still never enter recall, so the v1 read/write path below remains the only
 production Memory source until the separate v2 recall switch.
 

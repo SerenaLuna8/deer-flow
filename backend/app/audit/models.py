@@ -73,6 +73,7 @@ class AuditAction(StrEnum):
     RUN_CANCEL_REQUESTED = "run.cancel_requested"
     RUN_FILES_FINALIZED = "run.files_finalized"
     RUN_TERMINAL = "run.terminal"
+    MEMORY_CHANGED = "memory.changed"
     JOB_DEAD = "job.dead"
     JOB_REQUEUED = "job.requeued"
     PURGE_COMPLETED = "purge.completed"
@@ -88,6 +89,7 @@ class AuditTargetKind(StrEnum):
     AUTOMATION = "automation"
     QUOTA = "quota"
     RUN = "run"
+    MEMORY = "memory"
     JOB = "job"
     PURGE = "purge"
     AUDIT = "audit"
@@ -311,6 +313,11 @@ _ACTION_CONTRACTS[AuditAction.RUN_ADMITTED] = AuditActionContract(
 )
 _ACTION_CONTRACTS[AuditAction.RUN_CANCEL_REQUESTED] = _contract(
     AuditTargetKind.RUN,
+    AuditScope.PROJECT,
+    "user",
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_CHANGED] = _contract(
+    AuditTargetKind.MEMORY,
     AuditScope.PROJECT,
     "user",
 )
@@ -718,6 +725,18 @@ class RunFilesFinalizedAuditMetadata(_AuditMetadata):
     committed_bytes: StrictInt = Field(ge=0)
 
 
+class MemoryChangedAuditMetadata(_AuditMetadata):
+    operation: Literal[
+        "candidate_accept",
+        "candidate_reject",
+        "fact_edit",
+        "fact_disable",
+        "fact_restore",
+        "fact_hard_forget",
+    ]
+    affected_count: StrictInt = Field(ge=1, le=100_000)
+
+
 class JobAuditMetadata(_AuditMetadata):
     job_type: Literal[
         "private_run",
@@ -790,6 +809,7 @@ _AUDIT_METADATA_MODELS[AuditAction.QUOTA_RECONCILED] = QuotaReconciledAuditMetad
 _AUDIT_METADATA_MODELS[AuditAction.RUN_ADMITTED] = RunAdmittedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_FILES_FINALIZED] = RunFilesFinalizedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_TERMINAL] = RunTerminalAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_CHANGED] = MemoryChangedAuditMetadata
 for _action in (AuditAction.JOB_DEAD, AuditAction.JOB_REQUEUED):
     _AUDIT_METADATA_MODELS[_action] = JobAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.PURGE_COMPLETED] = PurgeAuditMetadata

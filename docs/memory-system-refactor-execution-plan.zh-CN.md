@@ -1,7 +1,7 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR1—PR5 与检查点 A 已完成，下一阶段 PR6）
+- 状态：执行中（PR1—PR6 与检查点 A 已完成，下一阶段 PR7）
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
@@ -168,7 +168,8 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 | PR3 | 完成 | `82f111da` | 后端核心门禁 756 passed、0 skipped；PR3 聚焦单元测试 6 passed；PR3 随机 PostgreSQL 9 passed；Python lint/format 通过 |
 | PR4 | 完成 | `22609495` | 后端核心门禁 781 passed、0 skipped；PR4 聚焦单元测试 17 passed；PR4 随机 PostgreSQL 8 passed；Python lint/format 通过 |
 | 检查点 A | 完成 | `f25b2a4b` | 固定样例 64 条/8 Batch；precision 100%；recall 100%；secret、scope、duplicate、batch error 均为 0；PR2—PR4 随机 PostgreSQL 21 passed；后端核心 787 passed、0 skipped |
-| PR5 | 完成 | 本次 PR5 提交 | PR5 聚焦单元测试 20 passed；PR2—PR5 与精确版本随机 PostgreSQL 36 passed；后端核心 821 passed、0 skipped；Python lint/format 通过 |
+| PR5 | 完成 | `220eb6f8` | PR5 聚焦单元测试 20 passed；PR2—PR5 与精确版本随机 PostgreSQL 36 passed；后端核心 821 passed、0 skipped；Python lint/format 通过 |
+| PR6 | 完成 | 本次 PR6 提交 | PR6 API/轮换聚焦单元测试 18 passed；PR6 管理/隐私随机 PostgreSQL 9 passed；PR1—PR6 随机 PostgreSQL 44 passed；后端核心 848 passed、0 skipped；Python lint/format 通过 |
 
 PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
 `shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
@@ -197,6 +198,16 @@ rejected；Candidate 决策、Fact/Revision/Evidence 和 Job 结算处于同一�
 精确截止时间，且只在该截止时间前的 terminal Candidate 上执行；它不依赖整理模型可用。该 Job 只在保留期
 后擦除 terminal Candidate 正文，不处理 pending，也不删除 Fact/Revision/Evidence。PR5 没有新增
 服务、表、签名、调用账本、管理 API 或 v2 Recall，正式召回仍只使用 v1。
+
+PR6 在保留全部 v1 路由的同时新增 `/memory/v2/*` 管理面：用户可以查看 Fact、Revision、
+Evidence 和 Candidate，以时间戳或版本 CAS 接受、拒绝、编辑、disable、restore 和 hard forget，
+并以 owner-scoped NDJSON 导出 v2 数据。Thread/Run 删除会先擦除 Source/Candidate 正文、断开
+Evidence/Revision locator、写 source suppression 并取消相关 Memory Job；活跃 Run 存在时拒绝
+删除 Thread，避免结算竞态重新产生来源。hard forget 额外擦除 Fact Revision、Summary 和 Recall
+Snapshot 正文，且 retained HMAC key 仍参与 suppression 匹配。Run 因不可删除的 Job 关系保留
+不可见的脱敏 shell，同时显式删除 RunEvent、Feedback、Artifact 等正文子项。Owner/project
+retention 与 Privacy Center export 已覆盖全部 v2 表。PR6 没有新增表、服务、capability 或模型调用，
+也没有切换正式召回；v1 仍是唯一生产召回来源。
 
 ## 6. PR1：修复现有 Memory 正确性问题
 

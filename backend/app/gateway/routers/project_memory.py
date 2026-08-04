@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from app.gateway.deps import private_work_context, require_project_private_open
@@ -16,9 +17,22 @@ from app.gateway.private_work_schemas import (
 from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import PrivateWorkError
-from app.private_work.memory_service import PrivateMemoryService, PrivateMemoryStatus
+from app.private_work.memory_service import (
+    PrivateMemoryService,
+    PrivateMemoryStatus,
+    PrivateMemoryV2Service,
+)
+from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.agents.memory.storage import ProjectMemorySnapshot
 from deerflow.persistence.engine import get_session_factory
+from deerflow.persistence.private_work.memory_v2_management import (
+    MemoryV2CandidateView,
+    MemoryV2EvidenceView,
+    MemoryV2FactDetail,
+    MemoryV2FactView,
+    MemoryV2HardForgetResult,
+    MemoryV2RevisionView,
+)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/memory",
@@ -173,6 +187,130 @@ class ProjectMemoryDeleteRequest(StrictPrivateWorkRequest):
     expected_version: int = Field(ge=0)
 
 
+class ProjectMemoryV2Revision(StrictPrivateWorkResponse):
+    id: uuid.UUID
+    fact_id: uuid.UUID = Field(alias="factId")
+    revision_number: int = Field(alias="revisionNumber", ge=1)
+    revision_sequence: int = Field(alias="revisionSequence", ge=1)
+    content: str | None = Field(default=None, max_length=16_000)
+    content_digest: str = Field(alias="contentDigest", min_length=64, max_length=64)
+    category: str = Field(min_length=1, max_length=32)
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    valid_from: datetime | None = Field(alias="validFrom")
+    valid_to: datetime | None = Field(alias="validTo")
+    last_confirmed_at: datetime | None = Field(alias="lastConfirmedAt")
+    changed_by: Literal["user", "system", "consolidator"] = Field(alias="changedBy")
+    source_candidate_id: uuid.UUID | None = Field(alias="sourceCandidateId")
+    supersedes_revision_id: uuid.UUID | None = Field(alias="supersedesRevisionId")
+    change_reason: str | None = Field(alias="changeReason", max_length=64)
+    content_erased_at: datetime | None = Field(alias="contentErasedAt")
+    created_at: datetime = Field(alias="createdAt")
+
+
+class ProjectMemoryV2Fact(StrictPrivateWorkResponse):
+    id: uuid.UUID
+    fact_kind: str = Field(alias="factKind", min_length=1, max_length=32)
+    status: Literal["active", "disabled", "superseded", "deleted"]
+    version: int = Field(ge=1)
+    disabled_at: datetime | None = Field(alias="disabledAt")
+    superseded_at: datetime | None = Field(alias="supersededAt")
+    deleted_at: datetime | None = Field(alias="deletedAt")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+    current_revision: ProjectMemoryV2Revision = Field(alias="currentRevision")
+
+
+class ProjectMemoryV2Candidate(StrictPrivateWorkResponse):
+    id: uuid.UUID
+    candidate_type: str = Field(alias="candidateType", min_length=1, max_length=32)
+    content: str | None = Field(default=None, max_length=16_000)
+    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    retention_class: Literal["permanent", "durable", "ephemeral"] = Field(alias="retentionClass")
+    sensitivity: Literal["normal", "sensitive", "restricted"]
+    status: Literal["pending", "accepted", "rejected", "superseded"]
+    decision_reason: str | None = Field(alias="decisionReason", max_length=64)
+    decided_at: datetime | None = Field(alias="decidedAt")
+    content_erased_at: datetime | None = Field(alias="contentErasedAt")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+
+
+class ProjectMemoryV2Evidence(StrictPrivateWorkResponse):
+    id: uuid.UUID
+    fact_id: uuid.UUID = Field(alias="factId")
+    revision_id: uuid.UUID = Field(alias="revisionId")
+    source_candidate_id: uuid.UUID | None = Field(alias="sourceCandidateId")
+    source_item_id: uuid.UUID | None = Field(alias="sourceItemId")
+    thread_id: str | None = Field(alias="threadId", max_length=64)
+    run_id: str | None = Field(alias="runId", max_length=64)
+    run_event_sequence: int | None = Field(alias="runEventSequence", ge=0)
+    evidence_excerpt: str | None = Field(alias="evidenceExcerpt", max_length=4_000)
+    trust_class: Literal["direct", "derived", "untrusted"] = Field(alias="trustClass")
+    source_erased_at: datetime | None = Field(alias="sourceErasedAt")
+    created_at: datetime = Field(alias="createdAt")
+
+
+class ProjectMemoryV2FactsResponse(StrictPrivateWorkResponse):
+    namespace: str
+    items: list[ProjectMemoryV2Fact] = Field(max_length=100)
+
+
+class ProjectMemoryV2CandidatesResponse(StrictPrivateWorkResponse):
+    namespace: str
+    items: list[ProjectMemoryV2Candidate] = Field(max_length=100)
+
+
+class ProjectMemoryV2FactDetailResponse(StrictPrivateWorkResponse):
+    namespace: str
+    fact: ProjectMemoryV2Fact
+    revisions: list[ProjectMemoryV2Revision] = Field(max_length=1_000)
+    evidence: list[ProjectMemoryV2Evidence] = Field(max_length=5_000)
+
+
+class ProjectMemoryV2CandidateDecisionRequest(StrictPrivateWorkRequest):
+    expected_updated_at: str = Field(
+        alias="expectedUpdatedAt",
+        min_length=1,
+        max_length=64,
+    )
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def validate_expected_updated_at(cls, value: str) -> str:
+        return _require_timezone(value, allow_empty=False)
+
+    def parsed_expected_updated_at(self) -> datetime:
+        return datetime.fromisoformat(self.expected_updated_at.replace("Z", "+00:00"))
+
+
+class ProjectMemoryV2FactUpdateRequest(StrictPrivateWorkRequest):
+    expected_version: int = Field(alias="expectedVersion", ge=1)
+    content: str | None = Field(default=None, min_length=1, max_length=16_000)
+    category: str | None = Field(default=None, min_length=1, max_length=32)
+    confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    reason: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if self.content is None and self.category is None and self.confidence is None:
+            raise ValueError("at least one Fact field must change")
+        return self
+
+
+class ProjectMemoryV2FactStateRequest(StrictPrivateWorkRequest):
+    expected_version: int = Field(alias="expectedVersion", ge=1)
+
+
+class ProjectMemoryV2HardForgetResponse(StrictPrivateWorkResponse):
+    fact_id: uuid.UUID = Field(alias="factId")
+    version: int = Field(ge=2)
+    status: Literal["deleted"]
+    erased_candidates: int = Field(alias="erasedCandidates", ge=0)
+    erased_revisions: int = Field(alias="erasedRevisions", ge=1)
+    erased_evidence: int = Field(alias="erasedEvidence", ge=0)
+    erased_source_items: int = Field(alias="erasedSourceItems", ge=0)
+
+
 def _service(request: Request) -> PrivateMemoryService:
     service = getattr(request.app.state, "project_memory_service", None)
     if isinstance(service, PrivateMemoryService):
@@ -180,6 +318,128 @@ def _service(request: Request) -> PrivateMemoryService:
     service = PrivateMemoryService(get_session_factory())
     request.app.state.project_memory_service = service
     return service
+
+
+def _v2_service(request: Request) -> PrivateMemoryV2Service:
+    service = getattr(request.app.state, "project_memory_v2_service", None)
+    if isinstance(service, PrivateMemoryV2Service):
+        return service
+    service = PrivateMemoryV2Service(
+        get_session_factory(),
+        source_hmac=AuditHmacKeyring.from_environment().memory_source_ref,
+    )
+    request.app.state.project_memory_v2_service = service
+    return service
+
+
+def _revision_response(row: MemoryV2RevisionView) -> ProjectMemoryV2Revision:
+    return ProjectMemoryV2Revision.model_validate(
+        {
+            "id": row.id,
+            "factId": row.fact_id,
+            "revisionNumber": row.revision_number,
+            "revisionSequence": row.revision_sequence,
+            "content": row.content,
+            "contentDigest": row.content_digest,
+            "category": row.category,
+            "confidence": row.confidence,
+            "validFrom": row.valid_from,
+            "validTo": row.valid_to,
+            "lastConfirmedAt": row.last_confirmed_at,
+            "changedBy": row.changed_by,
+            "sourceCandidateId": row.source_candidate_id,
+            "supersedesRevisionId": row.supersedes_revision_id,
+            "changeReason": row.change_reason,
+            "contentErasedAt": row.content_erased_at,
+            "createdAt": row.created_at,
+        }
+    )
+
+
+def _fact_response(row: MemoryV2FactView) -> ProjectMemoryV2Fact:
+    return ProjectMemoryV2Fact.model_validate(
+        {
+            "id": row.id,
+            "factKind": row.fact_kind,
+            "status": row.status,
+            "version": row.version,
+            "disabledAt": row.disabled_at,
+            "supersededAt": row.superseded_at,
+            "deletedAt": row.deleted_at,
+            "createdAt": row.created_at,
+            "updatedAt": row.updated_at,
+            "currentRevision": _revision_response(row.current_revision),
+        }
+    )
+
+
+def _candidate_response(
+    row: MemoryV2CandidateView,
+) -> ProjectMemoryV2Candidate:
+    return ProjectMemoryV2Candidate.model_validate(
+        {
+            "id": row.id,
+            "candidateType": row.candidate_type,
+            "content": row.content,
+            "confidence": row.confidence,
+            "retentionClass": row.retention_class,
+            "sensitivity": row.sensitivity,
+            "status": row.status,
+            "decisionReason": row.decision_reason,
+            "decidedAt": row.decided_at,
+            "contentErasedAt": row.content_erased_at,
+            "createdAt": row.created_at,
+            "updatedAt": row.updated_at,
+        }
+    )
+
+
+def _evidence_response(row: MemoryV2EvidenceView) -> ProjectMemoryV2Evidence:
+    return ProjectMemoryV2Evidence.model_validate(
+        {
+            "id": row.id,
+            "factId": row.fact_id,
+            "revisionId": row.revision_id,
+            "sourceCandidateId": row.source_candidate_id,
+            "sourceItemId": row.source_item_id,
+            "threadId": row.thread_id,
+            "runId": row.run_id,
+            "runEventSequence": row.run_event_sequence,
+            "evidenceExcerpt": row.evidence_excerpt,
+            "trustClass": row.trust_class,
+            "sourceErasedAt": row.source_erased_at,
+            "createdAt": row.created_at,
+        }
+    )
+
+
+def _fact_detail_response(
+    row: MemoryV2FactDetail,
+    *,
+    namespace: str,
+) -> ProjectMemoryV2FactDetailResponse:
+    return ProjectMemoryV2FactDetailResponse(
+        namespace=namespace,
+        fact=_fact_response(row.fact),
+        revisions=[_revision_response(item) for item in row.revisions],
+        evidence=[_evidence_response(item) for item in row.evidence],
+    )
+
+
+def _hard_forget_response(
+    row: MemoryV2HardForgetResult,
+) -> ProjectMemoryV2HardForgetResponse:
+    return ProjectMemoryV2HardForgetResponse.model_validate(
+        {
+            "factId": row.fact_id,
+            "version": row.version,
+            "status": row.status,
+            "erasedCandidates": row.erased_candidates,
+            "erasedRevisions": row.erased_revisions,
+            "erasedEvidence": row.erased_evidence,
+            "erasedSourceItems": row.erased_source_items,
+        }
+    )
 
 
 def _snapshot_response(
@@ -325,3 +585,231 @@ async def delete_project_memory_fact(
         )
     )
     return _snapshot_response(snapshot, namespace)
+
+
+@router.get("/v2/facts", response_model=ProjectMemoryV2FactsResponse)
+async def list_project_memory_v2_facts(
+    request: Request,
+    namespace: Namespace = "default",
+    status: Literal["active", "disabled", "all"] = "active",
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2FactsResponse:
+    statuses: tuple[Literal["active", "disabled"], ...] = ("active", "disabled") if status == "all" else (status,)
+    rows = await _call(
+        _v2_service(request).list_facts(
+            context,
+            namespace=namespace,
+            statuses=statuses,
+            limit=limit,
+            offset=offset,
+        )
+    )
+    return ProjectMemoryV2FactsResponse(
+        namespace=namespace,
+        items=[_fact_response(row) for row in rows],
+    )
+
+
+@router.get("/v2/export")
+async def export_project_memory_v2(
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+):
+    stream = await _call(
+        _v2_service(request).open_export(
+            context,
+            namespace=namespace,
+        )
+    )
+    return StreamingResponse(
+        stream,
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": ('attachment; filename="deer-flow-memory-v2.ndjson"'),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/v2/candidates", response_model=ProjectMemoryV2CandidatesResponse)
+async def list_project_memory_v2_candidates(
+    request: Request,
+    namespace: Namespace = "default",
+    status: Literal[
+        "pending",
+        "accepted",
+        "rejected",
+        "superseded",
+        "all",
+    ] = "pending",
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2CandidatesResponse:
+    statuses = ("pending", "accepted", "rejected", "superseded") if status == "all" else (status,)
+    rows = await _call(
+        _v2_service(request).list_candidates(
+            context,
+            namespace=namespace,
+            statuses=statuses,
+            limit=limit,
+            offset=offset,
+        )
+    )
+    return ProjectMemoryV2CandidatesResponse(
+        namespace=namespace,
+        items=[_candidate_response(row) for row in rows],
+    )
+
+
+@router.get(
+    "/v2/facts/{fact_id}",
+    response_model=ProjectMemoryV2FactDetailResponse,
+)
+async def get_project_memory_v2_fact(
+    fact_id: uuid.UUID,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2FactDetailResponse:
+    row = await _call(
+        _v2_service(request).get_fact(
+            context,
+            fact_id,
+            namespace=namespace,
+        )
+    )
+    return _fact_detail_response(row, namespace=namespace)
+
+
+@router.post(
+    "/v2/candidates/{candidate_id}/accept",
+    response_model=ProjectMemoryV2Fact,
+)
+async def accept_project_memory_v2_candidate(
+    candidate_id: uuid.UUID,
+    body: ProjectMemoryV2CandidateDecisionRequest,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2Fact:
+    row = await _call(
+        _v2_service(request).accept_candidate(
+            context,
+            candidate_id,
+            namespace=namespace,
+            expected_updated_at=body.parsed_expected_updated_at(),
+        )
+    )
+    return _fact_response(row)
+
+
+@router.post(
+    "/v2/candidates/{candidate_id}/reject",
+    response_model=ProjectMemoryV2Candidate,
+)
+async def reject_project_memory_v2_candidate(
+    candidate_id: uuid.UUID,
+    body: ProjectMemoryV2CandidateDecisionRequest,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2Candidate:
+    row = await _call(
+        _v2_service(request).reject_candidate(
+            context,
+            candidate_id,
+            namespace=namespace,
+            expected_updated_at=body.parsed_expected_updated_at(),
+        )
+    )
+    return _candidate_response(row)
+
+
+@router.patch("/v2/facts/{fact_id}", response_model=ProjectMemoryV2Fact)
+async def update_project_memory_v2_fact(
+    fact_id: uuid.UUID,
+    body: ProjectMemoryV2FactUpdateRequest,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2Fact:
+    row = await _call(
+        _v2_service(request).revise_fact(
+            context,
+            fact_id,
+            namespace=namespace,
+            expected_version=body.expected_version,
+            content=body.content,
+            category=body.category,
+            confidence=body.confidence,
+            reason=body.reason,
+        )
+    )
+    return _fact_response(row)
+
+
+@router.post("/v2/facts/{fact_id}/disable", response_model=ProjectMemoryV2Fact)
+async def disable_project_memory_v2_fact(
+    fact_id: uuid.UUID,
+    body: ProjectMemoryV2FactStateRequest,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2Fact:
+    row = await _call(
+        _v2_service(request).set_fact_enabled(
+            context,
+            fact_id,
+            namespace=namespace,
+            expected_version=body.expected_version,
+            enabled=False,
+        )
+    )
+    return _fact_response(row)
+
+
+@router.post("/v2/facts/{fact_id}/restore", response_model=ProjectMemoryV2Fact)
+async def restore_project_memory_v2_fact(
+    fact_id: uuid.UUID,
+    body: ProjectMemoryV2FactStateRequest,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2Fact:
+    row = await _call(
+        _v2_service(request).set_fact_enabled(
+            context,
+            fact_id,
+            namespace=namespace,
+            expected_version=body.expected_version,
+            enabled=True,
+        )
+    )
+    return _fact_response(row)
+
+
+@router.post(
+    "/v2/facts/{fact_id}/hard-forget",
+    response_model=ProjectMemoryV2HardForgetResponse,
+)
+async def hard_forget_project_memory_v2_fact(
+    fact_id: uuid.UUID,
+    body: ProjectMemoryV2FactStateRequest,
+    request: Request,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2HardForgetResponse:
+    row = await _call(
+        _v2_service(request).hard_forget_fact(
+            context,
+            fact_id,
+            namespace=namespace,
+            expected_version=body.expected_version,
+        )
+    )
+    return _hard_forget_response(row)

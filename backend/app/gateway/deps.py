@@ -239,7 +239,10 @@ async def gateway_platform_runtime(
         from app.private_work.human_input_response import (
             CheckpointHumanInputResponsePromoter,
         )
-        from app.private_work.memory_service import PrivateMemoryService
+        from app.private_work.memory_service import (
+            PrivateMemoryService,
+            PrivateMemoryV2Service,
+        )
         from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
         from app.private_work.thread_service import PrivateThreadService
@@ -332,6 +335,11 @@ async def gateway_platform_runtime(
         app.state.private_feedback_service = PrivateFeedbackService(sf)
         app.state.private_file_streamer = PrivateFileStreamer(sf)
         app.state.project_memory_service = PrivateMemoryService(sf)
+        app.state.project_memory_v2_service = PrivateMemoryV2Service(
+            sf,
+            source_hmac=audit_keyring.memory_source_ref,
+            audit=operational_audit_sink,
+        )
         app.state.channel_connection_repo = ChannelConnectionRepository(sf)
         app.state.project_connection_service = ProjectConnectionService(
             sf,

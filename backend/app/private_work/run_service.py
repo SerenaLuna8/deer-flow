@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Protocol
 
@@ -28,7 +29,19 @@ from app.private_work.run_repository import (
 )
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs.model import JobRow
+from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.private_work.memory_v2_management import (
+    MemoryV2ManagementRepository,
+)
+from deerflow.persistence.private_work.model import (
+    PrivateArtifactRow,
+    RunAssetVersionRow,
+    RunMcpGrantSnapshotRow,
+    RunSkillCredentialSnapshotRow,
+    UserProjectMemoryFactRow,
+)
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 TERMINAL_PRIVATE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
@@ -256,6 +269,60 @@ class PrivateRunService:
                     raise PrivateWorkNotFound(context.request_id)
                 if record.status not in TERMINAL_PRIVATE_RUN_STATUSES:
                     raise PrivateWorkConflict(context.request_id)
+                await MemoryV2ManagementRepository(session).erase_sources(
+                    context.resource_scope,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    reason="run_deleted",
+                    now=datetime.now(UTC),
+                )
+                await session.execute(
+                    sa.update(UserProjectMemoryFactRow)
+                    .where(
+                        UserProjectMemoryFactRow.project_id == context.project_id,
+                        UserProjectMemoryFactRow.owner_user_id == str(context.user_id),
+                        UserProjectMemoryFactRow.source_thread_id == thread_id,
+                        UserProjectMemoryFactRow.source_run_id == run_id,
+                    )
+                    .values(source_thread_id=None, source_run_id=None)
+                )
+                await session.execute(
+                    sa.delete(RunEventRow).where(
+                        RunEventRow.project_id == context.project_id,
+                        RunEventRow.owner_user_id == str(context.user_id),
+                        RunEventRow.thread_id == thread_id,
+                        RunEventRow.run_id == run_id,
+                    )
+                )
+                await session.execute(
+                    sa.delete(FeedbackRow).where(
+                        FeedbackRow.project_id == context.project_id,
+                        FeedbackRow.owner_user_id == str(context.user_id),
+                        FeedbackRow.thread_id == thread_id,
+                        FeedbackRow.run_id == run_id,
+                    )
+                )
+                await session.execute(
+                    sa.delete(PrivateArtifactRow).where(
+                        PrivateArtifactRow.project_id == context.project_id,
+                        PrivateArtifactRow.owner_user_id == str(context.user_id),
+                        PrivateArtifactRow.thread_id == thread_id,
+                        PrivateArtifactRow.run_id == run_id,
+                    )
+                )
+                for snapshot_type in (
+                    RunSkillCredentialSnapshotRow,
+                    RunMcpGrantSnapshotRow,
+                    RunAssetVersionRow,
+                ):
+                    await session.execute(
+                        sa.delete(snapshot_type).where(
+                            snapshot_type.project_id == context.project_id,
+                            snapshot_type.owner_user_id == str(context.user_id),
+                            snapshot_type.thread_id == thread_id,
+                            snapshot_type.run_id == run_id,
+                        )
+                    )
                 if not await repository.delete(
                     scope=context.resource_scope,
                     run_id=run_id,

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import sqlalchemy as sa
-from sqlalchemy import case, delete, select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -262,6 +262,7 @@ class PrivateRunRepository:
         statement = select(RunRow).where(
             RunRow.run_id == run_id,
             *self.predicates(scope),
+            RunRow.status != "deleted",
         )
         if lock:
             statement = statement.with_for_update(of=RunRow)
@@ -805,6 +806,7 @@ class PrivateRunRepository:
             .where(
                 RunRow.thread_id == thread_id,
                 *self.predicates(scope),
+                RunRow.status != "deleted",
             )
             .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
             .limit(limit)
@@ -829,6 +831,7 @@ class PrivateRunRepository:
                     RunRow.thread_id == thread_id,
                     RunRow.run_id.in_(selected),
                     *self.predicates(scope),
+                    RunRow.status != "deleted",
                 )
             )
         ).scalars()
@@ -870,5 +873,26 @@ class PrivateRunRepository:
         scope: PrivateResourceScope,
         run_id: str,
     ) -> bool:
-        result = await self.session.execute(delete(RunRow).where(RunRow.run_id == run_id, *self.predicates(scope)))
+        deleted_at = datetime.now(UTC)
+        result = await self.session.execute(
+            update(RunRow)
+            .where(
+                RunRow.run_id == run_id,
+                *self.predicates(scope),
+                RunRow.status != "deleted",
+            )
+            .values(
+                assistant_id=None,
+                status="deleted",
+                metadata_json={},
+                kwargs_json={},
+                error=None,
+                first_human_message=None,
+                last_ai_message=None,
+                model_name=None,
+                token_usage_by_model={},
+                follow_up_to_run_id=None,
+                updated_at=deleted_at,
+            )
+        )
         return result.rowcount != 0

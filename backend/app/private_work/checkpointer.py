@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -14,7 +15,7 @@ from langgraph.checkpoint.base import (
     CheckpointMetadata,
     CheckpointTuple,
 )
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,7 +33,15 @@ from app.private_work.errors import (
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
-from deerflow.persistence.private_work.model import PrivateArtifactRow, PrivateFileRow
+from deerflow.persistence.private_work.memory_v2_management import (
+    MemoryV2ManagementRepository,
+)
+from deerflow.persistence.private_work.model import (
+    PrivateArtifactRow,
+    PrivateFileRow,
+    UserProjectMemoryFactRow,
+)
+from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 PRIVATE_SCOPE_MARKER = "deerflow_private_scope"
@@ -527,6 +536,45 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         raise PrivateWorkNotFound(context.request_id)
                     if expected_version is not None and record.version != expected_version:
                         raise PrivateWorkConflict(context.request_id)
+                    incomplete_run = (
+                        await session.execute(
+                            select(RunRow.run_id)
+                            .where(
+                                RunRow.project_id == context.project_id,
+                                RunRow.owner_user_id == str(context.user_id),
+                                RunRow.thread_id == thread_id,
+                                or_(
+                                    RunRow.status.in_(("pending", "running")),
+                                    RunRow.finalization_status == "finalizing",
+                                ),
+                            )
+                            .order_by(RunRow.created_at, RunRow.run_id)
+                            .with_for_update(of=RunRow)
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if incomplete_run is not None:
+                        raise PrivateWorkConflict(context.request_id)
+                    erased_at = datetime.now(UTC)
+                    await MemoryV2ManagementRepository(session).erase_sources(
+                        context.resource_scope,
+                        thread_id=thread_id,
+                        run_id=None,
+                        reason="thread_deleted",
+                        now=erased_at,
+                    )
+                    await session.execute(
+                        update(UserProjectMemoryFactRow)
+                        .where(
+                            UserProjectMemoryFactRow.project_id == context.project_id,
+                            UserProjectMemoryFactRow.owner_user_id == str(context.user_id),
+                            UserProjectMemoryFactRow.source_thread_id == thread_id,
+                        )
+                        .values(
+                            source_thread_id=None,
+                            source_run_id=None,
+                        )
+                    )
                     deleted = await repository.mark_deleted(
                         scope=context.resource_scope,
                         thread_id=thread_id,

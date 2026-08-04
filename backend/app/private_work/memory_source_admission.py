@@ -68,6 +68,7 @@ class SourceHmacRef(Protocol):
 
 
 MemorySourceHmac = Callable[[bytes], SourceHmacRef]
+MemorySourceHmacRefs = Callable[[bytes], tuple[SourceHmacRef, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,7 @@ class PreparedMemorySourceItem:
     source_message_id: str
     content: str
     content_hmac: str
+    suppression_refs: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +206,7 @@ def prepare_memory_source(
     source_attempt_id: uuid.UUID,
     raw_input: object,
     source_hmac: MemorySourceHmac,
+    source_hmac_refs: MemorySourceHmacRefs | None = None,
 ) -> PreparedMemorySource | None:
     """Return filtered, ordered source evidence or ``None`` when nothing qualifies."""
 
@@ -222,6 +225,7 @@ def prepare_memory_source(
         or len(run_id) > 64
         or type(source_attempt_id) is not uuid.UUID
         or not callable(source_hmac)
+        or (source_hmac_refs is not None and not callable(source_hmac_refs))
     ):
         raise ValueError("Memory source coordinates are invalid")
 
@@ -252,6 +256,16 @@ def prepare_memory_source(
         reference = source_hmac(_SOURCE_ITEM_HMAC_DOMAIN + hmac_payload)
         if not isinstance(reference.key_id, str) or not reference.key_id or len(reference.key_id) > 64 or re.fullmatch(r"[0-9a-f]{64}", reference.hmac_hex) is None:
             raise ValueError("Memory source HMAC is invalid")
+        retained_references = (reference,) if source_hmac_refs is None else source_hmac_refs(_SOURCE_ITEM_HMAC_DOMAIN + hmac_payload)
+        if (
+            not isinstance(retained_references, tuple)
+            or not retained_references
+            or retained_references[0].key_id != reference.key_id
+            or retained_references[0].hmac_hex != reference.hmac_hex
+            or len({item.key_id for item in retained_references}) != len(retained_references)
+            or any(not isinstance(item.key_id, str) or not item.key_id or len(item.key_id) > 64 or re.fullmatch(r"[0-9a-f]{64}", item.hmac_hex) is None for item in retained_references)
+        ):
+            raise ValueError("Memory source HMAC keyring is invalid")
         if key_version is None:
             key_version = reference.key_id
         elif key_version != reference.key_id:
@@ -276,6 +290,7 @@ def prepare_memory_source(
                 source_message_id=message_id,
                 content=content,
                 content_hmac=reference.hmac_hex,
+                suppression_refs=tuple((item.key_id, item.hmac_hex) for item in retained_references),
             )
         )
 
@@ -346,6 +361,7 @@ class MemorySourceAdmissionService:
         self,
         *,
         source_hmac: MemorySourceHmac,
+        source_hmac_refs: MemorySourceHmacRefs | None = None,
         job_repository_builder=JobRepository,
         repository_builder=MemoryV2Repository,
         namespace: str = "default",
@@ -353,6 +369,7 @@ class MemorySourceAdmissionService:
     ) -> None:
         if (
             not callable(source_hmac)
+            or (source_hmac_refs is not None and not callable(source_hmac_refs))
             or not callable(job_repository_builder)
             or not callable(repository_builder)
             or not isinstance(namespace, str)
@@ -363,6 +380,7 @@ class MemorySourceAdmissionService:
         ):
             raise ValueError("Memory source admission configuration is invalid")
         self._source_hmac = source_hmac
+        self._source_hmac_refs = source_hmac_refs
         self._job_repository_builder = job_repository_builder
         self._repository_builder = repository_builder
         self._namespace = namespace
@@ -449,9 +467,28 @@ class MemorySourceAdmissionService:
             source_attempt_id=source_attempt_id,
             raw_input=_run_source_input(run),
             source_hmac=self._source_hmac,
+            source_hmac_refs=self._source_hmac_refs,
         )
         if prepared is None:
             return None
+
+        repository = self._repository_builder(
+            session,
+            jobs=self._job_repository_builder(session),
+        )
+        suppression_refs: dict[str, set[str]] = {}
+        for item in prepared.items:
+            for key_id, hmac_hex in item.suppression_refs:
+                suppression_refs.setdefault(key_id, set()).add(hmac_hex)
+        for key_id, identity_hmacs in suppression_refs.items():
+            if await repository.source_suppressed(
+                project_id=run.project_id,
+                owner_user_id=run.owner_user_id,
+                namespace=self._namespace,
+                hmac_key_version=key_id,
+                identity_hmacs=tuple(sorted(identity_hmacs)),
+            ):
+                return None
 
         model_purpose = "memory" if policy.memory.model_name is not None else "lead"
         model_snapshot = await SystemModelRepository(session).existing_snapshot(
@@ -523,10 +560,6 @@ class MemorySourceAdmissionService:
             output_schema_version=MEMORY_EXTRACT_OUTPUT_SCHEMA_VERSION,
             extract_job_max_attempts=self._extract_job_max_attempts,
         )
-        repository = self._repository_builder(
-            session,
-            jobs=self._job_repository_builder(session),
-        )
         return await repository.admit_source(request)
 
 
@@ -534,9 +567,10 @@ __all__ = [
     "MEMORY_EXTRACTOR_VERSION",
     "MEMORY_EXTRACT_OUTPUT_SCHEMA_VERSION",
     "MEMORY_EXTRACT_PROMPT_VERSION",
-    "MemorySourceHmac",
     "MemorySourceAdmissionPort",
     "MemorySourceAdmissionService",
+    "MemorySourceHmac",
+    "MemorySourceHmacRefs",
     "PreparedMemorySource",
     "PreparedMemorySourceItem",
     "prepare_memory_source",

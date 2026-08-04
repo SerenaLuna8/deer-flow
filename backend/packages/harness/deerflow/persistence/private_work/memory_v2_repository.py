@@ -30,6 +30,7 @@ from deerflow.persistence.private_work.memory_v2_model import (
     MemoryFactRow,
     MemorySourceBatchRow,
     MemorySourceItemRow,
+    MemorySuppressionRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
@@ -480,6 +481,47 @@ class MemoryV2Repository:
     ) -> None:
         self.session = session
         self.jobs = jobs or JobRepository(session)
+
+    async def source_suppressed(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        namespace: str,
+        hmac_key_version: str,
+        identity_hmacs: tuple[str, ...],
+    ) -> bool:
+        """Return whether hard-forget blocks any exact prepared source item."""
+
+        if (
+            not isinstance(project_id, uuid.UUID)
+            or not isinstance(owner_user_id, str)
+            or not owner_user_id
+            or not isinstance(namespace, str)
+            or not namespace
+            or not isinstance(hmac_key_version, str)
+            or not hmac_key_version
+            or not identity_hmacs
+            or any(_SHA256.fullmatch(value) is None for value in identity_hmacs)
+        ):
+            raise ValueError("Memory source suppression lookup is invalid")
+        return (
+            await self.session.scalar(
+                select(
+                    exists(
+                        select(MemorySuppressionRow.id).where(
+                            MemorySuppressionRow.project_id == project_id,
+                            MemorySuppressionRow.owner_user_id == owner_user_id,
+                            MemorySuppressionRow.namespace == namespace,
+                            MemorySuppressionRow.suppression_kind == "source",
+                            MemorySuppressionRow.hmac_key_version == hmac_key_version,
+                            MemorySuppressionRow.identity_hmac.in_(identity_hmacs),
+                        )
+                    )
+                )
+            )
+            is True
+        )
 
     @staticmethod
     def _validate(request: MemorySourceAdmissionWrite) -> None:

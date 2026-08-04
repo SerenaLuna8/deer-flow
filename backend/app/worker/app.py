@@ -202,6 +202,7 @@ async def run_worker(
                 audit=audit_sink,
                 memory_source_admission=MemorySourceAdmissionService(
                     source_hmac=audit_keyring.memory_source_ref,
+                    source_hmac_refs=audit_keyring.memory_source_refs,
                     job_repository_builder=repository_builder,
                 ),
             )
