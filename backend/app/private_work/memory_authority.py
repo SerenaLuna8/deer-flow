@@ -15,10 +15,20 @@ from app.projects.context import (
     ProjectContext,
     resolve_project_context_in_transaction,
 )
+from app.system_runtime_settings.models import RuntimePolicySection
+from app.system_runtime_settings.repository import SystemRuntimePolicyRepository
+from deerflow.agents.memory import format_memory_for_injection
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.private_work.memory_repository import (
     PrivateMemoryRecord,
     PrivateMemoryRepository,
+)
+from deerflow.persistence.private_work.memory_v2_recall import (
+    MemoryV2RecallContract,
+    MemoryV2RecallFact,
+    MemoryV2RecallRepository,
+    MemoryV2RecallSnapshot,
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
@@ -36,6 +46,7 @@ class PrivateRunMemoryAuthority:
         claim: JobClaim,
         thread_id: str,
         namespace: str,
+        memory_config: MemoryConfig | None = None,
     ) -> None:
         context = require_issued_private_work_context(context)
         if type(claim) is not JobClaim or claim.run_id is None or claim.scope.project_id != context.project_id or claim.scope.owner_user_id != str(context.user_id):
@@ -47,8 +58,78 @@ class PrivateRunMemoryAuthority:
         self._claim = claim
         self._thread_id = thread_id
         self._namespace = namespace
+        if memory_config is not None and not isinstance(memory_config, MemoryConfig):
+            raise ValueError("Memory authority configuration is invalid")
+        self._memory_config = memory_config
 
-    async def load_snapshot(self) -> PrivateMemoryRecord | None:
+    @property
+    def pipeline_mode(self) -> str:
+        """Expose only the frozen routing mode to trusted runtime middleware."""
+
+        return self._memory_config.pipeline_mode if self._memory_config is not None else "consolidate"
+
+    def _render_v2(self, facts: tuple[MemoryV2RecallFact, ...]) -> str:
+        config = self._memory_config
+        if config is None:
+            raise RuntimeError("Memory v2 configuration is unavailable")
+        rendered = format_memory_for_injection(
+            {
+                "facts": [
+                    {
+                        "id": str(fact.id),
+                        "content": fact.content,
+                        "category": fact.category,
+                        "confidence": fact.confidence,
+                        "createdAt": fact.created_at.isoformat(),
+                    }
+                    for fact in facts
+                ]
+            },
+            max_tokens=config.max_injection_tokens,
+            use_tiktoken=config.token_counting == "tiktoken",
+            guaranteed_categories=config.guaranteed_categories,
+            guaranteed_token_budget=config.guaranteed_token_budget,
+        )
+        if not rendered.strip():
+            return ""
+        return f"<memory>\n{rendered}\n</memory>"
+
+    async def _load_v2(
+        self,
+        session,
+    ) -> MemoryV2RecallSnapshot:
+        config = self._memory_config
+        if config is None or config.pipeline_mode != "v2":
+            raise RuntimeError("Memory v2 configuration is unavailable")
+        material = await SystemRuntimePolicyRepository(session).snapshot_material(
+            project_id=self._context.project_id,
+            owner_user_id=str(self._context.user_id),
+            run_id=self._claim.run_id,
+            section=RuntimePolicySection.AGENT_RUNTIME,
+        )
+        if material is None:
+            raise AuthorizationRevoked
+        _snapshot, version = material
+        contract = MemoryV2RecallContract(
+            policy_revision=int(version.version_number),
+            max_facts=config.max_facts,
+            token_budget=config.max_injection_tokens,
+            guaranteed_categories=tuple(config.guaranteed_categories),
+            guaranteed_token_budget=config.guaranteed_token_budget,
+            use_tiktoken=config.token_counting == "tiktoken",
+        )
+        return await MemoryV2RecallRepository(session).load_or_create(
+            self._context.resource_scope,
+            namespace=self._namespace,
+            thread_id=self._thread_id,
+            run_id=self._claim.run_id,
+            contract=contract,
+            renderer=self._render_v2,
+        )
+
+    async def load_snapshot(
+        self,
+    ) -> PrivateMemoryRecord | MemoryV2RecallSnapshot | None:
         """Load without creating a row after one transactional authority check."""
 
         try:
@@ -90,6 +171,11 @@ class PrivateRunMemoryAuthority:
                 )
                 if run is None or run.thread_id != self._thread_id or run.job_id != self._claim.job_id:
                     raise AuthorizationRevoked
+
+                if self._memory_config is not None and not self._memory_config.enabled:
+                    return None
+                if self.pipeline_mode == "v2":
+                    return await self._load_v2(session)
 
                 return await PrivateMemoryRepository(session).load(
                     scope=self._context.resource_scope,

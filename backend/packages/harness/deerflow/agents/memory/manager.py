@@ -94,17 +94,20 @@ class ProjectMemoryManager:
 
         version = getattr(snapshot, "version", None)
         facts = getattr(snapshot, "facts", None)
-        if type(version) is not int or version < 1:
+        if type(version) is not int or version < 0:
             raise RuntimeError("project memory snapshot is invalid")
         if not isinstance(facts, Sequence) or isinstance(facts, (str, bytes, bytearray)):
             raise RuntimeError("project memory snapshot is invalid")
         payloads = tuple(payload for fact in facts if (payload := _fact_payload(fact)) is not None)
+        retrieval_at = getattr(snapshot, "retrieval_at", None)
+        if not isinstance(retrieval_at, datetime):
+            retrieval_at = now
         results = rank_project_memory_facts(
             payloads,
             query,
             category=category,
             top_k=top_k,
-            now=now,
+            now=retrieval_at,
         )
         return ProjectMemorySearchResponse(
             snapshot_version=version,

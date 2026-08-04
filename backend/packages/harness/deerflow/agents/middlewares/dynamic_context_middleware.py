@@ -1,10 +1,10 @@
 """Middleware to inject dynamic context (memory, current date) as a system-reminder.
 
 The system prompt is kept fully static for maximum prefix-cache reuse across users
-and sessions.  The current date is always injected.  Per-user memory is also injected
-when ``memory.injection_enabled`` is True in the app config.  Both are delivered once
-per conversation as a dedicated <system-reminder> SystemMessage inserted before the
-first user message (frozen-snapshot pattern).
+and sessions. The current date is always injected. Per-user Memory is injected when
+``memory.injection_enabled`` is true. The legacy path keeps its Thread-frozen
+behavior; the v2 path replaces one hidden HumanMessage from a stable per-Run
+snapshot and revalidates its deletion overlay before every model call.
 
 When a conversation spans midnight the middleware detects the date change and injects
 a lightweight date-update reminder as a separate SystemMessage before the current turn.
@@ -36,7 +36,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, override
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
@@ -59,6 +59,10 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _PROJECT_MEMORY_LOADED_KEY = "project_memory_loaded"
+_PROJECT_MEMORY_MODE_KEY = "project_memory_mode"
+_PROJECT_MEMORY_SNAPSHOT_ID_KEY = "project_memory_snapshot_id"
+_PROJECT_MEMORY_SNAPSHOT_VERSION_KEY = "project_memory_snapshot_version"
+_PROJECT_MEMORY_SNAPSHOT_DIGEST_KEY = "project_memory_snapshot_digest"
 _SUMMARY_MESSAGE_NAME = "summary"
 _LEGACY_MEMORY = object()
 
@@ -116,6 +120,27 @@ def _project_memory_loaded(messages: list) -> bool:
     return any(is_dynamic_context_reminder(message) and message.additional_kwargs.get(_PROJECT_MEMORY_LOADED_KEY) is True for message in messages)
 
 
+def _is_project_memory_message(message: object) -> bool:
+    if not isinstance(message, HumanMessage) or not is_dynamic_context_reminder(message):
+        return False
+    if message.additional_kwargs.get(_PROJECT_MEMORY_LOADED_KEY) is not True:
+        return False
+    content = message.content if isinstance(message.content, str) else str(message.content)
+    return message.additional_kwargs.get(_PROJECT_MEMORY_MODE_KEY) == "v2" or "<memory>" in content
+
+
+def _has_v2_memory_marker(messages: list) -> bool:
+    for message in reversed(messages):
+        if _is_project_memory_message(message):
+            return message.additional_kwargs.get(_PROJECT_MEMORY_MODE_KEY) == "v2"
+    for message in reversed(messages):
+        if not isinstance(message, SystemMessage) or not is_dynamic_context_reminder(message):
+            continue
+        if _last_injected_date([message]) is not None:
+            return message.additional_kwargs.get(_PROJECT_MEMORY_MODE_KEY) == "v2"
+    return False
+
+
 def _is_user_injection_target(message: object) -> bool:
     """Return whether *message* can receive a dynamic-context reminder."""
     if not isinstance(message, HumanMessage):
@@ -136,14 +161,13 @@ def _is_user_injection_target(message: object) -> bool:
 
 
 class DynamicContextMiddleware(AgentMiddleware):
-    """Inject memory and current date as a SystemMessage <system-reminder>.
+    """Inject the date plus low-authority hidden Human Memory context.
 
     First turn
     ----------
-    Prepends a full system-reminder (memory + date) to the first HumanMessage and
-    persists it (same message ID).  The first message is then frozen for the whole
-    session — its content never changes again, so the prefix cache can hit on every
-    subsequent turn.
+    The v1 path preserves the existing Thread-frozen reminder. The v2 path pins
+    exact Revisions per Run and reconciles the single hidden Memory message at
+    each model boundary while the framework-owned date remains a SystemMessage.
 
     Midnight crossing
     -----------------
@@ -212,6 +236,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         *,
         reminder_date: str | None = None,
         memory_loaded: bool = False,
+        memory_metadata: dict[str, object] | None = None,
     ) -> list[SystemMessage | HumanMessage]:
         """Return messages using the ID-swap technique.
 
@@ -235,6 +260,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
         if memory_loaded:
             reminder_kwargs[_PROJECT_MEMORY_LOADED_KEY] = True
+            if memory_metadata:
+                reminder_kwargs.update(memory_metadata)
         messages.append(
             SystemMessage(
                 content=reminder_content,
@@ -250,6 +277,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             }
             if memory_loaded:
                 memory_kwargs[_PROJECT_MEMORY_LOADED_KEY] = True
+                if memory_metadata:
+                    memory_kwargs.update(memory_metadata)
             messages.append(
                 HumanMessage(
                     content=memory_content,
@@ -272,6 +301,8 @@ class DynamicContextMiddleware(AgentMiddleware):
     def _make_memory_and_user_messages(
         original: HumanMessage,
         memory_content: str,
+        *,
+        memory_metadata: dict[str, object] | None = None,
     ) -> list[HumanMessage]:
         """Replace the current user turn with hidden Memory followed by the user."""
         stable_id = original.id or str(uuid.uuid4())
@@ -283,6 +314,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                     "hide_from_ui": True,
                     _DYNAMIC_CONTEXT_REMINDER_KEY: True,
                     _PROJECT_MEMORY_LOADED_KEY: True,
+                    **(memory_metadata or {}),
                 },
             ),
             HumanMessage(
@@ -294,7 +326,11 @@ class DynamicContextMiddleware(AgentMiddleware):
         ]
 
     @staticmethod
-    def _mark_existing_reminder_memory_loaded(messages: list) -> dict | None:
+    def _mark_existing_reminder_memory_loaded(
+        messages: list,
+        *,
+        memory_metadata: dict[str, object] | None = None,
+    ) -> dict | None:
         for message in reversed(messages):
             if not isinstance(message, SystemMessage):
                 continue
@@ -304,6 +340,10 @@ class DynamicContextMiddleware(AgentMiddleware):
                 continue
             additional_kwargs = dict(message.additional_kwargs)
             additional_kwargs[_PROJECT_MEMORY_LOADED_KEY] = True
+            if memory_metadata:
+                additional_kwargs.update(memory_metadata)
+            if additional_kwargs == message.additional_kwargs:
+                return None
             return {
                 "messages": [
                     message.model_copy(
@@ -319,6 +359,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         *,
         memory_block_override: str | None | object = _LEGACY_MEMORY,
         memory_loaded: bool = False,
+        memory_metadata: dict[str, object] | None = None,
     ) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
@@ -361,6 +402,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 memory_block,
                 reminder_date=current_date,
                 memory_loaded=memory_loaded,
+                memory_metadata=memory_metadata,
             )
             return {"messages": result_msgs}
 
@@ -378,9 +420,13 @@ class DynamicContextMiddleware(AgentMiddleware):
                         "messages": self._make_memory_and_user_messages(
                             messages[target_idx],
                             memory_block_override,
+                            memory_metadata=memory_metadata,
                         )
                     }
-                return self._mark_existing_reminder_memory_loaded(messages)
+                return self._mark_existing_reminder_memory_loaded(
+                    messages,
+                    memory_metadata=memory_metadata,
+                )
             return None
 
         # ── Midnight crossed: inject date-update reminder as a SystemMessage ──
@@ -395,6 +441,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             memory_block,
             reminder_date=current_date,
             memory_loaded=memory_loaded,
+            memory_metadata=memory_metadata,
         )
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
         return {"messages": result_msgs}
@@ -439,6 +486,120 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
         return f"<memory>\n{memory_content}\n</memory>"
 
+    @staticmethod
+    def _v2_authority(runtime: Runtime) -> object | None:
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        authority = runtime_context.get("__memory_authority")
+        if authority is None or isinstance(authority, dict):
+            return None
+        if getattr(authority, "pipeline_mode", None) != "v2":
+            return None
+        if not callable(getattr(authority, "load_snapshot", None)):
+            return None
+        return authority
+
+    @staticmethod
+    def _v2_snapshot_view(
+        snapshot: object | None,
+    ) -> tuple[str | None, dict[str, object]]:
+        metadata: dict[str, object] = {_PROJECT_MEMORY_MODE_KEY: "v2"}
+        if snapshot is None:
+            return None, metadata
+        snapshot_id = getattr(snapshot, "id", None)
+        version = getattr(snapshot, "version", None)
+        digest = getattr(snapshot, "rendered_content_digest", None)
+        rendered_content = getattr(snapshot, "rendered_content", None)
+        if snapshot_id is None or type(version) is not int or version < 0:
+            raise RuntimeError("project memory v2 snapshot is invalid")
+        snapshot_id = str(snapshot_id)
+        if not snapshot_id or not isinstance(digest, str) or len(digest) != 64:
+            raise RuntimeError("project memory v2 snapshot is invalid")
+        if rendered_content is not None and not isinstance(rendered_content, str):
+            raise RuntimeError("project memory v2 snapshot is invalid")
+        metadata.update(
+            {
+                _PROJECT_MEMORY_SNAPSHOT_ID_KEY: snapshot_id,
+                _PROJECT_MEMORY_SNAPSHOT_VERSION_KEY: version,
+                _PROJECT_MEMORY_SNAPSHOT_DIGEST_KEY: digest,
+            }
+        )
+        return (
+            rendered_content if isinstance(rendered_content, str) and rendered_content.strip() else None,
+            metadata,
+        )
+
+    def _reconcile_v2_snapshot(
+        self,
+        state,
+        snapshot: object | None,
+    ) -> dict | None:
+        messages = list(state.get("messages", []))
+        if not messages:
+            return None
+        memory_block, metadata = self._v2_snapshot_view(snapshot)
+        memory_messages = [message for message in messages if _is_project_memory_message(message)]
+
+        if _last_injected_date(messages) is None:
+            update = self._inject(
+                state,
+                memory_block_override=memory_block,
+                memory_loaded=True,
+                memory_metadata=metadata,
+            )
+            if update is None:
+                return None
+            stale = [RemoveMessage(id=message.id) for message in memory_messages if message.id is not None]
+            return {"messages": [*stale, *update["messages"]]}
+
+        operations: list[object] = []
+        if memory_messages:
+            keeper = memory_messages[-1]
+            for stale in memory_messages[:-1]:
+                if stale.id is not None:
+                    operations.append(RemoveMessage(id=stale.id))
+            if memory_block is None:
+                if keeper.id is not None:
+                    operations.append(RemoveMessage(id=keeper.id))
+            else:
+                additional_kwargs = dict(keeper.additional_kwargs)
+                additional_kwargs.update(
+                    {
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _PROJECT_MEMORY_LOADED_KEY: True,
+                        **metadata,
+                    }
+                )
+                if keeper.content != memory_block or additional_kwargs != keeper.additional_kwargs:
+                    operations.append(
+                        keeper.model_copy(
+                            update={
+                                "content": memory_block,
+                                "additional_kwargs": additional_kwargs,
+                            }
+                        )
+                    )
+        elif memory_block is not None:
+            created = self._inject(
+                state,
+                memory_block_override=memory_block,
+                memory_loaded=True,
+                memory_metadata=metadata,
+            )
+            if created is not None:
+                operations.extend(created["messages"])
+                return {"messages": operations}
+
+        date_update = self._inject(
+            state,
+            memory_block_override=None,
+            memory_loaded=True,
+            memory_metadata=metadata,
+        )
+        if date_update is not None:
+            operations.extend(date_update["messages"])
+        return {"messages": operations} if operations else None
+
     async def _inject_private(
         self,
         state,
@@ -449,19 +610,33 @@ class DynamicContextMiddleware(AgentMiddleware):
         messages = list(state.get("messages", []))
         if not messages:
             return None
-        if _project_memory_loaded(messages):
-            return self._inject(state, memory_block_override=None)
-        if type(scope) is not PrivateResourceScope:
-            return self._inject(state, memory_block_override=None)
+        transitioning_from_v2 = _has_v2_memory_marker(messages)
+        stale_v2 = [RemoveMessage(id=message.id) for message in messages if _is_project_memory_message(message) and message.additional_kwargs.get(_PROJECT_MEMORY_MODE_KEY) == "v2" and message.id is not None]
+
+        def finish(
+            update: dict | None,
+            *,
+            remove_all_memory: bool = False,
+        ) -> dict | None:
+            removals = [RemoveMessage(id=message.id) for message in messages if _is_project_memory_message(message) and message.id is not None] if remove_all_memory else stale_v2
+            operations = [*removals, *((update or {}).get("messages", []))]
+            return {"messages": operations} if operations else None
 
         config = self._app_config.memory if self._app_config else None
         if config is not None and (not config.enabled or not config.injection_enabled):
+            return finish(
+                self._inject(state, memory_block_override=None),
+                remove_all_memory=True,
+            )
+        if _project_memory_loaded(messages) and not transitioning_from_v2:
             return self._inject(state, memory_block_override=None)
+        if type(scope) is not PrivateResourceScope:
+            return finish(self._inject(state, memory_block_override=None))
 
         try:
             storage, revalidator = self._resolve_project_memory_dependencies()
             if not await revalidator.is_active(scope):
-                return self._inject(state, memory_block_override=None)
+                return finish(self._inject(state, memory_block_override=None))
             snapshot = await storage.load(
                 scope=scope,
                 namespace=self._project_memory_namespace(),
@@ -470,18 +645,36 @@ class DynamicContextMiddleware(AgentMiddleware):
                 self._format_project_memory,
                 snapshot.memory,
             )
-            return self._inject(
+            update = self._inject(
                 state,
                 memory_block_override=memory_block,
                 memory_loaded=True,
+                memory_metadata={_PROJECT_MEMORY_MODE_KEY: "v1"},
             )
+            if memory_block and transitioning_from_v2:
+                marker = self._mark_existing_reminder_memory_loaded(
+                    messages,
+                    memory_metadata={_PROJECT_MEMORY_MODE_KEY: "v1"},
+                )
+                if marker is not None:
+                    update = {
+                        "messages": [
+                            *((update or {}).get("messages", [])),
+                            *marker["messages"],
+                        ]
+                    }
+            return finish(update)
         except Exception:
             logger.exception("DynamicContextMiddleware: failed to load project memory; injecting date only")
-            return self._inject(state, memory_block_override=None)
+            return finish(self._inject(state, memory_block_override=None))
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
         runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        if self._v2_authority(runtime) is not None:
+            # v2 is loaded at every model boundary so hard-forget overlays can
+            # replace checkpointed Memory before the next model call.
+            return None
         if "private_scope" in runtime_context:
             try:
                 return await asyncio.wait_for(
@@ -512,3 +705,17 @@ class DynamicContextMiddleware(AgentMiddleware):
                 _INJECT_TIMEOUT_SECONDS,
             )
             return None
+
+    @override
+    async def abefore_model(self, state, runtime: Runtime) -> dict | None:
+        authority = self._v2_authority(runtime)
+        if authority is None:
+            return None
+        config = self._app_config.memory if self._app_config is not None else None
+        if config is not None and (not config.enabled or not config.injection_enabled):
+            return self._reconcile_v2_snapshot(state, None)
+        snapshot = await asyncio.wait_for(
+            authority.load_snapshot(),
+            timeout=_INJECT_TIMEOUT_SECONDS,
+        )
+        return self._reconcile_v2_snapshot(state, snapshot)

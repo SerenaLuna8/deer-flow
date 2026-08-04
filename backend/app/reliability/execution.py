@@ -1353,6 +1353,7 @@ class RunAgentPrivateExecutor:
                 claim=claim,
                 thread_id=execution.run.thread_id,
                 namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
+                memory_config=runtime_app_config.memory,
             )
             run_manager = RunManager()
             record = await run_manager.register_persisted(

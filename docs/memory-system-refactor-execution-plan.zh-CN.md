@@ -1,7 +1,7 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR1—PR6 与检查点 A 已完成，下一阶段 PR7）
+- 状态：执行中（PR1—PR7 与检查点 A 已完成，下一阶段 PR8）
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
@@ -169,7 +169,8 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 | PR4 | 完成 | `22609495` | 后端核心门禁 781 passed、0 skipped；PR4 聚焦单元测试 17 passed；PR4 随机 PostgreSQL 8 passed；Python lint/format 通过 |
 | 检查点 A | 完成 | `f25b2a4b` | 固定样例 64 条/8 Batch；precision 100%；recall 100%；secret、scope、duplicate、batch error 均为 0；PR2—PR4 随机 PostgreSQL 21 passed；后端核心 787 passed、0 skipped |
 | PR5 | 完成 | `220eb6f8` | PR5 聚焦单元测试 20 passed；PR2—PR5 与精确版本随机 PostgreSQL 36 passed；后端核心 821 passed、0 skipped；Python lint/format 通过 |
-| PR6 | 完成 | 本次 PR6 提交 | PR6 API/轮换聚焦单元测试 18 passed；PR6 管理/隐私随机 PostgreSQL 9 passed；PR1—PR6 随机 PostgreSQL 44 passed；后端核心 848 passed、0 skipped；Python lint/format 通过 |
+| PR6 | 完成 | `23bde1b8` | PR6 API/轮换聚焦单元测试 18 passed；PR6 管理/隐私随机 PostgreSQL 9 passed；PR1—PR6 随机 PostgreSQL 44 passed；后端核心 848 passed、0 skipped；Python lint/format 通过 |
+| PR7 | 完成 | 本次 PR7 提交 | PR7 运行时聚焦测试 10 passed；PR7 随机 PostgreSQL 5 passed；PR1—PR7 随机 PostgreSQL 49 passed；后端核心 863 passed、0 skipped；Python lint/format 通过 |
 
 PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
 `shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
@@ -208,6 +209,16 @@ Snapshot 正文，且 retained HMAC key 仍参与 suppression 匹配。Run 因�
 不可见的脱敏 shell，同时显式删除 RunEvent、Feedback、Artifact 等正文子项。Owner/project
 retention 与 Privacy Center export 已覆盖全部 v2 表。PR6 没有新增表、服务、capability 或模型调用，
 也没有切换正式召回；v1 仍是唯一生产召回来源。
+
+PR7 不修改 Schema：Run 第一次读取 v2 Memory 时，在原有 Run-bound authority 的同一授权事务
+内创建唯一 Recall Snapshot，并按 `guaranteed category → confidence → revision sequence → fact ID`
+冻结最多 500 条 active exact Revision。自动注入按冻结 token budget 渲染 ordered items，
+`memory_search` 对同一组 items 继续使用 Unicode/CJK 词法排序；空 Snapshot 的 ceiling 为 `0`。
+同一 Run 的 retry/resume 不跟随新 Fact 或新 Revision，新 Run 才读取最新事实。每次模型边界会
+重验 authority，并从原 items 应用 disable/hard-forget overlay；渲染在线程中执行，外层 5 秒
+超时保持有效。隐藏 Memory 仍是 HumanMessage，新 Run 原位替换旧 Memory，不累加历史正文。
+冻结模式为 `off`、`shadow` 或 `consolidate` 时继续使用 v1；从 v2 回退时只看最新权威 marker，
+跨午夜也不会重复注入。PR7 没有增加 pgvector、新表、服务、Job 或新的安全框架。
 
 ## 6. PR1：修复现有 Memory 正确性问题
 
@@ -644,10 +655,11 @@ Candidate 处理结果和 Fact/Revision/Evidence 写入必须在同一事务提�
 ### 13.4 主要文件
 
 - `backend/packages/harness/deerflow/agents/middlewares/dynamic_context_middleware.py`
-- `backend/packages/harness/deerflow/agents/memory/retrieval.py`
-- `backend/packages/harness/deerflow/agents/memory/tools.py`
+- `backend/packages/harness/deerflow/agents/memory/manager.py`
+- `backend/packages/harness/deerflow/persistence/private_work/memory_v2_recall.py`
 - `backend/app/private_work/memory_authority.py`
-- Memory v2 repository 和 Recall Snapshot 测试
+- `backend/app/reliability/execution.py`
+- Recall Snapshot PostgreSQL 与模型边界测试
 
 ### 13.5 退出标准
 

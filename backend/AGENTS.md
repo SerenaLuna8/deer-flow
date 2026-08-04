@@ -652,16 +652,23 @@ content; Thread deletion conflicts with an active/finalizing Run. A deleted Run 
 immutable Job is retained only as a hidden scrubbed shell, with Run events, feedback, artifacts,
 and removable admitted snapshots deleted explicitly.
 
-Candidates and v2 Facts still never enter recall, so the v1 read/write path below remains the only
-production Memory source until the separate v2 recall switch.
+Recall follows the exact Run-frozen Pipeline mode. `off`, `shadow`, and `consolidate` continue to
+read the v1 aggregate so an operator can roll back without deleting v2 data. A Run frozen in `v2`
+creates at most one `run_memory_context_snapshot` on its first Memory read, pins at most the frozen
+`max_facts` active exact Revisions as ordered items, and reuses those items for every retry/resume.
+Candidates and non-active Facts never participate. Later Fact edits or newly consolidated Facts are
+visible only to a new Run; disable and hard forget are applied as an overlay to the pinned items at
+the next read, without selecting replacement Facts into the old Snapshot.
 
 Private Lead Agent Runs may expose the async, read-only `memory_search` tool when
 `memory.enabled` and `memory.search_enabled` are both true. Its model-visible arguments are only
 `query`, optional `category`, and `top_k`. The Worker creates an opaque Run-bound Memory authority
 and installs it under the internal `__memory_authority` runtime key after stripping caller values.
 One search transaction locks/revalidates the exact membership and capability, active Run
-authorization, Job/Run/lease/cancellation/thread binding, then reads the exact Memory snapshot
-without creating a missing row. The ranker owns no scope, cache, index, or persistence.
+authorization, Job/Run/lease/cancellation/thread binding, then reads the exact Memory source for the
+frozen Pipeline mode. A v2 search ranks the same pinned items and revision ceiling used by automatic
+injection; an empty v2 Snapshot has the valid virtual ceiling `0`. The ranker owns no scope, cache,
+index, or persistence.
 
 The canonical code-registered `memory_search` object uses the trusted read-only tool boundary, so
 its PostgreSQL read does not mark Job retry safety unknown. A name or metadata value cannot claim
@@ -669,11 +676,15 @@ this status; legacy boundaries without the read-only hook fall back to the ordin
 Search errors expose only a stable public code, and untrusted fact content/category are
 neutralized and bounded before returning to the model.
 
-Memory injection remains a hidden low-authority Human message frozen in the Thread checkpoint.
-Do not promote Memory text to System, reload it on every turn, or replace dev's latest-genuine-user
-selection with main's first-user selection. A missing row is a read-only virtual version `0`; its
-first write uses an atomic version-`0` CAS and creates database version `1`. A failed injection does
-not mark Memory loaded merely because the date reminder succeeded, so a later turn may retry.
+Memory injection remains a hidden low-authority Human message. Do not promote Memory text to System
+or replace dev's latest-genuine-user selection with main's first-user selection. The v1 path keeps
+the historical Thread-checkpoint behavior. The v2 path reads through the same opaque Run authority
+at every model boundary: it replaces the prior Run's hidden Memory instead of appending duplicates,
+reuses the same pinned items, and removes hard-forgotten or authorization-revoked content before the
+model call. Renderer work runs off the event loop so the bounded model-boundary timeout remains
+effective. A missing v1 row is a read-only virtual version `0`; its first write uses an atomic
+version-`0` CAS and creates database version `1`. A failed v1 injection does not mark Memory loaded
+merely because the date reminder succeeded, so a later turn may retry.
 Conversation facts continue to be written passively: pre-summarization uses immediate queue
 admission, normal pending snapshots remain authoritative per Thread, writes are serialized by the
 actual `project_id + owner_user_id + namespace` Memory aggregate, and Worker shutdown performs a

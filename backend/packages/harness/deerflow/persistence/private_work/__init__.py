@@ -23,6 +23,13 @@ from deerflow.persistence.private_work.memory_v2_model import (
     RunMemoryContextItemRow,
     RunMemoryContextSnapshotRow,
 )
+from deerflow.persistence.private_work.memory_v2_recall import (
+    MemoryV2RecallContract,
+    MemoryV2RecallFact,
+    MemoryV2RecallInvalid,
+    MemoryV2RecallRepository,
+    MemoryV2RecallSnapshot,
+)
 from deerflow.persistence.private_work.memory_v2_repository import (
     MemorySourceAdmissionRecord,
     MemorySourceAdmissionWrite,
@@ -56,6 +63,11 @@ __all__ = [
     "MemorySourceItemWrite",
     "MemorySuppressionRow",
     "MemoryV2AdmissionConflict",
+    "MemoryV2RecallContract",
+    "MemoryV2RecallFact",
+    "MemoryV2RecallInvalid",
+    "MemoryV2RecallRepository",
+    "MemoryV2RecallSnapshot",
     "MemoryV2Repository",
     "PrivateArtifactRow",
     "PrivateFileChunkRow",
