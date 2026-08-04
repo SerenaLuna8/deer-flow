@@ -25,6 +25,7 @@ from app.private_work.run_admission import (
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime import checkpoint_mode as checkpoint_mode_state
 
 QUESTION = "Which environment should I deploy to?"
 REQUEST_ID = "clarification:call-abc"
@@ -364,7 +365,18 @@ def test_existing_run_retry_ignores_only_server_promoted_visibility() -> None:
 async def test_run_admission_persists_gateway_authorized_visibility(
     migrated_postgres_database_url: str,
     checkpoint_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        checkpoint_mode_state,
+        "_frozen_checkpoint_channel_mode",
+        None,
+    )
+    monkeypatch.setattr(
+        checkpoint_mode_state,
+        "_frozen_checkpoint_snapshot_frequency",
+        None,
+    )
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     thread_id = f"human-input-{uuid.uuid4()}"
     raw_checkpointer = InMemorySaver()

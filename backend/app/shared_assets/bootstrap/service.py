@@ -333,19 +333,22 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
                 hashlib.sha256(file.content).hexdigest(),
                 file.content,
             )
-            for file in archive_files
+            for file in sorted(archive_files, key=lambda item: item.path)
         ]
-        actual_files = [
-            (
-                file.skill_version_id,
-                file.path,
-                file.media_type,
-                file.size_bytes,
-                file.sha256,
-                bytes(file.content),
-            )
-            for file in persisted_files
-        ]
+        actual_files = sorted(
+            [
+                (
+                    file.skill_version_id,
+                    file.path,
+                    file.media_type,
+                    file.size_bytes,
+                    file.sha256,
+                    bytes(file.content),
+                )
+                for file in persisted_files
+            ],
+            key=lambda item: item[1],
+        )
         if asset.current_published_version_id != version_id or actual_files != expected_files:
             raise BootstrapConflict("existing system Skill files conflict with canonical payload")
         return False
