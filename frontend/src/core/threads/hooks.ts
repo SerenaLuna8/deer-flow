@@ -98,6 +98,7 @@ function scopedThreadQueryKey(
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  continueFromLatestCheckpoint?: boolean;
   /**
    * Invoked exactly once after the upload and thread submission succeed. It
    * never fires for a dropped concurrent send or a failed submission, so
@@ -105,6 +106,12 @@ type SendMessageOptions = {
    */
   onSent?: () => void;
 };
+
+export function buildThreadSubmitCheckpointOptions(
+  continueFromLatestCheckpoint: boolean | undefined,
+): { checkpoint: null } | Record<string, never> {
+  return continueFromLatestCheckpoint ? { checkpoint: null } : {};
+}
 
 type ThreadDeleteClient = {
   threads: {
@@ -2240,6 +2247,9 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
+            ...buildThreadSubmitCheckpointOptions(
+              options?.continueFromLatestCheckpoint,
+            ),
             ...buildRootThreadStreamOptions(),
             context: {
               ...extraContext,

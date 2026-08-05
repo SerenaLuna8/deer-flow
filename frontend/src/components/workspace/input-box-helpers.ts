@@ -36,6 +36,47 @@ export type ActiveGoalRequest = {
   threadId: string;
 };
 
+export type LatestCheckpointContinuationState = {
+  pending: boolean;
+  threadId: string | null;
+};
+
+export function createLatestCheckpointContinuationState(): LatestCheckpointContinuationState {
+  return { pending: false, threadId: null };
+}
+
+export function markLatestCheckpointContinuation(
+  state: LatestCheckpointContinuationState,
+  threadId: string,
+): void {
+  state.pending = true;
+  state.threadId = threadId;
+}
+
+export function shouldContinueFromLatestCheckpoint(
+  state: LatestCheckpointContinuationState,
+  threadId: string,
+): boolean {
+  return state.pending && state.threadId === threadId;
+}
+
+export function completeLatestCheckpointContinuation(
+  state: LatestCheckpointContinuationState,
+  threadId: string,
+): void {
+  if (state.pending && state.threadId === threadId) {
+    state.pending = false;
+    state.threadId = null;
+  }
+}
+
+export function resetLatestCheckpointContinuation(
+  state: LatestCheckpointContinuationState,
+): void {
+  state.pending = false;
+  state.threadId = null;
+}
+
 export function createGoalRequestState(): GoalRequestState {
   return {
     controller: null,

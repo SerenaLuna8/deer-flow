@@ -132,7 +132,9 @@ import {
   abortGoalRequest,
   beginGoalRequest,
   canPolishInput,
+  completeLatestCheckpointContinuation,
   createGoalRequestState,
+  createLatestCheckpointContinuationState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
   getInputSubmitAction,
@@ -141,7 +143,10 @@ import {
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
+  markLatestCheckpointContinuation,
   readGoalResponseError,
+  resetLatestCheckpointContinuation,
+  shouldContinueFromLatestCheckpoint,
   type SlashSuggestion,
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
@@ -212,6 +217,7 @@ function escapeXmlAttribute(value: string) {
 export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  continueFromLatestCheckpoint?: boolean;
   onSent?: () => void;
 };
 
@@ -359,6 +365,9 @@ export function InputBox({
   const inlineSkillComposingRef = useRef(false);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
+  const latestCheckpointContinuationRef = useRef(
+    createLatestCheckpointContinuationState(),
+  );
   const inputPolishRequestRef = useRef<{
     controller: AbortController | null;
     sequence: number;
@@ -749,6 +758,7 @@ export function InputBox({
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
     const compactRequestState = compactRequestStateRef.current;
+    resetLatestCheckpointContinuation(latestCheckpointContinuationRef.current);
     return () => {
       abortGoalRequest(goalRequestState);
       abortGoalRequest(compactRequestState);
@@ -943,27 +953,42 @@ export function InputBox({
       ) {
         throw new DOMException("Compact request superseded", "AbortError");
       }
-      promptHistoryIndexRef.current = null;
-      promptHistoryDraftRef.current = "";
-      setFollowups([]);
-      setFollowupsHidden(false);
-      setFollowupsLoading(false);
-
-      void queryClient.invalidateQueries({
-        queryKey: privateWorkQueryKey(privateWork.scope, "thread", threadId),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: privateWorkQueryKey(
-          privateWork.scope,
-          ...threadTokenUsageQueryKey(threadId),
-        ),
-      });
-
       if (result.compacted) {
+        markLatestCheckpointContinuation(
+          latestCheckpointContinuationRef.current,
+          threadId,
+        );
+        promptHistoryIndexRef.current = null;
+        promptHistoryDraftRef.current = "";
+        latestDraftRef.current = null;
+        if (draftSaveTimerRef.current !== null) {
+          window.clearTimeout(draftSaveTimerRef.current);
+          draftSaveTimerRef.current = null;
+        }
+        clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+        setTextInput("");
+        setFollowups([]);
+        setFollowupsHidden(false);
+        setFollowupsLoading(false);
         toast.success(t.inputBox.compactSuccess);
       } else {
         toast.info(t.inputBox.compactSkipped);
       }
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: privateWorkQueryKey(
+            privateWork.scope,
+            "thread",
+            threadId,
+          ),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: privateWorkQueryKey(
+            privateWork.scope,
+            ...threadTokenUsageQueryKey(threadId),
+          ),
+        }),
+      ]);
     } catch (error) {
       if (
         isAbortError(error) ||
@@ -980,11 +1005,13 @@ export function InputBox({
     }
   }, [
     queryClient,
+    draftKey,
     t.inputBox.compactFailed,
     t.inputBox.compactSkipped,
     t.inputBox.compactSuccess,
     isWelcomeMode,
     privateWork,
+    setTextInput,
     threadId,
   ]);
 
@@ -1022,7 +1049,13 @@ export function InputBox({
       const quotes = sidecar?.conversationQuotes ?? [];
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
+      const continueFromLatestCheckpoint =
+        shouldContinueFromLatestCheckpoint(
+          latestCheckpointContinuationRef.current,
+          threadId,
+        );
       const submitOptions: InputBoxSubmitOptions = {
+        continueFromLatestCheckpoint,
         ...(quotes.length
           ? {
               additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
@@ -1035,6 +1068,10 @@ export function InputBox({
           : {}),
         // Clear one-time state only after the stream accepts the send.
         onSent: () => {
+          completeLatestCheckpointContinuation(
+            latestCheckpointContinuationRef.current,
+            threadId,
+          );
           latestDraftRef.current = null;
           if (draftSaveTimerRef.current !== null) {
             window.clearTimeout(draftSaveTimerRef.current);
@@ -1077,6 +1114,7 @@ export function InputBox({
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       uploadLimits,
+      threadId,
     ],
   );
 

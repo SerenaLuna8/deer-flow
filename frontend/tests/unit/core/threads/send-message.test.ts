@@ -2,9 +2,16 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
+  buildThreadSubmitCheckpointOptions,
   buildThreadSubmitMessages,
   uploadedFileInfoToMessage,
 } from "@/core/threads/hooks";
+
+test("omits the SDK branch checkpoint after a successful compaction", () => {
+  expect(buildThreadSubmitCheckpointOptions(true)).toEqual({ checkpoint: null });
+  expect(buildThreadSubmitCheckpointOptions(false)).toEqual({});
+  expect(buildThreadSubmitCheckpointOptions(undefined)).toEqual({});
+});
 
 test("builds thread submit messages with hidden sidecar context before the visible user message", () => {
   const hiddenContext = {
