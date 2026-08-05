@@ -1,9 +1,10 @@
 # DeerFlow 记忆系统重构执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR1—PR7 与检查点 A 已完成，下一阶段 PR8）
+- 状态：核心重构 PR1—PR8 已完成；PR9—PR13 稳定化与个性化待执行
 - 基线分支：`dev`
 - 设计依据：[记忆系统改造方案](./memory-system-refactor-plan.zh-CN.md)
+- 后续计划：[Memory v2 稳定化与个性化执行计划](./memory-system-refactor-stabilization-execution-plan.zh-CN.md)
 - 实施范围：Owner-private Project Memory
 
 ## 1. 这份计划解决什么问题
