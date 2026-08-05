@@ -74,9 +74,9 @@ async def test_scheduler_admits_bounded_consolidation_and_retention_jobs() -> No
     assert repository.consolidation_calls[0]["now"] == now
     contract = repository.consolidation_calls[0]["contract"]
     assert contract.policy_revision == 4
-    assert contract.prompt_version == "memory-consolidate-prompt-v1"
-    assert contract.consolidator_version == "memory-consolidator-v1"
-    assert contract.output_schema_version == "memory-consolidate-output-v1"
+    assert contract.prompt_version == "memory-consolidate-prompt-v2"
+    assert contract.consolidator_version == "memory-consolidator-v2"
+    assert contract.output_schema_version == "memory-consolidate-output-v2"
     assert repository.retention_calls[0]["retention_days"] == 30
 
 

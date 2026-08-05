@@ -237,7 +237,8 @@ class MemoryConsolidateJobHandler:
             decision = by_candidate.get(candidate.id)
             if decision is None:
                 raise ValueError("Memory consolidation decision is missing")
-            policy_pending = decision.action in {"create", "revise"} and float(decision.confidence or 0) < confidence_threshold
+            mutates_fact = decision.action in {"create", "confirm", "revise"}
+            policy_pending = mutates_fact and (candidate.retention_class == "ephemeral" or candidate.confidence < confidence_threshold or (decision.action in {"create", "revise"} and float(decision.confidence or 0) < confidence_threshold))
             if decision.action == "create" and not policy_pending:
                 create_signature = (
                     candidate.candidate_type,
@@ -409,6 +410,7 @@ class MemoryConsolidateJobHandler:
                             candidate_type=candidate.candidate_type,
                             content=candidate.content,
                             confidence=candidate.confidence,
+                            retention_class=candidate.retention_class,
                         )
                         for candidate in normal_candidates
                     ),

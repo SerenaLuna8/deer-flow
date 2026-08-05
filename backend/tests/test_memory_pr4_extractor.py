@@ -178,6 +178,8 @@ async def test_extractor_uses_only_ordered_source_items_and_returns_strict_candi
     assert "changed from A to B" in system_instruction
     assert "might, maybe, perhaps" in system_instruction
     assert "colleague" in system_instruction
+    assert "role-play" in system_instruction
+    assert "self-contained" in system_instruction
     assert "tool" not in user_content.lower()
     assert json.loads(user_content) == {
         "items": [

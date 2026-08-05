@@ -146,7 +146,7 @@ def _work(
         model_config_id=model_id,
         model_config_version_id=model_version_id,
         model_config_checksum=model_checksum,
-        prompt_version="memory-extract-prompt-v2",
+        prompt_version="memory-extract-prompt-v3",
         extractor_version="memory-extractor-v2",
         output_schema_version="memory-candidate-v1",
         source_items=(

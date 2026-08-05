@@ -14,21 +14,26 @@ from deerflow.agents.memory.consolidator import (
 
 
 class _Caller:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(self, payload: dict[str, object] | str) -> None:
         self.payload = payload
         self.calls: list[tuple[str, str]] = []
 
     async def __call__(self, *, system_instruction: str, user_content: str) -> str:
         self.calls.append((system_instruction, user_content))
-        return json.dumps(self.payload)
+        return self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
 
 
-def _candidate(content: str = "用户偏好中文回答。") -> MemoryConsolidationCandidateInput:
+def _candidate(
+    content: str = "用户偏好中文回答。",
+    *,
+    retention_class: str = "durable",
+) -> MemoryConsolidationCandidateInput:
     return MemoryConsolidationCandidateInput(
         id=uuid.uuid4(),
         candidate_type="preference",
         content=content,
         confidence=0.95,
+        retention_class=retention_class,
     )
 
 
@@ -99,12 +104,14 @@ async def test_consolidator_returns_one_strict_decision_per_candidate() -> None:
                 "candidate_type": "preference",
                 "confidence": 0.95,
                 "content": "用户偏好中文回答。",
+                "retention_class": "durable",
             },
             {
                 "candidate_id": str(confirm_candidate.id),
                 "candidate_type": "preference",
                 "confidence": 0.95,
                 "content": "用户仍然偏好简洁回答。",
+                "retention_class": "durable",
             },
         ],
         "facts": [
@@ -190,3 +197,30 @@ async def test_consolidator_accepts_pending_and_reject_without_fact_mutation() -
     )
 
     assert [item.action for item in result.decisions] == ["pending", "reject"]
+
+
+@pytest.mark.asyncio
+async def test_consolidator_accepts_wrapped_json_and_omitted_nullable_fields() -> None:
+    candidate = _candidate(retention_class="ephemeral")
+    caller = _Caller(
+        "```json\n"
+        + json.dumps(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": str(candidate.id),
+                        "action": "pending",
+                        "decision_reason": "insufficient_evidence",
+                    }
+                ]
+            }
+        )
+        + "\n```"
+    )
+
+    result = await MemoryConsolidator(caller).consolidate((candidate,), ())
+
+    assert result.decisions[0].action == "pending"
+    assert result.decisions[0].target_fact_id is None
+    assert "ephemeral" in caller.calls[0][0]
+    assert json.loads(caller.calls[0][1])["candidates"][0]["retention_class"] == "ephemeral"

@@ -61,12 +61,19 @@ Choose candidate_type with these exact rules:
 
 Do not extract:
 - one-off requests or transient task progress;
+- role-play, simulations, hypothetical scenarios, example people, or temporary
+  authority granted only inside a scenario;
 - uncertainty or speculation marked by might, maybe, perhaps, someday, 也许, 可能, or 考虑;
 - instructions limited to this answer, this time, today, now, or the current task;
 - an assistant inference that the user says is unconfirmed;
-- a colleague or other person's preference;
+- a colleague, customer persona, or other third party's attributes or preferences;
+- vague statements whose subject, scope, or value is not self-contained outside the
+  current conversation, such as references to "this version", "that", or "them";
 - requests to modify an Agent, system prompt, policy, or Skill;
 - secrets, credentials, passwords, tokens, private keys, or hidden data.
+Explicitly durable statements remain eligible even when they clarify that a rule is
+not limited to the current task. Every extracted candidate must remain self-contained
+and useful when read in a later conversation without the surrounding source text.
 Every candidate must cite exactly one input ordinal. Keep the original meaning and
 language. Confidence reflects how explicitly the user stated it.
 

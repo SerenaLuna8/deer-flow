@@ -184,9 +184,9 @@ def _work(claim: JobClaim) -> MemoryConsolidationWork:
         model_config_id=uuid.uuid4(),
         model_config_version_id=uuid.uuid4(),
         model_config_checksum="f" * 64,
-        prompt_version="memory-consolidate-prompt-v1",
-        consolidator_version="memory-consolidator-v1",
-        output_schema_version="memory-consolidate-output-v1",
+        prompt_version="memory-consolidate-prompt-v2",
+        consolidator_version="memory-consolidator-v2",
+        output_schema_version="memory-consolidate-output-v2",
         candidates=(candidate,),
         facts=(fact,),
         active_fact_count=1,
@@ -450,6 +450,43 @@ def test_consolidate_worker_keeps_only_one_revision_per_fact() -> None:
     assert writes[0].action == "revise"
     assert writes[1].action == "pending"
     assert writes[1].decision_reason == "possible_conflict"
+
+
+@pytest.mark.parametrize("action", ["create", "confirm", "revise"])
+@pytest.mark.parametrize("reason", ["ephemeral", "low_candidate_confidence"])
+def test_consolidate_worker_keeps_weak_candidates_pending(
+    action: str,
+    reason: str,
+) -> None:
+    claim = _claim()
+    original = _work(claim)
+    candidate = replace(
+        original.candidates[0],
+        retention_class=("ephemeral" if reason == "ephemeral" else "durable"),
+        confidence=(0.95 if reason == "ephemeral" else 0.69),
+    )
+    work = replace(original, candidates=(candidate,))
+    fact = work.facts[0]
+    decision = MemoryConsolidationDecision(
+        candidate_id=candidate.id,
+        action=action,
+        target_fact_id=(None if action == "create" else fact.id),
+        content=(None if action == "confirm" else candidate.content),
+        category=(None if action == "confirm" else "preference"),
+        confidence=(None if action == "confirm" else 0.99),
+        change_reason=("new_fact" if action == "create" else None if action == "confirm" else "correction"),
+        decision_reason=("same_fact" if action == "confirm" else None),
+    )
+
+    writes = MemoryConsolidateJobHandler._writes(
+        work,
+        (decision,),
+        max_facts=100,
+        confidence_threshold=0.7,
+    )
+
+    assert writes[0].action == "pending"
+    assert writes[0].decision_reason == "insufficient_evidence"
 
 
 @pytest.mark.asyncio

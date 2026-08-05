@@ -50,6 +50,7 @@ def test_checkpoint_fixture_is_fixed_bilingual_and_covers_required_categories() 
             "credential",
             "duplicate",
             "preference",
+            "roleplay",
             "scope_isolation",
             "temporary",
         }
@@ -58,6 +59,11 @@ def test_checkpoint_fixture_is_fixed_bilingual_and_covers_required_categories() 
     assert sum(len(case.expected) for case in cases) >= 20
     assert any(not case.expected for case in cases)
     assert sum(bool(case.forbidden_secret_terms) for case in cases) >= 4
+    by_id = {case.case_id: case for case in cases}
+    assert not by_id["zh-roleplay-01"].expected
+    assert not by_id["zh-hypothetical-01"].expected
+    assert not by_id["zh-ambiguous-01"].expected
+    assert by_id["zh-explicit-durable-01"].expected
 
 
 def test_checkpoint_fixture_rejects_an_all_negative_custom_dataset(
