@@ -31,7 +31,6 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
-from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
@@ -272,7 +271,6 @@ def _project_memory_tools(
 # SummarizationMiddleware should be early to reduce context before other processing
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
 # TitleMiddleware generates title after first exchange
-# MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
@@ -304,7 +302,7 @@ def build_middlewares(
     Args:
         config: Runtime configuration containing configurable options like is_plan_mode.
         model_name: Resolved runtime model name; gates vision-only middleware.
-        agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
+        agent_name: Optional agent namespace used by context middlewares.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
@@ -398,15 +396,6 @@ def build_middlewares(
 
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
-
-    # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(
-        MemoryMiddleware(
-            agent_name=agent_name,
-            memory_config=resolved_app_config.memory,
-            app_config=resolved_app_config,
-        )
-    )
 
     # Always install checkpoint cleanup. Text-only models disable ephemeral
     # image injection but still purge legacy base64 channels/messages.

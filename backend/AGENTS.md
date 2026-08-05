@@ -641,16 +641,26 @@ remain. Both consolidation and retention lock and recheck the current policy in 
 transaction, so pausing keeps the backlog and cannot commit a Fact or erase Candidate text after
 the pause has linearized.
 
-Gateway exposes the additive `/api/projects/{project_id}/memory/v2/*` management surface while all
-v1 Memory routes remain available. Reads list scoped Candidates/Facts and their Revision/Evidence
-history; writes use Candidate `updated_at` or Fact `version` CAS for accept/reject, user Revision,
-disable/restore, and irreversible hard forget. Hard forget erases every derived body, writes
-source/lineage suppression, and retained audit-HMAC keys remain eligible when a replay is checked
-after key rotation. Owner export is streaming NDJSON and excludes HMAC/checksum material. Thread
-or Run deletion first suppresses and erases its source lineage while preserving accepted Fact
-content; Thread deletion conflicts with an active/finalizing Run. A deleted Run referenced by its
-immutable Job is retained only as a hidden scrubbed shell, with Run events, feedback, artifacts,
-and removable admitted snapshots deleted explicitly.
+Gateway exposes `/api/projects/{project_id}/memory/v2/*` as the writable management surface. Fact
+lists support bounded search, category/status filtering, and `limit/offset` pagination; Candidate
+lists are likewise paged. Reads expose scoped Candidates/Facts and their Revision/Evidence history,
+while writes use Candidate `updated_at` or Fact `version` CAS for accept/reject, user Revision,
+disable/restore, and irreversible hard forget. The read-only `/v2/status` response projects only the
+current committed `enabled`, Pipeline mode, search/injection switches, consolidation interval, and
+Candidate retention period. Hard forget erases every derived body, writes source/lineage
+suppression, and retained audit-HMAC keys remain eligible when a replay is checked after key
+rotation. Owner export is streaming NDJSON and excludes HMAC/checksum material. Thread or Run
+deletion first suppresses and erases its source lineage while preserving accepted Fact content;
+Thread deletion conflicts with an active/finalizing Run. A deleted Run referenced by its immutable
+Job is retained only as a hidden scrubbed shell, with Run events, feedback, artifacts, and removable
+admitted snapshots deleted explicitly.
+
+The v1 aggregate is rollback-only and read-only. Its scoped list, status, and export routes remain;
+the compatibility reload route returns fixed `501` without mutation, while import and Fact
+create/update/delete routes do not exist. The historical aggregate has no automatic writer: the
+built-in `MemoryMiddleware`, process-local queue/updater, pre-summarization Memory hook,
+message-processing helper, and Worker shutdown flush are removed. `off`, `shadow`, and
+`consolidate` may still read retained v1 data; no current runtime or API path creates or changes it.
 
 Recall follows the exact Run-frozen Pipeline mode. `off`, `shadow`, and `consolidate` continue to
 read the v1 aggregate so an operator can roll back without deleting v2 data. A Run frozen in `v2`
@@ -677,19 +687,18 @@ Search errors expose only a stable public code, and untrusted fact content/categ
 neutralized and bounded before returning to the model.
 
 Memory injection remains a hidden low-authority Human message. Do not promote Memory text to System
-or replace dev's latest-genuine-user selection with main's first-user selection. The v1 path keeps
-the historical Thread-checkpoint behavior. The v2 path reads through the same opaque Run authority
-at every model boundary: it replaces the prior Run's hidden Memory instead of appending duplicates,
-reuses the same pinned items, and removes hard-forgotten or authorization-revoked content before the
-model call. Renderer work runs off the event loop so the bounded model-boundary timeout remains
-effective. A missing v1 row is a read-only virtual version `0`; its first write uses an atomic
-version-`0` CAS and creates database version `1`. A failed v1 injection does not mark Memory loaded
-merely because the date reminder succeeded, so a later turn may retry.
-Conversation facts continue to be written passively: pre-summarization uses immediate queue
-admission, normal pending snapshots remain authoritative per Thread, writes are serialized by the
-actual `project_id + owner_user_id + namespace` Memory aggregate, and Worker shutdown performs a
-bounded flush after inflight Runs settle and before registry removal. This process-local queue
-improves graceful shutdown but is not a durable job system.
+or replace dev's latest-genuine-user selection with main's first-user selection. The v1 fallback
+keeps the historical Thread-checkpoint read behavior. The v2 path reads through the same opaque Run
+authority at every model boundary: it replaces the prior Run's hidden Memory instead of appending
+duplicates, reuses the same pinned items, and removes hard-forgotten or authorization-revoked
+content before the model call. Renderer work runs off the event loop so the bounded model-boundary
+timeout remains effective. A missing v1 row is a read-only virtual version `0`; it is never created
+as a side effect of recall. A failed v1 injection does not mark Memory loaded merely because the
+date reminder succeeded, so a later turn may retry.
+
+New long-term Memory is produced only through the durable v2 Source -> `memory_extract` ->
+Candidate -> scheduled `memory_consolidate` -> versioned Fact path. Thread summarization owns only
+Thread context compaction and has no long-term Memory write hook.
 
 ## Project APIs
 

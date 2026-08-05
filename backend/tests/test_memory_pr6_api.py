@@ -227,18 +227,16 @@ async def _request(
         return await client.request(method, path, **kwargs)
 
 
-def test_memory_router_keeps_v1_and_exposes_v2_management_surface() -> None:
+def test_memory_router_keeps_v1_read_surface_and_exposes_v2_management() -> None:
     routes = {(route.path, method) for route in memory_router.router.routes for method in route.methods or ()}
 
     assert {
         ("/api/projects/{project_id}/memory", "GET"),
         ("/api/projects/{project_id}/memory/status", "GET"),
         ("/api/projects/{project_id}/memory/export", "GET"),
-        ("/api/projects/{project_id}/memory/import", "POST"),
-        ("/api/projects/{project_id}/memory/facts", "POST"),
-        ("/api/projects/{project_id}/memory/facts/{fact_id}", "PATCH"),
-        ("/api/projects/{project_id}/memory/facts/{fact_id}", "DELETE"),
+        ("/api/projects/{project_id}/memory/reload", "POST"),
         ("/api/projects/{project_id}/memory/v2/facts", "GET"),
+        ("/api/projects/{project_id}/memory/v2/status", "GET"),
         ("/api/projects/{project_id}/memory/v2/candidates", "GET"),
         ("/api/projects/{project_id}/memory/v2/facts/{fact_id}", "GET"),
         ("/api/projects/{project_id}/memory/v2/candidates/{candidate_id}/accept", "POST"),
@@ -249,6 +247,13 @@ def test_memory_router_keeps_v1_and_exposes_v2_management_surface() -> None:
         ("/api/projects/{project_id}/memory/v2/facts/{fact_id}/hard-forget", "POST"),
         ("/api/projects/{project_id}/memory/v2/export", "GET"),
     } <= routes
+
+    assert {
+        ("/api/projects/{project_id}/memory/import", "POST"),
+        ("/api/projects/{project_id}/memory/facts", "POST"),
+        ("/api/projects/{project_id}/memory/facts/{fact_id}", "PATCH"),
+        ("/api/projects/{project_id}/memory/facts/{fact_id}", "DELETE"),
+    }.isdisjoint(routes)
 
 
 def test_v2_request_contracts_require_alias_cas_and_reject_unknown_fields() -> None:

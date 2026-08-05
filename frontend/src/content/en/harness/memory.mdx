@@ -5,10 +5,36 @@ description: Project-scoped PostgreSQL Memory for admitted private runs.
 
 # Memory
 
-Memory stores structured context summaries and facts under an exact project, owner and namespace. Reads, writes, queue items and prompt injection all retain those authority coordinates.
+Project Memory stores long-term Candidates, versioned Facts, Revisions, Evidence, and per-Run recall snapshots in PostgreSQL under an exact project, owner, and namespace. Thread summaries are separate: they compact one Thread's conversation context and never become long-term Memory by themselves.
 
-After an admitted private run, the async Memory middleware filters the visible human/final-assistant exchange and enqueues a project update. Before processing, membership is revalidated. The updater loads the PostgreSQL snapshot, applies extracted changes with optimistic versioning and records source Thread/Run IDs for new facts.
+## Durable write pipeline
 
-Runs without a trusted project scope do not read, inject or persist Memory. Sync middleware hooks also fail closed.
+When an eligible private Run succeeds, settlement atomically records the bounded source messages and a durable `memory_extract` Job. A Worker uses the Run-frozen model configuration to extract pending Candidates without tools. Candidates cannot be injected or returned by `memory_search`.
 
-Project members manage Memory from the project Memory page subject to capability. Import, clear and fact mutation use authenticated project APIs.
+The Scheduler periodically admits bounded `memory_consolidate` Jobs for pending Candidates. Only a Worker runs the consolidator. It can accept a Candidate into a new Fact, add Evidence to an existing Fact, or create a new Revision when a fact is corrected. Candidate decisions and Fact/Revision/Evidence writes settle in one transaction.
+
+The legacy built-in `MemoryMiddleware`, process-local queue/updater, summarization write hook, and v1 write APIs are removed. Summarization now owns only Thread context compaction; long-term Memory follows Source → extract → consolidate.
+
+## Recall
+
+The Pipeline mode is frozen when a Run is admitted:
+
+- `off` creates no v2 data and reads the retained v1 aggregate as a rollback source.
+- `shadow` extracts Candidates but continues to recall v1.
+- `consolidate` also produces versioned Facts but continues to recall v1.
+- `v2` creates one ordered Fact-Revision snapshot on the Run's first Memory read and reuses it for retry and resume.
+
+Automatic injection is a hidden, low-authority Human message rather than a System instruction. The read-only `memory_search` tool ranks the same Run-pinned v2 items. The model may provide only a query, optional category, and result count; the Worker supplies and revalidates project, owner, namespace, Run, and lease authority. Disabled or hard-forgotten content is removed from later reads without backfilling a different Fact into an existing Run snapshot.
+
+## Project Memory page
+
+The project page has four regions:
+
+- **Long-term Memory** — search, category/status filters, and paged active or disabled Facts.
+- **Pending** — paged pending Candidates with accept or reject actions.
+- **History** — the selected Fact's Revisions, Evidence, and source-erasure state.
+- **Settings** — read-only Pipeline status, search/injection switches, consolidation interval, and Candidate retention period.
+
+Candidate decisions send the exact server `updatedAt`; Fact edit, disable, restore, and irreversible hard forget send the exact visible Fact version. A concurrent change returns a conflict instead of silently overwriting newer data. The v1 aggregate retains only scoped list, status, export, and rollback recall; it cannot be imported or edited.
+
+Runs without a trusted project-private scope do not read, inject, extract, consolidate, or manage Memory.

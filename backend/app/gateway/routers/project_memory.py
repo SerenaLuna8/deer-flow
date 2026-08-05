@@ -6,9 +6,20 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
-from app.gateway.deps import private_work_context, require_project_private_open
+from app.gateway.deps import (
+    get_current_agent_runtime_config,
+    private_work_context,
+    require_project_private_open,
+)
 from app.gateway.private_work_schemas import (
     PrivateWorkRoute,
     StrictPrivateWorkRequest,
@@ -24,6 +35,7 @@ from app.private_work.memory_service import (
 )
 from app.reliability.owner_refs import AuditHmacKeyring
 from deerflow.agents.memory.storage import ProjectMemorySnapshot
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.private_work.memory_v2_management import (
     MemoryV2CandidateView,
@@ -42,6 +54,22 @@ router = APIRouter(
 )
 
 Namespace = Annotated[str, Query(min_length=1, max_length=128)]
+
+
+def _strip_filter(value: object) -> object:
+    return value.strip() if isinstance(value, str) else value
+
+
+FactQuery = Annotated[
+    str,
+    BeforeValidator(_strip_filter),
+    StringConstraints(min_length=1, max_length=200),
+]
+FactCategory = Annotated[
+    str,
+    BeforeValidator(_strip_filter),
+    StringConstraints(min_length=1, max_length=32),
+]
 
 
 def _require_timezone(value: str, *, allow_empty: bool) -> str:
@@ -162,31 +190,6 @@ class ProjectMemoryStatusResponse(StrictPrivateWorkResponse):
     last_updated: str
 
 
-class ProjectMemoryImportRequest(StrictPrivateWorkRequest):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    expected_version: int = Field(ge=0)
-    memory: ProjectMemoryDocument
-
-
-class ProjectMemoryCreateRequest(StrictPrivateWorkRequest):
-    expected_version: int = Field(ge=0)
-    content: str = Field(min_length=1, max_length=10_000)
-    category: str = Field(default="context", max_length=32)
-    confidence: float = Field(default=0.8, ge=0, le=1)
-
-
-class ProjectMemoryUpdateRequest(StrictPrivateWorkRequest):
-    expected_version: int = Field(ge=0)
-    content: str | None = Field(default=None, min_length=1, max_length=10_000)
-    category: str | None = Field(default=None, min_length=1, max_length=32)
-    confidence: float | None = Field(default=None, ge=0, le=1)
-
-
-class ProjectMemoryDeleteRequest(StrictPrivateWorkRequest):
-    expected_version: int = Field(ge=0)
-
-
 class ProjectMemoryV2Revision(StrictPrivateWorkResponse):
     id: uuid.UUID
     fact_id: uuid.UUID = Field(alias="factId")
@@ -258,6 +261,25 @@ class ProjectMemoryV2FactsResponse(StrictPrivateWorkResponse):
 class ProjectMemoryV2CandidatesResponse(StrictPrivateWorkResponse):
     namespace: str
     items: list[ProjectMemoryV2Candidate] = Field(max_length=100)
+
+
+class ProjectMemoryV2StatusResponse(StrictPrivateWorkResponse):
+    enabled: bool
+    pipeline_mode: Literal["off", "shadow", "consolidate", "v2"] = Field(
+        alias="pipelineMode",
+    )
+    search_enabled: bool = Field(alias="searchEnabled")
+    injection_enabled: bool = Field(alias="injectionEnabled")
+    consolidation_interval_minutes: int = Field(
+        alias="consolidationIntervalMinutes",
+        ge=15,
+        le=1_440,
+    )
+    candidate_retention_days: int = Field(
+        alias="candidateRetentionDays",
+        ge=1,
+        le=365,
+    )
 
 
 class ProjectMemoryV2FactDetailResponse(StrictPrivateWorkResponse):
@@ -508,85 +530,6 @@ async def export_project_memory(
     return ProjectMemoryDocument.model_validate(memory)
 
 
-@router.post("/import", response_model=ProjectMemoryResponse)
-async def import_project_memory(
-    request: Request,
-    body: ProjectMemoryImportRequest,
-    namespace: Namespace = "default",
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ProjectMemoryResponse:
-    snapshot = await _call(
-        _service(request).import_memory(
-            context,
-            body.memory.model_dump(mode="json", by_alias=True),
-            namespace=namespace,
-            expected_version=body.expected_version,
-        )
-    )
-    return _snapshot_response(snapshot, namespace)
-
-
-@router.post("/facts", response_model=ProjectMemoryResponse)
-async def create_project_memory_fact(
-    request: Request,
-    body: ProjectMemoryCreateRequest,
-    namespace: Namespace = "default",
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ProjectMemoryResponse:
-    snapshot = await _call(
-        _service(request).create_fact(
-            context,
-            namespace=namespace,
-            expected_version=body.expected_version,
-            content=body.content,
-            category=body.category,
-            confidence=body.confidence,
-        )
-    )
-    return _snapshot_response(snapshot, namespace)
-
-
-@router.patch("/facts/{fact_id}", response_model=ProjectMemoryResponse)
-async def update_project_memory_fact(
-    request: Request,
-    fact_id: str,
-    body: ProjectMemoryUpdateRequest,
-    namespace: Namespace = "default",
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ProjectMemoryResponse:
-    snapshot = await _call(
-        _service(request).update(
-            context,
-            fact_id,
-            namespace=namespace,
-            expected_version=body.expected_version,
-            content=body.content,
-            category=body.category,
-            confidence=body.confidence,
-        )
-    )
-    return _snapshot_response(snapshot, namespace)
-
-
-@router.delete("/facts/{fact_id}", response_model=ProjectMemoryResponse)
-async def delete_project_memory_fact(
-    request: Request,
-    fact_id: str,
-    body: ProjectMemoryDeleteRequest,
-    namespace: Namespace = "default",
-    context: PrivateWorkContext = Depends(private_work_context),
-) -> ProjectMemoryResponse:
-    snapshot = await _call(
-        _service(request).delete(
-            context,
-            fact_id,
-            namespace=namespace,
-            expected_version=body.expected_version,
-        )
-    )
-    return _snapshot_response(snapshot, namespace)
-
-
 @router.get("/v2/facts", response_model=ProjectMemoryV2FactsResponse)
 async def list_project_memory_v2_facts(
     request: Request,
@@ -594,9 +537,12 @@ async def list_project_memory_v2_facts(
     status: Literal["active", "disabled", "all"] = "active",
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    query: Annotated[FactQuery | None, Query()] = None,
+    category: Annotated[FactCategory | None, Query()] = None,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> ProjectMemoryV2FactsResponse:
     statuses: tuple[Literal["active", "disabled"], ...] = ("active", "disabled") if status == "all" else (status,)
+    filters = {key: value for key, value in (("query", query), ("category", category)) if value is not None}
     rows = await _call(
         _v2_service(request).list_facts(
             context,
@@ -604,11 +550,30 @@ async def list_project_memory_v2_facts(
             statuses=statuses,
             limit=limit,
             offset=offset,
+            **filters,
         )
     )
     return ProjectMemoryV2FactsResponse(
         namespace=namespace,
         items=[_fact_response(row) for row in rows],
+    )
+
+
+@router.get("/v2/status", response_model=ProjectMemoryV2StatusResponse)
+async def get_project_memory_v2_status(
+    _context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_current_agent_runtime_config),
+) -> ProjectMemoryV2StatusResponse:
+    memory = config.memory
+    return ProjectMemoryV2StatusResponse.model_validate(
+        {
+            "enabled": memory.enabled,
+            "pipelineMode": memory.pipeline_mode,
+            "searchEnabled": memory.search_enabled,
+            "injectionEnabled": memory.injection_enabled,
+            "consolidationIntervalMinutes": memory.consolidation_interval_minutes,
+            "candidateRetentionDays": memory.candidate_retention_days,
+        }
     )
 
 

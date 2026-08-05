@@ -47,7 +47,7 @@ Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
 
 ### 中间件前处理
 
-在调用模型之前，每个活跃的中间件都有机会修改状态。例如，`MemoryMiddleware` 将持久化的记忆事实注入到系统提示中，`SummarizationMiddleware` 在 token 预算超出时可能压缩旧消息。
+在调用模型之前，每个活跃的中间件都有机会修改状态。例如，`DynamicContextMiddleware` 读取 Run 固定的 Memory 来源，并加入一条隐藏的低权限 Human message；`SummarizationMiddleware` 在 token 预算超出时可能压缩当前 Thread 的旧消息。
 
 ### LLM 推理
 
@@ -67,7 +67,7 @@ Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
 
 ### 状态更新
 
-`ThreadState` 更新为新消息、产出物和记忆队列。如果配置了检查点，状态将被持久化。
+`ThreadState` 更新为新消息、产出物和 durable Thread Context。如果配置了检查点，状态将被持久化。长期 Memory 不是 Thread state 队列：符合条件的 Run 成功后，结算流程会为独立的 Worker/Scheduler 链路准入 durable Source 和 `memory_extract` Job。
 
 </Steps>
 

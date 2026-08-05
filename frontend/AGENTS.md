@@ -147,6 +147,17 @@ require their exact server capability. Viewer can read/list/export and delete th
 ready upload/workspace/output files, but never sees mutation controls that require
 create/manage authority.
 
+The project Memory page is a v2 workbench with four regions: active/disabled long-term Facts,
+pending Candidates, selected-Fact Revision/Evidence history, and read-only Pipeline settings. Fact
+queries support server-side text search, category/status filters, and bounded `limit/offset`
+pagination; Candidate pages are bounded the same way. Candidate accept/reject sends the exact
+server `updatedAt`, while Fact edit, disable, restore, and irreversible hard forget send the exact
+visible Fact version. A `409` is an explicit stale-view result and triggers scoped refresh rather
+than an optimistic overwrite. Every account/project/namespace query has a strict Zod response,
+forwards the active AbortSignal, and renders distinct loading, error, empty, and next-page states.
+The settings region reads `/memory/v2/status`; it does not edit system policy. The old v1 aggregate
+has no frontend write path and remains a backend read-only rollback source only.
+
 Durable SSE cursor and deduplication state is keyed by account/project/thread. Event IDs are
 thread-monotonic; duplicate IDs and duplicate terminal frames are ignored. Gateway restart
 must resume from the stored `Last-Event-ID` without cross-scope replay.
@@ -543,8 +554,9 @@ pending runtime roles. Agent model references are limited to active system logic
   Ultra map to minimal, low, medium, and high reasoning effort respectively. The composer and
   Sidecar persist only the mode; submit and replay derive runtime fields after all stored context
   so a legacy standalone reasoning-effort value cannot override the selected mode.
-- Project Memory and Connection pages own their scoped queries and mutations; shared
-  presentation components remain pure.
+- Project Memory and Connection pages own their scoped queries and mutations; the Memory page owns
+  its v2 Fact/Candidate/history/status query roots and CAS invalidation, while shared presentation
+  components remain pure.
 - Static demo fixtures and adapters are separate from the production client registry.
 
 Human-input replies are ordinary human messages with `hide_from_ui: true` and the structured

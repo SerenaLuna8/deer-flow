@@ -1,24 +1,21 @@
 """Project-scoped PostgreSQL memory storage."""
 
 import copy
-import logging
-import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.private_work.memory_repository import (
     PrivateMemoryFactRecord,
-    PrivateMemoryFactWrite,
     PrivateMemoryRecord,
     PrivateMemoryRepository,
 )
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.private_scope import PrivateResourceScope
-
-logger = logging.getLogger(__name__)
 
 
 def utc_now_iso_z() -> str:
@@ -53,84 +50,44 @@ class ProjectMemorySnapshot:
     version: int
 
 
+class ProjectMemoryMembershipRevalidator:
+    """Check that the captured owner still has the captured active membership."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def is_active(self, scope: PrivateResourceScope) -> bool:
+        if type(scope) is not PrivateResourceScope:
+            return False
+        try:
+            project_id = uuid.UUID(scope.project_id)
+            owner_user_id = str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            return False
+
+        async with self._session_factory() as session:
+            membership_id = (
+                await session.execute(
+                    select(ProjectMembershipRow.id)
+                    .join(ProjectRow, ProjectRow.id == ProjectMembershipRow.project_id)
+                    .where(
+                        ProjectMembershipRow.project_id == project_id,
+                        ProjectMembershipRow.user_id == owner_user_id,
+                        ProjectMembershipRow.status == "active",
+                        ProjectMembershipRow.version == scope.membership_version,
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
+                )
+            ).scalar_one_or_none()
+        return membership_id is not None
+
+
 class ProjectMemoryStorage:
     """Async project-owner scoped adapter over the PostgreSQL Memory repository."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
-
-    @staticmethod
-    def _context_summary(memory_data: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(memory_data, dict):
-            raise ValueError("memory data")
-        empty = create_empty_memory()
-        user = memory_data.get("user", empty["user"])
-        history = memory_data.get("history", empty["history"])
-        if not isinstance(user, dict) or not isinstance(history, dict):
-            raise ValueError("memory data")
-        version = memory_data.get("version", empty["version"])
-        last_updated = memory_data.get("lastUpdated", empty["lastUpdated"])
-        if not isinstance(version, str) or not isinstance(last_updated, str):
-            raise ValueError("memory data")
-        return {
-            "version": version,
-            "lastUpdated": last_updated,
-            "user": copy.deepcopy(user),
-            "history": copy.deepcopy(history),
-        }
-
-    @staticmethod
-    def _parse_datetime(value: object) -> datetime | None:
-        if not isinstance(value, str) or not value:
-            return None
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=UTC)
-        return parsed.astimezone(UTC)
-
-    @classmethod
-    def _fact_write(cls, fact: object) -> PrivateMemoryFactWrite:
-        if not isinstance(fact, dict):
-            raise ValueError("memory fact")
-        content = fact.get("content")
-        category = fact.get("category", "context")
-        confidence = fact.get("confidence", 0.5)
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("memory fact content")
-        if not isinstance(category, str) or not category.strip() or len(category.strip()) > 32:
-            raise ValueError("memory fact category")
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            raise ValueError("memory fact confidence")
-        confidence = float(confidence)
-        if not math.isfinite(confidence) or not 0 <= confidence <= 1:
-            raise ValueError("memory fact confidence")
-        try:
-            fact_id = uuid.UUID(str(fact.get("id")))
-        except (TypeError, ValueError):
-            fact_id = uuid.uuid4()
-
-        source_thread_id = fact.get("sourceThreadId")
-        if source_thread_id is None:
-            legacy_source = fact.get("source")
-            if isinstance(legacy_source, str) and legacy_source not in {"", "manual", "unknown"}:
-                source_thread_id = legacy_source
-        source_run_id = fact.get("sourceRunId")
-        if source_thread_id is not None and (not isinstance(source_thread_id, str) or not source_thread_id):
-            raise ValueError("memory fact source thread")
-        if source_run_id is not None and (not isinstance(source_run_id, str) or not source_run_id or source_thread_id is None):
-            raise ValueError("memory fact source run")
-        return PrivateMemoryFactWrite(
-            id=fact_id,
-            content=content.strip(),
-            category=category.strip(),
-            confidence=confidence,
-            source_thread_id=source_thread_id,
-            source_run_id=source_run_id,
-            created_at=cls._parse_datetime(fact.get("createdAt")),
-        )
 
     @staticmethod
     def _iso_z(value: datetime) -> str:
@@ -165,21 +122,6 @@ class ProjectMemoryStorage:
         }
         return ProjectMemorySnapshot(memory=memory, version=record.version)
 
-    async def create_if_needed(
-        self,
-        *,
-        scope: PrivateResourceScope,
-        namespace: str,
-    ) -> ProjectMemorySnapshot:
-        empty = create_empty_memory()
-        async with self._session_factory() as session, session.begin():
-            record = await PrivateMemoryRepository(session).create_if_needed(
-                scope=scope,
-                namespace=namespace,
-                context_summary=self._context_summary(empty),
-            )
-        return self._snapshot(record)
-
     async def load(
         self,
         *,
@@ -195,44 +137,5 @@ class ProjectMemoryStorage:
             return ProjectMemorySnapshot(
                 memory=create_empty_memory(last_updated=""),
                 version=0,
-            )
-        return self._snapshot(record)
-
-    async def save(
-        self,
-        memory_data: dict[str, Any],
-        *,
-        scope: PrivateResourceScope,
-        namespace: str,
-        expected_version: int,
-    ) -> ProjectMemorySnapshot:
-        facts = memory_data.get("facts", []) if isinstance(memory_data, dict) else None
-        if not isinstance(facts, list):
-            raise ValueError("memory facts")
-        fact_writes = tuple(self._fact_write(fact) for fact in facts)
-        async with self._session_factory() as session, session.begin():
-            record = await PrivateMemoryRepository(session).save(
-                scope=scope,
-                namespace=namespace,
-                context_summary=self._context_summary(memory_data),
-                facts=fact_writes,
-                expected_version=expected_version,
-            )
-        return self._snapshot(record)
-
-    async def clear(
-        self,
-        *,
-        scope: PrivateResourceScope,
-        namespace: str,
-        expected_version: int,
-    ) -> ProjectMemorySnapshot:
-        empty = create_empty_memory()
-        async with self._session_factory() as session, session.begin():
-            record = await PrivateMemoryRepository(session).clear(
-                scope=scope,
-                namespace=namespace,
-                context_summary=self._context_summary(empty),
-                expected_version=expected_version,
             )
         return self._snapshot(record)

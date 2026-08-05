@@ -22,23 +22,22 @@ This design keeps the agent core simple and stable while allowing rich, composab
 The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
 
 1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
-2. `DynamicContextMiddleware` — current date and optional memory context
+2. `DynamicContextMiddleware` — current date and Run-frozen memory context
 3. `SkillActivationMiddleware` — slash-skill activation
 4. `DurableContextMiddleware` — captures durable summary, delegation, and skill-reference state
 5. `SummarizationMiddleware` — context compression (if enabled)
 6. `TodoMiddleware` — task list management (plan mode only)
 7. `TokenUsageMiddleware` — token tracking (if enabled)
 8. `TitleMiddleware` — automatic thread title generation
-9. `MemoryMiddleware` — cross-session memory injection and queuing
-10. `ViewImageMiddleware` — image details injection (if model supports vision)
-11. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
-12. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-13. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-14. `LoopDetectionMiddleware` — breaks repetitive tool call loops
-15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
-16. Custom middlewares (if any)
-17. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
-18. `ClarificationMiddleware` — intercepts clarification requests (always last)
+9. `ViewImageMiddleware` — image details injection (if model supports vision)
+10. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
+11. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
+12. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+13. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+14. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
+15. Custom middlewares (if any)
+16. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
+17. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
 The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
@@ -62,19 +61,11 @@ Warning interventions are queued per thread and run, then drained on the next mo
 
 ---
 
-### MemoryMiddleware
+### DynamicContextMiddleware
 
-Reads persisted memory facts at the start of each conversation and injects them into the system prompt. After a conversation ends, queues a background update to incorporate any new information into the memory store.
+Adds the current-date reminder and, when enabled for a private Run, reads the Run-frozen Memory source through Worker-issued authority. v2 recall reuses the Run's exact ordered Fact-Revision snapshot at every model boundary and injects it as a hidden low-authority Human message. It does not admit or update long-term Memory.
 
-**Configuration**: see the [Memory](/docs/harness/memory) page and the `memory:` section in `config.yaml`.
-
-```yaml
-memory:
-  enabled: true
-  injection_enabled: true
-  max_injection_tokens: 2000
-  debounce_seconds: 30
-```
+The long-term write path is outside the middleware chain: successful Run settlement admits a durable Source and `memory_extract` Job, then Scheduler and Worker run consolidation. The removed built-in `MemoryMiddleware`, process-local queue/updater, and summarization Memory hook are not runtime extension points. See [Memory](/docs/harness/memory) for Pipeline modes and management behavior.
 
 ---
 
@@ -144,6 +135,8 @@ The backend stamps bounded structured task-result and skill-read metadata before
 ### SummarizationMiddleware
 
 When the conversation grows long, summarizes older messages to reduce context size. The generated summary is stored in thread state and projected into later model calls as hidden durable context data, preserving meaning without keeping the original messages in the active transcript.
+
+Summarization is Thread-local context compaction. It does not flush, enqueue, or update long-term Memory.
 
 **Configuration**: `summarization:` section in `config.yaml`. See detailed configuration below.
 

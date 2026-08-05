@@ -20,12 +20,12 @@ class RuntimeFeatures:
     - ``False``: disable
     - An ``AgentMiddleware`` instance: use this custom implementation instead
 
-    ``summarization`` and ``guardrail`` have no built-in default — they only
+    ``memory``, ``summarization``, and ``guardrail`` have no built-in default — they only
     accept ``False`` (disable) or an ``AgentMiddleware`` instance (custom).
     """
 
     sandbox: bool | AgentMiddleware = True
-    memory: bool | AgentMiddleware = False
+    memory: Literal[False] | AgentMiddleware = False
     summarization: Literal[False] | AgentMiddleware = False
     subagent: bool | AgentMiddleware = False
     vision: bool | AgentMiddleware = False

@@ -170,7 +170,7 @@ def test_subagent_injects_task_tool(mock_create_agent):
 @patch("deerflow.agents.factory.create_agent")
 def test_clarification_always_last(mock_create_agent):
     mock_create_agent.return_value = MagicMock()
-    feat = RuntimeFeatures(sandbox=True, memory=True, vision=True)
+    feat = RuntimeFeatures(sandbox=True, vision=True)
 
     create_deerflow_agent(_make_mock_model(), features=feat)
 
@@ -265,9 +265,15 @@ def test_custom_middleware_replaces_default(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     middleware = call_kwargs["middleware"]
     assert custom_memory in middleware
-    # Should NOT have the default MemoryMiddleware
-    mw_types = [type(m).__name__ for m in middleware]
-    assert "MemoryMiddleware" not in mw_types
+    assert middleware.count(custom_memory) == 1
+
+
+def test_memory_true_requires_custom_middleware() -> None:
+    with pytest.raises(ValueError, match="memory=True requires a custom AgentMiddleware"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, memory=True),  # type: ignore[arg-type]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -780,9 +786,12 @@ def test_full_chain_order(mock_create_agent):
     class MySummarization(AM):
         pass
 
+    class MyMemory(AM):
+        pass
+
     feat = RuntimeFeatures(
         sandbox=True,
-        memory=True,
+        memory=MyMemory(),
         summarization=MySummarization(),
         subagent=True,
         vision=True,
@@ -804,7 +813,7 @@ def test_full_chain_order(mock_create_agent):
         "MySummarization",
         "TodoMiddleware",
         "TitleMiddleware",
-        "MemoryMiddleware",
+        "MyMemory",
         "ViewImageMiddleware",
         "SubagentLimitMiddleware",
         "LoopDetectionMiddleware",

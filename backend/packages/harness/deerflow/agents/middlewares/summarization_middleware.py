@@ -582,8 +582,6 @@ def create_summarization_middleware(
     use this factory so model resolution, hooks, prompt config, and retention
     defaults cannot drift.
     """
-    from deerflow.agents.memory.summarization_hook import memory_flush_hook
-
     resolved_app_config = app_config or get_app_config()
     config = resolved_app_config.summarization
 
@@ -622,11 +620,4 @@ def create_summarization_middleware(
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    hooks: list[BeforeSummarizationHook] = []
-    if resolved_app_config.memory.enabled:
-        hooks.append(memory_flush_hook)
-
-    return DeerFlowSummarizationMiddleware(
-        **kwargs,
-        before_summarization=hooks,
-    )
+    return DeerFlowSummarizationMiddleware(**kwargs)

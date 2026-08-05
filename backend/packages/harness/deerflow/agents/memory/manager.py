@@ -27,7 +27,7 @@ class ProjectMemoryCapabilities:
 PROJECT_MEMORY_CAPABILITIES = ProjectMemoryCapabilities(
     supports_search=True,
     supports_fact_mutation=False,
-    requires_passive_writes=True,
+    requires_passive_writes=False,
 )
 
 

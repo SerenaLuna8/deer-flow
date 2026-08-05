@@ -251,7 +251,7 @@ def create_chat_model(
         attach_tracing: When True (default), attach tracing callbacks (Langfuse,
             LangSmith) directly to the model instance. Standalone callers — anything
             that invokes the model outside a LangGraph run that already wires tracing
-            at the invocation root (``MemoryUpdater``, ad-hoc utilities, etc.) — keep
+            at the invocation root (ad-hoc utilities, background jobs, etc.) — keep
             this default so the model-level callback still produces traces. Callers
             that already attach tracing at the graph root (``make_lead_agent``, the
             in-graph ``TitleMiddleware``) MUST pass ``attach_tracing=False``; otherwise

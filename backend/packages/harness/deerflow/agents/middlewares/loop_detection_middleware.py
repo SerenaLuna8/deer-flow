@@ -537,8 +537,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if warning:
             # Defer injection to the next model call. We must NOT alter the
             # AIMessage(tool_calls=...) here (would put framework words in
-            # the model's mouth, polluting downstream consumers like
-            # MemoryMiddleware), nor insert a separate non-tool message
+            # the model's mouth, polluting downstream message consumers),
+            # nor insert a separate non-tool message
             # (would break OpenAI/Moonshot tool-call pairing because the
             # tools node has not produced ToolMessage responses yet). The
             # warning is delivered via ``wrap_model_call`` below.

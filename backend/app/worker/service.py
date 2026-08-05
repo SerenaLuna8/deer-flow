@@ -19,7 +19,6 @@ from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobRepository
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 _PUBLIC_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
-_MEMORY_FLUSH_MAX_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
 
@@ -503,55 +502,12 @@ class WorkerService:
                 self._detach(task)
         self._inflight.clear()
 
-    async def _flush_initialized_project_memory_queue(self) -> None:
-        from deerflow.agents.memory.queue import get_initialized_project_memory_queue
-
-        queue = get_initialized_project_memory_queue()
-        if queue is None:
-            return
-
-        flush_task = asyncio.create_task(
-            queue.flush_all(),
-            name=f"worker-memory-flush-{_task_key(self.worker_id)}",
-        )
-        timeout = min(float(self._config.shutdown_grace_seconds), _MEMORY_FLUSH_MAX_SECONDS)
-        done, pending = await asyncio.wait({flush_task}, timeout=timeout)
-        if done:
-            try:
-                await flush_task
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning(
-                    "Project memory queue shutdown flush failed: %s",
-                    type(error).__name__,
-                )
-            return
-
-        logger.warning("Project memory queue shutdown flush timed out")
-        flush_task.cancel()
-        cancelled_done, still_pending = await asyncio.wait(
-            pending,
-            timeout=_CANCEL_DRAIN_SECONDS,
-        )
-        if cancelled_done:
-            await asyncio.gather(*cancelled_done, return_exceptions=True)
-        for task in still_pending:
-            self._detach(task)
-
     async def _shutdown(self) -> None:
         error: BaseException | None = None
         try:
             await self.drain()
         except BaseException as caught:
             error = caught
-        try:
-            await self._flush_initialized_project_memory_queue()
-        except BaseException as caught:
-            if error is None:
-                error = caught
-            else:
-                error.add_note(f"project memory queue flush also failed: {type(caught).__name__}")
         try:
             await self._registry.remove(self.worker_id)
         except BaseException as caught:

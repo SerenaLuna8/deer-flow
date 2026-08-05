@@ -181,6 +181,22 @@ def _category(value: str) -> str:
     return normalized
 
 
+def _optional_filter(value: str | None, *, max_length: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MemoryV2ManagementInvalid
+    normalized = value.strip()
+    if not 1 <= len(normalized) <= max_length:
+        raise MemoryV2ManagementInvalid
+    return normalized
+
+
+def _contains_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _confidence(value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise MemoryV2ManagementInvalid
@@ -297,37 +313,47 @@ class MemoryV2ManagementRepository:
         statuses: tuple[Literal["active", "disabled"], ...],
         limit: int,
         offset: int,
+        query: str | None = None,
+        category: str | None = None,
     ) -> tuple[MemoryV2FactView, ...]:
         project_id, owner_user_id = _scope(scope)
         namespace = _namespace(namespace)
         limit, offset = _page(limit, offset)
+        query = _optional_filter(query, max_length=200)
+        category = _optional_filter(category, max_length=32)
         if not statuses or any(status not in {"active", "disabled"} for status in statuses):
             raise MemoryV2ManagementInvalid
-        rows = (
-            await self.session.execute(
-                select(MemoryFactRow, MemoryFactRevisionRow)
-                .join(
-                    MemoryFactRevisionRow,
-                    (MemoryFactRevisionRow.project_id == MemoryFactRow.project_id)
-                    & (MemoryFactRevisionRow.owner_user_id == MemoryFactRow.owner_user_id)
-                    & (MemoryFactRevisionRow.namespace == MemoryFactRow.namespace)
-                    & (MemoryFactRevisionRow.fact_id == MemoryFactRow.id)
-                    & (MemoryFactRevisionRow.id == MemoryFactRow.current_revision_id),
-                )
-                .where(
-                    *self._predicates(
-                        project_id,
-                        owner_user_id,
-                        namespace,
-                        MemoryFactRow,
-                    ),
-                    MemoryFactRow.status.in_(statuses),
-                )
-                .order_by(MemoryFactRow.updated_at.desc(), MemoryFactRow.id)
-                .limit(limit)
-                .offset(offset)
+        statement = (
+            select(MemoryFactRow, MemoryFactRevisionRow)
+            .join(
+                MemoryFactRevisionRow,
+                (MemoryFactRevisionRow.project_id == MemoryFactRow.project_id)
+                & (MemoryFactRevisionRow.owner_user_id == MemoryFactRow.owner_user_id)
+                & (MemoryFactRevisionRow.namespace == MemoryFactRow.namespace)
+                & (MemoryFactRevisionRow.fact_id == MemoryFactRow.id)
+                & (MemoryFactRevisionRow.id == MemoryFactRow.current_revision_id),
             )
-        ).all()
+            .where(
+                *self._predicates(
+                    project_id,
+                    owner_user_id,
+                    namespace,
+                    MemoryFactRow,
+                ),
+                MemoryFactRow.status.in_(statuses),
+            )
+        )
+        if query is not None:
+            pattern = _contains_pattern(query)
+            statement = statement.where(
+                or_(
+                    MemoryFactRevisionRow.content.ilike(pattern, escape="\\"),
+                    MemoryFactRevisionRow.category.ilike(pattern, escape="\\"),
+                )
+            )
+        if category is not None:
+            statement = statement.where(MemoryFactRevisionRow.category == category)
+        rows = (await self.session.execute(statement.order_by(MemoryFactRow.updated_at.desc(), MemoryFactRow.id).limit(limit).offset(offset))).all()
         return tuple(_fact_view(fact, revision) for fact, revision in rows)
 
     async def list_candidates(

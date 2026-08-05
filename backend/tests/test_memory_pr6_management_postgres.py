@@ -262,6 +262,116 @@ async def test_memory_v2_management_enforces_candidate_cas_fact_lifecycle_and_ow
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_memory_v2_fact_search_filters_current_revision_before_pagination(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    try:
+        await _seed_candidates(
+            seed,
+            "Plan ALPHA work first.",
+            "Plain context note.",
+            "Category-only match.",
+        )
+        now = datetime.now(UTC)
+
+        async with seed.factory() as session, session.begin():
+            repository = MemoryV2ManagementRepository(session)
+            candidates = await repository.list_candidates(
+                seed.owner_a_scope,
+                namespace="default",
+                statuses=("pending",),
+                limit=100,
+                offset=0,
+            )
+            by_content = {candidate.content: candidate for candidate in candidates}
+            facts = {}
+            for ordinal, content in enumerate(
+                (
+                    "Plan ALPHA work first.",
+                    "Plain context note.",
+                    "Category-only match.",
+                )
+            ):
+                candidate = by_content[content]
+                facts[content] = await repository.accept_candidate(
+                    seed.owner_a_scope,
+                    namespace="default",
+                    candidate_id=candidate.id,
+                    expected_updated_at=candidate.updated_at,
+                    now=now + timedelta(seconds=ordinal),
+                )
+
+            context_fact = facts["Plain context note."]
+            await repository.revise_fact(
+                seed.owner_a_scope,
+                namespace="default",
+                fact_id=context_fact.id,
+                expected_version=1,
+                content=None,
+                category="context",
+                confidence=None,
+                reason="test_category",
+                now=now + timedelta(seconds=4),
+            )
+            category_match = facts["Category-only match."]
+            await repository.revise_fact(
+                seed.owner_a_scope,
+                namespace="default",
+                fact_id=category_match.id,
+                expected_version=1,
+                content=None,
+                category="AlphaCategory",
+                confidence=None,
+                reason="test_category",
+                now=now + timedelta(seconds=5),
+            )
+
+            first_page = await repository.list_facts(
+                seed.owner_a_scope,
+                namespace="default",
+                statuses=("active",),
+                limit=1,
+                offset=0,
+                query="  alpha  ",
+            )
+            second_page = await repository.list_facts(
+                seed.owner_a_scope,
+                namespace="default",
+                statuses=("active",),
+                limit=1,
+                offset=1,
+                query="alpha",
+            )
+            exhausted = await repository.list_facts(
+                seed.owner_a_scope,
+                namespace="default",
+                statuses=("active",),
+                limit=1,
+                offset=2,
+                query="alpha",
+            )
+            context_only = await repository.list_facts(
+                seed.owner_a_scope,
+                namespace="default",
+                statuses=("active",),
+                limit=100,
+                offset=0,
+                category="  context  ",
+            )
+
+            assert {item.current_revision.content for item in (*first_page, *second_page)} == {
+                "Plan ALPHA work first.",
+                "Category-only match.",
+            }
+            assert exhausted == ()
+            assert [item.id for item in context_only] == [context_fact.id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_memory_v2_hard_forget_erases_lineage_and_blocks_source_replay(
     migrated_postgres_database_url: str,
 ) -> None:

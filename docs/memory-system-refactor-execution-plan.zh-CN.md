@@ -170,7 +170,8 @@ PR1 → PR2 → PR3 → PR4 → 检查点 A → PR5 → PR6 → PR7 → PR8
 | 检查点 A | 完成 | `f25b2a4b` | 固定样例 64 条/8 Batch；precision 100%；recall 100%；secret、scope、duplicate、batch error 均为 0；PR2—PR4 随机 PostgreSQL 21 passed；后端核心 787 passed、0 skipped |
 | PR5 | 完成 | `220eb6f8` | PR5 聚焦单元测试 20 passed；PR2—PR5 与精确版本随机 PostgreSQL 36 passed；后端核心 821 passed、0 skipped；Python lint/format 通过 |
 | PR6 | 完成 | `23bde1b8` | PR6 API/轮换聚焦单元测试 18 passed；PR6 管理/隐私随机 PostgreSQL 9 passed；PR1—PR6 随机 PostgreSQL 44 passed；后端核心 848 passed、0 skipped；Python lint/format 通过 |
-| PR7 | 完成 | 本次 PR7 提交 | PR7 运行时聚焦测试 10 passed；PR7 随机 PostgreSQL 5 passed；PR1—PR7 随机 PostgreSQL 49 passed；后端核心 863 passed、0 skipped；Python lint/format 通过 |
+| PR7 | 完成 | `28195187` | PR7 运行时聚焦测试 10 passed；PR7 随机 PostgreSQL 5 passed；PR1—PR7 随机 PostgreSQL 49 passed；后端核心 863 passed、0 skipped；Python lint/format 通过 |
+| PR8 | 完成 | 本次 PR8 提交 | 后端聚焦 177 passed；PR1—PR8 随机 PostgreSQL 50 passed；后端核心 866 passed、0 skipped；前端 unit 135 passed、核心 E2E 1 passed、静态 E2E 2 passed；生产构建、前端 check/format、Python lint/format 与 `git diff --check` 通过 |
 
 PR2 没有注册 Memory Worker handler、没有接入 Run settlement、没有调用模型、没有启用
 `shadow`，因此正式召回仍完全使用 v1。外部模型、容器和部署环境不属于 PR2 验证范围。
@@ -679,37 +680,44 @@ Candidate 处理结果和 Fact/Revision/Evidence 写入必须在同一事务提�
 - 长期记忆：active/disabled Facts；
 - 待整理：pending Candidates；
 - 修改历史：Fact Revisions 和来源状态；
-- 设置：Pipeline 状态、自动整理周期和保留期。
+- 设置：只读 Pipeline 状态、search/injection 开关、自动整理周期和保留期。
 
-支持搜索、分类筛选、编辑、接受、拒绝、disable、restore 和 hard forget。
+Facts 支持服务端搜索、分类/状态筛选和有界 `limit/offset` 分页；Candidates 同样使用有界分页。
+Candidate 接受/拒绝提交精确 `updatedAt`，Fact 编辑、disable、restore 和 hard forget 提交当前
+Fact version。并发冲突返回 `409` 并刷新当前作用域，不做静默覆盖。设置区域只读取
+`GET /api/projects/{project_id}/memory/v2/status`，不在项目页面修改系统策略。
 
-### 14.2 旧链路清理条件
+### 14.2 旧链路清理边界
 
-满足以下条件后才删除旧 updater/queue：
+PR3—PR7 已把新写入和召回链路落到 durable Source/Job、Scheduler、Worker 和 Run Snapshot。
+PR8 删除以下不再承担生产职责的旧写入路径：
 
-- Pipeline 已稳定运行在 `v2`；
-- 检查点 A 仍通过；
-- Candidate backlog 和 dead Memory Job 已处理；
-- v1/v2 数据数量已经核对；
-- 回滚窗口已经结束；
-- 后端、前端和随机 PostgreSQL 门禁通过。
-
-删除内容：
-
-- 旧进程内 Memory queue；
-- 旧 updater；
+- 内置 `MemoryMiddleware`；
+- 旧进程内 Memory queue/updater/message processing；
 - summarization hook 对长期 Memory 更新的依赖；
-- 旧 aggregate 的写路径。
+- Worker shutdown 的 queue flush；
+- v1 import、Fact create/update/delete API 和 repository/storage 写方法；
+- 旧前端 v1 workbench。
 
-在旧链路删除前，v1 数据保持只读可回退。
+继续保留：
+
+- Source → `memory_extract` → Candidate → 定时 `memory_consolidate` → versioned Fact 主链路；
+- v2 Fact/Candidate/Revision/Evidence 管理与 NDJSON export；
+- v1 scoped list/status/export、固定返回 `501` 的无写入 reload 兼容入口，以及 `off`、`shadow`、
+  `consolidate` 的只读回退召回。
+
+v1 aggregate 不再有自动或人工写入口；它只作为回滚窗口中的只读数据源。Thread summarization
+只维护 Thread Context，不再触发长期 Memory 写入。
 
 ### 14.3 主要文件
 
-- `frontend/src/components/workspace/settings/memory/`
+- `frontend/src/components/projects/private-work/memory/memory-v2-workbench.tsx`
 - `frontend/src/components/projects/private-work/project-memory-page.tsx`
 - `frontend/src/core/private-work/memory.ts`
 - 前端 i18n、unit test 和 E2E
-- 旧 backend queue/updater 入口及对应测试
+- `backend/app/gateway/routers/project_memory.py`
+- `backend/app/private_work/memory_service.py`
+- 旧 backend middleware/queue/updater/summarization hook、Worker flush 入口及对应测试
 
 ### 14.4 退出标准
 
@@ -719,6 +727,27 @@ Candidate 处理结果和 Fact/Revision/Evidence 写入必须在同一事务提�
 - 旧 queue/updater 没有运行时引用；
 - 全量后端和前端测试通过；
 - 文档和 `AGENTS.md` 与最终实现一致。
+
+### 14.5 最终验证结果
+
+PR8 完成以下门禁：后端聚焦测试 177 passed；PR1—PR8 随机 PostgreSQL 记忆测试 50 passed；
+后端核心门禁 866 passed、0 skipped；前端单元测试 135 passed；核心 Memory E2E 1 passed；
+静态模式 E2E 2 passed。生产构建、前端 ESLint/TypeScript/Prettier、Python Ruff
+check/format 和 `git diff --check` 全部通过。
+
+对应复验命令：
+
+```bash
+POSTGRES_TEST_URL=... make test
+cd frontend && pnpm test
+cd frontend && pnpm check
+cd frontend && pnpm format
+cd frontend && pnpm test:e2e
+cd frontend && pnpm test:e2e:static
+cd frontend && pnpm build:production
+cd backend && make lint
+git diff --check
+```
 
 ## 15. 数据库部署与存量数据
 
@@ -839,7 +868,7 @@ PR：PRN - 名称
 9. Project + Owner + namespace 隔离测试通过；
 10. hard forget 覆盖所有 Memory 派生正文；
 11. 一个 Run 内召回结果稳定；
-12. v2 可切回 v1，直到旧链路正式删除；
+12. `off`、`shadow`、`consolidate` 可读取 v1 只读回退，但不存在 v1 自动或人工写链路；
 13. 后端、前端和随机 PostgreSQL gate 全部通过；
 14. 每个 PR 均已独立提交，没有未说明的范围扩展。
 

@@ -456,8 +456,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         self,
     ) -> tuple[ProjectMemoryStorage, ProjectMemoryRevalidator]:
         if self._project_memory_storage is None or self._project_memory_revalidator is None:
-            from deerflow.agents.memory.queue import ProjectMemoryMembershipRevalidator
-            from deerflow.agents.memory.storage import ProjectMemoryStorage
+            from deerflow.agents.memory.storage import ProjectMemoryMembershipRevalidator, ProjectMemoryStorage
             from deerflow.persistence import get_session_factory
 
             session_factory = get_session_factory()

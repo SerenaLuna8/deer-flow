@@ -56,16 +56,29 @@ the intended network boundary.
 ### Project Memory
 
 项目 Memory 的数据与运行策略都以 PostgreSQL 为权威；system admin 在
-`/admin/settings/system` 的 Agent runtime 区域调整 `memory` 开关、召回、debounce、模型与
-注入预算。新 Run 准入时会冻结完整策略，延迟队列继续使用该 Run 的精确配置，不能切换
-owner、namespace 或存储后端。
+`/admin/settings/system` 的 Agent runtime 区域调整 `memory` Pipeline、模型、召回和注入预算。
+新 Run 准入时会冻结完整策略；成功 Run 的长期记忆来源与 `memory_extract` Job 在同一结算事务
+写入，Scheduler 定时准入 `memory_consolidate`，真正的提取和整理都只由 Worker 执行。
 
 - `enabled` 关闭 Memory 注入、被动提取和只读召回。
+- `pipeline_mode` 决定写入与召回阶段：
+  - `off` 不产生 v2 Source/Candidate/Fact，并只读回退到保留的 v1 aggregate；
+  - `shadow` 产生 Source 和 Candidate，但召回仍读取 v1；
+  - `consolidate` 继续把 Candidate 整理成版本化 Fact，但召回仍读取 v1；
+  - `v2` 使用带 Revision 的 Fact 和每 Run 固定的 Recall Snapshot。
 - `search_enabled` 只控制私有 Lead Agent 是否获得 async `memory_search`。模型只能提交
   query、可选 category 和 top-k，scope 与 Run/lease authority 始终由 Worker 签发。
-- `search_enabled: false` 不关闭项目 Memory 管理 API，也不改变已有被动写入策略。
-- `debounce_seconds` 控制进程内被动更新队列；它不是 durable job 或跨 Worker
-  exactly-once 保证。
+- `injection_enabled` 控制模型调用前的隐藏低权限 Memory 注入；它不改变管理 API。
+- `consolidation_interval_minutes` 控制 Scheduler 检查并准入待整理 Candidate 的周期。
+- `candidate_retention_days` 控制 terminal Candidate 正文的保留期；pending Candidate 不在该
+  清理范围内。
+- `search_enabled: false` 不关闭项目 Memory 管理 API，也不停止 durable v2 写入链路。
+
+项目 Memory 页通过只读 `GET /api/projects/{project_id}/memory/v2/status` 展示当前已提交的
+`enabled`、Pipeline mode、search/injection 开关、整理周期和保留期；用户在该页面不能修改系统
+策略。v1 aggregate 只保留 scoped GET/status/export 与回退召回；兼容的 reload route 固定返回
+`501` 且不修改数据。import、Fact create/update/delete、内置 `MemoryMiddleware`、进程内
+queue/updater 和 summarization 长期记忆 hook 均已移除。
 
 ### Checkpoint 表示
 

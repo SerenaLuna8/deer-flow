@@ -3,11 +3,9 @@
 from deerflow.persistence.private_work.memory_repository import (
     PrivateMemoryConflict,
     PrivateMemoryFactRecord,
-    PrivateMemoryFactWrite,
     PrivateMemoryInvalid,
     PrivateMemoryRecord,
     PrivateMemoryRepository,
-    PrivateMemoryVersionConflict,
 )
 from deerflow.persistence.private_work.memory_v2_model import (
     MemoryCandidateRow,
@@ -74,11 +72,9 @@ __all__ = [
     "PrivateFileRow",
     "PrivateMemoryConflict",
     "PrivateMemoryFactRecord",
-    "PrivateMemoryFactWrite",
     "PrivateMemoryInvalid",
     "PrivateMemoryRecord",
     "PrivateMemoryRepository",
-    "PrivateMemoryVersionConflict",
     "RunAssetVersionRow",
     "RunMemoryContextItemRow",
     "RunMemoryContextSnapshotRow",

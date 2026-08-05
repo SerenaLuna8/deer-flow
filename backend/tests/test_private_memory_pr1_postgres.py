@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -11,18 +11,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.projects.models import CreateProject
 from app.projects.repository import ProjectRepository
 from deerflow.agents.memory.storage import (
-    ProjectMemorySnapshot,
     ProjectMemoryStorage,
     create_empty_memory,
-)
-from deerflow.persistence.private_work.memory_repository import (
-    PrivateMemoryVersionConflict,
 )
 from deerflow.private_scope import PrivateResourceScope
 
 
 @pytest.mark.asyncio
-async def test_missing_read_and_atomic_first_write(
+async def test_load_is_non_mutating_and_reads_manually_seeded_memory(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -75,46 +71,92 @@ async def test_missing_read_and_atomic_first_write(
         assert missing.memory["lastUpdated"] == ""
         assert row_count == 0
 
-        imported = create_empty_memory()
-        imported["lastUpdated"] = "1999-01-01T00:00:00Z"
-        results = await asyncio.gather(
-            storage.save(
-                imported,
-                scope=scope,
-                namespace="agent:lead",
-                expected_version=0,
-            ),
-            storage.save(
-                imported,
-                scope=scope,
-                namespace="agent:lead",
-                expected_version=0,
-            ),
-            return_exceptions=True,
-        )
+        memory_id = uuid.uuid4()
+        fact_id = uuid.uuid4()
+        aggregate_updated_at = datetime.now(UTC)
+        fact_created_at = datetime.now(UTC)
+        context_summary = create_empty_memory(last_updated="ignored-on-read")
+        context_summary["user"]["workContext"] = {
+            "summary": "负责 ActWeave 项目",
+            "updatedAt": "2026-08-05T00:00:00Z",
+        }
+        context_summary.pop("facts")
 
-        successes = [result for result in results if isinstance(result, ProjectMemorySnapshot)]
-        conflicts = [result for result in results if isinstance(result, PrivateMemoryVersionConflict)]
-        assert len(successes) == 1
-        assert len(conflicts) == 1
-        assert successes[0].version == 1
-        assert successes[0].memory["lastUpdated"] != imported["lastUpdated"]
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO user_project_memories
+                    (id,project_id,owner_user_id,namespace,context_summary,version,created_at,updated_at)
+                    VALUES
+                    (:id,:project_id,:owner_user_id,:namespace,CAST(:context_summary AS jsonb),7,:created_at,:updated_at)"""
+                ),
+                {
+                    "id": memory_id,
+                    "project_id": context.project_id,
+                    "owner_user_id": str(owner_id),
+                    "namespace": "agent:lead",
+                    "context_summary": json.dumps(context_summary, ensure_ascii=False),
+                    "created_at": aggregate_updated_at,
+                    "updated_at": aggregate_updated_at,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO user_project_memory_facts
+                    (id,project_id,owner_user_id,memory_id,content,category,confidence,created_at,updated_at)
+                    VALUES
+                    (:id,:project_id,:owner_user_id,:memory_id,:content,:category,:confidence,:created_at,:updated_at)"""
+                ),
+                {
+                    "id": fact_id,
+                    "project_id": context.project_id,
+                    "owner_user_id": str(owner_id),
+                    "memory_id": memory_id,
+                    "content": "用户偏好中文交流",
+                    "category": "preference",
+                    "confidence": 0.95,
+                    "created_at": fact_created_at,
+                    "updated_at": fact_created_at,
+                },
+            )
+
+        loaded = await storage.load(scope=scope, namespace="agent:lead")
+        assert loaded.version == 7
+        assert loaded.memory["lastUpdated"] == aggregate_updated_at.isoformat().removesuffix("+00:00") + "Z"
+        assert loaded.memory["user"]["workContext"]["summary"] == "负责 ActWeave 项目"
+        assert loaded.memory["facts"] == [
+            {
+                "id": str(fact_id),
+                "content": "用户偏好中文交流",
+                "category": "preference",
+                "confidence": 0.95,
+                "createdAt": fact_created_at.isoformat().removesuffix("+00:00") + "Z",
+                "source": "manual",
+            }
+        ]
 
         async with engine.connect() as connection:
-            row_count = (
+            counts = (
                 await connection.execute(
                     text(
-                        """SELECT count(*) FROM user_project_memories
-                        WHERE project_id=:project_id
-                          AND owner_user_id=:owner_user_id
-                          AND namespace='agent:lead'"""
+                        """SELECT
+                            (SELECT count(*) FROM user_project_memories
+                             WHERE project_id=:project_id
+                               AND owner_user_id=:owner_user_id
+                               AND namespace='agent:lead') AS memories,
+                            (SELECT count(*) FROM user_project_memory_facts
+                             WHERE project_id=:project_id
+                               AND owner_user_id=:owner_user_id
+                               AND memory_id=:memory_id) AS facts"""
                     ),
                     {
                         "project_id": context.project_id,
                         "owner_user_id": str(owner_id),
+                        "memory_id": memory_id,
                     },
                 )
-            ).scalar_one()
-        assert row_count == 1
+            ).one()
+        assert counts.memories == 1
+        assert counts.facts == 1
     finally:
         await engine.dispose()

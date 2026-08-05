@@ -111,7 +111,7 @@ def create_deerflow_agent(
     checkpointer:
         Optional persistence backend.
     name:
-        Agent name (passed to middleware that cares, e.g. ``MemoryMiddleware``).
+        Agent name passed to middleware that uses an agent namespace.
 
     Raises
     ------
@@ -200,7 +200,7 @@ def _assemble_from_features(
       6.   SummarizationMiddleware (summarization feature)
       7.   TodoMiddleware (plan_mode parameter)
       8.   TitleMiddleware (auto_title feature)
-      9.   MemoryMiddleware (memory feature)
+      9.   Custom memory middleware (memory feature)
       10.  ViewImageMiddleware (vision feature)
       11.  SubagentLimitMiddleware (subagent feature)
       12.  LoopDetectionMiddleware (loop_detection feature)
@@ -213,7 +213,7 @@ def _assemble_from_features(
     Each feature value is handled as:
       - ``False``: skip
       - ``True``: create the built-in default middleware (not available for
-        ``summarization`` and ``guardrail`` — these require a custom instance)
+        ``memory``, ``summarization``, and ``guardrail`` — these require a custom instance)
       - ``AgentMiddleware`` instance: use directly (custom replacement)
     """
     chain: list[AgentMiddleware] = []
@@ -272,9 +272,7 @@ def _assemble_from_features(
         if isinstance(feat.memory, AgentMiddleware):
             chain.append(feat.memory)
         else:
-            from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
-
-            chain.append(MemoryMiddleware(agent_name=name))
+            raise ValueError("memory=True requires a custom AgentMiddleware instance (no built-in memory middleware)")
 
     # --- [10] Image checkpoint cleanup / optional vision injection ---
     if feat.vision is not False:

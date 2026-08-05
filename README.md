@@ -16,10 +16,18 @@ PostgreSQL `lower(email)` 唯一索引保护。`auth.local.allow_registration` �
 不会削弱 PostgreSQL durable `sid` 的验证和撤销。HTTPS 与 localhost 可按 token lifetime
 持久化，普通公网 HTTP 默认仍使用 session cookie，access 与 CSRF cookie 始终采用同一次策略。
 
-项目 Memory 保存在 PostgreSQL，并始终受 account、project 与 owner 作用域约束。
-私有 Run 默认可使用只读 `memory_search` 按需召回事实；模型只能提供查询、分类和数量，
-不能选择项目、账号或 namespace，也不能通过该工具修改 Memory。可在
-`memory.search_enabled` 中关闭检索；会话事实的被动更新和项目 Memory 管理 API 不受该开关影响。
+项目 Memory 保存在 PostgreSQL，并始终受 account、project、owner 与 namespace 作用域约束。
+符合条件的成功 Run 会在结算事务中写入 Source 与 durable `memory_extract` Job，Worker 提取
+Candidate，Scheduler 再定时准入整理 Job，由 Worker 生成带 Revision/Evidence 的长期 Fact。
+Candidate 不参与召回；`v2` Run 会固定本次使用的 Fact Revision，重试和恢复不会漂移。私有 Run
+默认可使用只读 `memory_search` 按需召回同一快照；模型只能提供查询、分类和数量，不能选择
+作用域或修改 Memory。
+
+项目 Memory 页面提供长期事实、待整理候选、修改历史和只读 Pipeline 设置四个区域，支持搜索、
+分类筛选、分页，以及带版本并发校验的接受、拒绝、编辑、停用、恢复和永久遗忘。旧 v1 aggregate
+只保留查询、状态、导出与 `off`/`shadow`/`consolidate` 模式的只读回退；旧 `MemoryMiddleware`、
+进程内 queue/updater、摘要写入 hook 和 v1 写 API 已移除。Thread 摘要只服务当前 Thread 的上下文
+压缩，不会写长期 Memory。
 
 Checkpoint 默认使用兼容的 `full` 表示，也可将全部 Gateway/Worker 同步配置为 `delta`
 以减少长会话的重复消息写入。Delta 状态始终通过项目作用域内的物化读取恢复；配置切换需要

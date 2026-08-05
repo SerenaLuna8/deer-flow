@@ -5,10 +5,36 @@ description: admitted private Run 使用的 PostgreSQL 项目 Memory。
 
 # 记忆系统
 
-Memory 把结构化上下文摘要和事实存入明确的 project、owner、namespace。读取、写入、队列项和 prompt 注入始终携带相同 authority 坐标。
+项目 Memory 把长期 Candidate、带版本的 Fact、Revision、Evidence 和每 Run 召回快照存入 PostgreSQL，并始终绑定明确的 project、owner 与 namespace。Thread 摘要是另一套数据：它只压缩当前 Thread 的对话上下文，不会自行变成长期 Memory。
 
-admitted private Run 结束后，异步 Memory middleware 过滤可见用户消息和最终助手回复，并进入项目队列。处理前重新验证 membership；updater 读取 PostgreSQL snapshot，通过乐观版本更新，并为新事实记录来源 Thread/Run。
+## 可靠写入链路
 
-没有可信项目 scope 的运行不会读取、注入或持久化 Memory；同步 middleware hook 同样失败关闭。
+符合条件的私有 Run 成功后，结算事务会原子写入受限来源消息和 durable `memory_extract` Job。Worker 使用该 Run 冻结的模型配置执行无工具提取，生成 pending Candidate。Candidate 在确认前不会被自动注入，也不会由 `memory_search` 返回。
 
-项目成员按 capability 在项目 Memory 页面管理内容。导入、清理和 fact mutation 都使用认证项目 API。
+Scheduler 会按周期为 pending Candidate 准入有界的 `memory_consolidate` Job，真正的整理只由 Worker 执行。整理可以把 Candidate 接受为新 Fact、为已有 Fact 增加 Evidence，或在事实修正时生成新 Revision。Candidate 决策与 Fact/Revision/Evidence 写入在一个事务内完成。
+
+旧的内置 `MemoryMiddleware`、进程内 queue/updater、摘要写入 hook 和 v1 写 API 已移除。摘要压缩现在只负责 Thread Context；长期 Memory 固定走 Source → extract → consolidate。
+
+## 召回
+
+Run 准入时会冻结 Pipeline mode：
+
+- `off` 不产生 v2 数据，只读保留的 v1 aggregate 作为回退来源；
+- `shadow` 提取 Candidate，但仍从 v1 召回；
+- `consolidate` 继续生成带版本的 Fact，但仍从 v1 召回；
+- `v2` 在 Run 第一次读取 Memory 时创建一份有序 Fact Revision 快照，retry/resume 始终复用它。
+
+自动注入使用隐藏的低权限 Human message，而不是 System 指令。只读 `memory_search` 对同一组 Run 固定的 v2 items 排序。模型只能提交 query、可选 category 和返回数量；project、owner、namespace、Run 与 lease authority 都由 Worker 提供并重新验证。Fact 被停用或永久遗忘后，后续读取会移除相应内容，但不会为旧 Run 补入另一条 Fact。
+
+## 项目 Memory 页面
+
+项目页面只有四个区域：
+
+- **长期记忆**：搜索、分类/状态筛选和 active/disabled Fact 分页；
+- **待整理**：pending Candidate 分页及接受/拒绝；
+- **修改历史**：所选 Fact 的 Revision、Evidence 和来源擦除状态；
+- **设置**：只读 Pipeline 状态、search/injection 开关、整理周期和 Candidate 保留期。
+
+Candidate 决策提交服务端返回的精确 `updatedAt`；Fact 编辑、停用、恢复和不可逆 hard forget 提交当前可见版本。发生并发修改时返回冲突，不会静默覆盖更新数据。v1 aggregate 只保留 scoped list、status、export 和回退召回，不能再导入或修改。
+
+没有可信项目私有 scope 的 Run 不会读取、注入、提取、整理或管理 Memory。
