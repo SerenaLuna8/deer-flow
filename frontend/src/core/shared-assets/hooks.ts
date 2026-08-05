@@ -343,11 +343,17 @@ export function useProjectAssetVersions(
   assetId: string,
   enabled = true,
 ) {
+  const hasAssetId = assetId.trim() !== "";
   return useQuery<VersionHistoryResponse>({
-    queryKey: projectAssetVersionsKey(accountId, projectId, kind, assetId),
+    queryKey: projectAssetVersionsKey(
+      accountId,
+      projectId,
+      kind,
+      hasAssetId ? assetId : "__unselected__",
+    ),
     queryFn: ({ signal }) =>
       listProjectAssetVersions(projectId, kind, assetId, signal),
-    enabled,
+    enabled: enabled && hasAssetId,
   });
 }
 
