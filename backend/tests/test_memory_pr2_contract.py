@@ -75,7 +75,7 @@ def _digest(value: str) -> str:
 
 
 def test_memory_v2_schema_and_marker_are_registered() -> None:
-    assert CURRENT_SCHEMA_REVISION == "full_schema_v2"
+    assert CURRENT_SCHEMA_REVISION == "full_schema_v3"
     assert MEMORY_V2_TABLES <= set(Base.metadata.tables)
 
     for table_name in MEMORY_V2_TABLES:
@@ -115,7 +115,7 @@ def test_memory_v2_schema_and_marker_are_registered() -> None:
     }
 
     schema_sql = (Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/full_schema.sql").read_text(encoding="utf-8")
-    assert "VALUES ('full_schema_v2')" in schema_sql
+    assert "VALUES ('full_schema_v3')" in schema_sql
     assert "full_schema_v1" not in schema_sql
     for table_name in MEMORY_V2_TABLES:
         assert f"CREATE TABLE {table_name}" in schema_sql

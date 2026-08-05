@@ -13,6 +13,7 @@ from typing import Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.run_repository import PrivateRunRecord
 from app.reliability.jobs import memory_extract_idempotency_key
 from app.system_runtime_settings.models import (
@@ -364,6 +365,7 @@ class MemorySourceAdmissionService:
         source_hmac_refs: MemorySourceHmacRefs | None = None,
         job_repository_builder=JobRepository,
         repository_builder=MemoryV2Repository,
+        personalization_repository_builder=AccountPersonalizationRepository,
         namespace: str = "default",
         extract_job_max_attempts: int = 3,
     ) -> None:
@@ -372,6 +374,7 @@ class MemorySourceAdmissionService:
             or (source_hmac_refs is not None and not callable(source_hmac_refs))
             or not callable(job_repository_builder)
             or not callable(repository_builder)
+            or not callable(personalization_repository_builder)
             or not isinstance(namespace, str)
             or not namespace
             or namespace != namespace.strip()
@@ -383,6 +386,7 @@ class MemorySourceAdmissionService:
         self._source_hmac_refs = source_hmac_refs
         self._job_repository_builder = job_repository_builder
         self._repository_builder = repository_builder
+        self._personalization_repository_builder = personalization_repository_builder
         self._namespace = namespace
         self._extract_job_max_attempts = extract_job_max_attempts
 
@@ -430,6 +434,9 @@ class MemorySourceAdmissionService:
             source_attempt_id=source_attempt_id,
         )
         if _is_non_interactive_run(run):
+            return None
+        preference = await self._personalization_repository_builder(session).read_memory(run.owner_user_id, for_update=True)
+        if not preference.memory_enabled:
             return None
 
         policy_material = await SystemRuntimePolicyRepository(session).snapshot_material(

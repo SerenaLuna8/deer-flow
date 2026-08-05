@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.authorization import PrivateRunAuthorizationService
 from app.private_work.context import (
     PrivateWorkContext,
@@ -47,6 +48,7 @@ class PrivateRunMemoryAuthority:
         thread_id: str,
         namespace: str,
         memory_config: MemoryConfig | None = None,
+        personalization_repository_builder=AccountPersonalizationRepository,
     ) -> None:
         context = require_issued_private_work_context(context)
         if type(claim) is not JobClaim or claim.run_id is None or claim.scope.project_id != context.project_id or claim.scope.owner_user_id != str(context.user_id):
@@ -61,6 +63,9 @@ class PrivateRunMemoryAuthority:
         if memory_config is not None and not isinstance(memory_config, MemoryConfig):
             raise ValueError("Memory authority configuration is invalid")
         self._memory_config = memory_config
+        if not callable(personalization_repository_builder):
+            raise ValueError("Memory authority configuration is invalid")
+        self._personalization_repository_builder = personalization_repository_builder
 
     @property
     def pipeline_mode(self) -> str:
@@ -173,6 +178,9 @@ class PrivateRunMemoryAuthority:
                     raise AuthorizationRevoked
 
                 if self._memory_config is not None and not self._memory_config.enabled:
+                    return None
+                preference = await self._personalization_repository_builder(session).read_memory(str(self._context.user_id))
+                if not preference.memory_enabled:
                     return None
                 if self.pipeline_mode == "v2":
                     return await self._load_v2(session)

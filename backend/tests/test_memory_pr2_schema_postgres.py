@@ -109,7 +109,7 @@ async def test_memory_v2_full_schema_contract(
             }
             reflected_contract = await connection.run_sync(_reflect_schema_contract)
 
-        assert marker == "full_schema_v2"
+        assert marker == "full_schema_v3"
         assert tables == MEMORY_V2_TABLES
         assert set(job_checks) == {
             "ck_jobs_type",

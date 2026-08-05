@@ -853,6 +853,18 @@ class _ConsolidationRepository:
         )
 
 
+class _PersonalizationRepository:
+    def __init__(self, *, enabled: bool = True, version: int = 1) -> None:
+        self.enabled = enabled
+        self.version = version
+
+    async def read_memory(self, _user_id, **_kwargs):
+        return SimpleNamespace(
+            memory_enabled=self.enabled,
+            version=self.version,
+        )
+
+
 def _consolidation_runtime(
     *,
     enabled: bool = True,
@@ -890,6 +902,7 @@ async def test_v2_service_dream_requires_both_capabilities_and_exact_scope() -> 
         ),
         revalidator=revalidator,
         consolidation_repository_builder=lambda _session: repository,
+        personalization_repository_builder=lambda _session: _PersonalizationRepository(),
         runtime_resolver=runtime_resolver,
     )
     context = _context()
@@ -929,8 +942,36 @@ async def test_v2_service_dream_rejects_inactive_pipeline_or_missing_model(
         ),
         revalidator=_Revalidator(),
         consolidation_repository_builder=lambda _session: _ConsolidationRepository(),
+        personalization_repository_builder=lambda _session: _PersonalizationRepository(),
         runtime_resolver=runtime_resolver,
     )
 
     with pytest.raises(error_type):
         await service.consolidate_now(_context(), namespace="default")
+
+
+@pytest.mark.asyncio
+async def test_v2_service_dream_rejects_disabled_account_memory() -> None:
+    repository = _ConsolidationRepository()
+
+    async def runtime_resolver(_session):
+        return _consolidation_runtime()
+
+    service = PrivateMemoryV2Service(
+        _SessionFactory(),
+        source_hmac=lambda _payload: SimpleNamespace(
+            hmac_hex="a" * 64,
+            key_id="test-key",
+        ),
+        revalidator=_Revalidator(),
+        consolidation_repository_builder=lambda _session: repository,
+        personalization_repository_builder=lambda _session: _PersonalizationRepository(
+            enabled=False,
+        ),
+        runtime_resolver=runtime_resolver,
+    )
+
+    with pytest.raises(PrivateWorkConflict):
+        await service.consolidate_now(_context(), namespace="default")
+
+    assert repository.calls == []

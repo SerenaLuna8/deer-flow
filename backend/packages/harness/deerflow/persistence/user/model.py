@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -66,6 +67,21 @@ class UserRow(Base):
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
+    # Account-owned Memory preference. The version is the optimistic
+    # concurrency token for both toggle and reset operations.
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    preferences_version: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+
     __table_args__ = (
         CheckConstraint("system_role IN ('system_admin', 'user')", name="ck_users_system_role"),
         CheckConstraint(
@@ -82,6 +98,10 @@ class UserRow(Base):
             "AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' "
             "AND needs_setup IS FALSE AND token_version = 0)",
             name="ck_users_channel_guest_identity",
+        ),
+        CheckConstraint(
+            "preferences_version >= 1",
+            name="ck_users_preferences_version",
         ),
         UniqueConstraint(
             "id",

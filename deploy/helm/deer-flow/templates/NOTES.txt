@@ -28,7 +28,7 @@ POSTGRES_ADMIN_URL is transient setup authority, may use the same PostgreSQL
 role, and is never injected into runtime Pods. Runtime receives one
 DATABASE_URL only.
 
-Runtime Pods require the exact full_schema_v2 marker and fail closed for legacy,
+Runtime Pods require the exact full_schema_v3 marker and fail closed for legacy,
 unknown or unmanaged non-empty databases. There is no in-place upgrade path.
 
 PROCESS AND SECRET BOUNDARIES

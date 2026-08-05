@@ -1562,6 +1562,7 @@ export interface Translations {
     description: string;
     sections: {
       account: string;
+      personalization: string;
       appearance: string;
       channels: string;
       memory: string;
@@ -1704,6 +1705,33 @@ export interface Translations {
         conflict: string;
         emptyContent: string;
       };
+    };
+    personalization: {
+      title: string;
+      description: string;
+      loading: string;
+      loadError: string;
+      loadErrorDescription: string;
+      retry: string;
+      enableTitle: string;
+      enableDescription: string;
+      platformUnavailable: string;
+      saving: string;
+      enableSuccess: string;
+      disableSuccess: string;
+      updateError: string;
+      conflict: string;
+      resetTitle: string;
+      resetDescription: string;
+      resetButton: string;
+      resetDialogTitle: string;
+      resetDialogDescription: string;
+      resetChatNotice: string;
+      cancel: string;
+      confirmReset: string;
+      resetting: string;
+      resetSuccess: string;
+      resetError: string;
     };
     appearance: {
       themeTitle: string;

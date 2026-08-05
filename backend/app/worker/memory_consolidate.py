@@ -9,6 +9,11 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.personalization.repository import (
+    AccountMemoryPreference,
+    AccountPersonalizationNotFound,
+    AccountPersonalizationRepository,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
@@ -133,6 +138,7 @@ class MemoryConsolidateJobHandler:
         repository_builder=MemoryV2Repository,
         job_repository_builder=JobRepository,
         scope_validator: MemoryScopeValidator | None = None,
+        personalization_repository_builder=AccountPersonalizationRepository,
         retry_initial_seconds: int = 5,
         retry_max_seconds: int = 300,
     ) -> None:
@@ -140,6 +146,7 @@ class MemoryConsolidateJobHandler:
             not callable(session_factory)
             or not callable(repository_builder)
             or not callable(job_repository_builder)
+            or not callable(personalization_repository_builder)
             or (consolidator_factory is None and not isinstance(app_config, AppConfig))
             or type(retry_initial_seconds) is not int
             or type(retry_max_seconds) is not int
@@ -157,6 +164,7 @@ class MemoryConsolidateJobHandler:
         self._repository_builder = repository_builder
         self._job_repository_builder = job_repository_builder
         self._scope_validator = scope_validator or _default_consolidation_scope_validator
+        self._personalization_repository_builder = personalization_repository_builder
         self._retry_initial_seconds = retry_initial_seconds
         self._retry_max_seconds = retry_max_seconds
 
@@ -183,7 +191,7 @@ class MemoryConsolidateJobHandler:
     async def _load_work(
         self,
         claim: JobClaim,
-    ) -> tuple[bool, MemoryConsolidationWork | None]:
+    ) -> tuple[bool, AccountMemoryPreference | None, MemoryConsolidationWork | None]:
         async with self._sessions() as session, session.begin():
             allowed = await self._scope_validator(
                 session,
@@ -191,14 +199,18 @@ class MemoryConsolidateJobHandler:
                 lock=False,
             )
             if not allowed:
-                return False, None
+                return False, None, None
+            try:
+                preference = await self._personalization_repository_builder(session).read_memory(claim.scope.owner_user_id or "")
+            except AccountPersonalizationNotFound:
+                return False, None, None
             work = await self._repository(session).load_consolidation_work(
                 job_id=claim.job_id,
                 project_id=claim.scope.project_id,
                 owner_user_id=claim.scope.owner_user_id or "",
                 namespace=claim.namespace or "",
             )
-        return True, work
+        return True, preference, work
 
     @staticmethod
     def _is_supported_contract(work: MemoryConsolidationWork) -> bool:
@@ -313,7 +325,7 @@ class MemoryConsolidateJobHandler:
         if authority.cancel_requested:
             return JobOutcome.cancelled()
         try:
-            allowed, work = await self._load_work(claim)
+            allowed, preference, work = await self._load_work(claim)
         except asyncio.CancelledError:
             raise
         except MemoryV2ConsolidationConflict:
@@ -324,6 +336,19 @@ class MemoryConsolidateJobHandler:
             return JobOutcome.failed("MEMORY_CONSOLIDATE_SCOPE_UNAVAILABLE")
         if work is None:
             return JobOutcome.failed("MEMORY_CONSOLIDATE_WORK_UNAVAILABLE")
+        if preference is None:
+            return JobOutcome.cancelled()
+        if not preference.memory_enabled:
+            return self._settlement(
+                claim,
+                work,
+                decisions=(),
+                max_facts=10,
+                confidence_threshold=0.0,
+                cancel=True,
+                release_candidates=True,
+                expected_preferences_version=preference.version,
+            )
         if authority.cancel_requested or work.cancel_requested or work.suppressed:
             return self._settlement(
                 claim,
@@ -485,6 +510,7 @@ class MemoryConsolidateJobHandler:
             confidence_threshold=frozen.memory.fact_confidence_threshold,
             cancel=False,
             release_candidates=False,
+            expected_preferences_version=preference.version,
         )
 
     def _settlement(
@@ -497,9 +523,15 @@ class MemoryConsolidateJobHandler:
         confidence_threshold: float,
         cancel: bool,
         release_candidates: bool,
+        expected_preferences_version: int | None = None,
     ) -> JobSettlement:
         async def commit() -> None:
             async with self._sessions() as session, session.begin():
+                try:
+                    preference = await self._personalization_repository_builder(session).read_memory(work.owner_user_id, for_update=True)
+                except AccountPersonalizationNotFound:
+                    preference = None
+                personalization_allowed = preference is not None and preference.memory_enabled and (expected_preferences_version is None or preference.version == expected_preferences_version)
                 allowed = await self._scope_validator(
                     session,
                     claim,
@@ -525,10 +557,15 @@ class MemoryConsolidateJobHandler:
                             raise MemoryV2ConsolidationConflict(
                                 "Memory consolidation policy is invalid",
                             )
-                        paused_at_commit = not current.memory.enabled or current.memory.pipeline_mode not in {
-                            "consolidate",
-                            "v2",
-                        }
+                        paused_at_commit = (
+                            not current.memory.enabled
+                            or current.memory.pipeline_mode
+                            not in {
+                                "consolidate",
+                                "v2",
+                            }
+                            or not personalization_allowed
+                        )
                         await self._repository(session).finalize_consolidation(
                             job_id=claim.job_id,
                             lease_token=claim.lease_token,

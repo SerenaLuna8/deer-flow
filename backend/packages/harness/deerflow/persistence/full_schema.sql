@@ -208,11 +208,14 @@ CREATE TABLE users (
     oauth_id VARCHAR(128),
     needs_setup BOOLEAN NOT NULL,
     token_version INTEGER NOT NULL,
+    memory_enabled BOOLEAN DEFAULT true NOT NULL,
+    preferences_version BIGINT DEFAULT 1 NOT NULL,
     PRIMARY KEY (id),
     CONSTRAINT ck_users_system_role CHECK (system_role IN ('system_admin', 'user')),
     CONSTRAINT ck_users_principal_type CHECK (principal_type IN ('human', 'channel_guest')),
     CONSTRAINT ck_users_oauth_identity_shape CHECK ((oauth_provider IS NULL AND oauth_id IS NULL) OR (oauth_provider IS NOT NULL AND oauth_id IS NOT NULL)),
     CONSTRAINT ck_users_channel_guest_identity CHECK ((principal_type = 'human' AND email IS NOT NULL) OR (principal_type = 'channel_guest' AND email IS NULL AND password_hash IS NULL AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' AND needs_setup IS FALSE AND token_version = 0)),
+    CONSTRAINT ck_users_preferences_version CHECK (preferences_version >= 1),
     CONSTRAINT uq_users_id_principal_type UNIQUE (id, principal_type)
 );
 
@@ -3184,6 +3187,6 @@ INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
 
 
-INSERT INTO alembic_version (version_num) VALUES ('full_schema_v2');
+INSERT INTO alembic_version (version_num) VALUES ('full_schema_v3');
 
 COMMIT;

@@ -340,6 +340,9 @@ async def gateway_platform_runtime(
             source_hmac=audit_keyring.memory_source_ref,
             audit=operational_audit_sink,
         )
+        from app.personalization.service import AccountPersonalizationService
+
+        app.state.account_personalization_service = AccountPersonalizationService(sf)
         app.state.channel_connection_repo = ChannelConnectionRepository(sf)
         app.state.project_connection_service = ProjectConnectionService(
             sf,

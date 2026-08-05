@@ -39,6 +39,7 @@ from deerflow.persistence.system_runtime_settings import (
     SystemRuntimePolicyVersionRow,
 )
 from deerflow.persistence.system_settings import RunModelConfigSnapshotRow
+from deerflow.persistence.user.model import UserRow
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MEMORY_CANDIDATE_ID_NAMESPACE = uuid.UUID("4395227b-ff34-5f48-b14b-009662f24ad0")
@@ -1027,14 +1028,42 @@ class MemoryV2Repository:
             )
         except MemoryV2ExtractionConflict:
             settled_at = datetime.now(UTC)
-            changed = await self.jobs.settle_success(
+            changed = (
+                await self.jobs.settle_cancelled(
+                    job_id,
+                    lease_token=lease_token,
+                    now=settled_at,
+                )
+                if cancel
+                else await self.jobs.settle_success(
+                    job_id,
+                    lease_token=lease_token,
+                    now=settled_at,
+                )
+            )
+            if not changed:
+                raise MemoryV2ExtractionLeaseLost from None
+            if cancel:
+                return MemoryCandidateCommitRecord(
+                    generation_id=generation_id,
+                    candidate_ids=(),
+                    status="cancelled",
+                )
+            raise
+        if work is None and cancel:
+            settled_at = datetime.now(UTC)
+            changed = await self.jobs.settle_cancelled(
                 job_id,
                 lease_token=lease_token,
                 now=settled_at,
             )
             if not changed:
-                raise MemoryV2ExtractionLeaseLost from None
-            raise
+                raise MemoryV2ExtractionLeaseLost
+            return MemoryCandidateCommitRecord(
+                generation_id=generation_id,
+                candidate_ids=(),
+                status="cancelled",
+            )
         if work is None or work.generation_id != generation_id or work.source_batch_id != source_batch_id or work.contract_digest != contract_digest or work.pipeline_mode != pipeline_mode:
             raise MemoryV2ExtractionConflict("Memory extraction settlement does not match")
 
@@ -1236,6 +1265,10 @@ class MemoryV2Repository:
         ).scalar_one_or_none()
         return membership is not None
 
+    async def _lock_memory_enabled(self, owner_user_id: str) -> bool:
+        enabled = await self.session.scalar(select(UserRow.memory_enabled).where(UserRow.id == owner_user_id).with_for_update(of=UserRow))
+        return enabled is True
+
     @staticmethod
     def _active_memory_job_exists(
         *,
@@ -1295,6 +1328,10 @@ class MemoryV2Repository:
                         ProjectMembershipRow.user_id == MemoryConsolidationGenerationRow.owner_user_id,
                     ),
                 )
+                .join(
+                    UserRow,
+                    UserRow.id == MemoryConsolidationGenerationRow.owner_user_id,
+                )
                 .where(
                     MemoryConsolidationGenerationRow.fact_committed_at.is_(None),
                     JobRow.job_type == "memory_consolidate",
@@ -1310,6 +1347,7 @@ class MemoryV2Repository:
                     ProjectMembershipRow.role.in_(
                         ("admin", "editor", "runner", "channel_guest"),
                     ),
+                    UserRow.memory_enabled.is_(True),
                     pending_candidate,
                 )
                 .order_by(
@@ -1325,6 +1363,8 @@ class MemoryV2Repository:
             project_id=coordinates.project_id,
             owner_user_id=coordinates.owner_user_id,
         ):
+            return None
+        if not await self._lock_memory_enabled(coordinates.owner_user_id):
             return None
         active_job = await self.session.scalar(
             select(JobRow.id)
@@ -1587,6 +1627,7 @@ class MemoryV2Repository:
                         ProjectMembershipRow.user_id == MemoryCandidateRow.owner_user_id,
                     ),
                 )
+                .join(UserRow, UserRow.id == MemoryCandidateRow.owner_user_id)
                 .where(
                     MemoryCandidateRow.status == "pending",
                     MemoryCandidateRow.consolidation_generation_id.is_(None),
@@ -1608,6 +1649,7 @@ class MemoryV2Repository:
                             "channel_guest",
                         ),
                     ),
+                    UserRow.memory_enabled.is_(True),
                     ~active_job,
                 )
                 .order_by(MemoryCandidateRow.created_at, MemoryCandidateRow.id)
@@ -1621,6 +1663,8 @@ class MemoryV2Repository:
             project_id=project_id,
             owner_user_id=owner_user_id,
         ):
+            return None
+        if not await self._lock_memory_enabled(owner_user_id):
             return None
         existing_active_job = await self.session.scalar(
             select(JobRow.id)
@@ -1710,6 +1754,12 @@ class MemoryV2Repository:
             project_id=project_id,
             owner_user_id=owner_user_id,
         ):
+            return MemoryConsolidationImmediateAdmission(
+                disposition="no_candidates",
+                job_id=None,
+                candidate_count=0,
+            )
+        if not await self._lock_memory_enabled(owner_user_id):
             return MemoryConsolidationImmediateAdmission(
                 disposition="no_candidates",
                 job_id=None,
@@ -2107,6 +2157,21 @@ class MemoryV2Repository:
             namespace=namespace,
             for_update=True,
         )
+        if work is None and cancel:
+            changed = await self.jobs.settle_cancelled(
+                job_id,
+                lease_token=lease_token,
+                now=settled_at,
+            )
+            if not changed:
+                raise MemoryV2ConsolidationLeaseLost
+            return MemoryFactCommitRecord(
+                generation_id=generation_id,
+                candidate_ids=(),
+                fact_ids=(),
+                revision_ids=(),
+                status="cancelled",
+            )
         if work is None or work.generation_id != generation_id or work.candidate_input_digest != candidate_input_digest or work.contract_digest != contract_digest:
             raise MemoryV2ConsolidationConflict(
                 "Memory consolidation settlement does not match",

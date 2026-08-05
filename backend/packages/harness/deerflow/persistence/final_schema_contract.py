@@ -83,16 +83,16 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
         digest="81ada47437032ea1ca8717daaef0a0d3d1ebcc7f7649a1ad5330ae23ad3827e2",
     ),
     "columns": CatalogInvariant(
-        count=1114,
-        digest="dc29997367d21759b1a1c8e3e82d51afc62043bb1dbc95fcfd56a5dea7503ee0",
+        count=1116,
+        digest="afa3545af183f70c2983b467dd8883c01f9a6f5845b5d2aecc2beba902ce2664",
     ),
     "sequences": CatalogInvariant(
         count=1,
         digest="94e9734ed0d3e15fc64fcf15a8ed1181999429aec5e9ddb535513ac42145acde",
     ),
     "constraints": CatalogInvariant(
-        count=851,
-        digest="e1d5c31a252ec8d0b6298714e040fae9ab725b7e0a4f66d4f65b160a42bb63ec",
+        count=852,
+        digest="4d97d28c74551aa490563b4b59d9c89c5d2129b1f5236b3547e88e97eff975a7",
     ),
     "indexes": CatalogInvariant(
         count=318,

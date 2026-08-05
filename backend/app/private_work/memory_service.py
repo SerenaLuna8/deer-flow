@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -246,8 +247,16 @@ class PrivateMemoryV2Service:
         repository_builder=MemoryV2ManagementRepository,
         consolidation_repository_builder=MemoryV2Repository,
         runtime_resolver: MemoryRuntimeResolver = resolve_memory_consolidation_runtime,
+        personalization_repository_builder=AccountPersonalizationRepository,
     ) -> None:
-        if not callable(session_factory) or not callable(source_hmac) or not callable(repository_builder) or not callable(consolidation_repository_builder) or not callable(runtime_resolver):
+        if (
+            not callable(session_factory)
+            or not callable(source_hmac)
+            or not callable(repository_builder)
+            or not callable(consolidation_repository_builder)
+            or not callable(runtime_resolver)
+            or not callable(personalization_repository_builder)
+        ):
             raise ValueError("Memory v2 service configuration is invalid")
         self._session_factory = session_factory
         self._source_hmac = source_hmac
@@ -256,6 +265,7 @@ class PrivateMemoryV2Service:
         self._repository_builder = repository_builder
         self._consolidation_repository_builder = consolidation_repository_builder
         self._runtime_resolver = runtime_resolver
+        self._personalization_repository_builder = personalization_repository_builder
 
     @staticmethod
     def _map_error(
@@ -475,6 +485,9 @@ class PrivateMemoryV2Service:
                     context,
                     Capability.SHARED_ASSETS_EXECUTE,
                 )
+                preference = await self._personalization_repository_builder(session).read_memory(str(context.user_id), for_update=True)
+                if not preference.memory_enabled:
+                    raise PrivateWorkConflict(context.request_id)
                 runtime = await self._runtime_resolver(session)
                 if not runtime.enabled or runtime.pipeline_mode not in {
                     "consolidate",

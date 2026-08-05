@@ -46,6 +46,21 @@ class _SessionFactory:
         return _Session()
 
 
+class _PersonalizationRepository:
+    def __init__(self, *preferences: tuple[bool, int]) -> None:
+        self.preferences = list(preferences or ((True, 1),))
+        self.calls: list[dict[str, object]] = []
+
+    async def read_memory(self, _user_id, **kwargs):
+        self.calls.append(kwargs)
+        enabled, version = self.preferences.pop(0) if len(self.preferences) > 1 else self.preferences[0]
+        return SimpleNamespace(memory_enabled=enabled, version=version)
+
+
+def _enabled_personalization_repository(_session) -> _PersonalizationRepository:
+    return _PersonalizationRepository()
+
+
 class _Authority:
     def __init__(self, *, cancel_requested: bool = False) -> None:
         self.cancel_requested = cancel_requested
@@ -214,6 +229,7 @@ async def test_memory_extract_handler_calls_model_then_defers_atomic_finalize() 
         runtime_policy_materializer=policy,
         extractor_factory=lambda _model: extractor,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
     authority = _Authority()
@@ -276,6 +292,7 @@ async def test_memory_extract_handler_skips_model_for_terminal_domain_work(
         runtime_policy_materializer=_PolicyMaterializer(),
         extractor_factory=lambda _model: extractor,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -303,6 +320,7 @@ async def test_memory_extract_handler_retries_invalid_model_output() -> None:
         runtime_policy_materializer=_PolicyMaterializer(),
         extractor_factory=lambda _model: extractor,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -327,6 +345,7 @@ async def test_memory_extract_handler_rejects_an_unknown_frozen_contract() -> No
         runtime_policy_materializer=_PolicyMaterializer(),
         extractor_factory=lambda _model: extractor,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -363,6 +382,7 @@ async def test_memory_extract_handler_rechecks_scope_before_commit() -> None:
         runtime_policy_materializer=_PolicyMaterializer(),
         extractor_factory=lambda _model: extractor,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=scope,
     )
 
@@ -372,6 +392,74 @@ async def test_memory_extract_handler_rechecks_scope_before_commit() -> None:
     assert scope.locks == [False, True]
     assert repository.finalized[0]["cancel"] is True
     assert repository.finalized[0]["candidates"] == ()
+
+
+@pytest.mark.asyncio
+async def test_memory_extract_handler_skips_model_when_account_memory_is_disabled() -> None:
+    claim = _claim()
+    repository = _Repository(_work(claim))
+    personalization = _PersonalizationRepository((False, 3))
+    model = _ModelMaterializer()
+    extractor = _Extractor(MemoryExtractionResult(()))
+    handler = MemoryExtractJobHandler(
+        _SessionFactory(),
+        app_config=None,
+        model_materializer=model,
+        runtime_policy_materializer=_PolicyMaterializer(),
+        extractor_factory=lambda _model: extractor,
+        repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=lambda _session: personalization,
+        scope_validator=_scope_allowed,
+    )
+
+    settlement = await handler(claim, _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome == JobOutcome.cancelled()
+    assert model.calls == []
+    assert extractor.calls == []
+    await settlement.commit()
+    assert repository.finalized[0]["cancel"] is True
+    assert repository.finalized[0]["candidates"] == ()
+
+
+@pytest.mark.asyncio
+async def test_memory_extract_handler_discards_result_after_preference_version_changes() -> None:
+    claim = _claim()
+    repository = _Repository(_work(claim))
+    personalization = _PersonalizationRepository((True, 1), (True, 2))
+    extractor = _Extractor(
+        MemoryExtractionResult(
+            candidates=(
+                ExtractedMemoryCandidate(
+                    source_ordinal=0,
+                    candidate_type="preference",
+                    content="用户偏好简洁回答。",
+                    confidence=0.98,
+                    retention_class="durable",
+                    sensitivity="normal",
+                ),
+            ),
+        )
+    )
+    handler = MemoryExtractJobHandler(
+        _SessionFactory(),
+        app_config=None,
+        model_materializer=_ModelMaterializer(),
+        runtime_policy_materializer=_PolicyMaterializer(),
+        extractor_factory=lambda _model: extractor,
+        repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=lambda _session: personalization,
+        scope_validator=_scope_allowed,
+    )
+
+    settlement = await handler(claim, _Authority())
+    await settlement.commit()
+
+    assert len(extractor.calls) == 1
+    assert repository.finalized[0]["cancel"] is True
+    assert repository.finalized[0]["candidates"] == ()
+    assert personalization.calls == [{}, {"for_update": True}]
 
 
 def test_worker_service_accepts_pr5_memory_handlers() -> None:

@@ -2,6 +2,6 @@
 
 # Updated together with FINAL_M7_CATALOG_SIGNATURE after installing
 # ``full_schema.sql`` in a disposable PostgreSQL database.
-M7_CANONICAL_SCHEMA_DIGEST = "a62e0d972d9e698bc414790cb64e0421c7f426df7956b9d46c8071b29821b4bc"
+M7_CANONICAL_SCHEMA_DIGEST = "e74ff8d21f8b540e4a5a78e6d3ba2890f2a851006d99328f5a74bcbe20fe5b19"
 
 __all__ = ["M7_CANONICAL_SCHEMA_DIGEST"]

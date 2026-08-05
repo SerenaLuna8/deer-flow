@@ -9,6 +9,11 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.personalization.repository import (
+    AccountMemoryPreference,
+    AccountPersonalizationNotFound,
+    AccountPersonalizationRepository,
+)
 from app.private_work.memory_source_admission import (
     MEMORY_EXTRACT_OUTPUT_SCHEMA_VERSION,
     MEMORY_EXTRACT_PROMPT_VERSION,
@@ -102,8 +107,15 @@ class MemoryExtractJobHandler:
         repository_builder=MemoryV2Repository,
         job_repository_builder=JobRepository,
         scope_validator: MemoryScopeValidator | None = None,
+        personalization_repository_builder=AccountPersonalizationRepository,
     ) -> None:
-        if not callable(session_factory) or not callable(repository_builder) or not callable(job_repository_builder) or (extractor_factory is None and not isinstance(app_config, AppConfig)):
+        if (
+            not callable(session_factory)
+            or not callable(repository_builder)
+            or not callable(job_repository_builder)
+            or not callable(personalization_repository_builder)
+            or (extractor_factory is None and not isinstance(app_config, AppConfig))
+        ):
             raise ValueError("Memory extract Worker configuration is invalid")
         self._sessions = session_factory
         self._app_config = app_config
@@ -115,6 +127,7 @@ class MemoryExtractJobHandler:
         self._repository_builder = repository_builder
         self._job_repository_builder = job_repository_builder
         self._scope_validator = scope_validator or _default_scope_validator
+        self._personalization_repository_builder = personalization_repository_builder
 
     def _make_extractor(self, model: object) -> MemoryCandidateExtractor:
         if self._app_config is None:
@@ -139,7 +152,7 @@ class MemoryExtractJobHandler:
     async def _load_work(
         self,
         claim: JobClaim,
-    ) -> tuple[bool, MemoryExtractionWork | None]:
+    ) -> tuple[bool, AccountMemoryPreference | None, MemoryExtractionWork | None]:
         async with self._sessions() as session, session.begin():
             allowed = await self._scope_validator(
                 session,
@@ -147,14 +160,18 @@ class MemoryExtractJobHandler:
                 lock=False,
             )
             if not allowed:
-                return False, None
+                return False, None, None
+            try:
+                preference = await self._personalization_repository_builder(session).read_memory(claim.scope.owner_user_id or "")
+            except AccountPersonalizationNotFound:
+                return False, None, None
             work = await self._repository(session).load_extraction_work(
                 job_id=claim.job_id,
                 project_id=claim.scope.project_id,
                 owner_user_id=claim.scope.owner_user_id or "",
                 namespace=claim.namespace or "",
             )
-        return True, work
+        return True, preference, work
 
     async def __call__(
         self,
@@ -168,7 +185,7 @@ class MemoryExtractJobHandler:
         if authority.cancel_requested:
             return JobOutcome.cancelled()
         try:
-            allowed, work = await self._load_work(claim)
+            allowed, preference, work = await self._load_work(claim)
         except asyncio.CancelledError:
             raise
         except MemoryV2ExtractionConflict:
@@ -179,6 +196,16 @@ class MemoryExtractJobHandler:
             return JobOutcome.cancelled()
         if work is None:
             return JobOutcome.failed("MEMORY_EXTRACT_WORK_UNAVAILABLE")
+        if preference is None:
+            return JobOutcome.cancelled()
+        if not preference.memory_enabled:
+            return self._settlement(
+                claim,
+                work,
+                candidates=(),
+                cancel=True,
+                expected_preferences_version=preference.version,
+            )
         if work.suppressed:
             return self._settlement(
                 claim,
@@ -281,6 +308,7 @@ class MemoryExtractJobHandler:
             work,
             candidates=writes,
             cancel=False,
+            expected_preferences_version=preference.version,
         )
 
     def _settlement(
@@ -290,9 +318,15 @@ class MemoryExtractJobHandler:
         *,
         candidates: tuple[MemoryCandidateWrite, ...],
         cancel: bool,
+        expected_preferences_version: int | None = None,
     ) -> JobSettlement:
         async def commit() -> None:
             async with self._sessions() as session, session.begin():
+                try:
+                    preference = await self._personalization_repository_builder(session).read_memory(work.owner_user_id, for_update=True)
+                except AccountPersonalizationNotFound:
+                    preference = None
+                personalization_allowed = preference is not None and preference.memory_enabled and (expected_preferences_version is None or preference.version == expected_preferences_version)
                 allowed = await self._scope_validator(
                     session,
                     claim,
@@ -309,8 +343,8 @@ class MemoryExtractJobHandler:
                         source_batch_id=work.source_batch_id,
                         contract_digest=work.contract_digest,
                         pipeline_mode=work.pipeline_mode,
-                        candidates=candidates if allowed else (),
-                        cancel=cancel or not allowed,
+                        candidates=(candidates if allowed and personalization_allowed else ()),
+                        cancel=cancel or not allowed or not personalization_allowed,
                     )
                 except MemoryV2ExtractionLeaseLost:
                     raise LeaseLost(claim.job_id) from None

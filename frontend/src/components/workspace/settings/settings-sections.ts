@@ -1,5 +1,6 @@
 export const SETTINGS_SECTION_IDS = [
   "account",
+  "personalization",
   "appearance",
   "notification",
   "about",

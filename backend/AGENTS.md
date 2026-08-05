@@ -69,7 +69,7 @@ does not acquire the Scheduler ownership lock or start polling.
 ## PostgreSQL full-schema initialization
 
 `full_schema.sql` is the only complete application-schema source. The exact current marker is
-`full_schema_v2`; there is no Alembic revision chain or incremental upgrade path.
+`full_schema_v3`; there is no Alembic revision chain or incremental upgrade path.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the named
 empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
@@ -623,7 +623,7 @@ PostgreSQL is the only project Memory authority. Every row remains bound to
 `project_id + owner_user_id + namespace`; the harness must not derive these coordinates from
 model arguments, request payloads, ambient user state, or a replaceable Memory backend.
 
-The `full_schema_v2` snapshot reserves the complete staged Memory v2 contract: Source Batch and
+The `full_schema_v3` snapshot reserves the complete staged Memory v2 contract: Source Batch and
 Item, Extraction/Consolidation Generation, Candidate, versioned Fact/Evidence, derived Summary,
 Suppression, and per-Run Context Snapshot rows, plus the `memory_extract`,
 `memory_consolidate`, and `memory_retention_purge` Job types. `memory.pipeline_mode` is frozen in
@@ -645,6 +645,16 @@ the pause has linearized.
 uses the same current policy/model contract and existing `memory_consolidate` Job, but selects only
 currently pending Candidates from the authenticated exact project/owner/namespace without the
 Scheduler age interval. It never scans chat history, runs the model in Gateway, or creates a Run.
+
+Account personalization is stored on `users.memory_enabled` with
+`users.preferences_version` as the CAS token. The strict authenticated account API is
+`GET/PATCH /api/v1/account/personalization` plus
+`POST /api/v1/account/personalization/memory/reset`; it never accepts owner or project
+coordinates from the client. Effective Memory requires both the platform policy and this account
+preference. Source admission, recall/search, Scheduler/Dream admission, and Worker settlement all
+honor the same preference. Reset enumerates retained memberships server-side, erases owner-private
+v1/v2 Memory and active Memory jobs across every namespace, preserves replay suppressions, and
+does not delete Threads, Runs, messages, files, or compact summaries.
 
 Gateway exposes `/api/projects/{project_id}/memory/v2/*` as the writable management surface. Fact
 lists support bounded search, category/status filtering, and `limit/offset` pagination; Candidate

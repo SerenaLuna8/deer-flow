@@ -13,6 +13,7 @@ from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import gateway_platform_runtime
 from app.gateway.routers import (
+    account_personalization,
     admin_assets,
     admin_audit,
     admin_jobs,
@@ -337,6 +338,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
+    app.include_router(account_personalization.router)
 
     # Project-scoped SaaS API is mounted at /api/projects.
     app.include_router(projects.router)

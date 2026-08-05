@@ -107,7 +107,7 @@ model-provider API keys before starting the role.
 
 `make setup-db` is the only schema initialization entry point. It requires an empty PostgreSQL
 target, executes the complete packaged `full_schema.sql`, records the exact
-`full_schema_v2` marker, seeds the packaged system catalog, initializes the LangGraph schema,
+`full_schema_v3` marker, seeds the packaged system catalog, initializes the LangGraph schema,
 bootstraps the default project, and atomically seeds the encrypted DeepSeek V4 Pro
 Credential/model/default pointer. Missing `DEEPSEEK_API_KEY` or an invalid Credential keyring
 fails preflight before the target database is created.
@@ -193,7 +193,7 @@ These apply repo-wide; module guides own the module-specific detail.
   不要为这些命令再新增重复 workflow；Replay E2E、发布、容器、Helm Chart 和版本检查仍使用专用
   workflow。该核心集合用于快速保护主路径，不代表外部模型、浏览器矩阵或部署环境的完整认证。
 - **Single full-schema initialization** — `full_schema.sql` 是唯一完整 PostgreSQL schema
-  来源，当前精确 marker 为 `full_schema_v2`。`make setup-db` 只接受空库，并在同一次显式初始化中
+  来源，当前精确 marker 为 `full_schema_v3`。`make setup-db` 只接受空库，并在同一次显式初始化中
   安装完整 schema、builtin catalog、LangGraph schema 与 default project。仓库不提供增量升级；
   旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 必须换空库重建。运行时和
   `make check-db` 只读校验。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。

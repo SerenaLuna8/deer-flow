@@ -541,6 +541,12 @@ root. Each section is replaced atomically with its expected revision; conflict r
 the local draft, and the UI renders the server-confirmed effective revision, effect scope, and any
 pending runtime roles. Agent model references are limited to active system logical model names.
 
+The ordinary Settings dialog has a separate account-owned Personalization section. Its Memory
+switch and reset action use the strict account API and `preferences_version` CAS; they are not
+local settings and do not edit the platform runtime policy. Reset confirmation must state that
+chats and `/compact` summaries are preserved. Success cancels and removes every project Memory
+query for the active account while leaving Thread and other private-work caches intact.
+
 ## Component ownership
 
 - `ProjectContextProvider` owns project resolution and enter.

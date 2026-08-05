@@ -1,7 +1,7 @@
 # Memory v2 稳定化与个性化执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR9—PR12 代码与离线测试完成；当前阶段 PR13；真实环境终验待完成）
+- 状态：执行中（PR9—PR13 代码与完整核心门禁完成；真实环境终验待完成）
 - 前置提交：3024d664
 - 基线分支：codex/memory-system-refactor
 - 上游计划：[记忆系统重构执行计划](./memory-system-refactor-execution-plan.zh-CN.md)

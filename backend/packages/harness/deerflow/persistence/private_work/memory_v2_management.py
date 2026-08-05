@@ -136,6 +136,15 @@ class MemoryV2HardForgetResult:
     erased_source_items: int
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryV2ResetResult:
+    source_batches: int
+    candidates: int
+    facts: int
+    snapshots: int
+    jobs_cancelled: int
+
+
 def _scope(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
     if type(scope) is not PrivateResourceScope:
         raise MemoryV2ManagementInvalid
@@ -1512,6 +1521,129 @@ class MemoryV2ManagementRepository:
         ):
             await self.session.execute(delete(row_type).where(*predicates(row_type)))
 
+    async def reset_scope(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        now: datetime,
+    ) -> MemoryV2ResetResult:
+        """Erase one account-owned project scope while preserving replay suppression."""
+
+        reset_at = _aware(now)
+        try:
+            uuid.UUID(owner_user_id)
+        except (TypeError, ValueError):
+            raise MemoryV2ManagementInvalid from None
+
+        def predicates(row_type):
+            return (
+                row_type.project_id == project_id,
+                row_type.owner_user_id == owner_user_id,
+            )
+
+        source_batches = int(await self.session.scalar(select(func.count()).select_from(MemorySourceBatchRow).where(*predicates(MemorySourceBatchRow))) or 0)
+        candidates = int(await self.session.scalar(select(func.count()).select_from(MemoryCandidateRow).where(*predicates(MemoryCandidateRow))) or 0)
+        facts = int(await self.session.scalar(select(func.count()).select_from(MemoryFactRow).where(*predicates(MemoryFactRow))) or 0)
+        snapshots = int(await self.session.scalar(select(func.count()).select_from(RunMemoryContextSnapshotRow).where(*predicates(RunMemoryContextSnapshotRow))) or 0)
+
+        source_identities = (
+            await self.session.execute(
+                select(
+                    MemorySourceItemRow.namespace,
+                    MemorySourceItemRow.content_hmac,
+                    MemorySourceBatchRow.source_hmac_key_version,
+                )
+                .join(
+                    MemorySourceBatchRow,
+                    MemorySourceBatchRow.id == MemorySourceItemRow.source_batch_id,
+                )
+                .where(*predicates(MemorySourceItemRow))
+                .order_by(MemorySourceItemRow.namespace, MemorySourceItemRow.id)
+            )
+        ).all()
+        if source_identities:
+            await self.session.execute(
+                insert(MemorySuppressionRow)
+                .values(
+                    [
+                        {
+                            "id": uuid.uuid4(),
+                            "project_id": project_id,
+                            "owner_user_id": owner_user_id,
+                            "namespace": row.namespace,
+                            "suppression_kind": "source",
+                            "identity_hmac": row.content_hmac,
+                            "hmac_key_version": row.source_hmac_key_version,
+                            "reason": "account_memory_reset",
+                            "created_at": reset_at,
+                        }
+                        for row in source_identities
+                    ]
+                )
+                .on_conflict_do_nothing(
+                    constraint="uq_memory_suppressions_identity",
+                )
+            )
+
+        active_job_ids = tuple(
+            (
+                await self.session.execute(
+                    select(JobRow.id)
+                    .where(
+                        JobRow.project_id == project_id,
+                        JobRow.owner_user_id == owner_user_id,
+                        JobRow.job_type.in_(
+                            (
+                                "memory_extract",
+                                "memory_consolidate",
+                                "memory_retention_purge",
+                            )
+                        ),
+                        JobRow.status.in_(("queued", "leased", "running", "retry_wait")),
+                    )
+                    .order_by(JobRow.id)
+                    .with_for_update(of=JobRow)
+                )
+            ).scalars()
+        )
+        scope = JobScope(project_id, owner_user_id)
+        jobs_cancelled = 0
+        for job_id in active_job_ids:
+            if await self.jobs.request_cancel(
+                scope,
+                job_id,
+                reason="account_memory_reset",
+                now=reset_at,
+            ):
+                jobs_cancelled += 1
+                await self.jobs.settle_requested_cancel(
+                    scope,
+                    job_id,
+                    now=reset_at,
+                )
+
+        for row_type in (
+            RunMemoryContextSnapshotRow,
+            MemoryContextSummaryRow,
+            MemoryFactEvidenceRow,
+            MemoryFactRow,
+            MemoryCandidateRow,
+            MemoryConsolidationGenerationRow,
+            MemoryExtractionGenerationRow,
+            MemorySourceItemRow,
+            MemorySourceBatchRow,
+        ):
+            await self.session.execute(delete(row_type).where(*predicates(row_type)))
+        await self.session.flush()
+        return MemoryV2ResetResult(
+            source_batches=source_batches,
+            candidates=candidates,
+            facts=facts,
+            snapshots=snapshots,
+            jobs_cancelled=jobs_cancelled,
+        )
+
 
 __all__ = [
     "MemoryCandidateStatus",
@@ -1527,4 +1659,5 @@ __all__ = [
     "MemoryV2ManagementNotFound",
     "MemoryV2ManagementRepository",
     "MemoryV2RevisionView",
+    "MemoryV2ResetResult",
 ]

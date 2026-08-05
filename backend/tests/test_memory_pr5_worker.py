@@ -51,6 +51,21 @@ class _SessionFactory:
         return _Session()
 
 
+class _PersonalizationRepository:
+    def __init__(self, *preferences: tuple[bool, int]) -> None:
+        self.preferences = list(preferences or ((True, 1),))
+        self.calls: list[dict[str, object]] = []
+
+    async def read_memory(self, _user_id, **kwargs):
+        self.calls.append(kwargs)
+        enabled, version = self.preferences.pop(0) if len(self.preferences) > 1 else self.preferences[0]
+        return SimpleNamespace(memory_enabled=enabled, version=version)
+
+
+def _enabled_personalization_repository(_session) -> _PersonalizationRepository:
+    return _PersonalizationRepository()
+
+
 class _Authority:
     def __init__(self, *, cancel_requested: bool = False) -> None:
         self.cancel_requested = cancel_requested
@@ -237,6 +252,7 @@ async def test_consolidate_worker_uses_frozen_policy_and_exact_model() -> None:
         runtime_policy_materializer=policy,
         consolidator_factory=lambda _model: consolidator,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -278,6 +294,7 @@ async def test_consolidate_worker_rejects_sensitive_candidate_without_model() ->
         runtime_policy_materializer=policy,
         consolidator_factory=lambda _model: consolidator,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -302,6 +319,7 @@ async def test_consolidate_worker_pause_releases_bound_backlog() -> None:
         runtime_policy_materializer=policy,
         consolidator_factory=lambda _model: _Consolidator(MemoryConsolidationResult(decisions=())),
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -364,6 +382,7 @@ async def test_consolidate_worker_rechecks_pause_at_commit() -> None:
         runtime_policy_materializer=policy,
         consolidator_factory=lambda _model: consolidator,
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 
@@ -384,6 +403,81 @@ async def test_consolidate_worker_rechecks_pause_at_commit() -> None:
     assert finalized["release_candidates_on_cancel"] is True
     assert finalized["decisions"] == ()
     assert policy.current_in_session_for_update == [True]
+
+
+@pytest.mark.asyncio
+async def test_consolidate_worker_skips_model_when_account_memory_is_disabled() -> None:
+    claim = _claim()
+    repository = _Repository(_work(claim))
+    personalization = _PersonalizationRepository((False, 3))
+    model = _ModelMaterializer()
+    consolidator = _Consolidator(MemoryConsolidationResult(decisions=()))
+    handler = MemoryConsolidateJobHandler(
+        _SessionFactory(),
+        app_config=None,
+        model_materializer=model,
+        runtime_policy_materializer=_PolicyMaterializer(),
+        consolidator_factory=lambda _model: consolidator,
+        repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=lambda _session: personalization,
+        scope_validator=_scope_allowed,
+    )
+
+    settlement = await handler(claim, _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome == JobOutcome.cancelled()
+    assert model.calls == []
+    assert consolidator.calls == []
+    await settlement.commit()
+    finalized = repository.consolidation_finalized[0]
+    assert finalized["cancel"] is True
+    assert finalized["release_candidates_on_cancel"] is True
+
+
+@pytest.mark.asyncio
+async def test_consolidate_worker_discards_result_after_preference_version_changes() -> None:
+    claim = _claim()
+    work = _work(claim)
+    repository = _Repository(work)
+    personalization = _PersonalizationRepository((True, 1), (True, 2))
+    candidate = work.candidates[0]
+    consolidator = _Consolidator(
+        MemoryConsolidationResult(
+            decisions=(
+                MemoryConsolidationDecision(
+                    candidate_id=candidate.id,
+                    action="create",
+                    target_fact_id=None,
+                    content=candidate.content,
+                    category="preference",
+                    confidence=0.95,
+                    change_reason="new_fact",
+                    decision_reason=None,
+                ),
+            )
+        )
+    )
+    handler = MemoryConsolidateJobHandler(
+        _SessionFactory(),
+        app_config=None,
+        model_materializer=_ModelMaterializer(),
+        runtime_policy_materializer=_PolicyMaterializer(),
+        consolidator_factory=lambda _model: consolidator,
+        repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=lambda _session: personalization,
+        scope_validator=_scope_allowed,
+    )
+
+    settlement = await handler(claim, _Authority())
+    await settlement.commit()
+
+    assert len(consolidator.calls) == 1
+    finalized = repository.consolidation_finalized[0]
+    assert finalized["cancel"] is True
+    assert finalized["decisions"] == ()
+    assert finalized["release_candidates_on_cancel"] is True
+    assert personalization.calls == [{}, {"for_update": True}]
 
 
 @pytest.mark.asyncio
@@ -502,6 +596,7 @@ async def test_consolidate_worker_retries_temporarily_unavailable_scope() -> Non
             MemoryConsolidationResult(decisions=()),
         ),
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_unavailable,
     )
 
@@ -524,6 +619,7 @@ async def test_consolidate_worker_rejects_unknown_contract_before_model() -> Non
         runtime_policy_materializer=_PolicyMaterializer(),
         consolidator_factory=lambda _model: _Consolidator(MemoryConsolidationResult(decisions=())),
         repository_builder=lambda _session, **_kwargs: repository,
+        personalization_repository_builder=_enabled_personalization_repository,
         scope_validator=_scope_allowed,
     )
 

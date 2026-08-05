@@ -24,7 +24,7 @@ The default chart deliberately has no usable database target. Choose one:
 
 The database must have been initialized from an empty target by the checkout's
 sole supported `make setup-db` workflow before Gateway, Worker or Scheduler
-starts. Runtime Pods only validate `full_schema_v2`; they never create, migrate,
+starts. Runtime Pods only validate `full_schema_v3`; they never create, migrate,
 stamp, repair or delete schema. An older, unknown or non-empty unmanaged
 database must be replaced with a new empty database rather than upgraded in
 place.

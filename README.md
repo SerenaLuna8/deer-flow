@@ -24,6 +24,11 @@ Candidate 不参与召回；`v2` Run 会固定本次使用的 Fact Revision，�
 作用域或修改 Memory。聊天输入框中的 `/Dream` 是内置命令：它会立即把当前项目、当前账号
 尚未整理的 Candidate 加入既有整理队列，不会作为普通聊天消息发送，也不会重新扫描对话。
 
+系统设置中的“个性化 → 记忆”提供账号级启用开关与重置入口。个人开关与平台 Memory Policy
+共同决定是否召回和生成记忆；关闭只暂停使用和生成，不删除已有内容。重置会清除当前账号在
+所有保留项目中的 v1/v2 长期记忆、候选、来源和快照，但不会删除 Thread、聊天消息、文件或
+`/compact` 摘要。
+
 项目 Memory 页面提供长期事实、待整理候选、修改历史和只读 Pipeline 设置四个区域，支持搜索、
 分类筛选、分页，以及带版本并发校验的接受、拒绝、编辑、停用、恢复和永久遗忘。旧 v1 aggregate
 只保留查询、状态、导出与 `off`/`shadow`/`consolidate` 模式的只读回退；旧 `MemoryMiddleware`、
@@ -142,7 +147,7 @@ Scheduler 和 Worker。
 
 ### 3. 初始化 PostgreSQL
 
-`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v2`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY` 与 Credential keyring，把原示例中的 DeepSeek V4 Pro 配置及加密 `model_api_key` Credential 写入 PostgreSQL，并将模型设为 active/default；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v3`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY` 与 Credential keyring，把原示例中的 DeepSeek V4 Pro 配置及加密 `model_api_key` Credential 写入 PostgreSQL，并将模型设为 active/default；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 在根目录 .env 中配置 DATABASE_URL、POSTGRES_ADMIN_URL、
@@ -152,7 +157,7 @@ make setup-db
 make check-db
 ```
 
-`make check-db` 只读校验 `full_schema_v2` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
+`make check-db` 只读校验 `full_schema_v3` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 

@@ -1825,6 +1825,7 @@ export const enUS: Translations = {
     description: "Adjust how ActWeave looks and behaves for you.",
     sections: {
       account: "Account",
+      personalization: "Personalization",
       appearance: "Appearance",
       channels: "Channels",
       memory: "Memory",
@@ -1982,6 +1983,41 @@ export const enUS: Translations = {
           "Memory changed while you were editing. Refresh and try again.",
         emptyContent: "(content unavailable)",
       },
+    },
+    personalization: {
+      title: "Memory",
+      description:
+        "Control how ActWeave collects, retains, and uses long-term memory for your account.",
+      loading: "Loading Memory settings…",
+      loadError: "Memory settings could not be loaded",
+      loadErrorDescription:
+        "Your current setting has not changed. Please try again.",
+      retry: "Retry",
+      enableTitle: "Enable Memory",
+      enableDescription:
+        "Create long-term memory from chats and recall it in future conversations.",
+      platformUnavailable:
+        "Memory is currently disabled by the system. Your preference is still saved.",
+      saving: "Saving…",
+      enableSuccess: "Memory enabled",
+      disableSuccess: "Memory disabled; existing content is preserved",
+      updateError: "Memory settings could not be updated. Please try again.",
+      conflict:
+        "This setting changed elsewhere. It has been refreshed; please try again.",
+      resetTitle: "Reset Memory",
+      resetDescription:
+        "Delete long-term memory and pending content for this account in every project.",
+      resetButton: "Reset",
+      resetDialogTitle: "Reset all Memory?",
+      resetDialogDescription:
+        "This permanently deletes long-term facts, pending candidates, sources, and Memory snapshots. It cannot be undone.",
+      resetChatNotice:
+        "Chats, thread context, files, and /compact summaries will not be deleted.",
+      cancel: "Cancel",
+      confirmReset: "Reset Memory",
+      resetting: "Resetting…",
+      resetSuccess: "Memory reset; chats were left unchanged",
+      resetError: "Memory could not be reset. Please try again.",
     },
     appearance: {
       themeTitle: "Theme",
