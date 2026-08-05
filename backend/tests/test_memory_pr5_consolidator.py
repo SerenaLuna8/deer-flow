@@ -224,3 +224,32 @@ async def test_consolidator_accepts_wrapped_json_and_omitted_nullable_fields() -
     assert result.decisions[0].target_fact_id is None
     assert "ephemeral" in caller.calls[0][0]
     assert json.loads(caller.calls[0][1])["candidates"][0]["retention_class"] == "ephemeral"
+
+
+@pytest.mark.asyncio
+async def test_consolidator_prompt_defines_every_action_and_cross_candidate_conflict() -> None:
+    candidate = _candidate()
+    caller = _Caller(
+        {
+            "decisions": [
+                {
+                    "candidate_id": str(candidate.id),
+                    "action": "pending",
+                    "decision_reason": "insufficient_evidence",
+                }
+            ]
+        }
+    )
+
+    await MemoryConsolidator(caller).consolidate((candidate,), ())
+
+    system_instruction = caller.calls[0][0]
+    normalized_instruction = " ".join(system_instruction.split())
+    for action in ("create", "confirm", "revise", "pending", "reject"):
+        assert f'"action":"{action}"' in system_instruction
+    assert "copy target_fact_id only from facts[].fact_id" in normalized_instruction
+    assert "When facts is empty, confirm and revise are impossible" in normalized_instruction
+    assert "conflicts with another candidate in the same input" in normalized_instruction
+    assert "does not enumerate the durable values" in normalized_instruction
+    assert "must be pending with insufficient_evidence" in normalized_instruction
+    assert "Return all eight keys for every decision" in normalized_instruction

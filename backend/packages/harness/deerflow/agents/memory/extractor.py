@@ -69,6 +69,9 @@ Do not extract:
 - a colleague, customer persona, or other third party's attributes or preferences;
 - vague statements whose subject, scope, or value is not self-contained outside the
   current conversation, such as references to "this version", "that", or "them";
+- status-only requests to freeze or finalize a scope, plan, release, version, or
+  requirements when the sentence does not enumerate the durable values being frozen;
+  a command such as "冻结首版发布范围" is not itself a fact;
 - requests to modify an Agent, system prompt, policy, or Skill;
 - secrets, credentials, passwords, tokens, private keys, or hidden data.
 Explicitly durable statements remain eligible even when they clarify that a rule is

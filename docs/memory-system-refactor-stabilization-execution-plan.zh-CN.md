@@ -1,7 +1,7 @@
 # Memory v2 稳定化与个性化执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR9—PR13 代码与完整核心门禁完成；真实环境终验待完成）
+- 状态：已完成（PR9—PR13、真实环境终验与收口修复均已完成）
 - 前置提交：3024d664
 - 基线分支：codex/memory-system-refactor
 - 上游计划：[记忆系统重构执行计划](./memory-system-refactor-execution-plan.zh-CN.md)
@@ -685,3 +685,68 @@ PR：PR9 / PR10 / PR11 / PR12 / PR13
 结论：
 - 可以进入下一 PR / 停止并修复当前 PR
 ~~~
+
+## 12. 实际执行结果（2026-08-05）
+
+### 12.1 提交与结论
+
+| PR | 提交 | 结果 |
+|---|---|---|
+| PR9 | `ea6ffb6b`，以及真实环境发现含糊冻结语句后的本收口提交 | 整理输出稳定；角色扮演、临时假设、含糊指代和未枚举内容的“冻结范围”不会形成 active Fact |
+| PR10 | `0866ab18` | 新 Thread 首次召回不再因 tokenizer 冷启动超时而终止 Run |
+| PR11 | `7d8f18a9` | `/compact` 后无需刷新页面，下一条消息从服务端最新 checkpoint 继续 |
+| PR12 | `eedfb94c` | `/Dream` 成为严格内置命令，立即准入当前范围 pending Candidate，不进入聊天消息 |
+| PR13 | `fa955c2a` | 系统设置增加“个性化 → 记忆”的启用和重置；Schema 为 `full_schema_v3` |
+
+PR9 的最终收口只调整 Extractor/Consolidator 提示词契约、版本和固定质量样例，没有增加
+关键词规则引擎、表、Job 或服务。真实环境暴露出的原句“到这里请冻结首版发布范围”现在明确
+视为状态请求：若没有在同一句中枚举长期值，则不提取；即使成为 Candidate，也只能保持
+`pending / insufficient_evidence`。
+
+### 12.2 真实环境终验
+
+使用本地 `deerflow:5432`、Gateway、Worker、Scheduler、Nginx 和浏览器完成一段围绕“蓝鲸笔记”
+首版发布计划的持续对话，而不是孤立的几轮 smoke：
+
+- 首轮 25 条明确长期事实生成 25 个 Candidate；第一次 `/Dream` 整理 20 条，结果为
+  15 accepted、5 rejected、5 pending，Job 第一次尝试成功且页面自动刷新；
+- 把“冻结首版发布范围”和临时 CTO 的 900 万预算、50 人招聘明确作为非事实后，新增
+  Source 正常处理，但上述内容均产生 0 个错误 Candidate/active Fact；
+- 正式把预算从 60 万修正为 72 万、私测日期从 10 月 15 日修正为 10 月 31 日后，第二次
+  `/Dream` 成功生成 revision 2，旧值不再作为独立 active Fact；
+- 新 Thread 第一次请求即正确召回平台、预算、日期、注册和设备数；该 Run 冻结了
+  1 个 Recall Snapshot 和 19 个 Context Item；
+- 手动 `/compact` 生成的新 checkpoint 以旧 head 为 parent；不刷新页面立即发送后续消息，
+  新 Run 从 compact head 继续并正确复述压缩前决定；
+- 临时降低自动摘要阈值后，普通对话 Run 更新了 `summary_text` channel，证明自动摘要链路
+  独立于手动 `/compact`；测试后已恢复为 32000 tokens、保留 10 条消息；
+- `/Dream` 始终未显示为聊天消息，也没有创建 private Run；
+- 关闭个人记忆后，新 Thread 无 Recall Snapshot 且模型明确不知道旧事实；重新开启后，
+  新 Thread 首次请求立即恢复召回；
+- 重置前后数据库对比：Fact 19 → 0、Candidate 29 → 0、Source Batch/Item 10/10 → 0、
+  Recall Snapshot/Item 12/201 → 0；Thread 仍为 4、Run 仍为 13、Checkpoint 仍为 261，
+  长对话的 186 个 checkpoint 和 41 个含 `summary_text` 的 checkpoint 均保留；
+- 重置后 Memory 页面立即显示空状态，聊天页面仍能完整打开并显示原对话；个人记忆开关仍为启用；
+- 测试结束后 Runtime Policy 已恢复为 revision 4：pipeline v2、debounce 30 秒、整理周期
+  120 分钟、摘要阈值 32000 tokens、保留 10 条消息。
+
+### 12.3 门禁证据
+
+- PR9 最终增量聚焦测试：`54 passed`；
+- 后端受影响文件 Ruff format/check：通过；
+- 前端 ESLint + TypeScript：通过；
+- 前端单元测试：`146 passed, 0 failed, 0 skipped`；
+- PR13 完成时的完整后端核心门禁：`892 passed, 0 failed, 0 skipped`；
+- 最终提示词增量后的完整重跑：893 个测试主体全部通过、0 skip；本地
+  `POSTGRES_ADMIN_URL` 当前指向非 superuser 的 `deerflow_local_app`，因此唯一错误发生在
+  `test_real_postgres_concurrent_setup_owner_bootstrap_and_check` 已通过后的 teardown：它不能终止
+  TimescaleDB 自动创建的 `postgres` 后台连接。该随机 `deerflow_test_*` 已显式删除，应用角色
+  `CREATEDB=false`、`SUPERUSER=false` 已复核；这不是产品断言失败，也没有修改代码规避环境契约；
+- `full_schema_v3` 空库 `make setup-db` 与 `make check-db`：通过；
+- 真实环境 Memory 表重置后为空，未留下 `deerflow_test_*` 数据库。
+
+### 12.4 最终状态
+
+PR9—PR13 的计划范围均已落地。下一步不再扩展本轮功能；如需合并，只执行正常代码审查、
+推送和 PR 流程。正式 CI 应使用真正具备测试管理权限的 `POSTGRES_TEST_URL`，而不是当前本地
+应用角色 URL。

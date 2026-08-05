@@ -199,7 +199,7 @@ def _work(claim: JobClaim) -> MemoryConsolidationWork:
         model_config_id=uuid.uuid4(),
         model_config_version_id=uuid.uuid4(),
         model_config_checksum="f" * 64,
-        prompt_version="memory-consolidate-prompt-v2",
+        prompt_version="memory-consolidate-prompt-v4",
         consolidator_version="memory-consolidator-v2",
         output_schema_version="memory-consolidate-output-v2",
         candidates=(candidate,),

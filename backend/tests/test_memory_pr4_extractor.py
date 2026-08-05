@@ -180,6 +180,8 @@ async def test_extractor_uses_only_ordered_source_items_and_returns_strict_candi
     assert "colleague" in system_instruction
     assert "role-play" in system_instruction
     assert "self-contained" in system_instruction
+    assert "freeze or finalize a scope" in system_instruction
+    assert "does not enumerate the durable values" in system_instruction
     assert "tool" not in user_content.lower()
     assert json.loads(user_content) == {
         "items": [

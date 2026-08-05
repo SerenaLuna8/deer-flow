@@ -63,6 +63,7 @@ def test_checkpoint_fixture_is_fixed_bilingual_and_covers_required_categories() 
     assert not by_id["zh-roleplay-01"].expected
     assert not by_id["zh-hypothetical-01"].expected
     assert not by_id["zh-ambiguous-01"].expected
+    assert not by_id["zh-status-only-freeze-01"].expected
     assert by_id["zh-explicit-durable-01"].expected
 
 
