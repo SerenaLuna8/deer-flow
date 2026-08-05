@@ -713,8 +713,15 @@ class DynamicContextMiddleware(AgentMiddleware):
         config = self._app_config.memory if self._app_config is not None else None
         if config is not None and (not config.enabled or not config.injection_enabled):
             return self._reconcile_v2_snapshot(state, None)
-        snapshot = await asyncio.wait_for(
-            authority.load_snapshot(),
-            timeout=_INJECT_TIMEOUT_SECONDS,
-        )
+        try:
+            snapshot = await asyncio.wait_for(
+                authority.load_snapshot(),
+                timeout=_INJECT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "DynamicContextMiddleware: memory v2 snapshot timed out (%.1fs); injecting empty memory",
+                _INJECT_TIMEOUT_SECONDS,
+            )
+            snapshot = None
         return self._reconcile_v2_snapshot(state, snapshot)

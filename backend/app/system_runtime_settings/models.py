@@ -150,7 +150,7 @@ class MemoryPolicy(_PolicyModel):
     fact_confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     injection_enabled: bool = True
     max_injection_tokens: int = Field(default=2_000, ge=100, le=8_000)
-    token_counting: Literal["tiktoken", "char"] = "tiktoken"
+    token_counting: Literal["tiktoken", "char"] = "char"
     guaranteed_categories: list[CategoryName] = Field(
         default_factory=lambda: ["correction"],
         max_length=32,

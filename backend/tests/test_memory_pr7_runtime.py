@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph.message import add_messages
 
+import deerflow.agents.middlewares.dynamic_context_middleware as dynamic_context_module
 from deerflow.agents.memory.manager import ProjectMemoryManager
 from deerflow.agents.memory.storage import ProjectMemorySnapshot, create_empty_memory
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
@@ -48,6 +50,24 @@ class _RevokedV2Authority:
 
     async def load_snapshot(self) -> None:
         raise AuthorizationRevoked
+
+
+class _SlowV2Authority:
+    pipeline_mode = "v2"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def load_snapshot(self) -> None:
+        self.calls += 1
+        await asyncio.sleep(60)
+
+
+class _CancelledV2Authority:
+    pipeline_mode = "v2"
+
+    async def load_snapshot(self) -> None:
+        raise asyncio.CancelledError
 
 
 class _ConsolidateAuthority:
@@ -244,6 +264,41 @@ async def test_v2_authorization_revoked_propagates_from_model_boundary() -> None
         await middleware.abefore_model(
             {"messages": [HumanMessage(content="private", id="turn-1")]},
             _runtime(_RevokedV2Authority()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_v2_snapshot_timeout_degrades_to_empty_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dynamic_context_module, "_INJECT_TIMEOUT_SECONDS", 0.01)
+    authority = _SlowV2Authority()
+    middleware = DynamicContextMiddleware(
+        agent_name="lead",
+        app_config=_app_config(pipeline_mode="v2"),
+    )
+
+    update = await middleware.abefore_model(
+        {"messages": [HumanMessage(content="continue", id="turn-1")]},
+        _runtime(authority),
+    )
+
+    assert update is not None
+    assert authority.calls == 1
+    assert _hidden_memory_messages(update["messages"]) == []
+
+
+@pytest.mark.asyncio
+async def test_v2_snapshot_cancellation_propagates() -> None:
+    middleware = DynamicContextMiddleware(
+        agent_name="lead",
+        app_config=_app_config(pipeline_mode="v2"),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await middleware.abefore_model(
+            {"messages": [HumanMessage(content="continue", id="turn-1")]},
+            _runtime(_CancelledV2Authority()),
         )
 
 

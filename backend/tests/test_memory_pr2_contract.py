@@ -124,6 +124,8 @@ def test_memory_v2_schema_and_marker_are_registered() -> None:
 def test_memory_pipeline_mode_defaults_off_and_runtime_overlay_is_bounded() -> None:
     assert MemoryConfig().pipeline_mode == "off"
     assert MemoryPolicy().pipeline_mode == "off"
+    assert MemoryConfig().token_counting == "char"
+    assert MemoryPolicy().token_counting == "char"
     assert MemoryConfig().consolidation_interval_minutes == 120
     assert MemoryPolicy().candidate_retention_days == 30
     assert RUNTIME_POLICY_SCHEMA_VERSION == 2

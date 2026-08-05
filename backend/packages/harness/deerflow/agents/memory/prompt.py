@@ -65,9 +65,8 @@ _TIKTOKEN_ENCODING_MISSING = object()
 _TIKTOKEN_ENCODING_LOADING = object()
 # Cooldown before a *failed* tiktoken load is re-attempted. This is an internal
 # tuning constant rather than a user-facing config: it only affects how quickly
-# the default ``tiktoken`` mode self-heals after a transient network outage.
-# Deployments that want to avoid tiktoken's network dependency entirely should
-# set ``memory.token_counting: char`` instead of tuning this value.
+# the opt-in ``tiktoken`` mode self-heals after a transient network outage.
+# The default ``memory.token_counting: char`` mode avoids this dependency.
 _TIKTOKEN_RETRY_COOLDOWN_S = 600.0
 _tiktoken_encoding_cache: dict[str, Any] = {}
 _tiktoken_encoding_cache_lock = threading.Lock()

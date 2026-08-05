@@ -67,14 +67,15 @@ class MemoryConfig(BaseModel):
         description="Maximum tokens to use for memory injection",
     )
     token_counting: Literal["tiktoken", "char"] = Field(
-        default="tiktoken",
+        default="char",
         description=(
             "Token counting strategy for memory-injection budgeting. "
-            "'tiktoken' is accurate but the encoding's BPE data may be "
+            "'char' is the network-free default. 'tiktoken' is more accurate "
+            "but the encoding's BPE data may be "
             "downloaded from a public network endpoint on first use, which "
             "can block for a long time in network-restricted environments "
-            "(see issue #3402/#3429). 'char' uses a network-free "
-            "CJK-aware character-based estimate and never touches tiktoken."
+            "(see issue #3402/#3429). Character mode uses a CJK-aware "
+            "estimate and never touches tiktoken."
         ),
     )
     guaranteed_categories: list[str] = Field(
