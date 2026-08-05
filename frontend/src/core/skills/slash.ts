@@ -11,6 +11,7 @@ export type Skill = {
  */
 export const RESERVED_SLASH_SKILL_NAMES = new Set([
   "bootstrap",
+  "dream",
   "goal",
   "help",
   "memory",

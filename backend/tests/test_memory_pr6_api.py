@@ -25,7 +25,10 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
-from app.private_work.memory_service import PrivateMemoryV2Service
+from app.private_work.memory_service import (
+    MemoryConsolidationRuntime,
+    PrivateMemoryV2Service,
+)
 from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
@@ -38,6 +41,9 @@ from deerflow.persistence.private_work.memory_v2_management import (
     MemoryV2ManagementInvalid,
     MemoryV2ManagementNotFound,
     MemoryV2RevisionView,
+)
+from deerflow.persistence.private_work.memory_v2_repository import (
+    MemoryConsolidationImmediateAdmission,
 )
 
 
@@ -120,6 +126,11 @@ class _ApiService:
         self.candidate = _candidate()
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self.errors: dict[str, Exception] = {}
+        self.consolidation = MemoryConsolidationImmediateAdmission(
+            disposition="queued",
+            job_id=uuid.uuid4(),
+            candidate_count=3,
+        )
 
     def _record(
         self,
@@ -195,6 +206,14 @@ class _ApiService:
 
         return stream()
 
+    async def consolidate_now(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> MemoryConsolidationImmediateAdmission:
+        self._record("consolidate_now", args, kwargs)
+        return self.consolidation
+
 
 @pytest.fixture()
 def api_service() -> _ApiService:
@@ -237,6 +256,7 @@ def test_memory_router_keeps_v1_read_surface_and_exposes_v2_management() -> None
         ("/api/projects/{project_id}/memory/reload", "POST"),
         ("/api/projects/{project_id}/memory/v2/facts", "GET"),
         ("/api/projects/{project_id}/memory/v2/status", "GET"),
+        ("/api/projects/{project_id}/memory/v2/consolidate", "POST"),
         ("/api/projects/{project_id}/memory/v2/candidates", "GET"),
         ("/api/projects/{project_id}/memory/v2/facts/{fact_id}", "GET"),
         ("/api/projects/{project_id}/memory/v2/candidates/{candidate_id}/accept", "POST"),
@@ -254,6 +274,46 @@ def test_memory_router_keeps_v1_read_surface_and_exposes_v2_management() -> None
         ("/api/projects/{project_id}/memory/facts/{fact_id}", "PATCH"),
         ("/api/projects/{project_id}/memory/facts/{fact_id}", "DELETE"),
     }.isdisjoint(routes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disposition", "status", "candidate_count"),
+    [
+        ("queued", 202, 3),
+        ("already_running", 200, 3),
+        ("no_candidates", 200, 0),
+    ],
+)
+async def test_v2_consolidate_route_reports_admission_disposition(
+    app: FastAPI,
+    api_service: _ApiService,
+    disposition: str,
+    status: int,
+    candidate_count: int,
+) -> None:
+    job_id = None if disposition == "no_candidates" else uuid.uuid4()
+    api_service.consolidation = MemoryConsolidationImmediateAdmission(
+        disposition=disposition,
+        job_id=job_id,
+        candidate_count=candidate_count,
+    )
+
+    response = await _request(
+        app,
+        "POST",
+        f"/api/projects/{uuid.uuid4()}/memory/v2/consolidate",
+        params={"namespace": "default"},
+    )
+
+    assert response.status_code == status
+    assert response.json() == {
+        "namespace": "default",
+        "disposition": disposition,
+        "jobId": None if job_id is None else str(job_id),
+        "candidateCount": candidate_count,
+    }
+    assert api_service.calls[-1][0] == "consolidate_now"
 
 
 def test_v2_request_contracts_require_alias_cas_and_reject_unknown_fields() -> None:
@@ -778,3 +838,99 @@ async def test_v2_service_maps_repository_errors_to_stable_private_errors(
 
     assert raised.value.request_id == "memory-pr6-request"
     assert "database detail" not in str(raised.value)
+
+
+class _ConsolidationRepository:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def admit_consolidation_for_scope(self, **kwargs):
+        self.calls.append(kwargs)
+        return MemoryConsolidationImmediateAdmission(
+            disposition="queued",
+            job_id=uuid.uuid4(),
+            candidate_count=2,
+        )
+
+
+def _consolidation_runtime(
+    *,
+    enabled: bool = True,
+    pipeline_mode: str = "v2",
+    with_model: bool = True,
+) -> MemoryConsolidationRuntime:
+    return MemoryConsolidationRuntime(
+        enabled=enabled,
+        pipeline_mode=pipeline_mode,
+        consolidation_interval_minutes=120,
+        candidate_retention_days=30,
+        fact_confidence_threshold=0.7,
+        max_facts=100,
+        policy_revision=4,
+        model_config_id=uuid.uuid4() if with_model else None,
+        model_config_version_id=uuid.uuid4() if with_model else None,
+        model_config_checksum="a" * 64 if with_model else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_service_dream_requires_both_capabilities_and_exact_scope() -> None:
+    factory = _SessionFactory()
+    revalidator = _Revalidator()
+    repository = _ConsolidationRepository()
+
+    async def runtime_resolver(_session):
+        return _consolidation_runtime()
+
+    service = PrivateMemoryV2Service(
+        factory,
+        source_hmac=lambda _payload: SimpleNamespace(
+            hmac_hex="a" * 64,
+            key_id="test-key",
+        ),
+        revalidator=revalidator,
+        consolidation_repository_builder=lambda _session: repository,
+        runtime_resolver=runtime_resolver,
+    )
+    context = _context()
+
+    result = await service.consolidate_now(context, namespace="default")
+
+    assert result.disposition == "queued"
+    assert revalidator.calls == [
+        (Capability.PRIVATE_WORK_CREATE, True),
+        (Capability.SHARED_ASSETS_EXECUTE, False),
+    ]
+    assert repository.calls[0]["project_id"] == context.project_id
+    assert repository.calls[0]["owner_user_id"] == str(context.user_id)
+    assert repository.calls[0]["namespace"] == "default"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime", "error_type"),
+    [
+        (_consolidation_runtime(pipeline_mode="shadow"), PrivateWorkConflict),
+        (_consolidation_runtime(with_model=False), PrivateWorkUnavailable),
+    ],
+)
+async def test_v2_service_dream_rejects_inactive_pipeline_or_missing_model(
+    runtime: MemoryConsolidationRuntime,
+    error_type: type[Exception],
+) -> None:
+    async def runtime_resolver(_session):
+        return runtime
+
+    service = PrivateMemoryV2Service(
+        _SessionFactory(),
+        source_hmac=lambda _payload: SimpleNamespace(
+            hmac_hex="a" * 64,
+            key_id="test-key",
+        ),
+        revalidator=_Revalidator(),
+        consolidation_repository_builder=lambda _session: _ConsolidationRepository(),
+        runtime_resolver=runtime_resolver,
+    )
+
+    with pytest.raises(error_type):
+        await service.consolidate_now(_context(), namespace="default")

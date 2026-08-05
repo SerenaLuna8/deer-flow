@@ -87,6 +87,8 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       listProjectMemoryV2Facts(privateWork, factRequest, signal),
     enabled: permissions.canRead,
     placeholderData: keepPreviousData,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
   });
   const candidatesQuery = useQuery({
     queryKey: projectMemoryV2CandidatesQueryKey(scope, candidateRequest),
@@ -94,6 +96,8 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       listProjectMemoryV2Candidates(privateWork, candidateRequest, signal),
     enabled: permissions.canRead,
     placeholderData: keepPreviousData,
+    refetchInterval: 15_000,
+    refetchIntervalInBackground: false,
   });
   const statusQuery = useQuery({
     queryKey: projectMemoryV2StatusQueryKey(scope),

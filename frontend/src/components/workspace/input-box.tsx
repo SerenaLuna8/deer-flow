@@ -73,6 +73,10 @@ import { polishInputDraft } from "@/core/input-polish/api";
 import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import {
+  consolidateProjectMemoryV2,
+  projectMemoryV2RootQueryKey,
+} from "@/core/private-work/memory";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { privateWorkQueryKey } from "@/core/private-work/query-keys";
 import { useProjectRuntimeSlashSkills } from "@/core/shared-assets";
@@ -365,6 +369,7 @@ export function InputBox({
   const inlineSkillComposingRef = useRef(false);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
+  const dreamRequestStateRef = useRef(createGoalRequestState());
   const latestCheckpointContinuationRef = useRef(
     createLatestCheckpointContinuationState(),
   );
@@ -504,11 +509,17 @@ export function InputBox({
             },
           ]
         : []),
+      {
+        name: "dream" as const,
+        description: t.inputBox.dreamCommandDescription,
+        kind: "builtin" as const,
+      },
     ],
     [
       compactCommandEnabled,
       goalCommandsEnabled,
       t.inputBox.compactCommandDescription,
+      t.inputBox.dreamCommandDescription,
       t.inputBox.goalCommandDescription,
     ],
   );
@@ -758,10 +769,12 @@ export function InputBox({
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
     const compactRequestState = compactRequestStateRef.current;
+    const dreamRequestState = dreamRequestStateRef.current;
     resetLatestCheckpointContinuation(latestCheckpointContinuationRef.current);
     return () => {
       abortGoalRequest(goalRequestState);
       abortGoalRequest(compactRequestState);
+      abortGoalRequest(dreamRequestState);
     };
   }, [threadId]);
 
@@ -1015,6 +1028,71 @@ export function InputBox({
     threadId,
   ]);
 
+  const handleDreamCommand = useCallback(async (): Promise<void> => {
+    const request = beginGoalRequest(dreamRequestStateRef.current, threadId);
+    try {
+      const result = await consolidateProjectMemoryV2(
+        privateWork,
+        request.controller.signal,
+      );
+      if (
+        !isCurrentGoalRequest(dreamRequestStateRef.current, request, threadId)
+      ) {
+        throw new DOMException("Dream request superseded", "AbortError");
+      }
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      latestDraftRef.current = null;
+      if (draftSaveTimerRef.current !== null) {
+        window.clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+      clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+      setTextInput("");
+      setFollowups([]);
+      setFollowupsHidden(false);
+      setFollowupsLoading(false);
+      await queryClient.invalidateQueries({
+        queryKey: projectMemoryV2RootQueryKey(privateWork.scope),
+      });
+      if (result.disposition === "queued") {
+        toast.success(
+          t.inputBox.dreamQueued.replace(
+            "{count}",
+            String(result.candidateCount),
+          ),
+        );
+      } else if (result.disposition === "already_running") {
+        toast.info(t.inputBox.dreamAlreadyRunning);
+      } else {
+        toast.info(t.inputBox.dreamNoCandidates);
+      }
+    } catch (error) {
+      if (
+        isAbortError(error) ||
+        !isCurrentGoalRequest(dreamRequestStateRef.current, request, threadId)
+      ) {
+        throw error;
+      }
+      toast.error(
+        error instanceof Error ? error.message : t.inputBox.dreamFailed,
+      );
+      throw error;
+    } finally {
+      finishGoalRequest(dreamRequestStateRef.current, request);
+    }
+  }, [
+    draftKey,
+    privateWork,
+    queryClient,
+    setTextInput,
+    t.inputBox.dreamAlreadyRunning,
+    t.inputBox.dreamFailed,
+    t.inputBox.dreamNoCandidates,
+    t.inputBox.dreamQueued,
+    threadId,
+  ]);
+
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
       const files = message.files.flatMap((file) =>
@@ -1172,6 +1250,17 @@ export function InputBox({
       if (submitAction.kind === "compact" && compactCommandEnabled) {
         return handleCompactCommand();
       }
+      if (submitAction.kind === "dream") {
+        return handleDreamCommand();
+      }
+      if (submitAction.kind === "dream-invalid") {
+        const errorMessage =
+          submitAction.reason === "attachments"
+            ? t.inputBox.dreamAttachmentsUnsupported
+            : t.inputBox.dreamInvalidArguments;
+        toast.error(errorMessage);
+        return Promise.reject(new Error(errorMessage));
+      }
       if (submitAction.kind === "stop") {
         onStop?.();
         return;
@@ -1187,6 +1276,7 @@ export function InputBox({
     [
       abortVoiceInput,
       handleCompactCommand,
+      handleDreamCommand,
       handleGoalCommand,
       compactCommandEnabled,
       goalCommandsEnabled,
@@ -1194,6 +1284,8 @@ export function InputBox({
       selectedSlashSkill,
       status,
       submitThreadMessageWithFollowup,
+      t.inputBox.dreamAttachmentsUnsupported,
+      t.inputBox.dreamInvalidArguments,
       t.inputBox.pleaseWaitStreaming,
     ],
   );

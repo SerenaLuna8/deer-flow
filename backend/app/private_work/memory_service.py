@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -27,6 +27,13 @@ from app.private_work.memory_source_admission import SourceHmacRef
 from app.private_work.memory_v2_export import iter_memory_v2_export_records
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.projects.capabilities import Capability
+from app.system_runtime_settings.service import SystemRuntimePolicyService
+from app.system_settings.repository import SystemModelRepository
+from deerflow.agents.memory.consolidator import (
+    MEMORY_CONSOLIDATE_OUTPUT_SCHEMA_VERSION,
+    MEMORY_CONSOLIDATE_PROMPT_VERSION,
+    MEMORY_CONSOLIDATOR_VERSION,
+)
 from deerflow.agents.memory.storage import ProjectMemorySnapshot, ProjectMemoryStorage
 from deerflow.persistence.private_work.memory_repository import (
     PrivateMemoryInvalid as RepositoryMemoryInvalid,
@@ -41,6 +48,12 @@ from deerflow.persistence.private_work.memory_v2_management import (
     MemoryV2ManagementInvalid,
     MemoryV2ManagementNotFound,
     MemoryV2ManagementRepository,
+)
+from deerflow.persistence.private_work.memory_v2_repository import (
+    MemoryConsolidationAdmissionContract,
+    MemoryConsolidationImmediateAdmission,
+    MemoryV2AdmissionConflict,
+    MemoryV2Repository,
 )
 
 _FACT_LINEAGE_HMAC_DOMAIN = b"deerflow.memory.fact-lineage.v1\x00"
@@ -67,6 +80,76 @@ class PrivateMemoryStatus:
     version: int
     fact_count: int
     last_updated: str
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryConsolidationRuntime:
+    enabled: bool
+    pipeline_mode: Literal["off", "shadow", "consolidate", "v2"]
+    consolidation_interval_minutes: int
+    candidate_retention_days: int
+    fact_confidence_threshold: float
+    max_facts: int
+    policy_revision: int
+    model_config_id: uuid.UUID | None
+    model_config_version_id: uuid.UUID | None
+    model_config_checksum: str | None
+
+
+MemoryRuntimeResolver = Callable[
+    [AsyncSession],
+    Awaitable[MemoryConsolidationRuntime],
+]
+
+
+async def resolve_memory_consolidation_runtime(
+    session: AsyncSession,
+) -> MemoryConsolidationRuntime:
+    locked = await SystemRuntimePolicyService.read_agent_runtime_for_admission(
+        session,
+    )
+    memory = locked.value.memory
+    model_config_id = None
+    model_config_version_id = None
+    model_config_checksum = None
+    if memory.enabled and memory.pipeline_mode in {"consolidate", "v2"}:
+        material = await SystemModelRepository(session).resolve_active_model(
+            memory.model_name,
+            load_envelope=False,
+        )
+        if material is not None:
+            model_config_id = material.model.id
+            model_config_version_id = material.version.id
+            model_config_checksum = material.version.payload_checksum
+    return MemoryConsolidationRuntime(
+        enabled=memory.enabled,
+        pipeline_mode=memory.pipeline_mode,
+        consolidation_interval_minutes=memory.consolidation_interval_minutes,
+        candidate_retention_days=memory.candidate_retention_days,
+        fact_confidence_threshold=memory.fact_confidence_threshold,
+        max_facts=memory.max_facts,
+        policy_revision=locked.revision,
+        model_config_id=model_config_id,
+        model_config_version_id=model_config_version_id,
+        model_config_checksum=model_config_checksum,
+    )
+
+
+def build_memory_consolidation_contract(
+    runtime: MemoryConsolidationRuntime,
+) -> MemoryConsolidationAdmissionContract | None:
+    if runtime.model_config_id is None or runtime.model_config_version_id is None or runtime.model_config_checksum is None:
+        return None
+    return MemoryConsolidationAdmissionContract(
+        interval_minutes=runtime.consolidation_interval_minutes,
+        policy_revision=runtime.policy_revision,
+        model_config_id=runtime.model_config_id,
+        model_config_version_id=runtime.model_config_version_id,
+        model_config_checksum=runtime.model_config_checksum,
+        prompt_version=MEMORY_CONSOLIDATE_PROMPT_VERSION,
+        consolidator_version=MEMORY_CONSOLIDATOR_VERSION,
+        output_schema_version=MEMORY_CONSOLIDATE_OUTPUT_SCHEMA_VERSION,
+    )
 
 
 class PrivateMemoryService:
@@ -161,14 +244,18 @@ class PrivateMemoryV2Service:
         audit: MemoryV2AuditPort | None = None,
         revalidator: PrivateWorkRevalidator | None = None,
         repository_builder=MemoryV2ManagementRepository,
+        consolidation_repository_builder=MemoryV2Repository,
+        runtime_resolver: MemoryRuntimeResolver = resolve_memory_consolidation_runtime,
     ) -> None:
-        if not callable(session_factory) or not callable(source_hmac) or not callable(repository_builder):
+        if not callable(session_factory) or not callable(source_hmac) or not callable(repository_builder) or not callable(consolidation_repository_builder) or not callable(runtime_resolver):
             raise ValueError("Memory v2 service configuration is invalid")
         self._session_factory = session_factory
         self._source_hmac = source_hmac
         self._audit = audit
         self._revalidator = revalidator or PrivateWorkRevalidator()
         self._repository_builder = repository_builder
+        self._consolidation_repository_builder = consolidation_repository_builder
+        self._runtime_resolver = runtime_resolver
 
     @staticmethod
     def _map_error(
@@ -177,7 +264,7 @@ class PrivateMemoryV2Service:
     ) -> PrivateWorkError:
         if isinstance(error, MemoryV2ManagementNotFound):
             return PrivateWorkNotFound(context.request_id)
-        if isinstance(error, MemoryV2ManagementConflict):
+        if isinstance(error, (MemoryV2ManagementConflict, MemoryV2AdmissionConflict)):
             return PrivateWorkConflict(context.request_id)
         if isinstance(error, (MemoryV2ManagementInvalid, ValueError, IntegrityError)):
             return PrivateWorkInvalid(context.request_id)
@@ -367,6 +454,49 @@ class PrivateMemoryV2Service:
                 await session.close()
 
         return stream()
+
+    async def consolidate_now(
+        self,
+        context: PrivateWorkContext,
+        *,
+        namespace: str,
+    ) -> MemoryConsolidationImmediateAdmission:
+        context = self._context(context)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    lock=True,
+                )
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.SHARED_ASSETS_EXECUTE,
+                )
+                runtime = await self._runtime_resolver(session)
+                if not runtime.enabled or runtime.pipeline_mode not in {
+                    "consolidate",
+                    "v2",
+                }:
+                    raise PrivateWorkConflict(context.request_id)
+                contract = build_memory_consolidation_contract(runtime)
+                if contract is None:
+                    raise PrivateWorkUnavailable(context.request_id)
+                return await self._consolidation_repository_builder(session).admit_consolidation_for_scope(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    namespace=namespace,
+                    contract=contract,
+                    now=datetime.now(UTC),
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except Exception as error:
+            raise self._map_error(context, error) from None
 
     async def accept_candidate(
         self,

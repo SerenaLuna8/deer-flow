@@ -20,6 +20,8 @@ export type GoalCommand =
 export type InputSubmitAction =
   | { kind: "goal"; command: GoalCommand }
   | { kind: "compact" }
+  | { kind: "dream" }
+  | { kind: "dream-invalid"; reason: "arguments" | "attachments" }
   | { kind: "stop" }
   | { kind: "empty" }
   | { kind: "message" };
@@ -230,6 +232,16 @@ export function parseCompactCommand(value: string): boolean {
   return /^\/(?:compact|context\s+compact)\s*$/i.test(value.trim());
 }
 
+export function parseDreamCommand(
+  value: string,
+): "valid" | "arguments" | null {
+  const trimmed = value.trim();
+  if (!/^\/dream(?:\s|$)/i.test(trimmed)) {
+    return null;
+  }
+  return /^\/dream$/i.test(trimmed) ? "valid" : "arguments";
+}
+
 export function canPolishInput(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -238,7 +250,11 @@ export function canPolishInput(value: string): boolean {
   // Reserved builtin command lines are routed to their own handlers, not the
   // LLM, so they must not be rewritten. Reuse the same parsers the composer
   // uses to dispatch them instead of maintaining a third parallel list.
-  return parseGoalCommand(trimmed) === null && !parseCompactCommand(trimmed);
+  return (
+    parseGoalCommand(trimmed) === null &&
+    !parseCompactCommand(trimmed) &&
+    parseDreamCommand(trimmed) === null
+  );
 }
 
 export function getInputSubmitAction({
@@ -251,6 +267,15 @@ export function getInputSubmitAction({
   status: string;
 }): InputSubmitAction {
   const goalCommand = parseGoalCommand(text);
+  const dreamCommand = parseDreamCommand(text);
+  if (dreamCommand !== null) {
+    if (fileCount > 0) {
+      return { kind: "dream-invalid", reason: "attachments" };
+    }
+    return dreamCommand === "valid"
+      ? { kind: "dream" }
+      : { kind: "dream-invalid", reason: "arguments" };
+  }
   if (goalCommand && fileCount === 0) {
     return { kind: "goal", command: goalCommand };
   }

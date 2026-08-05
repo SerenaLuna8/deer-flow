@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
 import {
   acceptProjectMemoryV2Candidate,
+  consolidateProjectMemoryV2,
   disableProjectMemoryV2Fact,
   exportProjectMemoryV2,
   getProjectMemoryV2Status,
@@ -107,6 +108,33 @@ afterEach(() => {
 });
 
 describe("project Memory v2 client", () => {
+  test("queues immediate consolidation without creating a chat request", async () => {
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json(
+          {
+            namespace: "default",
+            disposition: "queued",
+            jobId: "77777777-7777-4777-8777-777777777777",
+            candidateCount: 2,
+          },
+          { status: 202 },
+        ),
+    );
+    rs.stubGlobal("document", { cookie: "csrf_token=memory-token" });
+    rs.stubGlobal("fetch", fetcher);
+
+    const result = await consolidateProjectMemoryV2(access);
+
+    expect(result.disposition).toBe("queued");
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(requestURL(input), "http://local.test");
+    expect(url.pathname).toBe(
+      `/api/projects/${PROJECT_ID}/memory/v2/consolidate`,
+    );
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBeUndefined();
+  });
   test("scopes list keys and sends database filters before pagination", async () => {
     const controller = new AbortController();
     const fetcher = rs.fn(

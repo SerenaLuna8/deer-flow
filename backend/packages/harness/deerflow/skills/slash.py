@@ -10,7 +10,7 @@ from deerflow.skills.types import Skill
 #: treated as ``/skill`` activations. These values plus :data:`_SLASH_SKILL_RE`
 #: are mirrored by the frontend display parser in
 #: ``frontend/src/core/skills/slash.ts``.
-RESERVED_SLASH_SKILL_NAMES = frozenset({"bootstrap", "goal", "help", "memory", "models", "new", "status"})
+RESERVED_SLASH_SKILL_NAMES = frozenset({"bootstrap", "dream", "goal", "help", "memory", "models", "new", "status"})
 _SLASH_SKILL_RE = re.compile(r"^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)")
 
 

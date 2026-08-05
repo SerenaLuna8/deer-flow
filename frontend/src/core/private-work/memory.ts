@@ -129,6 +129,15 @@ export const memoryV2StatusSchema = z
   })
   .strict();
 
+export const memoryV2ConsolidationSchema = z
+  .object({
+    namespace: memoryNamespaceSchema,
+    disposition: z.enum(["queued", "already_running", "no_candidates"]),
+    jobId: z.string().uuid().nullable(),
+    candidateCount: z.number().int().min(0).max(20),
+  })
+  .strict();
+
 const memoryV2HardForgetResultSchema = z
   .object({
     factId: z.string().uuid(),
@@ -147,6 +156,9 @@ export type MemoryV2Candidate = z.infer<typeof memoryV2CandidateSchema>;
 export type MemoryV2Evidence = z.infer<typeof memoryV2EvidenceSchema>;
 export type MemoryV2FactDetail = z.infer<typeof memoryV2FactDetailSchema>;
 export type MemoryV2Status = z.infer<typeof memoryV2StatusSchema>;
+export type MemoryV2Consolidation = z.infer<
+  typeof memoryV2ConsolidationSchema
+>;
 export type MemoryV2HardForgetResult = z.infer<
   typeof memoryV2HardForgetResultSchema
 >;
@@ -381,6 +393,22 @@ export async function getProjectMemoryV2Status(
     response,
     memoryV2StatusSchema,
     "Failed to load project Memory settings",
+  );
+}
+
+export async function consolidateProjectMemoryV2(
+  access: ProjectMemoryAccess,
+  signal?: AbortSignal,
+) {
+  const { baseURL } = requireProjectMemoryAccess(access);
+  const response = await fetchWithAuth(
+    memoryV2URL(baseURL, "/consolidate"),
+    { method: "POST", signal },
+  );
+  return readJSON(
+    response,
+    memoryV2ConsolidationSchema,
+    "Failed to consolidate project Memory",
   );
 }
 

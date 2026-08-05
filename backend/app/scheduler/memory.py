@@ -3,41 +3,26 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.system_runtime_settings.service import SystemRuntimePolicyService
-from app.system_settings.repository import SystemModelRepository
+from app.private_work.memory_service import (
+    MemoryConsolidationRuntime,
+    build_memory_consolidation_contract,
+    resolve_memory_consolidation_runtime,
+)
 from deerflow.agents.memory.consolidator import (
     MEMORY_CONSOLIDATE_OUTPUT_SCHEMA_VERSION,
     MEMORY_CONSOLIDATE_PROMPT_VERSION,
     MEMORY_CONSOLIDATOR_VERSION,
 )
-from deerflow.persistence.private_work.memory_v2_repository import (
-    MemoryConsolidationAdmissionContract,
-    MemoryV2Repository,
-)
+from deerflow.persistence.private_work.memory_v2_repository import MemoryV2Repository
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryConsolidationRuntime:
-    enabled: bool
-    pipeline_mode: Literal["off", "shadow", "consolidate", "v2"]
-    consolidation_interval_minutes: int
-    candidate_retention_days: int
-    fact_confidence_threshold: float
-    max_facts: int
-    policy_revision: int
-    model_config_id: uuid.UUID | None
-    model_config_version_id: uuid.UUID | None
-    model_config_checksum: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,39 +41,6 @@ MemoryRuntimeResolver = Callable[
     [AsyncSession],
     Awaitable[MemoryConsolidationRuntime],
 ]
-
-
-async def resolve_memory_consolidation_runtime(
-    session: AsyncSession,
-) -> MemoryConsolidationRuntime:
-    locked = await SystemRuntimePolicyService.read_agent_runtime_for_admission(
-        session,
-    )
-    memory = locked.value.memory
-    model_config_id = None
-    model_config_version_id = None
-    model_config_checksum = None
-    if memory.enabled and memory.pipeline_mode in {"consolidate", "v2"}:
-        material = await SystemModelRepository(session).resolve_active_model(
-            memory.model_name,
-            load_envelope=False,
-        )
-        if material is not None:
-            model_config_id = material.model.id
-            model_config_version_id = material.version.id
-            model_config_checksum = material.version.payload_checksum
-    return MemoryConsolidationRuntime(
-        enabled=memory.enabled,
-        pipeline_mode=memory.pipeline_mode,
-        consolidation_interval_minutes=memory.consolidation_interval_minutes,
-        candidate_retention_days=memory.candidate_retention_days,
-        fact_confidence_threshold=memory.fact_confidence_threshold,
-        max_facts=memory.max_facts,
-        policy_revision=locked.revision,
-        model_config_id=model_config_id,
-        model_config_version_id=model_config_version_id,
-        model_config_checksum=model_config_checksum,
-    )
 
 
 class MemoryMaintenanceSchedulerService:
@@ -136,17 +88,8 @@ class MemoryMaintenanceSchedulerService:
                 break
             retention_jobs += 1
         consolidation_jobs = 0
-        if runtime.model_config_id is not None and runtime.model_config_version_id is not None and runtime.model_config_checksum is not None:
-            contract = MemoryConsolidationAdmissionContract(
-                interval_minutes=runtime.consolidation_interval_minutes,
-                policy_revision=runtime.policy_revision,
-                model_config_id=runtime.model_config_id,
-                model_config_version_id=runtime.model_config_version_id,
-                model_config_checksum=runtime.model_config_checksum,
-                prompt_version=MEMORY_CONSOLIDATE_PROMPT_VERSION,
-                consolidator_version=MEMORY_CONSOLIDATOR_VERSION,
-                output_schema_version=MEMORY_CONSOLIDATE_OUTPUT_SCHEMA_VERSION,
-            )
+        contract = build_memory_consolidation_contract(runtime)
+        if contract is not None:
             for _ in range(self._max_jobs_per_poll):
                 try:
                     async with session.begin_nested():

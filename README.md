@@ -21,7 +21,8 @@ PostgreSQL `lower(email)` 唯一索引保护。`auth.local.allow_registration` �
 Candidate，Scheduler 再定时准入整理 Job，由 Worker 生成带 Revision/Evidence 的长期 Fact。
 Candidate 不参与召回；`v2` Run 会固定本次使用的 Fact Revision，重试和恢复不会漂移。私有 Run
 默认可使用只读 `memory_search` 按需召回同一快照；模型只能提供查询、分类和数量，不能选择
-作用域或修改 Memory。
+作用域或修改 Memory。聊天输入框中的 `/Dream` 是内置命令：它会立即把当前项目、当前账号
+尚未整理的 Candidate 加入既有整理队列，不会作为普通聊天消息发送，也不会重新扫描对话。
 
 项目 Memory 页面提供长期事实、待整理候选、修改历史和只读 Pipeline 设置四个区域，支持搜索、
 分类筛选、分页，以及带版本并发校验的接受、拒绝、编辑、停用、恢复和永久遗忘。旧 v1 aggregate

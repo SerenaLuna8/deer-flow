@@ -186,6 +186,7 @@ export const zhCN: Translations = {
     suggestionPlaceholderRequired: "发送前请先填写建议模板中的占位内容。",
     goalCommandDescription: "设置、查看或清除当前目标",
     compactCommandDescription: "压缩早期上下文，保留完整聊天记录",
+    dreamCommandDescription: "立即整理已提取的长期记忆候选",
     goalLabel: "目标",
     goalContinuing: "续跑中 {count}/{max}",
     goalContinuationTooltip:
@@ -199,6 +200,12 @@ export const zhCN: Translations = {
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",
     compactFailed: "上下文压缩失败。",
+    dreamQueued: "已开始整理 {count} 条记忆候选。",
+    dreamAlreadyRunning: "记忆整理任务正在运行。",
+    dreamNoCandidates: "当前没有等待整理的记忆候选。",
+    dreamInvalidArguments: "/Dream 不接受参数，请直接发送 /Dream。",
+    dreamAttachmentsUnsupported: "/Dream 不能携带附件。",
+    dreamFailed: "记忆整理启动失败。",
     suggestions: [
       {
         suggestion: "写作",

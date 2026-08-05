@@ -260,6 +260,13 @@ class MemoryConsolidationAdmissionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryConsolidationImmediateAdmission:
+    disposition: Literal["queued", "already_running", "no_candidates"]
+    job_id: uuid.UUID | None
+    candidate_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryRetentionAdmissionRecord:
     job_id: uuid.UUID
     project_id: uuid.UUID
@@ -1418,6 +1425,111 @@ class MemoryV2Repository:
             candidate_ids=candidate_ids,
         )
 
+    async def _create_consolidation_admission(
+        self,
+        *,
+        contract: MemoryConsolidationAdmissionContract,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        namespace: str,
+        candidate_rows: tuple[MemoryCandidateRow, ...],
+    ) -> MemoryConsolidationAdmissionRecord:
+        input_digest = _candidate_input_digest(candidate_rows)
+        contract_digest = _consolidation_contract_digest(contract)
+        idempotency_key = _canonical_digest(
+            {
+                "candidate_input_digest": input_digest,
+                "contract_digest": contract_digest,
+                "job_type": "memory_consolidate",
+                "namespace": namespace,
+                "owner_user_id": owner_user_id,
+                "project_id": str(project_id),
+            }
+        )
+        job_id = await self.jobs.enqueue(
+            EnqueueJob(
+                job_type="memory_consolidate",
+                scope=JobScope(project_id, owner_user_id),
+                idempotency_key=idempotency_key,
+                run_id=None,
+                occurrence_id=None,
+                max_attempts=contract.max_attempts,
+                namespace=namespace,
+                retry_safety="safe",
+            )
+        )
+        generation_id = uuid.uuid4()
+        inserted_generation_id = await self.session.scalar(
+            insert(MemoryConsolidationGenerationRow)
+            .values(
+                id=generation_id,
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                namespace=namespace,
+                job_id=job_id,
+                candidate_input_digest=input_digest,
+                candidate_count=len(candidate_rows),
+                contract_digest=contract_digest,
+                policy_revision=contract.policy_revision,
+                model_config_id=contract.model_config_id,
+                model_config_version_id=contract.model_config_version_id,
+                model_config_checksum=contract.model_config_checksum,
+                prompt_version=contract.prompt_version,
+                consolidator_version=contract.consolidator_version,
+                output_schema_version=contract.output_schema_version,
+            )
+            .on_conflict_do_nothing(
+                constraint="uq_memory_consolidation_generations_contract",
+            )
+            .returning(MemoryConsolidationGenerationRow.id)
+        )
+        if inserted_generation_id is None:
+            generation = (
+                await self.session.execute(
+                    select(MemoryConsolidationGenerationRow)
+                    .where(
+                        MemoryConsolidationGenerationRow.project_id == project_id,
+                        MemoryConsolidationGenerationRow.owner_user_id == owner_user_id,
+                        MemoryConsolidationGenerationRow.namespace == namespace,
+                        MemoryConsolidationGenerationRow.candidate_input_digest == input_digest,
+                        MemoryConsolidationGenerationRow.contract_digest == contract_digest,
+                    )
+                    .with_for_update(of=MemoryConsolidationGenerationRow)
+                )
+            ).scalar_one()
+            if (
+                generation.job_id != job_id
+                or generation.candidate_count != len(candidate_rows)
+                or generation.policy_revision != contract.policy_revision
+                or generation.model_config_id != contract.model_config_id
+                or generation.model_config_version_id != contract.model_config_version_id
+                or generation.model_config_checksum != contract.model_config_checksum
+                or generation.prompt_version != contract.prompt_version
+                or generation.consolidator_version != contract.consolidator_version
+                or generation.output_schema_version != contract.output_schema_version
+            ):
+                raise MemoryV2AdmissionConflict(
+                    "Memory consolidation generation replay does not match",
+                )
+            generation_id = generation.id
+        else:
+            generation_id = inserted_generation_id
+        for candidate in candidate_rows:
+            if candidate.consolidation_generation_id is not None:
+                raise MemoryV2AdmissionConflict(
+                    "Memory Candidate was bound concurrently",
+                )
+            candidate.consolidation_generation_id = generation_id
+        await self.session.flush()
+        return MemoryConsolidationAdmissionRecord(
+            generation_id=generation_id,
+            job_id=job_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            namespace=namespace,
+            candidate_ids=tuple(candidate.id for candidate in candidate_rows),
+        )
+
     async def admit_next_consolidation(
         self,
         *,
@@ -1568,100 +1680,123 @@ class MemoryV2Repository:
         )
         if not candidate_rows:
             return None
-        input_digest = _candidate_input_digest(candidate_rows)
-        contract_digest = _consolidation_contract_digest(contract)
-        idempotency_key = _canonical_digest(
-            {
-                "candidate_input_digest": input_digest,
-                "contract_digest": contract_digest,
-                "job_type": "memory_consolidate",
-                "namespace": namespace,
-                "owner_user_id": owner_user_id,
-                "project_id": str(project_id),
-            }
-        )
-        job_id = await self.jobs.enqueue(
-            EnqueueJob(
-                job_type="memory_consolidate",
-                scope=JobScope(project_id, owner_user_id),
-                idempotency_key=idempotency_key,
-                run_id=None,
-                occurrence_id=None,
-                max_attempts=contract.max_attempts,
-                namespace=namespace,
-                retry_safety="safe",
-            )
-        )
-        generation_id = uuid.uuid4()
-        inserted_generation_id = await self.session.scalar(
-            insert(MemoryConsolidationGenerationRow)
-            .values(
-                id=generation_id,
-                project_id=project_id,
-                owner_user_id=owner_user_id,
-                namespace=namespace,
-                job_id=job_id,
-                candidate_input_digest=input_digest,
-                candidate_count=len(candidate_rows),
-                contract_digest=contract_digest,
-                policy_revision=contract.policy_revision,
-                model_config_id=contract.model_config_id,
-                model_config_version_id=contract.model_config_version_id,
-                model_config_checksum=contract.model_config_checksum,
-                prompt_version=contract.prompt_version,
-                consolidator_version=contract.consolidator_version,
-                output_schema_version=contract.output_schema_version,
-            )
-            .on_conflict_do_nothing(
-                constraint="uq_memory_consolidation_generations_contract",
-            )
-            .returning(MemoryConsolidationGenerationRow.id)
-        )
-        if inserted_generation_id is None:
-            generation = (
-                await self.session.execute(
-                    select(MemoryConsolidationGenerationRow)
-                    .where(
-                        MemoryConsolidationGenerationRow.project_id == project_id,
-                        MemoryConsolidationGenerationRow.owner_user_id == owner_user_id,
-                        MemoryConsolidationGenerationRow.namespace == namespace,
-                        MemoryConsolidationGenerationRow.candidate_input_digest == input_digest,
-                        MemoryConsolidationGenerationRow.contract_digest == contract_digest,
-                    )
-                    .with_for_update(of=MemoryConsolidationGenerationRow)
-                )
-            ).scalar_one()
-            if (
-                generation.job_id != job_id
-                or generation.candidate_count != len(candidate_rows)
-                or generation.policy_revision != contract.policy_revision
-                or generation.model_config_id != contract.model_config_id
-                or generation.model_config_version_id != contract.model_config_version_id
-                or generation.model_config_checksum != contract.model_config_checksum
-                or generation.prompt_version != contract.prompt_version
-                or generation.consolidator_version != contract.consolidator_version
-                or generation.output_schema_version != contract.output_schema_version
-            ):
-                raise MemoryV2AdmissionConflict(
-                    "Memory consolidation generation replay does not match",
-                )
-            generation_id = generation.id
-        else:
-            generation_id = inserted_generation_id
-        for candidate in candidate_rows:
-            if candidate.consolidation_generation_id is not None:
-                raise MemoryV2AdmissionConflict(
-                    "Memory Candidate was bound concurrently",
-                )
-            candidate.consolidation_generation_id = generation_id
-        await self.session.flush()
-        return MemoryConsolidationAdmissionRecord(
-            generation_id=generation_id,
-            job_id=job_id,
+        return await self._create_consolidation_admission(
+            contract=contract,
             project_id=project_id,
             owner_user_id=owner_user_id,
             namespace=namespace,
-            candidate_ids=tuple(candidate.id for candidate in candidate_rows),
+            candidate_rows=candidate_rows,
+        )
+
+    async def admit_consolidation_for_scope(
+        self,
+        *,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        namespace: str,
+        contract: MemoryConsolidationAdmissionContract,
+        now: datetime,
+    ) -> MemoryConsolidationImmediateAdmission:
+        """Immediately bind pending Candidates for exactly one private scope."""
+
+        self._validate_consolidation_contract(contract)
+        try:
+            uuid.UUID(owner_user_id)
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("Memory consolidation scope is invalid") from None
+        if not isinstance(project_id, uuid.UUID) or not isinstance(namespace, str) or namespace != namespace.strip() or not 1 <= len(namespace) <= 128 or not isinstance(now, datetime) or now.tzinfo is None:
+            raise ValueError("Memory consolidation scope is invalid")
+        if not await self._lock_live_scope(
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+        ):
+            return MemoryConsolidationImmediateAdmission(
+                disposition="no_candidates",
+                job_id=None,
+                candidate_count=0,
+            )
+        active_job_id = await self.session.scalar(
+            select(JobRow.id)
+            .where(
+                JobRow.job_type == "memory_consolidate",
+                JobRow.project_id == project_id,
+                JobRow.owner_user_id == owner_user_id,
+                JobRow.namespace == namespace,
+                JobRow.status.in_(("queued", "leased", "running", "retry_wait")),
+            )
+            .with_for_update(of=JobRow)
+            .limit(1)
+        )
+        if active_job_id is not None:
+            candidate_count = await self.session.scalar(
+                select(MemoryConsolidationGenerationRow.candidate_count).where(
+                    MemoryConsolidationGenerationRow.job_id == active_job_id,
+                )
+            )
+            return MemoryConsolidationImmediateAdmission(
+                disposition="already_running",
+                job_id=active_job_id,
+                candidate_count=int(candidate_count or 0),
+            )
+        candidate_rows = tuple(
+            (
+                await self.session.execute(
+                    select(MemoryCandidateRow)
+                    .join(
+                        MemorySourceBatchRow,
+                        and_(
+                            MemorySourceBatchRow.id == MemoryCandidateRow.source_batch_id,
+                            MemorySourceBatchRow.project_id == MemoryCandidateRow.project_id,
+                            MemorySourceBatchRow.owner_user_id == MemoryCandidateRow.owner_user_id,
+                            MemorySourceBatchRow.namespace == MemoryCandidateRow.namespace,
+                        ),
+                    )
+                    .join(
+                        MemorySourceItemRow,
+                        and_(
+                            MemorySourceItemRow.id == MemoryCandidateRow.source_item_id,
+                            MemorySourceItemRow.project_id == MemoryCandidateRow.project_id,
+                            MemorySourceItemRow.owner_user_id == MemoryCandidateRow.owner_user_id,
+                            MemorySourceItemRow.namespace == MemoryCandidateRow.namespace,
+                        ),
+                    )
+                    .where(
+                        MemoryCandidateRow.project_id == project_id,
+                        MemoryCandidateRow.owner_user_id == owner_user_id,
+                        MemoryCandidateRow.namespace == namespace,
+                        MemoryCandidateRow.status == "pending",
+                        MemoryCandidateRow.consolidation_generation_id.is_(None),
+                        MemoryCandidateRow.content.is_not(None),
+                        MemoryCandidateRow.content_erased_at.is_(None),
+                        MemoryCandidateRow.created_at <= now,
+                        MemorySourceBatchRow.pipeline_mode.in_(("consolidate", "v2")),
+                        MemorySourceBatchRow.suppressed_at.is_(None),
+                        MemorySourceItemRow.source_erased_at.is_(None),
+                        MemorySourceItemRow.content.is_not(None),
+                    )
+                    .order_by(MemoryCandidateRow.created_at, MemoryCandidateRow.id)
+                    .limit(20)
+                    .with_for_update(of=MemoryCandidateRow, skip_locked=True)
+                )
+            ).scalars()
+        )
+        if not candidate_rows:
+            return MemoryConsolidationImmediateAdmission(
+                disposition="no_candidates",
+                job_id=None,
+                candidate_count=0,
+            )
+        admitted = await self._create_consolidation_admission(
+            contract=contract,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            namespace=namespace,
+            candidate_rows=candidate_rows,
+        )
+        return MemoryConsolidationImmediateAdmission(
+            disposition="queued",
+            job_id=admitted.job_id,
+            candidate_count=len(admitted.candidate_ids),
         )
 
     async def load_consolidation_work(
@@ -2576,6 +2711,7 @@ __all__ = [
     "MemoryCandidateWrite",
     "MemoryConsolidationAdmissionContract",
     "MemoryConsolidationAdmissionRecord",
+    "MemoryConsolidationImmediateAdmission",
     "MemoryConsolidationCandidateRecord",
     "MemoryConsolidationDecisionWrite",
     "MemoryConsolidationFactRecord",

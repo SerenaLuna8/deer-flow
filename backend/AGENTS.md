@@ -641,6 +641,11 @@ remain. Both consolidation and retention lock and recheck the current policy in 
 transaction, so pausing keeps the backlog and cannot commit a Fact or erase Candidate text after
 the pause has linearized.
 
+`POST /api/projects/{project_id}/memory/v2/consolidate` is the manual `/Dream` admission path. It
+uses the same current policy/model contract and existing `memory_consolidate` Job, but selects only
+currently pending Candidates from the authenticated exact project/owner/namespace without the
+Scheduler age interval. It never scans chat history, runs the model in Gateway, or creates a Run.
+
 Gateway exposes `/api/projects/{project_id}/memory/v2/*` as the writable management surface. Fact
 lists support bounded search, category/status filtering, and `limit/offset` pagination; Candidate
 lists are likewise paged. Reads expose scoped Candidates/Facts and their Revision/Evidence history,

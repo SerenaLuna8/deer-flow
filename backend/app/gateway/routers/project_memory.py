@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import (
     BeforeValidator,
@@ -280,6 +280,13 @@ class ProjectMemoryV2StatusResponse(StrictPrivateWorkResponse):
         ge=1,
         le=365,
     )
+
+
+class ProjectMemoryV2ConsolidationResponse(StrictPrivateWorkResponse):
+    namespace: str
+    disposition: Literal["queued", "already_running", "no_candidates"]
+    job_id: uuid.UUID | None = Field(alias="jobId")
+    candidate_count: int = Field(alias="candidateCount", ge=0, le=20)
 
 
 class ProjectMemoryV2FactDetailResponse(StrictPrivateWorkResponse):
@@ -573,6 +580,34 @@ async def get_project_memory_v2_status(
             "injectionEnabled": memory.injection_enabled,
             "consolidationIntervalMinutes": memory.consolidation_interval_minutes,
             "candidateRetentionDays": memory.candidate_retention_days,
+        }
+    )
+
+
+@router.post(
+    "/v2/consolidate",
+    response_model=ProjectMemoryV2ConsolidationResponse,
+)
+async def consolidate_project_memory_v2(
+    request: Request,
+    response: Response,
+    namespace: Namespace = "default",
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryV2ConsolidationResponse:
+    result = await _call(
+        _v2_service(request).consolidate_now(
+            context,
+            namespace=namespace,
+        )
+    )
+    if result.disposition == "queued":
+        response.status_code = 202
+    return ProjectMemoryV2ConsolidationResponse.model_validate(
+        {
+            "namespace": namespace,
+            "disposition": result.disposition,
+            "jobId": result.job_id,
+            "candidateCount": result.candidate_count,
         }
     )
 

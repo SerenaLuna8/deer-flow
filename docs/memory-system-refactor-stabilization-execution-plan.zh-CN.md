@@ -1,7 +1,7 @@
 # Memory v2 稳定化与个性化执行计划
 
 - 日期：2026-08-05
-- 状态：执行中（PR9—PR11 代码与离线测试完成；当前阶段 PR12；真实环境终验待完成）
+- 状态：执行中（PR9—PR12 代码与离线测试完成；当前阶段 PR13；真实环境终验待完成）
 - 前置提交：3024d664
 - 基线分支：codex/memory-system-refactor
 - 上游计划：[记忆系统重构执行计划](./memory-system-refactor-execution-plan.zh-CN.md)
@@ -365,7 +365,7 @@ candidatesQuery 增加 15 秒前台轮询，refetchIntervalInBackground 为 fals
 - 未到 interval 的当前 Owner Candidate 可立即入队；
 - 其他 Owner 和 namespace 不动；
 - 并发两次只有一个 active Job；
-- private_runs 行数不增加；
+- `runs` 行数不增加；
 - Worker 通过原 memory_consolidate 完成 Fact 和 Candidate 结算；
 - /Dream 从未显示为聊天消息或 Skill；
 - Memory 页面一个轮询周期内显示结果。

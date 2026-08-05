@@ -160,6 +160,7 @@ export interface Translations {
     suggestionPlaceholderRequired: string;
     goalCommandDescription: string;
     compactCommandDescription: string;
+    dreamCommandDescription: string;
     goalLabel: string;
     goalContinuing: string;
     goalContinuationTooltip: string;
@@ -171,6 +172,12 @@ export interface Translations {
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
+    dreamQueued: string;
+    dreamAlreadyRunning: string;
+    dreamNoCandidates: string;
+    dreamInvalidArguments: string;
+    dreamAttachmentsUnsupported: string;
+    dreamFailed: string;
     suggestions: {
       suggestion: string;
       prompt: string;

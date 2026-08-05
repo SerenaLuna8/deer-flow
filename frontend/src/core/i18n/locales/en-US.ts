@@ -199,6 +199,7 @@ export const enUS: Translations = {
     goalCommandDescription: "Set, show, or clear an active goal",
     compactCommandDescription:
       "Compact earlier context while keeping the full chat visible",
+    dreamCommandDescription: "Consolidate extracted long-term Memory candidates now",
     goalLabel: "Goal",
     goalContinuing: "Continuing {count}/{max}",
     goalContinuationTooltip:
@@ -212,6 +213,12 @@ export const enUS: Translations = {
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
     compactFailed: "Context compaction failed.",
+    dreamQueued: "Started consolidating {count} Memory candidates.",
+    dreamAlreadyRunning: "Memory consolidation is already running.",
+    dreamNoCandidates: "There are no Memory candidates waiting to be consolidated.",
+    dreamInvalidArguments: "/Dream does not accept arguments. Send /Dream by itself.",
+    dreamAttachmentsUnsupported: "/Dream cannot be sent with attachments.",
+    dreamFailed: "Failed to start Memory consolidation.",
     suggestions: [
       {
         suggestion: "Write",

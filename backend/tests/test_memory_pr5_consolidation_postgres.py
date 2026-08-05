@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from sqlalchemy import text
 from support.memory_v2_seed import admit_memory_extraction_job
 from support.private_thread_seed import seed_private_thread_database
 
+from app.private_work.memory_service import build_memory_consolidation_contract
 from app.reliability.workers import WorkerRegistry
 from app.scheduler.memory import (
     MemoryMaintenanceSchedulerService,
@@ -32,6 +34,7 @@ from deerflow.agents.memory.extractor import (
 )
 from deerflow.agents.memory.storage import ProjectMemoryStorage
 from deerflow.persistence.jobs.sql import JobOwnerRef, JobRepository
+from deerflow.persistence.private_work.memory_v2_repository import MemoryV2Repository
 
 
 class _ExtractionPolicy:
@@ -125,7 +128,12 @@ def _job_repository(session) -> JobRepository:
     )
 
 
-async def _seed_candidates(seed, contents: tuple[str, ...]) -> None:
+async def _seed_candidates(
+    seed,
+    contents: tuple[str, ...],
+    *,
+    age_for_scheduler: bool = True,
+) -> None:
     _admitted, claim = await admit_memory_extraction_job(
         seed,
         messages=[
@@ -153,14 +161,15 @@ async def _seed_candidates(seed, contents: tuple[str, ...]) -> None:
     )
     assert isinstance(settlement, JobSettlement)
     await settlement.commit()
-    async with seed.factory() as session, session.begin():
-        await session.execute(
-            text(
-                """UPDATE memory_candidates
-                SET created_at=now()-interval '121 minutes'
-                WHERE status='pending' AND consolidation_generation_id IS NULL"""
+    if age_for_scheduler:
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """UPDATE memory_candidates
+                    SET created_at=now()-interval '121 minutes'
+                    WHERE status='pending' AND consolidation_generation_id IS NULL"""
+                )
             )
-        )
 
 
 async def _admit_memory_jobs(seed):
@@ -257,6 +266,61 @@ async def test_scheduler_admits_one_idempotent_bounded_job_per_scope(
                 )
             ).one()
         assert tuple(state) == (1, 1, 20, 1)
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_dream_immediately_admits_exact_scope_only_once(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    try:
+        await _seed_candidates(
+            seed,
+            ("无需等待定时间隔的长期偏好",),
+            age_for_scheduler=False,
+        )
+        async with seed.factory() as session:
+            runs_before = await session.scalar(text("SELECT count(*) FROM runs"))
+
+        async def admit_once():
+            async with seed.factory() as session, session.begin():
+                runtime = await resolve_memory_consolidation_runtime(session)
+                contract = build_memory_consolidation_contract(runtime)
+                assert contract is not None
+                return await MemoryV2Repository(session).admit_consolidation_for_scope(
+                    project_id=seed.owner_a.project_id,
+                    owner_user_id=str(seed.owner_a.user_id),
+                    namespace="default",
+                    contract=contract,
+                    now=await session.scalar(text("SELECT now()")),
+                )
+
+        outcomes = await asyncio.gather(admit_once(), admit_once())
+
+        assert sorted(outcome.disposition for outcome in outcomes) == [
+            "already_running",
+            "queued",
+        ]
+        queued = next(outcome for outcome in outcomes if outcome.disposition == "queued")
+        running = next(outcome for outcome in outcomes if outcome.disposition == "already_running")
+        assert queued.candidate_count == running.candidate_count == 1
+        assert queued.job_id == running.job_id
+        async with seed.factory() as session:
+            state = (
+                await session.execute(
+                    text(
+                        """SELECT
+                        (SELECT count(*) FROM jobs
+                         WHERE job_type='memory_consolidate'),
+                        (SELECT count(*) FROM memory_consolidation_generations),
+                        (SELECT count(*) FROM runs)"""
+                    )
+                )
+            ).one()
+        assert tuple(state) == (1, 1, runs_before)
     finally:
         await seed.engine.dispose()
 
