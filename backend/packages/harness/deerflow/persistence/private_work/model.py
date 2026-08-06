@@ -10,14 +10,12 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
-    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     LargeBinary,
     PrimaryKeyConstraint,
     String,
-    Text,
     UniqueConstraint,
     Uuid,
     text,
@@ -324,66 +322,4 @@ class PrivateArtifactRow(Base):
             "created_at",
             postgresql_where=text("deleted_at IS NULL"),
         ),
-    )
-
-
-class UserProjectMemoryRow(Base):
-    __tablename__ = "user_project_memories"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    namespace: Mapped[str] = mapped_column(String(255), nullable=False, default="default", server_default="default")
-    context_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
-
-    __table_args__ = (
-        *_scope_constraints("user_project_memories"),
-        UniqueConstraint("project_id", "owner_user_id", "namespace", name="uq_user_project_memories_namespace"),
-        UniqueConstraint("project_id", "owner_user_id", "id", name="uq_user_project_memories_private_scope"),
-        CheckConstraint("namespace <> ''", name="ck_user_project_memories_namespace"),
-        CheckConstraint("version >= 1", name="ck_user_project_memories_version"),
-    )
-
-
-class UserProjectMemoryFactRow(Base):
-    __tablename__ = "user_project_memory_facts"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    memory_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    category: Mapped[str] = mapped_column(String(32), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    source_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
-
-    __table_args__ = (
-        *_scope_constraints("user_project_memory_facts"),
-        ForeignKeyConstraint(
-            ["project_id", "owner_user_id", "memory_id"],
-            ["user_project_memories.project_id", "user_project_memories.owner_user_id", "user_project_memories.id"],
-            name="fk_user_project_memory_facts_memory",
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "owner_user_id", "source_thread_id"],
-            ["threads_meta.project_id", "threads_meta.owner_user_id", "threads_meta.thread_id"],
-            name="fk_user_project_memory_facts_source_thread",
-            ondelete="RESTRICT",
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "owner_user_id", "source_thread_id", "source_run_id"],
-            ["runs.project_id", "runs.owner_user_id", "runs.thread_id", "runs.run_id"],
-            name="fk_user_project_memory_facts_source_run",
-            ondelete="RESTRICT",
-        ),
-        CheckConstraint("content <> ''", name="ck_user_project_memory_facts_content"),
-        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_user_project_memory_facts_confidence"),
-        CheckConstraint("source_run_id IS NULL OR source_thread_id IS NOT NULL", name="ck_user_project_memory_facts_source"),
     )

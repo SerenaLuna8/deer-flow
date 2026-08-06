@@ -211,11 +211,7 @@ async def prepare_replay_runtime_catalog(
                     update={"enabled": False},
                 ),
                 "memory": value.memory.model_copy(
-                    update={
-                        "enabled": False,
-                        "search_enabled": False,
-                        "injection_enabled": False,
-                    },
+                    update={"enabled": False},
                 ),
             },
         )

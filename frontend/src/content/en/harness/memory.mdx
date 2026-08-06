@@ -1,40 +1,43 @@
 ---
 title: Memory
-description: Project-scoped PostgreSQL Memory for admitted private runs.
+description: Project-scoped long-term Memory built from SNIP archives and Dream.
 ---
 
 # Memory
 
-Project Memory stores long-term Candidates, versioned Facts, Revisions, Evidence, and per-Run recall snapshots in PostgreSQL under an exact project, owner, and namespace. Thread summaries are separate: they compact one Thread's conversation context and never become long-term Memory by themselves.
+Project Memory is one private, versioned Markdown document for each authenticated owner in a project. PostgreSQL stores the current document, pending history entries, Dream runs, immutable document versions, and the exact document snapshot frozen for each admitted Run. The server derives project, owner, and the fixed internal namespace from the authenticated request; the browser cannot select another scope.
 
-## Durable write pipeline
+Thread summaries remain separate. They compact one Thread's model context and are preserved when long-term Memory is reset.
 
-When an eligible private Run succeeds, settlement atomically records the bounded source messages and a durable `memory_extract` Job. A Worker uses the Run-frozen model configuration to extract pending Candidates without tools. Candidates cannot be injected or returned by `memory_search`.
+## SNIP and pending history
 
-The Scheduler periodically admits bounded `memory_consolidate` Jobs for pending Candidates. Only a Worker runs the consolidator. It can accept a Candidate into a new Fact, add Evidence to an existing Fact, or create a new Revision when a fact is corrected. Candidate decisions and Fact/Revision/Evidence writes settle in one transaction.
+When a Thread is compacted, SNIP makes one bounded model call over complete older turns. Its validated tagged output becomes both the Thread's `summary_text` and a pending private history entry. An exact `(nothing)` still updates the Thread summary but creates no long-term entry. The checkpoint receipt and database transaction use an idempotent handshake so a retry cannot archive the same compaction twice.
 
-The legacy built-in `MemoryMiddleware`, process-local queue/updater, summarization write hook, and v1 write APIs are removed. Summarization now owns only Thread context compaction; long-term Memory follows Source → extract → consolidate.
+Use `/compact` to run only this Thread-local compaction. The full visible chat remains available.
+
+## Dream
+
+Dream periodically organizes at most the oldest 20 pending entries into the current document. The isolated Dream session receives only the current document, the bounded pending batch, and in-memory read/replace tools. It has no shared Agent, files, shell, web, MCP, Skill, or Subagent access.
+
+Document replacement, a new immutable version, a real unified diff, cursor advancement, pending-entry tombstones, and Job success settle atomically. If model, tool, validation, timeout, or database work fails, the document and pending entries remain unchanged for a safe retry.
+
+`/Dream` first compacts the current Thread and then admits one manual Dream batch. The Memory page's **Organize now** action admits the same job without changing chat messages.
 
 ## Recall
 
-The Pipeline mode is frozen when a Run is admitted:
+Run admission reads the current bounded document once and freezes it in a single Run snapshot. Worker model boundaries reuse only that snapshot; first recall performs no model call, vector lookup, or ranking query. Dream finishing during a Run cannot change that Run's Memory.
 
-- `off` creates no v2 data and reads the retained v1 aggregate as a rollback source.
-- `shadow` extracts Candidates but continues to recall v1.
-- `consolidate` also produces versioned Facts but continues to recall v1.
-- `v2` creates one ordered Fact-Revision snapshot on the Run's first Memory read and reuses it for retry and resume.
-
-Automatic injection is a hidden, low-authority Human message rather than a System instruction. The read-only `memory_search` tool ranks the same Run-pinned v2 items. The model may provide only a query, optional category, and result count; the Worker supplies and revalidates project, owner, namespace, Run, and lease authority. Disabled or hard-forgotten content is removed from later reads without backfilling a different Fact into an existing Run snapshot.
+When enabled, the complete frozen document is injected as a hidden, low-authority Human message marked as private data rather than an instruction. Turning Memory off skips injection at the next model boundary. Reset removes long-term documents, history, versions, Dream records, and Run Memory snapshots while preserving chats and Thread summaries.
 
 ## Project Memory page
 
-The project page has four regions:
+The project page shows only:
 
-- **Long-term Memory** — search, category/status filters, and paged active or disabled Facts.
-- **Pending** — paged pending Candidates with accept or reject actions.
-- **History** — the selected Fact's Revisions, Evidence, and source-erasure state.
-- **Settings** — read-only Pipeline status, search/injection switches, consolidation interval, and Candidate retention period.
+- the current long-term document, version, update time, and pending count;
+- **Organize now** and an active-Dream state;
+- Dream and restore history with the processed count and real diff;
+- each saved document version and an explicit restore confirmation.
 
-Candidate decisions send the exact server `updatedAt`; Fact edit, disable, restore, and irreversible hard forget send the exact visible Fact version. A concurrent change returns a conflict instead of silently overwriting newer data. The v1 aggregate retains only scoped list, status, export, and rollback recall; it cannot be imported or edited.
+Restore writes the selected historical content as a new version. It never rewinds the history cursor or deletes later records. `/dream-log [version]` opens this history, and `/dream-restore <version>` asks for confirmation before calling the restore API. None of these commands is sent to the normal Agent chat flow.
 
-Runs without a trusted project-private scope do not read, inject, extract, consolidate, or manage Memory.
+Runs without a trusted project-private scope cannot read, inject, organize, restore, or reset Memory.

@@ -13,6 +13,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
+
 _MAX_PUBLIC_VIEWED_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_PUBLIC_SERIALIZATION_DEPTH = 128
 _MAX_PUBLIC_SERIALIZATION_NODES = 10_000
@@ -21,6 +23,7 @@ _MAX_PUBLIC_SERIALIZATION_STRING_CHARS = 1_000_000
 _MAX_PUBLIC_SERIALIZATION_TOTAL_STRING_CHARS = 4_000_000
 _MAX_PUBLIC_SERIALIZATION_KEY_CHARS = 1_024
 _BUDGET_EXHAUSTED = object()
+_INTERNAL_STATE_KEYS = frozenset({MEMORY_ARCHIVE_RECEIPT_KEY})
 _PUBLIC_VIEWED_IMAGE_MIME_TYPES = frozenset(
     {
         "image/gif",
@@ -122,6 +125,8 @@ def _serialize_lc_object(
                 if not state.reserve_item():
                     break
                 if not isinstance(key, str):
+                    continue
+                if key in _INTERNAL_STATE_KEYS:
                     continue
                 bounded_key = state.bound_string(key, key=True)
                 if bounded_key in result:
@@ -233,7 +238,7 @@ def serialize_channel_values(channel_values: dict[str, Any]) -> dict[str, Any]:
     for index, (key, value) in enumerate(channel_values.items()):
         if index >= _MAX_PUBLIC_SERIALIZATION_ITEMS:
             break
-        if not isinstance(key, str) or key.startswith("__pregel_"):
+        if not isinstance(key, str) or key.startswith("__pregel_") or key in _INTERNAL_STATE_KEYS:
             continue
         filtered[key] = value
     result = serialize_lc_object(filtered)
@@ -395,6 +400,8 @@ def _project_serialized_payload_for_api(
             if not state.reserve_item():
                 break
             if not isinstance(key, str):
+                continue
+            if key in _INTERNAL_STATE_KEYS:
                 continue
             bounded_key = state.bound_string(key, key=True)
             if bounded_key in result:

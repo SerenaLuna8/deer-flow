@@ -8,7 +8,9 @@ import {
 } from "@/core/threads/hooks";
 
 test("omits the SDK branch checkpoint after a successful compaction", () => {
-  expect(buildThreadSubmitCheckpointOptions(true)).toEqual({ checkpoint: null });
+  expect(buildThreadSubmitCheckpointOptions(true)).toEqual({
+    checkpoint: null,
+  });
   expect(buildThreadSubmitCheckpointOptions(false)).toEqual({});
   expect(buildThreadSubmitCheckpointOptions(undefined)).toEqual({});
 });

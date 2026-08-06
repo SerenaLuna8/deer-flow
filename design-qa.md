@@ -346,3 +346,48 @@ final result: passed
 The focused comparison is sufficient because the requested change is entirely contained in the summary region; the mobile screenshot provides the responsive evidence.
 
 final result: passed
+
+---
+
+# 模型目录压缩与连通性探测 Design QA
+
+## Scope and evidence
+
+- Source visual truth: `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-868a1be5-f2f9-4795-b398-fcaa4cac1ad8.png`.
+- Browser-rendered list: `/private/tmp/model-settings-list-final.png`.
+- Browser-rendered editor: `/private/tmp/model-settings-editor-final.png`.
+- Side-by-side comparison: `/private/tmp/model-settings-list-comparison.png` (left: annotated source; right: implementation).
+- State: authenticated system admin, light theme, two configured models.
+
+## Viewport and normalization
+
+- List review used the desktop `1440 x 900` viewport.
+- The editor review temporarily used `1440 x 1200` only to expose the Credential-binding action and the following capability section in one frame; the override was reset before handoff.
+- The comparison crops the source table and the rendered table to their shared content region, then uses a common width without aspect-ratio distortion.
+
+## Fidelity review
+
+- The desktop catalog now presents one primary line for configured model, Provider adapter, and Credential. Logical identifier, Provider model identifier, and injected environment-key secondary lines are removed from this desktop density.
+- `更新时间` is an independent table column. Version retains only `vN` and its compact revision/order metadata.
+- The wider action column keeps edit, state, and default controls horizontal at the reviewed desktop width.
+- The connection action follows the Credential binding and precedes capabilities. Its description states that the current form settings and selected Credential are used for a minimal request, while neither a model nor any browser-visible secret is persisted.
+- Existing design tokens, Lucide icons, typography, borders, and responsive mobile detail cards are retained; no custom visual asset was introduced.
+
+## Primary interactions and safety
+
+- The connection action is a real server-backed, non-graph probe. The server re-authorizes the system admin, locks only the selected current system Credential version, decrypts it only at the execution boundary, runs an untraced bounded request, and returns only `succeeded` or `failed`.
+- The browser test form shows the control disabled before a required Credential is selected. A live provider request was intentionally not made during visual QA because it can consume external provider quota.
+- Focused unit coverage verifies both successful and failed opaque probe outcomes, and the form placement assertion confirms that the action remains inside the Credential-binding section.
+
+## Comparison history and findings
+
+1. The source shows redundant lower metadata under the first three desktop columns and the timestamp nested below the version.
+2. The rendered comparison confirms those lower lines are removed, the timestamp occupies its own column, and action controls remain aligned in one row.
+3. The editor evidence confirms the added connection action is visible in the intended configuration flow without shifting Base URL or Credential placement.
+
+- P0: none.
+- P1: none.
+- P2: none.
+- P3: the desktop table intentionally retains compact version/revision metadata because it remains useful operational information and was not highlighted for removal.
+
+final result: passed

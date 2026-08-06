@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -60,6 +60,16 @@ export function filterProjectConversationThreads(
 
 export function projectConversationTitle(thread: AgentThread): string {
   return titleOfThread(thread).trim() || "新对话";
+}
+
+export function projectConversationAutoOpenPath(
+  projectSlug: string,
+  activeThreadId: string | undefined,
+  threads: AgentThread[],
+): string | null {
+  const firstThread = threads[0];
+  if (activeThreadId || !firstThread) return null;
+  return `/projects/${encodeURIComponent(projectSlug)}/chats/${encodeURIComponent(firstThread.thread_id)}`;
 }
 
 export function projectConversationPermissions(project: Project) {
@@ -261,6 +271,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
   const [deleteTarget, setDeleteTarget] = useState<AgentThread | null>(null);
   const [renameTarget, setRenameTarget] = useState<AgentThread | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const autoOpenedPathRef = useRef<string | null>(null);
   const threads = useMemo(
     () => threadsQuery.data?.pages.flat() ?? [],
     [threadsQuery.data],
@@ -280,6 +291,23 @@ export function ProjectConversationRail({ project }: { project: Project }) {
     canCreate,
     readiness.data?.status,
   );
+  const autoOpenPath =
+    !staticWebsiteOnly &&
+    threadsQuery.isSuccess &&
+    !threadsQuery.isFetching &&
+    !deleteThread.isPending
+      ? projectConversationAutoOpenPath(project.slug, activeThreadId, threads)
+      : null;
+
+  useEffect(() => {
+    if (!autoOpenPath) {
+      autoOpenedPathRef.current = null;
+      return;
+    }
+    if (autoOpenedPathRef.current === autoOpenPath) return;
+    autoOpenedPathRef.current = autoOpenPath;
+    router.replace(autoOpenPath);
+  }, [autoOpenPath, router]);
 
   if (staticWebsiteOnly) return null;
 

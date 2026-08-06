@@ -19,13 +19,16 @@ from app.final_schema import (
     FinalSchemaUnavailable,
 )
 from app.gateway.deps import (
+    get_config,
     get_system_model_catalog,
+    get_system_model_materializer,
     project_session,
 )
 from app.gateway.routers.admin_operations import (
     AdminOperationsRoute,
     authenticated_system_identity,
 )
+from app.gateway.system_model_callers import ModelConnectionTester
 from app.reliability.error_mapping import reliability_http_exception
 from app.reliability.errors import (
     ReliabilityDatabaseUnavailable,
@@ -36,10 +39,14 @@ from app.system_settings import (
     CreateSystemModel,
     SystemModelCatalogService,
     SystemModelCatalogView,
+    SystemModelConnectionCheck,
+    SystemModelMaterializationUnavailable,
+    SystemModelMaterializer,
     SystemModelView,
     UpdateSystemModel,
 )
 from app.system_settings.errors import SystemModelError
+from deerflow.config.app_config import AppConfig
 
 router = APIRouter(
     prefix="/api/admin/settings/models",
@@ -108,6 +115,15 @@ class AdminModelDefaultRequest(_StrictModel):
     expected_catalog_revision: int
 
 
+class AdminModelConnectionTestRequest(_StrictModel):
+    provider_adapter: str
+    provider_model: str
+    settings: dict[str, object]
+    credential_id: _JsonUuid | None = None
+    credential_version_id: _JsonUuid | None = None
+    credential_env_key: str | None = None
+
+
 class AdminModelItemResponse(_StrictModel):
     id: uuid.UUID
     logical_name: str
@@ -139,6 +155,11 @@ class AdminModelCatalogResponse(_StrictModel):
 class AdminModelMutationResponse(_StrictModel):
     item: AdminModelItemResponse
     catalog_revision: int
+    request_id: str
+
+
+class AdminModelConnectionTestResponse(_StrictModel):
+    status: Literal["succeeded", "failed"]
     request_id: str
 
 
@@ -312,6 +333,56 @@ async def create_admin_model(
         raise _system_model_http_exception(error) from None
 
 
+@router.post(
+    "/test-connection",
+    response_model=AdminModelConnectionTestResponse,
+)
+async def test_admin_model_connection(
+    body: AdminModelConnectionTestRequest,
+    context: Annotated[
+        SystemAuditContext,
+        Depends(current_model_admin_context),
+    ],
+    service: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+    materializer: Annotated[
+        SystemModelMaterializer,
+        Depends(get_system_model_materializer),
+    ],
+    config: Annotated[AppConfig, Depends(get_config)],
+) -> AdminModelConnectionTestResponse:
+    try:
+        material = await service.prepare_connection_test(
+            context,
+            SystemModelConnectionCheck(
+                provider_adapter=body.provider_adapter,
+                provider_model=body.provider_model,
+                settings=body.settings,
+                credential_id=body.credential_id,
+                credential_version_id=body.credential_version_id,
+                credential_env_key=body.credential_env_key,
+            ),
+        )
+        model = await materializer.materialize_connection_test(material)
+    except SystemModelError as error:
+        raise _system_model_http_exception(error) from None
+    except SystemModelMaterializationUnavailable:
+        return AdminModelConnectionTestResponse(
+            status="failed",
+            request_id=context.request_id,
+        )
+    return AdminModelConnectionTestResponse(
+        status=(
+            "succeeded"
+            if await ModelConnectionTester(config).test(model)
+            else "failed"
+        ),
+        request_id=context.request_id,
+    )
+
+
 @router.put("/{model_config_id}", response_model=AdminModelMutationResponse)
 async def update_admin_model(
     model_config_id: uuid.UUID,
@@ -437,6 +508,8 @@ async def set_admin_model_default(
 
 __all__ = [
     "AdminModelCatalogResponse",
+    "AdminModelConnectionTestRequest",
+    "AdminModelConnectionTestResponse",
     "AdminModelCreateRequest",
     "AdminModelItemResponse",
     "AdminModelMutationResponse",

@@ -161,6 +161,8 @@ export interface Translations {
     goalCommandDescription: string;
     compactCommandDescription: string;
     dreamCommandDescription: string;
+    dreamLogCommandDescription: string;
+    dreamRestoreCommandDescription: string;
     goalLabel: string;
     goalContinuing: string;
     goalContinuationTooltip: string;
@@ -174,10 +176,19 @@ export interface Translations {
     compactFailed: string;
     dreamQueued: string;
     dreamAlreadyRunning: string;
-    dreamNoCandidates: string;
+    dreamNothingPending: string;
     dreamInvalidArguments: string;
+    dreamLogInvalidArguments: string;
+    dreamRestoreInvalidArguments: string;
     dreamAttachmentsUnsupported: string;
     dreamFailed: string;
+    dreamRequiresThread: string;
+    dreamRouteUnavailable: string;
+    dreamRestoreSuccess: string;
+    dreamRestoreFailed: string;
+    dreamRestoreConfirmTitle: string;
+    dreamRestoreConfirmDescription: string;
+    dreamRestoreConfirmAction: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -436,9 +447,7 @@ export interface Translations {
         automation_run: string;
         retention_purge: string;
         mcp_discovery: string;
-        memory_extract: string;
-        memory_consolidate: string;
-        memory_retention_purge: string;
+        memory_dream: string;
       };
       retrySafety: {
         safe: string;
@@ -983,6 +992,7 @@ export interface Translations {
       active: string;
       suspended: string;
       updatedAt: (formattedDate: string) => string;
+      updatedAtColumn: string;
       providerModel: string;
       credential: string;
       environmentKey: string;
@@ -1034,6 +1044,7 @@ export interface Translations {
       sortOrder: string;
       sortOrderHint: string;
       capabilities: string;
+      capabilitiesAndRuntime: string;
       capabilitiesDescription: string;
       supportsThinking: string;
       supportsReasoningEffort: string;
@@ -1041,6 +1052,7 @@ export interface Translations {
       commonProviderSettings: string;
       commonProviderSettingsDescription: string;
       baseUrl: string;
+      baseUrlHint: string;
       temperature: string;
       maxTokens: string;
       requestTimeout: string;
@@ -1054,6 +1066,11 @@ export interface Translations {
       providerDoesNotUseCredential: string;
       environmentKey: string;
       environmentKeyHint: string;
+      testConnection: string;
+      testingConnection: string;
+      testConnectionDescription: string;
+      connectionSucceeded: string;
+      connectionFailed: string;
       advancedJson: string;
       advancedJsonHint: string;
       cancel: string;
@@ -1545,6 +1562,33 @@ export interface Translations {
     removeTodo: (content: string) => string;
   };
 
+  // Context Window
+  contextWindow: {
+    title: string;
+    automaticCompression: string;
+    loading: string;
+    unavailable: string;
+    disabled: string;
+    progressLabel: (percent: string) => string;
+    current: string;
+    triggerAt: string;
+    remaining: string;
+    estimatedContext: string;
+    tokenThreshold: string;
+    summaryPresent: string;
+    allConditions: string;
+    anyCondition: string;
+    primary: string;
+    triggerTypes: {
+      tokens: string;
+      fraction: string;
+      messages: string;
+    };
+    tokens: (value: string) => string;
+    tokenPair: (current: string, total: string) => string;
+    messages: (count: number) => string;
+  };
+
   // Shortcuts
   shortcuts: {
     searchActions: string;
@@ -1569,142 +1613,9 @@ export interface Translations {
       tools: string;
       skills: string;
       notification: string;
-      about: string;
     };
     memory: {
       title: string;
-      v2: {
-        description: string;
-        export: string;
-        exportSuccess: string;
-        tabs: {
-          facts: string;
-          candidates: string;
-          history: string;
-          settings: string;
-        };
-        facts: {
-          title: string;
-          description: string;
-          searchPlaceholder: string;
-          categoryPlaceholder: string;
-          statusAll: string;
-          statusActive: string;
-          statusDisabled: string;
-          count: (count: number) => string;
-          emptyTitle: string;
-          emptyDescription: string;
-          noMatchesTitle: string;
-          noMatchesDescription: string;
-          loadError: string;
-          confidence: string;
-          version: (version: number) => string;
-          updated: (value: string) => string;
-          edit: string;
-          disable: string;
-          restore: string;
-          hardForget: string;
-          viewHistory: string;
-        };
-        candidates: {
-          title: string;
-          description: string;
-          count: (count: number) => string;
-          emptyTitle: string;
-          emptyDescription: string;
-          loadError: string;
-          accept: string;
-          reject: string;
-          cannotAccept: string;
-          retention: string;
-          sensitivity: string;
-          created: (value: string) => string;
-          retentionLabels: {
-            permanent: string;
-            durable: string;
-            ephemeral: string;
-          };
-          sensitivityLabels: {
-            normal: string;
-            sensitive: string;
-            restricted: string;
-          };
-        };
-        history: {
-          title: string;
-          description: string;
-          selectTitle: string;
-          selectDescription: string;
-          loadError: string;
-          current: string;
-          revisions: string;
-          evidence: string;
-          revision: (revision: number) => string;
-          changedBy: (actor: string) => string;
-          reason: (reason: string) => string;
-          sourceAvailable: string;
-          sourceDeleted: string;
-          sourceUnknown: string;
-          openThread: string;
-          noEvidence: string;
-        };
-        settings: {
-          title: string;
-          description: string;
-          loadError: string;
-          pipeline: string;
-          enabled: string;
-          disabled: string;
-          search: string;
-          injection: string;
-          consolidationInterval: string;
-          retention: string;
-          minutes: (value: number) => string;
-          days: (value: number) => string;
-          readOnly: string;
-          modes: {
-            off: string;
-            shadow: string;
-            consolidate: string;
-            v2: string;
-          };
-        };
-        pagination: {
-          previous: string;
-          next: string;
-          page: (page: number) => string;
-        };
-        edit: {
-          title: string;
-          description: string;
-          content: string;
-          category: string;
-          confidence: string;
-          reason: string;
-          reasonPlaceholder: string;
-          cancel: string;
-          save: string;
-          success: string;
-          invalidContent: string;
-          invalidCategory: string;
-          invalidConfidence: string;
-        };
-        forget: {
-          title: string;
-          description: string;
-          preview: string;
-          cancel: string;
-          confirm: string;
-          success: string;
-        };
-        acceptSuccess: string;
-        rejectSuccess: string;
-        disableSuccess: string;
-        restoreSuccess: string;
-        retry: string;
-        conflict: string;
-        emptyContent: string;
-      };
     };
     personalization: {
       title: string;

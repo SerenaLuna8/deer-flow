@@ -54,20 +54,6 @@ const toolNameSchema = z
       ) && !/^(?:sk|pk|tp)-(?:proj-)?[A-Za-z0-9_-]{8,}$/u.test(value),
     "Runtime names must not contain credential-like values",
   );
-const categoryNameSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(/^[A-Za-z][A-Za-z0-9_.:-]*$/u)
-  .refine(
-    (value) =>
-      !/(?:^|[._:-])(?:api[_-]?key|authorization|bearer|client[_-]?secret|password|passwd|secret|token)(?:$|[._:-])/iu.test(
-        value,
-      ),
-    "Category names must not contain credential-like values",
-  );
-
 function containsSecretLikeMaterial(value: unknown): boolean {
   if (Array.isArray(value)) {
     return value.some(containsSecretLikeMaterial);
@@ -243,27 +229,9 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
       memory: z
         .object({
           enabled: z.boolean(),
-          pipeline_mode: z.enum(["off", "shadow", "consolidate", "v2"]),
-          consolidation_interval_minutes: boundedInteger(15, 1_440),
-          candidate_retention_days: boundedInteger(1, 365),
-          search_enabled: z.boolean(),
-          debounce_seconds: boundedInteger(1, 300),
           model_name: logicalModelNameSchema.nullable(),
-          max_facts: boundedInteger(10, 500),
-          fact_confidence_threshold: ratioSchema,
-          injection_enabled: z.boolean(),
+          dream_interval_minutes: boundedInteger(15, 1_440),
           max_injection_tokens: boundedInteger(100, 8_000),
-          token_counting: z.enum(["tiktoken", "char"]),
-          guaranteed_categories: uniqueNameListSchema(categoryNameSchema, 32),
-          guaranteed_token_budget: boundedInteger(50, 2_000),
-          staleness_review_enabled: z.boolean(),
-          staleness_age_days: boundedInteger(30, 365),
-          staleness_min_candidates: boundedInteger(1, 50),
-          staleness_max_removals_per_cycle: boundedInteger(1, 50),
-          staleness_protected_categories: uniqueNameListSchema(
-            categoryNameSchema,
-            32,
-          ),
         })
         .strict(),
       tool_search: z

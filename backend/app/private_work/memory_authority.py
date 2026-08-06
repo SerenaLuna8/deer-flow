@@ -1,8 +1,15 @@
+"""Worker-issued authority for one Run's frozen Memory document."""
+
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
+
+import sqlalchemy as sa
 
 from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.authorization import PrivateRunAuthorizationService
@@ -16,28 +23,49 @@ from app.projects.context import (
     ProjectContext,
     resolve_project_context_in_transaction,
 )
-from app.system_runtime_settings.models import RuntimePolicySection
-from app.system_runtime_settings.repository import SystemRuntimePolicyRepository
-from deerflow.agents.memory import format_memory_for_injection
+from deerflow.agents.memory.dream import validate_memory_document
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.jobs.sql import JobClaim
-from deerflow.persistence.private_work.memory_repository import (
-    PrivateMemoryRecord,
-    PrivateMemoryRepository,
-)
-from deerflow.persistence.private_work.memory_v2_recall import (
-    MemoryV2RecallContract,
-    MemoryV2RecallFact,
-    MemoryV2RecallRepository,
-    MemoryV2RecallSnapshot,
+from deerflow.persistence.private_work.memory_document_model import (
+    RunMemoryContextSnapshotRow,
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 DEFAULT_PRIVATE_MEMORY_NAMESPACE = "default"
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateRunMemorySnapshot:
+    """The complete, immutable Memory payload frozen by Run admission."""
+
+    document_version: int
+    content: str
+    content_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.document_version) is not int
+            or self.document_version < 1
+            or not isinstance(self.content, str)
+            or not self.content
+            or len(self.content) > 16_000
+            or not isinstance(self.content_digest, str)
+            or _SHA256_HEX.fullmatch(self.content_digest) is None
+            or hashlib.sha256(self.content.encode("utf-8")).hexdigest() != self.content_digest
+        ):
+            raise ValueError("Run Memory snapshot is invalid")
 
 
 class PrivateRunMemoryAuthority:
-    """Opaque, Worker-issued read authority for one Run's Memory snapshot."""
+    """Read one frozen snapshot after revalidating live Run authority.
+
+    The object is created only by Worker composition and is passed through the
+    opaque runtime context. It never reads the current Memory document: Dream
+    revisions that happen after admission therefore cannot change a Run retry.
+    The account preference is checked at each model boundary so disable/reset
+    takes effect without weakening the frozen snapshot contract.
+    """
 
     def __init__(
         self,
@@ -47,95 +75,30 @@ class PrivateRunMemoryAuthority:
         claim: JobClaim,
         thread_id: str,
         namespace: str,
-        memory_config: MemoryConfig | None = None,
+        memory_config: MemoryConfig,
         personalization_repository_builder=AccountPersonalizationRepository,
+        run_repository_builder=PrivateRunRepository,
     ) -> None:
         context = require_issued_private_work_context(context)
-        if type(claim) is not JobClaim or claim.run_id is None or claim.scope.project_id != context.project_id or claim.scope.owner_user_id != str(context.user_id):
+        if type(claim) is not JobClaim or claim.job_type not in {"private_run", "automation_run"} or claim.run_id is None or claim.scope.project_id != context.project_id or claim.scope.owner_user_id != str(context.user_id):
             raise ValueError("Memory authority claim is invalid")
         if not isinstance(thread_id, str) or not thread_id or not isinstance(namespace, str) or not namespace or namespace.strip() != namespace or len(namespace) > 255:
             raise ValueError("Memory authority coordinates are invalid")
+        if not isinstance(memory_config, MemoryConfig):
+            raise ValueError("Memory authority configuration is invalid")
+        if not callable(personalization_repository_builder) or not callable(run_repository_builder):
+            raise ValueError("Memory authority repositories are invalid")
         self._session_factory = session_factory
         self._context = context
         self._claim = claim
         self._thread_id = thread_id
         self._namespace = namespace
-        if memory_config is not None and not isinstance(memory_config, MemoryConfig):
-            raise ValueError("Memory authority configuration is invalid")
         self._memory_config = memory_config
-        if not callable(personalization_repository_builder):
-            raise ValueError("Memory authority configuration is invalid")
         self._personalization_repository_builder = personalization_repository_builder
+        self._run_repository_builder = run_repository_builder
 
-    @property
-    def pipeline_mode(self) -> str:
-        """Expose only the frozen routing mode to trusted runtime middleware."""
-
-        return self._memory_config.pipeline_mode if self._memory_config is not None else "consolidate"
-
-    def _render_v2(self, facts: tuple[MemoryV2RecallFact, ...]) -> str:
-        config = self._memory_config
-        if config is None:
-            raise RuntimeError("Memory v2 configuration is unavailable")
-        rendered = format_memory_for_injection(
-            {
-                "facts": [
-                    {
-                        "id": str(fact.id),
-                        "content": fact.content,
-                        "category": fact.category,
-                        "confidence": fact.confidence,
-                        "createdAt": fact.created_at.isoformat(),
-                    }
-                    for fact in facts
-                ]
-            },
-            max_tokens=config.max_injection_tokens,
-            use_tiktoken=config.token_counting == "tiktoken",
-            guaranteed_categories=config.guaranteed_categories,
-            guaranteed_token_budget=config.guaranteed_token_budget,
-        )
-        if not rendered.strip():
-            return ""
-        return f"<memory>\n{rendered}\n</memory>"
-
-    async def _load_v2(
-        self,
-        session,
-    ) -> MemoryV2RecallSnapshot:
-        config = self._memory_config
-        if config is None or config.pipeline_mode != "v2":
-            raise RuntimeError("Memory v2 configuration is unavailable")
-        material = await SystemRuntimePolicyRepository(session).snapshot_material(
-            project_id=self._context.project_id,
-            owner_user_id=str(self._context.user_id),
-            run_id=self._claim.run_id,
-            section=RuntimePolicySection.AGENT_RUNTIME,
-        )
-        if material is None:
-            raise AuthorizationRevoked
-        _snapshot, version = material
-        contract = MemoryV2RecallContract(
-            policy_revision=int(version.version_number),
-            max_facts=config.max_facts,
-            token_budget=config.max_injection_tokens,
-            guaranteed_categories=tuple(config.guaranteed_categories),
-            guaranteed_token_budget=config.guaranteed_token_budget,
-            use_tiktoken=config.token_counting == "tiktoken",
-        )
-        return await MemoryV2RecallRepository(session).load_or_create(
-            self._context.resource_scope,
-            namespace=self._namespace,
-            thread_id=self._thread_id,
-            run_id=self._claim.run_id,
-            contract=contract,
-            renderer=self._render_v2,
-        )
-
-    async def load_snapshot(
-        self,
-    ) -> PrivateMemoryRecord | MemoryV2RecallSnapshot | None:
-        """Load without creating a row after one transactional authority check."""
+    async def load_snapshot(self) -> PrivateRunMemorySnapshot | None:
+        """Return the admitted row, or no data when disabled/reset."""
 
         try:
             async with self._session_factory() as session, session.begin():
@@ -160,7 +123,7 @@ class PrivateRunMemoryAuthority:
                 if not active:
                     raise AuthorizationRevoked
 
-                runs = PrivateRunRepository(session)
+                runs = self._run_repository_builder(session)
                 cancel_requested = await runs.assert_execution_active(
                     scope=self._context.resource_scope,
                     run_id=self._claim.run_id,
@@ -177,18 +140,32 @@ class PrivateRunMemoryAuthority:
                 if run is None or run.thread_id != self._thread_id or run.job_id != self._claim.job_id:
                     raise AuthorizationRevoked
 
-                if self._memory_config is not None and not self._memory_config.enabled:
+                if not self._memory_config.enabled:
                     return None
                 preference = await self._personalization_repository_builder(session).read_memory(str(self._context.user_id))
                 if not preference.memory_enabled:
                     return None
-                if self.pipeline_mode == "v2":
-                    return await self._load_v2(session)
 
-                return await PrivateMemoryRepository(session).load(
-                    scope=self._context.resource_scope,
-                    namespace=self._namespace,
-                    lock=True,
+                row = (
+                    await session.execute(
+                        sa.select(RunMemoryContextSnapshotRow).where(
+                            RunMemoryContextSnapshotRow.project_id == self._context.project_id,
+                            RunMemoryContextSnapshotRow.owner_user_id == str(self._context.user_id),
+                            RunMemoryContextSnapshotRow.run_id == self._claim.run_id,
+                            RunMemoryContextSnapshotRow.namespace == self._namespace,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return None
+                validate_memory_document(
+                    row.content,
+                    self._memory_config.max_injection_tokens,
+                )
+                return PrivateRunMemorySnapshot(
+                    document_version=int(row.document_version),
+                    content=row.content,
+                    content_digest=row.content_digest,
                 )
         except asyncio.CancelledError:
             raise
@@ -201,4 +178,5 @@ class PrivateRunMemoryAuthority:
 __all__ = [
     "DEFAULT_PRIVATE_MEMORY_NAMESPACE",
     "PrivateRunMemoryAuthority",
+    "PrivateRunMemorySnapshot",
 ]

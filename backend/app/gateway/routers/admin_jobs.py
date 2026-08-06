@@ -37,9 +37,7 @@ class AdminJobResponse(BaseModel):
         "automation_run",
         "retention_purge",
         "mcp_discovery",
-        "memory_extract",
-        "memory_consolidate",
-        "memory_retention_purge",
+        "memory_dream",
     ]
     status: Literal[
         "queued",
@@ -120,9 +118,7 @@ async def list_admin_jobs(
         "automation_run",
         "retention_purge",
         "mcp_discovery",
-        "memory_extract",
-        "memory_consolidate",
-        "memory_retention_purge",
+        "memory_dream",
     ]
     | None = None,
     identity: tuple[uuid.UUID, str] = Depends(authenticated_system_identity),

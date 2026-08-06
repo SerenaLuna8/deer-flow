@@ -30,6 +30,7 @@ afterEach(() => {
 describe("account personalization client", () => {
   test("exposes personalization in Settings and scopes its query to the account", () => {
     expect(SETTINGS_SECTION_IDS).toContain("personalization");
+    expect(SETTINGS_SECTION_IDS).not.toContain("about");
     expect(accountPersonalizationQueryKey(ACCOUNT_ID)).toEqual([
       "account",
       ACCOUNT_ID,
@@ -102,10 +103,10 @@ describe("account personalization client", () => {
         Response.json({
           version: 3,
           scopesReset: 2,
-          v1Memories: 1,
-          sourceBatches: 2,
-          candidates: 3,
-          facts: 4,
+          historyEntries: 3,
+          documents: 2,
+          versions: 4,
+          dreamRuns: 1,
           snapshots: 5,
           jobsCancelled: 1,
         }),
@@ -136,7 +137,7 @@ describe("account personalization client", () => {
           "22222222-2222-4222-8222-222222222222",
           "private-work",
           "memory",
-          "v2",
+          "document",
         ],
         ACCOUNT_ID,
       ),

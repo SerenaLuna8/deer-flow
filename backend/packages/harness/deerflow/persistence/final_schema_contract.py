@@ -27,6 +27,7 @@ LANGGRAPH_TABLES = frozenset(
 )
 FINAL_APP_SEQUENCES = frozenset(
     {
+        ("memory_history_entries_sequence_seq", "memory_history_entries"),
         ("run_events_id_seq", "run_events"),
     }
 )
@@ -79,32 +80,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=89,
-        digest="81ada47437032ea1ca8717daaef0a0d3d1ebcc7f7649a1ad5330ae23ad3827e2",
+        count=80,
+        digest="b30b02aa4285731ee231fec8abe7f6b0fa77325d2d8a017674307061f3efec21",
     ),
     "columns": CatalogInvariant(
-        count=1116,
-        digest="afa3545af183f70c2983b467dd8883c01f9a6f5845b5d2aecc2beba902ce2664",
+        count=975,
+        digest="e589bf3423c3b2c39a50de7478aab55b0da0fdae86b80a15bde12317d0e223a2",
     ),
     "sequences": CatalogInvariant(
-        count=1,
-        digest="94e9734ed0d3e15fc64fcf15a8ed1181999429aec5e9ddb535513ac42145acde",
+        count=2,
+        digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
     ),
     "constraints": CatalogInvariant(
-        count=852,
-        digest="4d97d28c74551aa490563b4b59d9c89c5d2129b1f5236b3547e88e97eff975a7",
+        count=707,
+        digest="6b0184f08355a69b508086d9340a4f9dc93d2146ebb44cbbbe739feea451bc97",
     ),
     "indexes": CatalogInvariant(
-        count=318,
-        digest="567e8070aa09f9a949040fd782446f0a0ad3449695e57c822aca429352b28362",
+        count=276,
+        digest="9472b2386cc7a4a296fc9d59169d38e709eb651db622b45d313b04624a560ef5",
     ),
     "functions": CatalogInvariant(
         count=13,
         digest="3986289c90206f94aa821fef7e8a58e253dec6a968d91c4cb43fde6722ea8f62",
     ),
     "triggers": CatalogInvariant(
-        count=86,
-        digest="2c8e0672e4d00fbe1f56cc8ca8ddaa5500a07f0e894afa9a46c1df78a51892a0",
+        count=82,
+        digest="e2cba6eab9bb8b3a50bb14cc4fd31133d776c0f0a83ce4d8617d8adb84e3d50d",
     ),
 }
 

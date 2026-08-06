@@ -60,4 +60,4 @@ of those processes must restart after a change.
 
 Gateway, Worker and Scheduler validate the configured database and schema at startup. Use the explicit database setup/migration commands before starting application processes.
 
-Memory processing options control extraction, injection budgets and staleness review. Memory persistence itself is PostgreSQL project/owner scoped and has no local-file provider option.
+Memory policy has four controls: enablement, Dream model, automatic Dream interval, and the document injection budget. Persistence remains PostgreSQL project/owner scoped and has no local-file provider option.

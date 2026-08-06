@@ -16,7 +16,7 @@ export function adminModelSettingsQueryKey(accountId: string) {
 
 export function adminModelMutationKey(
   accountId: string,
-  action: "create" | "replace" | "status" | "default",
+  action: "create" | "replace" | "status" | "default" | "test_connection",
   modelId?: string,
 ) {
   return [

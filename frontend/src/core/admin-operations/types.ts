@@ -151,9 +151,7 @@ export const ADMIN_JOB_TYPES = [
   "automation_run",
   "retention_purge",
   "mcp_discovery",
-  "memory_extract",
-  "memory_consolidate",
-  "memory_retention_purge",
+  "memory_dream",
 ] as const;
 
 export const adminJobTypeSchema = z.enum(ADMIN_JOB_TYPES);

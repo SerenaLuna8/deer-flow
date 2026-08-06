@@ -6,6 +6,7 @@ from app.system_settings.credential_adapter import (
 )
 from app.system_settings.materializer import SystemModelMaterializer
 from app.system_settings.models import (
+    ConnectionTestSystemModelMaterial,
     CreateSystemModel,
     PublicSystemModelView,
     RunModelConfigSnapshotView,
@@ -13,12 +14,14 @@ from app.system_settings.models import (
     SystemModelCatalogView,
     SystemModelVersionView,
     SystemModelView,
+    SystemModelConnectionCheck,
     UpdateSystemModel,
 )
 from app.system_settings.service import SystemModelCatalogService
 
 __all__ = [
     "CreateSystemModel",
+    "ConnectionTestSystemModelMaterial",
     "PublicSystemModelView",
     "RunModelConfigSnapshotView",
     "SystemModelCatalogService",
@@ -29,5 +32,6 @@ __all__ = [
     "SystemModelMaterializer",
     "SystemModelVersionView",
     "SystemModelView",
+    "SystemModelConnectionCheck",
     "UpdateSystemModel",
 ]

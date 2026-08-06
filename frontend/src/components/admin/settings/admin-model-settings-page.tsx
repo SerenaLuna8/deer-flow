@@ -4,6 +4,7 @@ import {
   ActivityIcon,
   BotIcon,
   CheckCircle2Icon,
+  ChevronDownIcon,
   CirclePauseIcon,
   CirclePlayIcon,
   DatabaseIcon,
@@ -47,10 +48,13 @@ import {
   useReplaceAdminModel,
   useSetAdminModelDefault,
   useSetAdminModelStatus,
+  useTestAdminModelConnection,
   type AdminModelCatalog,
+  type AdminModelConnectionTestResponse,
   type AdminModelItem,
   type AdminModelSettingValue,
   type CreateAdminModelInput,
+  type TestAdminModelConnectionInput,
 } from "@/core/admin-settings/models";
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { Locale, Translations } from "@/core/i18n";
@@ -265,6 +269,7 @@ const MODEL_EDITOR_ERROR_ID = "admin-model-editor-error";
 const MODEL_EDITOR_CREDENTIAL_STATUS_ID =
   "admin-model-editor-credential-status";
 const MODEL_EDITOR_SORT_ORDER_HINT_ID = "admin-model-sort-order-hint";
+const MODEL_EDITOR_BASE_URL_HINT_ID = "admin-model-base-url-hint";
 const MODEL_EDITOR_ENVIRONMENT_KEY_HINT_ID = "admin-model-environment-key-hint";
 const MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID =
   "admin-model-advanced-settings-hint";
@@ -502,6 +507,21 @@ export function parseAdminModelEditorForm(
   return result.data;
 }
 
+export function parseAdminModelConnectionTestForm(
+  formData: FormData,
+  messages: AdminModelFormValidationMessages = DEFAULT_FORM_VALIDATION_MESSAGES,
+): TestAdminModelConnectionInput {
+  const input = parseAdminModelEditorForm(formData, messages);
+  return {
+    provider_adapter: input.provider_adapter,
+    provider_model: input.provider_model,
+    settings: input.settings,
+    credential_id: input.credential_id,
+    credential_version_id: input.credential_version_id,
+    credential_env_key: input.credential_env_key,
+  };
+}
+
 function splitProviderSettings(settings: AdminModelItem["settings"]): {
   common: Record<(typeof COMMON_SETTING_KEYS)[number], string>;
   advanced: string;
@@ -584,7 +604,13 @@ function CatalogMetric({
   );
 }
 
-function ModelIdentity({ model }: { model: AdminModelItem }) {
+function ModelIdentity({
+  model,
+  showSecondary = true,
+}: {
+  model: AdminModelItem;
+  showSecondary?: boolean;
+}) {
   const { t } = useI18n();
   const labels = t.adminModelSettings;
   return (
@@ -603,21 +629,26 @@ function ModelIdentity({ model }: { model: AdminModelItem }) {
           </Badge>
         ) : null}
       </div>
-      <p className="text-muted-foreground mt-1 flex min-w-0 items-center gap-1.5 text-xs">
-        <span className="min-w-0 truncate font-mono" title={model.logical_name}>
-          {model.logical_name}
-        </span>
-        {model.description ? (
-          <>
-            <span aria-hidden className="shrink-0">
-              ·
-            </span>
-            <span className="min-w-0 truncate" title={model.description}>
-              {model.description}
-            </span>
-          </>
-        ) : null}
-      </p>
+      {showSecondary ? (
+        <p className="text-muted-foreground mt-1 flex min-w-0 items-center gap-1.5 text-xs">
+          <span
+            className="min-w-0 truncate font-mono"
+            title={model.logical_name}
+          >
+            {model.logical_name}
+          </span>
+          {model.description ? (
+            <>
+              <span aria-hidden className="shrink-0">
+                ·
+              </span>
+              <span className="min-w-0 truncate" title={model.description}>
+                {model.description}
+              </span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -799,12 +830,13 @@ function ModelCatalog({
       >
         <table className="w-full table-fixed border-collapse text-left text-sm">
           <colgroup>
-            <col className="w-[22%]" />
-            <col className="w-[14%]" />
             <col className="w-[18%]" />
-            <col className="w-[19%]" />
             <col className="w-[15%]" />
-            <col className="w-[12%]" />
+            <col className="w-[16%]" />
+            <col className="w-[16%]" />
+            <col className="w-[8%]" />
+            <col className="w-[16%]" />
+            <col className="w-[11%]" />
           </colgroup>
           <thead className="bg-muted/40 text-muted-foreground">
             <tr className="border-border/70 border-b">
@@ -823,7 +855,10 @@ function ModelCatalog({
               <th className="px-3 py-2.5 text-xs font-medium">
                 {labels.card.version}
               </th>
-              <th className="px-3 py-2.5 text-right text-xs font-medium">
+              <th className="px-3 py-2.5 text-xs font-medium">
+                {labels.card.updatedAtColumn}
+              </th>
+              <th className="px-1.5 py-2.5 text-right text-xs font-medium">
                 <span className="sr-only">{labels.card.actions}</span>
               </th>
             </tr>
@@ -842,7 +877,7 @@ function ModelCatalog({
                   className="hover:bg-muted/20 align-middle transition-colors"
                 >
                   <td className="px-4 py-3.5">
-                    <ModelIdentity model={model} />
+                    <ModelIdentity model={model} showSecondary={false} />
                   </td>
                   <td className="px-3 py-3.5">
                     <p className="truncate font-medium">
@@ -850,12 +885,6 @@ function ModelCatalog({
                         model.provider_adapter,
                         labels.adapters,
                       )}
-                    </p>
-                    <p
-                      className="text-muted-foreground mt-1 truncate font-mono text-xs"
-                      title={model.provider_model}
-                    >
-                      {model.provider_model}
                     </p>
                   </td>
                   <td className="px-3 py-3.5">
@@ -866,30 +895,25 @@ function ModelCatalog({
                       <KeyRoundIcon aria-hidden className="size-3.5 shrink-0" />
                       <span className="min-w-0 truncate">{credential}</span>
                     </p>
-                    <p
-                      className="text-muted-foreground mt-1 truncate font-mono text-xs"
-                      title={model.credential_env_key ?? undefined}
-                    >
-                      {model.credential_env_key ?? "—"}
-                    </p>
                   </td>
                   <td className="px-3 py-3.5">
                     <ModelStatusAndCapabilities model={model} />
                   </td>
                   <td className="px-3 py-3.5 text-xs">
-                    <p className="font-medium">v{model.version_number}</p>
                     <p
-                      className="text-muted-foreground mt-1 truncate"
+                      className="truncate font-medium"
                       title={labels.card.versionMeta(
                         model.version_number,
                         model.revision,
                         model.sort_order,
                       )}
                     >
-                      r{model.revision} · {model.sort_order}
+                      v{model.version_number} · r{model.revision} · {model.sort_order}
                     </p>
+                  </td>
+                  <td className="px-3 py-3.5 text-xs">
                     <p
-                      className="text-muted-foreground mt-1 truncate text-[0.6875rem]"
+                      className="text-muted-foreground truncate"
                       title={labels.card.updatedAt(
                         formatUpdatedAt(model.updated_at, locale),
                       )}
@@ -897,7 +921,7 @@ function ModelCatalog({
                       {formatUpdatedAt(model.updated_at, locale)}
                     </p>
                   </td>
-                  <td className="px-3 py-3.5">
+                  <td className="px-1.5 py-3.5">
                     <ModelActions
                       model={model}
                       pendingAction={pendingAction}
@@ -1259,16 +1283,18 @@ function LabeledField({
   htmlFor,
   hint,
   hintId,
+  className,
   children,
 }: {
   label: string;
   htmlFor: string;
   hint?: string;
   hintId?: string;
+  className?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-1.5">
+    <div className={cn("space-y-1.5", className)}>
       <label htmlFor={htmlFor} className="text-sm font-medium">
         {label}
       </label>
@@ -1282,7 +1308,7 @@ function LabeledField({
   );
 }
 
-function ModelEditorDialog({
+export function ModelEditorDialog({
   open,
   model,
   credentials,
@@ -1293,6 +1319,7 @@ function ModelEditorDialog({
   onOpenChange,
   onRetryCredentials,
   onSubmit,
+  onTestConnection,
 }: {
   open: boolean;
   model: AdminModelItem | null;
@@ -1304,6 +1331,9 @@ function ModelEditorDialog({
   onOpenChange: (open: boolean) => void;
   onRetryCredentials: () => void;
   onSubmit: (input: CreateAdminModelInput) => Promise<boolean>;
+  onTestConnection: (
+    input: TestAdminModelConnectionInput,
+  ) => Promise<AdminModelConnectionTestResponse>;
 }) {
   const { t } = useI18n();
   const labels = t.adminModelSettings;
@@ -1318,6 +1348,11 @@ function ModelEditorDialog({
   const [formError, setFormError] = useState<string | null>(null);
   const [invalidFieldId, setInvalidFieldId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<
+    AdminModelConnectionTestResponse["status"] | null
+  >(null);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [credentialId, setCredentialId] = useState(
     initialCredentialState.credentialId,
   );
@@ -1353,7 +1388,7 @@ function ModelEditorDialog({
       selectedCredentialChoice !== undefined &&
       !selectedCredentialChoice.historical &&
       !selectedCredentialChoice.unavailable);
-  const closingBlocked = pending || submitting;
+  const closingBlocked = pending || submitting || testingConnection;
   const editorCanSubmit = canSubmitAdminModelEditor(
     credentialStatus,
     closingBlocked,
@@ -1414,12 +1449,49 @@ function ModelEditorDialog({
       setSubmitting(false);
     } catch (error) {
       setSubmitting(false);
-      setInvalidFieldId(getAdminModelEditorErrorField(error));
+      const invalidField = getAdminModelEditorErrorField(error);
+      setInvalidFieldId(invalidField);
+      if (invalidField === "advanced_settings") {
+        setAdvancedSettingsOpen(true);
+      }
       setFormError(
         error instanceof Error
           ? error.message
           : labels.validation.invalidConfiguration,
       );
+    }
+  }
+
+  async function testConnection(): Promise<void> {
+    if (!formRef.current || !editorCanSubmit) return;
+    setFormError(null);
+    setInvalidFieldId(null);
+    setConnectionStatus(null);
+    setTestingConnection(true);
+    try {
+      const input = parseAdminModelConnectionTestForm(
+        new FormData(formRef.current),
+        labels.validation,
+      );
+      const result = await onTestConnection(input);
+      setConnectionStatus(result.status);
+    } catch (error) {
+      const invalidField = getAdminModelEditorErrorField(error);
+      setInvalidFieldId(invalidField);
+      if (invalidField === "advanced_settings") {
+        setAdvancedSettingsOpen(true);
+      }
+      if (invalidField) {
+        setFormError(
+          error instanceof Error
+            ? error.message
+            : labels.validation.invalidConfiguration,
+        );
+      } else {
+        setConnectionStatus("failed");
+      }
+    } finally {
+      setTestingConnection(false);
     }
   }
 
@@ -1461,9 +1533,12 @@ function ModelEditorDialog({
             disabled={!canCloseAdminModelEditor(closingBlocked)}
             className="contents"
           >
-            <div className="grid min-h-0 auto-rows-max grid-cols-1 gap-4 overflow-y-auto p-4 sm:p-6 xl:grid-cols-2">
-              <fieldset className="border-border/70 rounded-xl border p-4 xl:col-span-2">
-                <legend className="px-1 text-sm font-semibold">
+            <div className="grid min-h-0 auto-rows-max grid-cols-1 overflow-y-auto p-4 sm:p-6 xl:grid-cols-2">
+              <fieldset
+                data-testid="admin-model-editor-basic-information"
+                className="border-border/70 space-y-4 border-t pt-5 pb-6 xl:col-span-2"
+              >
+                <legend className="px-0 text-sm font-semibold">
                   {labels.editor.basicInformation}
                 </legend>
                 <p className="text-muted-foreground mb-4 text-xs">
@@ -1544,6 +1619,42 @@ function ModelEditorDialog({
                       placeholder="gpt-5.2"
                     />
                   </LabeledField>
+                  <LabeledField
+                    label={labels.editor.baseUrl}
+                    htmlFor="base_url"
+                    hint={labels.editor.baseUrlHint}
+                    hintId={MODEL_EDITOR_BASE_URL_HINT_ID}
+                    className="sm:col-span-2"
+                  >
+                    <Input
+                      id="base_url"
+                      name="base_url"
+                      {...adminModelEditorFieldErrorAttributes(
+                        "base_url",
+                        invalidFieldId,
+                        MODEL_EDITOR_BASE_URL_HINT_ID,
+                      )}
+                      type="url"
+                      defaultValue={providerSettings.common.base_url}
+                      placeholder="https://api.example.com/v1"
+                    />
+                  </LabeledField>
+                  <LabeledField
+                    label={labels.editor.modelDescription}
+                    htmlFor="description"
+                    className="sm:col-span-2"
+                  >
+                    <Input
+                      id="description"
+                      name="description"
+                      {...adminModelEditorFieldErrorAttributes(
+                        "description",
+                        invalidFieldId,
+                      )}
+                      defaultValue={model?.description ?? ""}
+                      placeholder={labels.editor.modelDescriptionPlaceholder}
+                    />
+                  </LabeledField>
                   <LabeledField label={labels.editor.status} htmlFor="status">
                     {model ? (
                       <>
@@ -1581,21 +1692,6 @@ function ModelEditorDialog({
                     )}
                   </LabeledField>
                   <LabeledField
-                    label={labels.editor.modelDescription}
-                    htmlFor="description"
-                  >
-                    <Input
-                      id="description"
-                      name="description"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "description",
-                        invalidFieldId,
-                      )}
-                      defaultValue={model?.description ?? ""}
-                      placeholder={labels.editor.modelDescriptionPlaceholder}
-                    />
-                  </LabeledField>
-                  <LabeledField
                     label={labels.editor.sortOrder}
                     htmlFor="sort_order"
                     hint={labels.editor.sortOrderHint}
@@ -1618,145 +1714,11 @@ function ModelEditorDialog({
                 </div>
               </fieldset>
 
-              <fieldset className="border-border/70 space-y-3 rounded-xl border p-4 xl:col-span-2">
-                <legend className="px-1 text-sm font-semibold">
-                  {labels.editor.capabilities}
-                </legend>
-                <p className="text-muted-foreground text-xs">
-                  {labels.editor.capabilitiesDescription}
-                </p>
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {[
-                    [
-                      "supports_thinking",
-                      labels.editor.supportsThinking,
-                      model?.supports_thinking,
-                    ],
-                    [
-                      "supports_reasoning_effort",
-                      labels.editor.supportsReasoningEffort,
-                      model?.supports_reasoning_effort,
-                    ],
-                    [
-                      "supports_vision",
-                      labels.editor.supportsVision,
-                      model?.supports_vision,
-                    ],
-                  ].map(([name, label, checked]) => (
-                    <label
-                      key={String(name)}
-                      className="border-border/70 bg-background hover:bg-muted/30 flex items-center gap-2 rounded-lg border p-3 text-sm transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        name={String(name)}
-                        defaultChecked={Boolean(checked)}
-                        className="accent-selection size-4"
-                      />
-                      {String(label)}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
-
-              <fieldset className="border-border/70 space-y-4 rounded-xl border p-4">
-                <legend className="px-1 text-sm font-semibold">
-                  {labels.editor.commonProviderSettings}
-                </legend>
-                <p className="text-muted-foreground text-xs">
-                  {labels.editor.commonProviderSettingsDescription}
-                </p>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <LabeledField
-                    label={labels.editor.baseUrl}
-                    htmlFor="base_url"
-                  >
-                    <Input
-                      id="base_url"
-                      name="base_url"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "base_url",
-                        invalidFieldId,
-                      )}
-                      type="url"
-                      defaultValue={providerSettings.common.base_url}
-                      placeholder="https://api.example.com/v1"
-                    />
-                  </LabeledField>
-                  <LabeledField
-                    label={labels.editor.temperature}
-                    htmlFor="temperature"
-                  >
-                    <Input
-                      id="temperature"
-                      name="temperature"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "temperature",
-                        invalidFieldId,
-                      )}
-                      type="number"
-                      step="0.01"
-                      min="-2"
-                      max="2"
-                      defaultValue={providerSettings.common.temperature}
-                    />
-                  </LabeledField>
-                  <LabeledField
-                    label={labels.editor.maxTokens}
-                    htmlFor="max_tokens"
-                  >
-                    <Input
-                      id="max_tokens"
-                      name="max_tokens"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "max_tokens",
-                        invalidFieldId,
-                      )}
-                      type="number"
-                      min="1"
-                      step="1"
-                      defaultValue={providerSettings.common.max_tokens}
-                    />
-                  </LabeledField>
-                  <LabeledField
-                    label={labels.editor.requestTimeout}
-                    htmlFor="request_timeout"
-                  >
-                    <Input
-                      id="request_timeout"
-                      name="request_timeout"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "request_timeout",
-                        invalidFieldId,
-                      )}
-                      type="number"
-                      min="0.1"
-                      step="0.1"
-                      defaultValue={providerSettings.common.request_timeout}
-                    />
-                  </LabeledField>
-                  <LabeledField
-                    label={labels.editor.maxRetries}
-                    htmlFor="max_retries"
-                  >
-                    <Input
-                      id="max_retries"
-                      name="max_retries"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "max_retries",
-                        invalidFieldId,
-                      )}
-                      type="number"
-                      min="0"
-                      step="1"
-                      defaultValue={providerSettings.common.max_retries}
-                    />
-                  </LabeledField>
-                </div>
-              </fieldset>
-
-              <fieldset className="border-border/70 space-y-4 rounded-xl border p-4">
-                <legend className="px-1 text-sm font-semibold">
+              <fieldset
+                data-testid="admin-model-editor-credential-binding"
+                className="border-border/70 space-y-4 border-t pt-5 pb-6 xl:col-span-2"
+              >
+                <legend className="px-0 text-sm font-semibold">
                   {labels.editor.credentialBinding}
                 </legend>
                 <p className="text-muted-foreground text-xs">
@@ -1892,29 +1854,226 @@ function ModelEditorDialog({
                     />
                   </LabeledField>
                 </div>
+                <div className="border-border/70 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-muted-foreground text-xs">
+                    {labels.editor.testConnectionDescription}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button
+                      data-testid="admin-model-test-connection"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!editorCanSubmit}
+                      aria-busy={testingConnection}
+                      aria-describedby={
+                        providerAcceptsCredential &&
+                        (credentialStatus !== "ready" || !credentialBindingReady)
+                          ? MODEL_EDITOR_CREDENTIAL_STATUS_ID
+                          : undefined
+                      }
+                      onClick={() => void testConnection()}
+                    >
+                      <ActivityIcon
+                        aria-hidden
+                        className={
+                          testingConnection ? "animate-spin" : undefined
+                        }
+                      />
+                      {testingConnection
+                        ? labels.editor.testingConnection
+                        : labels.editor.testConnection}
+                    </Button>
+                    {connectionStatus ? (
+                      <p
+                        data-testid="admin-model-test-connection-status"
+                        role={
+                          connectionStatus === "succeeded" ? "status" : "alert"
+                        }
+                        className={cn(
+                          "text-sm",
+                          connectionStatus === "succeeded"
+                            ? "text-success"
+                            : "text-destructive",
+                        )}
+                      >
+                        {connectionStatus === "succeeded" ? (
+                          <CheckCircle2Icon
+                            aria-hidden
+                            className="mr-1 inline-block size-4"
+                          />
+                        ) : null}
+                        {connectionStatus === "succeeded"
+                          ? labels.editor.connectionSucceeded
+                          : labels.editor.connectionFailed}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
               </fieldset>
 
-              <section className="border-border/70 rounded-xl border p-4 xl:col-span-2">
-                <LabeledField
-                  label={labels.editor.advancedJson}
-                  htmlFor="advanced_settings"
-                  hint={labels.editor.advancedJsonHint}
-                  hintId={MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID}
-                >
-                  <Textarea
-                    id="advanced_settings"
-                    name="advanced_settings"
-                    {...adminModelEditorFieldErrorAttributes(
-                      "advanced_settings",
-                      invalidFieldId,
-                      MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID,
-                    )}
-                    className="bg-muted/20 min-h-36 font-mono text-xs"
-                    defaultValue={providerSettings.advanced}
-                    spellCheck={false}
+              <fieldset
+                data-testid="admin-model-editor-capabilities-and-runtime"
+                className="border-border/70 space-y-4 border-t pt-5 pb-6 xl:col-span-2"
+              >
+                <legend className="px-0 text-sm font-semibold">
+                  {labels.editor.capabilitiesAndRuntime}
+                </legend>
+                <p className="text-muted-foreground text-xs">
+                  {labels.editor.capabilitiesDescription}
+                </p>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {[
+                    [
+                      "supports_thinking",
+                      labels.editor.supportsThinking,
+                      model?.supports_thinking,
+                    ],
+                    [
+                      "supports_reasoning_effort",
+                      labels.editor.supportsReasoningEffort,
+                      model?.supports_reasoning_effort,
+                    ],
+                    [
+                      "supports_vision",
+                      labels.editor.supportsVision,
+                      model?.supports_vision,
+                    ],
+                  ].map(([name, label, checked]) => (
+                    <label
+                      key={String(name)}
+                      className="border-border/70 bg-background hover:bg-muted/30 flex items-center gap-2 rounded-lg border p-3 text-sm transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        name={String(name)}
+                        defaultChecked={Boolean(checked)}
+                        className="accent-selection size-4"
+                      />
+                      {String(label)}
+                    </label>
+                  ))}
+                </div>
+                <div className="border-border/70 space-y-4 border-t pt-5">
+                  <div>
+                    <p className="text-sm font-medium">
+                      {labels.editor.commonProviderSettings}
+                    </p>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      {labels.editor.commonProviderSettingsDescription}
+                    </p>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <LabeledField
+                      label={labels.editor.temperature}
+                      htmlFor="temperature"
+                    >
+                      <Input
+                        id="temperature"
+                        name="temperature"
+                        {...adminModelEditorFieldErrorAttributes(
+                          "temperature",
+                          invalidFieldId,
+                        )}
+                        type="number"
+                        step="0.01"
+                        min="-2"
+                        max="2"
+                        defaultValue={providerSettings.common.temperature}
+                      />
+                    </LabeledField>
+                    <LabeledField
+                      label={labels.editor.maxTokens}
+                      htmlFor="max_tokens"
+                    >
+                      <Input
+                        id="max_tokens"
+                        name="max_tokens"
+                        {...adminModelEditorFieldErrorAttributes(
+                          "max_tokens",
+                          invalidFieldId,
+                        )}
+                        type="number"
+                        min="1"
+                        step="1"
+                        defaultValue={providerSettings.common.max_tokens}
+                      />
+                    </LabeledField>
+                    <LabeledField
+                      label={labels.editor.requestTimeout}
+                      htmlFor="request_timeout"
+                    >
+                      <Input
+                        id="request_timeout"
+                        name="request_timeout"
+                        {...adminModelEditorFieldErrorAttributes(
+                          "request_timeout",
+                          invalidFieldId,
+                        )}
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        defaultValue={providerSettings.common.request_timeout}
+                      />
+                    </LabeledField>
+                    <LabeledField
+                      label={labels.editor.maxRetries}
+                      htmlFor="max_retries"
+                    >
+                      <Input
+                        id="max_retries"
+                        name="max_retries"
+                        {...adminModelEditorFieldErrorAttributes(
+                          "max_retries",
+                          invalidFieldId,
+                        )}
+                        type="number"
+                        min="0"
+                        step="1"
+                        defaultValue={providerSettings.common.max_retries}
+                      />
+                    </LabeledField>
+                  </div>
+                </div>
+              </fieldset>
+
+              <details
+                data-testid="admin-model-editor-advanced-settings"
+                open={advancedSettingsOpen}
+                onToggle={(event) =>
+                  setAdvancedSettingsOpen(event.currentTarget.open)
+                }
+                className="border-border/70 group border-t xl:col-span-2"
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-4 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+                  <span>{labels.editor.advancedJson}</span>
+                  <ChevronDownIcon
+                    aria-hidden
+                    className="text-muted-foreground size-4 transition-transform group-open:rotate-180"
                   />
-                </LabeledField>
-              </section>
+                </summary>
+                <div className="border-border/70 border-t pt-4 pb-6">
+                  <LabeledField
+                    label={labels.editor.advancedJson}
+                    htmlFor="advanced_settings"
+                    hint={labels.editor.advancedJsonHint}
+                    hintId={MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID}
+                  >
+                    <Textarea
+                      id="advanced_settings"
+                      name="advanced_settings"
+                      {...adminModelEditorFieldErrorAttributes(
+                        "advanced_settings",
+                        invalidFieldId,
+                        MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID,
+                      )}
+                      className="bg-muted/20 min-h-36 font-mono text-xs"
+                      defaultValue={providerSettings.advanced}
+                      spellCheck={false}
+                    />
+                  </LabeledField>
+                </div>
+              </details>
 
               {formError || mutationError ? (
                 <p
@@ -1974,6 +2133,7 @@ function AuthorizedAdminModelSettingsPage({
   const credentialsQuery = useAdminAssets(accountId, "credentials");
   const createModel = useCreateAdminModel(accountId);
   const replaceModel = useReplaceAdminModel(accountId);
+  const testConnection = useTestAdminModelConnection(accountId);
   const changeStatus = useSetAdminModelStatus(accountId);
   const setDefault = useSetAdminModelDefault(accountId);
   const [editor, setEditor] = useState<{
@@ -2044,6 +2204,16 @@ function AuthorizedAdminModelSettingsPage({
     } catch (error) {
       setActionError(safeActionError(error, labels.actionErrors));
       return false;
+    }
+  }
+
+  async function testEditorConnection(
+    input: TestAdminModelConnectionInput,
+  ): Promise<AdminModelConnectionTestResponse> {
+    try {
+      return await testConnection.mutateAsync(input);
+    } catch {
+      return { status: "failed", request_id: "client" };
     }
   }
 
@@ -2120,6 +2290,7 @@ function AuthorizedAdminModelSettingsPage({
           }
           onRetryCredentials={() => void credentialsQuery.refetch()}
           onSubmit={submitEditor}
+          onTestConnection={testEditorConnection}
         />
       ) : null}
     </>

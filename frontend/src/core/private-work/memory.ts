@@ -11,158 +11,75 @@ import {
   type ProjectClientScope,
 } from "./types";
 
-export const MEMORY_V2_CATEGORY_MAX_LENGTH = 32;
-export const MEMORY_V2_CONTENT_MAX_LENGTH = 16_000;
+export const MEMORY_DOCUMENT_MAX_LENGTH = 16_000;
+export const MEMORY_DIFF_MAX_LENGTH = 64_000;
+export const MEMORY_VERSION_PAGE_SIZE = 50;
 
-const memoryNamespaceSchema = z.string().min(1).max(128);
 const memoryDateTimeSchema = z.string().max(64).datetime({ offset: true });
-const memoryFactStatusSchema = z.enum(["active", "disabled"]);
-const memoryCandidateStatusSchema = z.enum([
-  "pending",
-  "accepted",
-  "rejected",
-  "superseded",
-]);
+const memoryVersionSchema = z.number().int().positive();
 
-export const memoryV2RevisionSchema = z
+export const memoryDocumentSchema = z
   .object({
-    id: z.string().uuid(),
-    factId: z.string().uuid(),
-    revisionNumber: z.number().int().positive(),
-    revisionSequence: z.number().int().positive(),
-    content: z.string().max(MEMORY_V2_CONTENT_MAX_LENGTH).nullable(),
-    contentDigest: z.string().length(64),
-    category: z.string().min(1).max(MEMORY_V2_CATEGORY_MAX_LENGTH),
-    confidence: z.number().min(0).max(1),
-    validFrom: memoryDateTimeSchema.nullable(),
-    validTo: memoryDateTimeSchema.nullable(),
-    lastConfirmedAt: memoryDateTimeSchema.nullable(),
-    changedBy: z.enum(["user", "system", "consolidator"]),
-    sourceCandidateId: z.string().uuid().nullable(),
-    supersedesRevisionId: z.string().uuid().nullable(),
-    changeReason: z.string().max(64).nullable(),
-    contentErasedAt: memoryDateTimeSchema.nullable(),
+    content: z.string().max(MEMORY_DOCUMENT_MAX_LENGTH),
+    version: z.number().int().nonnegative(),
+    updatedAt: memoryDateTimeSchema.nullable(),
+    pendingCount: z.number().int().nonnegative(),
+    dreamRunning: z.boolean(),
+  })
+  .strict();
+
+export const memoryVersionSummarySchema = z
+  .object({
+    version: memoryVersionSchema,
+    trigger: z.enum(["auto_dream", "manual_dream", "restore"]),
+    historyCount: z.number().int().min(1).max(20).nullable(),
+    changed: z.boolean(),
     createdAt: memoryDateTimeSchema,
   })
   .strict();
 
-export const memoryV2FactSchema = z
+export const memoryVersionsSchema = z
   .object({
-    id: z.string().uuid(),
-    factKind: z.string().min(1).max(32),
-    status: memoryFactStatusSchema,
-    version: z.number().int().positive(),
-    disabledAt: memoryDateTimeSchema.nullable(),
-    supersededAt: memoryDateTimeSchema.nullable(),
-    deletedAt: memoryDateTimeSchema.nullable(),
-    createdAt: memoryDateTimeSchema,
-    updatedAt: memoryDateTimeSchema,
-    currentRevision: memoryV2RevisionSchema,
+    items: z.array(memoryVersionSummarySchema).max(100),
   })
   .strict();
 
-export const memoryV2CandidateSchema = z
-  .object({
-    id: z.string().uuid(),
-    candidateType: z.string().min(1).max(32),
-    content: z.string().max(MEMORY_V2_CONTENT_MAX_LENGTH).nullable(),
-    confidence: z.number().min(0).max(1),
-    retentionClass: z.enum(["permanent", "durable", "ephemeral"]),
-    sensitivity: z.enum(["normal", "sensitive", "restricted"]),
-    status: memoryCandidateStatusSchema,
-    decisionReason: z.string().max(64).nullable(),
-    decidedAt: memoryDateTimeSchema.nullable(),
-    contentErasedAt: memoryDateTimeSchema.nullable(),
-    createdAt: memoryDateTimeSchema,
-    updatedAt: memoryDateTimeSchema,
+export const memoryVersionDetailSchema = memoryVersionSummarySchema
+  .extend({
+    content: z.string().max(MEMORY_DOCUMENT_MAX_LENGTH),
+    unifiedDiff: z.string().max(MEMORY_DIFF_MAX_LENGTH),
   })
   .strict();
 
-export const memoryV2EvidenceSchema = z
+export const memoryDreamResultSchema = z
   .object({
-    id: z.string().uuid(),
-    factId: z.string().uuid(),
-    revisionId: z.string().uuid(),
-    sourceCandidateId: z.string().uuid().nullable(),
-    sourceItemId: z.string().uuid().nullable(),
-    threadId: z.string().max(64).nullable(),
-    runId: z.string().max(64).nullable(),
-    runEventSequence: z.number().int().nonnegative().nullable(),
-    evidenceExcerpt: z.string().max(4_000).nullable(),
-    trustClass: z.enum(["direct", "derived", "untrusted"]),
-    sourceErasedAt: memoryDateTimeSchema.nullable(),
-    createdAt: memoryDateTimeSchema,
-  })
-  .strict();
-
-const memoryV2FactsResponseSchema = z
-  .object({
-    namespace: memoryNamespaceSchema,
-    items: z.array(memoryV2FactSchema).max(100),
-  })
-  .strict();
-
-const memoryV2CandidatesResponseSchema = z
-  .object({
-    namespace: memoryNamespaceSchema,
-    items: z.array(memoryV2CandidateSchema).max(100),
-  })
-  .strict();
-
-export const memoryV2FactDetailSchema = z
-  .object({
-    namespace: memoryNamespaceSchema,
-    fact: memoryV2FactSchema,
-    revisions: z.array(memoryV2RevisionSchema).max(1_000),
-    evidence: z.array(memoryV2EvidenceSchema).max(5_000),
-  })
-  .strict();
-
-export const memoryV2StatusSchema = z
-  .object({
-    enabled: z.boolean(),
-    pipelineMode: z.enum(["off", "shadow", "consolidate", "v2"]),
-    searchEnabled: z.boolean(),
-    injectionEnabled: z.boolean(),
-    consolidationIntervalMinutes: z.number().int().min(15).max(1_440),
-    candidateRetentionDays: z.number().int().min(1).max(365),
-  })
-  .strict();
-
-export const memoryV2ConsolidationSchema = z
-  .object({
-    namespace: memoryNamespaceSchema,
-    disposition: z.enum(["queued", "already_running", "no_candidates"]),
+    disposition: z.enum(["queued", "already_running", "nothing_pending"]),
     jobId: z.string().uuid().nullable(),
-    candidateCount: z.number().int().min(0).max(20),
+    historyCount: z.number().int().min(0).max(20),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const nothingPending = value.disposition === "nothing_pending";
+    if (nothingPending !== (value.jobId === null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["jobId"],
+        message: "Dream job identity does not match its disposition",
+      });
+    }
+    if (nothingPending !== (value.historyCount === 0)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["historyCount"],
+        message: "Dream history count does not match its disposition",
+      });
+    }
+  });
 
-const memoryV2HardForgetResultSchema = z
-  .object({
-    factId: z.string().uuid(),
-    version: z.number().int().min(2),
-    status: z.literal("deleted"),
-    erasedCandidates: z.number().int().nonnegative(),
-    erasedRevisions: z.number().int().positive(),
-    erasedEvidence: z.number().int().nonnegative(),
-    erasedSourceItems: z.number().int().nonnegative(),
-  })
-  .strict();
-
-export type MemoryV2Fact = z.infer<typeof memoryV2FactSchema>;
-export type MemoryV2Revision = z.infer<typeof memoryV2RevisionSchema>;
-export type MemoryV2Candidate = z.infer<typeof memoryV2CandidateSchema>;
-export type MemoryV2Evidence = z.infer<typeof memoryV2EvidenceSchema>;
-export type MemoryV2FactDetail = z.infer<typeof memoryV2FactDetailSchema>;
-export type MemoryV2Status = z.infer<typeof memoryV2StatusSchema>;
-export type MemoryV2Consolidation = z.infer<
-  typeof memoryV2ConsolidationSchema
->;
-export type MemoryV2HardForgetResult = z.infer<
-  typeof memoryV2HardForgetResultSchema
->;
-export type MemoryV2FactListStatus = "active" | "disabled" | "all";
+export type MemoryDocument = z.infer<typeof memoryDocumentSchema>;
+export type MemoryVersionSummary = z.infer<typeof memoryVersionSummarySchema>;
+export type MemoryVersionDetail = z.infer<typeof memoryVersionDetailSchema>;
+export type MemoryDreamResult = z.infer<typeof memoryDreamResultSchema>;
 
 type ProjectMemoryAccess = Pick<PrivateWorkAccess, "apiBaseURL" | "scope">;
 
@@ -176,20 +93,8 @@ function requireProjectMemoryAccess(access: ProjectMemoryAccess) {
   }
   return {
     scope,
-    baseURL: `${access.apiBaseURL.slice(0, -privateSuffix.length)}/projects/${scope.projectId}/memory/v2`,
+    baseURL: `${access.apiBaseURL.slice(0, -privateSuffix.length)}/projects/${scope.projectId}/memory`,
   };
-}
-
-function memoryV2URL(
-  baseURL: string,
-  path = "",
-  parameters: Record<string, string | number | undefined> = {},
-) {
-  const search = new URLSearchParams({ namespace: "default" });
-  for (const [key, value] of Object.entries(parameters)) {
-    if (value !== undefined) search.set(key, String(value));
-  }
-  return `${baseURL}${path}?${search.toString()}`;
 }
 
 async function readJSON<T>(
@@ -201,409 +106,168 @@ async function readJSON<T>(
   return schema.parse(await response.json());
 }
 
-function pageParameters(input: {
-  limit: number;
-  offset: number;
-  query?: string;
-  category?: string;
-}) {
-  return z
-    .object({
-      limit: z.number().int().min(1).max(100),
-      offset: z.number().int().nonnegative(),
-      query: z.string().trim().min(1).max(200).optional(),
-      category: z
-        .string()
-        .trim()
-        .min(1)
-        .max(MEMORY_V2_CATEGORY_MAX_LENGTH)
-        .optional(),
-    })
-    .strict()
-    .parse(input);
+function parseVersion(version: number) {
+  return memoryVersionSchema.parse(version);
 }
 
-export function projectMemoryV2RootQueryKey(scope: ProjectClientScope) {
-  return privateWorkQueryKey(scope, "memory", "v2", "default");
+export function projectMemoryRootQueryKey(scope: ProjectClientScope) {
+  return privateWorkQueryKey(scope, "memory");
 }
 
-export function projectMemoryV2FactsQueryKey(
-  scope: ProjectClientScope,
-  input: {
-    status: MemoryV2FactListStatus;
-    limit: number;
-    offset: number;
-    query?: string;
-    category?: string;
-  },
-) {
-  return privateWorkQueryKey(
-    scope,
-    "memory",
-    "v2",
-    "default",
-    "facts",
-    input.status,
-    input.limit,
-    input.offset,
-    input.query ?? "",
-    input.category ?? "",
-  );
+export function projectMemoryDocumentQueryKey(scope: ProjectClientScope) {
+  return privateWorkQueryKey(scope, "memory", "document");
 }
 
-export function projectMemoryV2CandidatesQueryKey(
+export function projectMemoryVersionsQueryKey(
   scope: ProjectClientScope,
   input: { limit: number; offset: number },
 ) {
+  const parameters = z
+    .object({
+      limit: z.number().int().min(1).max(100),
+      offset: z.number().int().min(0).max(10_000),
+    })
+    .strict()
+    .parse(input);
   return privateWorkQueryKey(
     scope,
     "memory",
-    "v2",
-    "default",
-    "candidates",
-    "pending",
-    input.limit,
-    input.offset,
+    "versions",
+    parameters.limit,
+    parameters.offset,
   );
 }
 
-export function projectMemoryV2StatusQueryKey(scope: ProjectClientScope) {
-  return privateWorkQueryKey(scope, "memory", "v2", "default", "status");
-}
-
-export function projectMemoryV2FactDetailQueryKey(
+export function projectMemoryVersionQueryKey(
   scope: ProjectClientScope,
-  factId: string,
+  version: number,
 ) {
-  return privateWorkQueryKey(scope, "memory", "v2", "default", "fact", factId);
+  return privateWorkQueryKey(scope, "memory", "version", parseVersion(version));
 }
 
-export function projectMemoryV2MutationKey(
+export function projectMemoryMutationKey(
   scope: ProjectClientScope,
-  action:
-    | "accept-candidate"
-    | "reject-candidate"
-    | "revise-fact"
-    | "disable-fact"
-    | "restore-fact"
-    | "hard-forget"
-    | "export",
+  action: "dream" | "restore",
 ) {
-  return privateWorkQueryKey(
-    scope,
-    "memory",
-    "v2",
-    "default",
-    "mutation",
-    action,
-  );
+  return privateWorkQueryKey(scope, "memory", "mutation", action);
 }
 
-export function projectMemoryV2Permissions(
-  capabilities: readonly Capability[],
-) {
+export function projectMemoryPermissions(capabilities: readonly Capability[]) {
   const canRead = capabilities.includes("private_work.read_own");
-  const canManage = capabilities.includes("private_work.create");
+  const canCreate = capabilities.includes("private_work.create");
   return {
     canRead,
-    canExport: canRead,
-    canManage,
-    canHardForget: canRead,
+    canDream: canCreate,
+    canRestore: canCreate,
   };
 }
 
-export async function listProjectMemoryV2Facts(
+export async function getProjectMemory(
   access: ProjectMemoryAccess,
-  input: {
-    status: MemoryV2FactListStatus;
-    limit: number;
-    offset: number;
-    query?: string;
-    category?: string;
-  },
   signal?: AbortSignal,
 ) {
-  const status = z.enum(["active", "disabled", "all"]).parse(input.status);
-  const parameters = pageParameters({
-    limit: input.limit,
-    offset: input.offset,
-    query: input.query,
-    category: input.category,
-  });
   const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, "/facts", { status, ...parameters }),
-    { signal },
-  );
+  const response = await fetchWithAuth(baseURL, { signal });
   return readJSON(
     response,
-    memoryV2FactsResponseSchema,
-    "Failed to load project Memory facts",
+    memoryDocumentSchema,
+    "Failed to load project Memory",
   );
 }
 
-export async function listProjectMemoryV2Candidates(
+export async function dreamProjectMemory(
+  access: ProjectMemoryAccess,
+  input: { threadId?: string } = {},
+  signal?: AbortSignal,
+) {
+  const body = z
+    .object({ threadId: z.string().min(1).max(64).optional() })
+    .strict()
+    .parse(input);
+  const { baseURL } = requireProjectMemoryAccess(access);
+  const response = await fetchWithAuth(`${baseURL}/dream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return readJSON(
+    response,
+    memoryDreamResultSchema,
+    "Failed to organize project Memory",
+  );
+}
+
+export async function listProjectMemoryVersions(
   access: ProjectMemoryAccess,
   input: { limit: number; offset: number },
   signal?: AbortSignal,
 ) {
-  const parameters = pageParameters(input);
+  const parameters = z
+    .object({
+      limit: z.number().int().min(1).max(100),
+      offset: z.number().int().min(0).max(10_000),
+    })
+    .strict()
+    .parse(input);
   const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, "/candidates", {
-      status: "pending",
-      ...parameters,
-    }),
-    { signal },
-  );
-  return readJSON(
-    response,
-    memoryV2CandidatesResponseSchema,
-    "Failed to load project Memory candidates",
-  );
-}
-
-export async function getProjectMemoryV2Fact(
-  access: ProjectMemoryAccess,
-  factId: string,
-  signal?: AbortSignal,
-) {
-  const parsedFactId = z.string().uuid().parse(factId);
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, `/facts/${encodeURIComponent(parsedFactId)}`),
-    { signal },
-  );
-  return readJSON(
-    response,
-    memoryV2FactDetailSchema,
-    "Failed to load project Memory history",
-  );
-}
-
-export async function getProjectMemoryV2Status(
-  access: ProjectMemoryAccess,
-  signal?: AbortSignal,
-) {
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(memoryV2URL(baseURL, "/status"), {
+  const search = new URLSearchParams({
+    limit: String(parameters.limit),
+    offset: String(parameters.offset),
+  });
+  const response = await fetchWithAuth(`${baseURL}/versions?${search}`, {
     signal,
   });
   return readJSON(
     response,
-    memoryV2StatusSchema,
-    "Failed to load project Memory settings",
+    memoryVersionsSchema,
+    "Failed to load project Memory versions",
   );
 }
 
-export async function consolidateProjectMemoryV2(
+export async function getProjectMemoryVersion(
   access: ProjectMemoryAccess,
+  version: number,
   signal?: AbortSignal,
 ) {
+  const parsedVersion = parseVersion(version);
   const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, "/consolidate"),
-    { method: "POST", signal },
-  );
+  const response = await fetchWithAuth(`${baseURL}/versions/${parsedVersion}`, {
+    signal,
+  });
   return readJSON(
     response,
-    memoryV2ConsolidationSchema,
-    "Failed to consolidate project Memory",
+    memoryVersionDetailSchema,
+    "Failed to load project Memory version",
   );
 }
 
-export async function acceptProjectMemoryV2Candidate(
+export async function restoreProjectMemoryVersion(
   access: ProjectMemoryAccess,
-  candidate: Pick<MemoryV2Candidate, "id" | "updatedAt">,
+  version: number,
+  input: { expectedCurrentVersion: number },
   signal?: AbortSignal,
 ) {
-  const parsed = z
-    .object({ id: z.string().uuid(), updatedAt: memoryDateTimeSchema })
-    .strict()
-    .parse({ id: candidate.id, updatedAt: candidate.updatedAt });
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, `/candidates/${encodeURIComponent(parsed.id)}/accept`),
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedUpdatedAt: parsed.updatedAt }),
-      signal,
-    },
-  );
-  return readJSON(
-    response,
-    memoryV2FactSchema,
-    "Failed to accept project Memory candidate",
-  );
-}
-
-export async function rejectProjectMemoryV2Candidate(
-  access: ProjectMemoryAccess,
-  candidate: Pick<MemoryV2Candidate, "id" | "updatedAt">,
-  signal?: AbortSignal,
-) {
-  const parsed = z
-    .object({ id: z.string().uuid(), updatedAt: memoryDateTimeSchema })
-    .strict()
-    .parse({ id: candidate.id, updatedAt: candidate.updatedAt });
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, `/candidates/${encodeURIComponent(parsed.id)}/reject`),
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedUpdatedAt: parsed.updatedAt }),
-      signal,
-    },
-  );
-  return readJSON(
-    response,
-    memoryV2CandidateSchema,
-    "Failed to reject project Memory candidate",
-  );
-}
-
-export async function reviseProjectMemoryV2Fact(
-  access: ProjectMemoryAccess,
-  fact: Pick<MemoryV2Fact, "id" | "version">,
-  input: {
-    content?: string;
-    category?: string;
-    confidence?: number;
-    reason?: string;
-  },
-  signal?: AbortSignal,
-) {
-  const parsedFact = z
-    .object({ id: z.string().uuid(), version: z.number().int().positive() })
-    .strict()
-    .parse({ id: fact.id, version: fact.version });
-  const parsedInput = z
+  const parsedVersion = parseVersion(version);
+  const body = z
     .object({
-      content: z
-        .string()
-        .trim()
-        .min(1)
-        .max(MEMORY_V2_CONTENT_MAX_LENGTH)
-        .optional(),
-      category: z
-        .string()
-        .trim()
-        .min(1)
-        .max(MEMORY_V2_CATEGORY_MAX_LENGTH)
-        .optional(),
-      confidence: z.number().min(0).max(1).optional(),
-      reason: z.string().trim().min(1).max(64).optional(),
+      expectedCurrentVersion: z.number().int().nonnegative(),
     })
     .strict()
-    .refine(
-      ({ content, category, confidence }) =>
-        content !== undefined ||
-        category !== undefined ||
-        confidence !== undefined,
-      "At least one Memory fact field must change",
-    )
     .parse(input);
   const { baseURL } = requireProjectMemoryAccess(access);
   const response = await fetchWithAuth(
-    memoryV2URL(baseURL, `/facts/${encodeURIComponent(parsedFact.id)}`),
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        expectedVersion: parsedFact.version,
-        ...parsedInput,
-      }),
-      signal,
-    },
-  );
-  return readJSON(
-    response,
-    memoryV2FactSchema,
-    "Failed to update project Memory fact",
-  );
-}
-
-async function setProjectMemoryV2FactState(
-  access: ProjectMemoryAccess,
-  fact: Pick<MemoryV2Fact, "id" | "version">,
-  action: "disable" | "restore",
-  signal?: AbortSignal,
-) {
-  const parsed = z
-    .object({ id: z.string().uuid(), version: z.number().int().positive() })
-    .strict()
-    .parse({ id: fact.id, version: fact.version });
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, `/facts/${encodeURIComponent(parsed.id)}/${action}`),
+    `${baseURL}/versions/${parsedVersion}/restore`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedVersion: parsed.version }),
+      body: JSON.stringify(body),
       signal,
     },
   );
   return readJSON(
     response,
-    memoryV2FactSchema,
-    `Failed to ${action} project Memory fact`,
+    memoryVersionDetailSchema,
+    "Failed to restore project Memory version",
   );
-}
-
-export function disableProjectMemoryV2Fact(
-  access: ProjectMemoryAccess,
-  fact: Pick<MemoryV2Fact, "id" | "version">,
-  signal?: AbortSignal,
-) {
-  return setProjectMemoryV2FactState(access, fact, "disable", signal);
-}
-
-export function restoreProjectMemoryV2Fact(
-  access: ProjectMemoryAccess,
-  fact: Pick<MemoryV2Fact, "id" | "version">,
-  signal?: AbortSignal,
-) {
-  return setProjectMemoryV2FactState(access, fact, "restore", signal);
-}
-
-export async function hardForgetProjectMemoryV2Fact(
-  access: ProjectMemoryAccess,
-  fact: Pick<MemoryV2Fact, "id" | "version">,
-  signal?: AbortSignal,
-) {
-  const parsed = z
-    .object({ id: z.string().uuid(), version: z.number().int().positive() })
-    .strict()
-    .parse({ id: fact.id, version: fact.version });
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(
-    memoryV2URL(baseURL, `/facts/${encodeURIComponent(parsed.id)}/hard-forget`),
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedVersion: parsed.version }),
-      signal,
-    },
-  );
-  return readJSON(
-    response,
-    memoryV2HardForgetResultSchema,
-    "Failed to permanently forget project Memory fact",
-  );
-}
-
-export async function exportProjectMemoryV2(
-  access: ProjectMemoryAccess,
-  signal?: AbortSignal,
-) {
-  const { baseURL } = requireProjectMemoryAccess(access);
-  const response = await fetchWithAuth(memoryV2URL(baseURL, "/export"), {
-    signal,
-  });
-  if (!response.ok) {
-    await throwGatewayApiError(response, "Failed to export project Memory");
-  }
-  return response.blob();
 }

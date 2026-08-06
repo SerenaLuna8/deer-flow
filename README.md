@@ -17,23 +17,23 @@ PostgreSQL `lower(email)` 唯一索引保护。`auth.local.allow_registration` �
 持久化，普通公网 HTTP 默认仍使用 session cookie，access 与 CSRF cookie 始终采用同一次策略。
 
 项目 Memory 保存在 PostgreSQL，并始终受 account、project、owner 与 namespace 作用域约束。
-符合条件的成功 Run 会在结算事务中写入 Source 与 durable `memory_extract` Job，Worker 提取
-Candidate，Scheduler 再定时准入整理 Job，由 Worker 生成带 Revision/Evidence 的长期 Fact。
-Candidate 不参与召回；`v2` Run 会固定本次使用的 Fact Revision，重试和恢复不会漂移。私有 Run
-默认可使用只读 `memory_search` 按需召回同一快照；模型只能提供查询、分类和数量，不能选择
-作用域或修改 Memory。聊天输入框中的 `/Dream` 是内置命令：它会立即把当前项目、当前账号
-尚未整理的 Candidate 加入既有整理队列，不会作为普通聊天消息发送，也不会重新扫描对话。
+Thread 自动压缩和 `/compact` 共用一次 SNIP 模型调用：同一段带标签文本既成为 Thread 的
+`summary_text`，也通过 checkpoint 回执幂等激活为待整理 history，不再运行独立 Extractor。
+Scheduler 或手动 `/Dream` 每次严格选择最老 20 条 history，由 Worker 的无外部工具 Dream
+执行器整理整份私有 Markdown 文档；文档、版本、真实 diff、cursor、history tombstone 和 Job
+终态在同一事务结算。聊天中的 `/Dream` 会先用专用 `keep=0` 把当前 Thread 的所有已完成回合
+分片归档，再准入同一 Dream 流程；这些内置命令不会作为普通聊天消息或 Agent Run 提交。
 
-系统设置中的“个性化 → 记忆”提供账号级启用开关与重置入口。个人开关与平台 Memory Policy
-共同决定是否召回和生成记忆；关闭只暂停使用和生成，不删除已有内容。重置会清除当前账号在
-所有保留项目中的 v1/v2 长期记忆、候选、来源和快照，但不会删除 Thread、聊天消息、文件或
-`/compact` 摘要。
+新 Run 准入时会冻结一份完整 Memory 文档快照。Worker 在每次模型调用边界重新校验账号偏好、
+项目成员资格、Run/Job/lease 与冻结策略后，以隐藏的低权限 Human message 注入这份快照；同一 Run
+的重试和恢复不会漂移到更新后的文档，也不存在 Fact 检索、向量排序或 `memory_search`。系统设置
+中的“个性化 → 记忆”提供账号级启用开关与重置入口：关闭会在下一模型边界停止归档、Dream 和
+注入但不删除正文；重置会删除该账号保留项目中的长期 Memory/history/version/snapshot，仍保留
+Thread、聊天消息、文件和 Thread `summary_text`。
 
-项目 Memory 页面提供长期事实、待整理候选、修改历史和只读 Pipeline 设置四个区域，支持搜索、
-分类筛选、分页，以及带版本并发校验的接受、拒绝、编辑、停用、恢复和永久遗忘。旧 v1 aggregate
-只保留查询、状态、导出与 `off`/`shadow`/`consolidate` 模式的只读回退；旧 `MemoryMiddleware`、
-进程内 queue/updater、摘要写入 hook 和 v1 写 API 已移除。Thread 摘要只服务当前 Thread 的上下文
-压缩，不会写长期 Memory。
+项目 Memory 页面只展示当前文档、待整理数量、Dream 状态和可分页的真实版本/diff，并提供
+“立即整理”与基于当前版本 CAS 的恢复。旧 Source/Extractor/Candidate/Fact、v1/v2 Pipeline、
+hard-forget/export/status 管理面和搜索召回链路均不再存在。
 
 Checkpoint 默认使用兼容的 `full` 表示，也可将全部 Gateway/Worker 同步配置为 `delta`
 以减少长会话的重复消息写入。Delta 状态始终通过项目作用域内的物化读取恢复；配置切换需要
@@ -65,7 +65,7 @@ UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次
 - 项目用量：具备用量权限的项目管理员可在概览查看全项目最近 24 个小时的 Token 消耗趋势。
 - 系统通知：工作区顶部铃铛集中展示账号级通知和未读数量；已注册用户收到项目邀请后可直接在通知中接受，未注册邮箱仍使用一次性邀请链接。
 - Agent 运行：持久化 Thread/Run、durable SSE、断线重连、取消、重试和 Worker lease。
-- 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。Main 无需项目 Agent 绑定，会在每次 Run 准入时冻结当前项目可用的系统/自建 Agent、Skill 和 MCP；普通 Agent 仍只加载其版本明确引用的 Skill 与 MCP。会话列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
+- 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。Main 无需项目 Agent 绑定，会在每次 Run 准入时冻结当前项目可用的系统/自建 Agent、Skill 和 MCP；普通 Agent 仍只加载其版本明确引用的 Skill 与 MCP。会话列表按最近活跃时间倒序排列，进入“会话”会自动打开第一条；列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
 - 会话模式：输入区只保留一个模式选择器；闪速、思考、Pro、Ultra 分别固定使用最低、低、中、高推理强度，不再提供可与模式冲突的独立推理深度设置。
 - 执行过程：复杂任务结束后，可在最终回答前展开按时间顺序保留的全部思考、工具调用和子任务，最终回答所属模型调用的思考也作为最后一步收在其中；每次模型调用的思考保持为独立的“已思考（用时 X 秒）”区块，不会合并成普通执行步骤或重复显示。外层默认折叠以保持页面简洁；没有前序执行过程的直接回答仍保留独立思考区块，任务执行中会逐轮保留思考并自动展开当前轮次。
 - 思考时长：完成态显示 Worker 从模型流中观测到的实际思考区间；任务总耗时继续单独展示，包含模型等待、工具和子任务时间，不会冒充思考时长。
@@ -147,17 +147,17 @@ Scheduler 和 Worker。
 
 ### 3. 初始化 PostgreSQL
 
-`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v3`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY` 与 Credential keyring，把原示例中的 DeepSeek V4 Pro 配置及加密 `model_api_key` Credential 写入 PostgreSQL，并将模型设为 active/default；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v4`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY`、`OPENCODE_API_KEY` 与 Credential keyring：DeepSeek V4 Flash 与 DeepSeek V4 Pro 共同引用一份加密 `model_api_key` Credential，GPT 5.6 Luna 使用单独加密的 OpenCode Credential，Flash 仍为默认模型；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 在根目录 .env 中配置 DATABASE_URL、POSTGRES_ADMIN_URL、
-# DEEPSEEK_API_KEY、DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID 和
+# DEEPSEEK_API_KEY、OPENCODE_API_KEY、DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID 和
 # DEER_FLOW_CREDENTIAL_KEYRING_JSON；也可用显式环境变量覆盖
 make setup-db
 make check-db
 ```
 
-`make check-db` 只读校验 `full_schema_v3` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
+`make check-db` 只读校验 `full_schema_v4` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
 
 ### 4. 启动
 
@@ -173,8 +173,9 @@ make dev
 make start
 ```
 
-访问 <http://localhost:2026>。首次空库初始化已提供 active/default 的 DeepSeek V4 Pro；
-system admin 可在 `/admin/settings/models` 检查、替换 Credential 或调整模型目录。provider
+访问 <http://localhost:2026>。首次空库初始化会提供 active 的 DeepSeek V4 Flash、
+DeepSeek V4 Pro 和 GPT 5.6 Luna，并将 Flash 设为默认；system admin 可在
+`/admin/settings/models` 检查或调整模型目录与加密 Credential。provider
 key 只在 `make setup-db` 时由 `.env`/显式环境导入加密 envelope，Gateway、Worker 与 Scheduler
 启动时不会接收该 key。本地全栈默认把运行状态写入
 `backend/.deer-flow`，日志写入 `logs/`；停止服务使用：
@@ -271,7 +272,7 @@ deer-flow/
 | `make gateway` / `make worker` / `make scheduler`             | 单独启动后端进程                                        |
 | `make setup-db`                                               | 在空库执行完整 schema 并初始化 PostgreSQL               |
 | `make check-db`                                               | 只读检查 PostgreSQL marker 与必需对象                   |
-| `cd backend && make lint`                                    | 后端格式与静态检查                                      |
+| `cd backend && make lint`                                     | 后端格式与静态检查                                      |
 | `cd frontend && pnpm check && pnpm test`                      | 前端 lint、类型检查与单元测试                           |
 | `POSTGRES_TEST_URL=... make test`                             | 运行后端核心测试（含真实 PostgreSQL）；仅限可丢弃实例   |
 

@@ -66,10 +66,11 @@ self-registration policy, project-quota defaults, and provider Credentials are
 PostgreSQL system settings, not `config.yaml` or ambient runtime provider environment variables.
 System admins manage runtime/auth/quota policy at `/admin/settings/system`; new Runs freeze the
 exact Agent policy while Gateway request-only features read the current committed policy. On an
-empty local target, `make setup-db` reads `DEEPSEEK_API_KEY` and
-the Credential keyring once from the root `.env` when that file exists (explicit environment
-wins, and may be used without an `.env` file), stores the removed
-example's DeepSeek V4 Pro as an encrypted active/default catalog entry, and runtime roles continue
+empty local target, `make setup-db` reads `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, and the
+Credential keyring once from the root `.env` when that file exists (explicit environment wins,
+and may be used without an `.env` file). It stores DeepSeek V4 Flash and DeepSeek V4 Pro as
+active catalog entries that share one encrypted Credential version, and GPT 5.6 Luna with a
+separate encrypted OpenCode Credential; Flash remains the default, and runtime roles continue
 to read only PostgreSQL. A system admin manages the resulting catalog at
 `/admin/settings/models`.
 Config schema and resolution are documented in [backend/AGENTS.md](backend/AGENTS.md).
@@ -107,10 +108,12 @@ model-provider API keys before starting the role.
 
 `make setup-db` is the only schema initialization entry point. It requires an empty PostgreSQL
 target, executes the complete packaged `full_schema.sql`, records the exact
-`full_schema_v3` marker, seeds the packaged system catalog, initializes the LangGraph schema,
-bootstraps the default project, and atomically seeds the encrypted DeepSeek V4 Pro
-Credential/model/default pointer. Missing `DEEPSEEK_API_KEY` or an invalid Credential keyring
-fails preflight before the target database is created.
+`full_schema_v4` marker, seeds the packaged system catalog, initializes the LangGraph schema,
+bootstraps the default project, and atomically seeds an encrypted DeepSeek Credential shared by
+the active DeepSeek V4 Flash and DeepSeek V4 Pro models plus a separate encrypted OpenCode
+Credential for GPT 5.6 Luna. Flash remains the default pointer. Missing `DEEPSEEK_API_KEY`,
+`OPENCODE_API_KEY`, or an invalid Credential keyring fails preflight before the target database
+is created.
 
 There is no incremental migration chain and no supported upgrade path for an older DeerFlow
 database. A legacy marker, unknown marker, unversioned nonempty schema, or catalog drift is
@@ -193,7 +196,7 @@ These apply repo-wide; module guides own the module-specific detail.
   不要为这些命令再新增重复 workflow；Replay E2E、发布、容器、Helm Chart 和版本检查仍使用专用
   workflow。该核心集合用于快速保护主路径，不代表外部模型、浏览器矩阵或部署环境的完整认证。
 - **Single full-schema initialization** — `full_schema.sql` 是唯一完整 PostgreSQL schema
-  来源，当前精确 marker 为 `full_schema_v3`。`make setup-db` 只接受空库，并在同一次显式初始化中
+  来源，当前精确 marker 为 `full_schema_v4`。`make setup-db` 只接受空库，并在同一次显式初始化中
   安装完整 schema、builtin catalog、LangGraph schema 与 default project。仓库不提供增量升级；
   旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 必须换空库重建。运行时和
   `make check-db` 只读校验。真实测试只准使用随机 `deerflow_test_*`，绝不连接业务库。

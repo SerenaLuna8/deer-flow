@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -187,6 +187,59 @@ class PrivateThreadTokenUsageResponse(StrictPrivateWorkResponse):
     )
 
 
+class PrivateThreadContextTokenTriggerResponse(StrictPrivateWorkResponse):
+    type: Literal["tokens"]
+    configured_value: int = Field(ge=1)
+    current_value: int = Field(ge=0)
+    threshold_value: int = Field(ge=1)
+    remaining_value: int = Field(ge=0)
+    progress_percent: float = Field(ge=0, le=100)
+    reached: bool
+    threshold_tokens: int = Field(ge=1)
+
+
+class PrivateThreadContextFractionTriggerResponse(StrictPrivateWorkResponse):
+    type: Literal["fraction"]
+    configured_value: float = Field(gt=0, le=1)
+    current_value: float = Field(ge=0)
+    threshold_value: float = Field(gt=0, le=1)
+    remaining_value: float = Field(ge=0)
+    progress_percent: float = Field(ge=0, le=100)
+    reached: bool
+    context_window_tokens: int = Field(ge=1)
+    threshold_tokens: int = Field(ge=1)
+
+
+class PrivateThreadContextMessageTriggerResponse(StrictPrivateWorkResponse):
+    type: Literal["messages"]
+    configured_value: int = Field(ge=1)
+    current_value: int = Field(ge=0)
+    threshold_value: int = Field(ge=1)
+    remaining_value: int = Field(ge=0)
+    progress_percent: float = Field(ge=0, le=100)
+    reached: bool
+
+
+PrivateThreadContextTriggerResponse = Annotated[
+    PrivateThreadContextTokenTriggerResponse | PrivateThreadContextFractionTriggerResponse | PrivateThreadContextMessageTriggerResponse,
+    Field(discriminator="type"),
+]
+
+
+class PrivateThreadContextUsageResponse(StrictPrivateWorkResponse):
+    thread_id: str
+    enabled: bool
+    estimated_tokens: int = Field(ge=0)
+    message_count: int = Field(ge=0)
+    summary_present: bool
+    context_window_tokens: int | None = Field(default=None, ge=1)
+    triggers: list[PrivateThreadContextTriggerResponse] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+    primary_trigger: PrivateThreadContextTriggerResponse | None = None
+
+
 class PrivateWorkRoute(APIRoute):
     """Give all project-private validation failures one stable error shape."""
 
@@ -214,6 +267,7 @@ def strip_client_authority_fields(
 __all__ = [
     "PrivateRunCheckpoint",
     "PrivateRunCreateRequest",
+    "PrivateThreadContextUsageResponse",
     "PrivateThreadTokenUsageResponse",
     "PrivateWorkRoute",
     "StrictPrivateWorkModel",

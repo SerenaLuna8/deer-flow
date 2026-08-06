@@ -11,7 +11,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
-from app.system_settings.models import CreateSystemModel, UpdateSystemModel
+from app.system_settings.models import (
+    CreateSystemModel,
+    SystemModelConnectionCheck,
+    UpdateSystemModel,
+)
 
 _MAX_SETTINGS_BYTES = 32 * 1024
 _MAX_DESCRIPTION_CHARS = 4_000
@@ -587,6 +591,41 @@ def validate_update_system_model(
         raise ModelSettingsInvalid() from None
 
 
+def validate_system_model_connection_test(
+    command: SystemModelConnectionCheck,
+) -> SystemModelConnectionCheck:
+    """Apply the same provider and Credential validation before a live probe."""
+
+    try:
+        if not isinstance(command, SystemModelConnectionCheck):
+            raise ValueError
+        values = _validate_version_fields(
+            display_name="Connection test",
+            description="",
+            provider_adapter=command.provider_adapter,
+            provider_model=command.provider_model,
+            settings=command.settings,
+            supports_thinking=False,
+            supports_reasoning_effort=False,
+            supports_vision=False,
+            credential_id=command.credential_id,
+            credential_version_id=command.credential_version_id,
+            credential_env_key=command.credential_env_key,
+            sort_order=0,
+        )
+        return replace(
+            command,
+            provider_adapter=values["provider_adapter"],
+            provider_model=values["provider_model"],
+            settings=values["settings"],
+            credential_id=values["credential_id"],
+            credential_version_id=values["credential_version_id"],
+            credential_env_key=values["credential_env_key"],
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ModelSettingsInvalid() from None
+
+
 def canonical_model_payload_checksum(
     model_config_id: uuid.UUID,
     command: CreateSystemModel | UpdateSystemModel,
@@ -638,5 +677,6 @@ __all__ = [
     "provider_credential_required",
     "validate_create_system_model",
     "validate_model_settings",
+    "validate_system_model_connection_test",
     "validate_update_system_model",
 ]

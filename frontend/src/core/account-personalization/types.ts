@@ -32,10 +32,10 @@ export const resetAccountMemoryResultSchema = z
   .object({
     version: safePositiveInteger,
     scopesReset: safeNonnegativeInteger,
-    v1Memories: safeNonnegativeInteger,
-    sourceBatches: safeNonnegativeInteger,
-    candidates: safeNonnegativeInteger,
-    facts: safeNonnegativeInteger,
+    historyEntries: safeNonnegativeInteger,
+    documents: safeNonnegativeInteger,
+    versions: safeNonnegativeInteger,
+    dreamRuns: safeNonnegativeInteger,
     snapshots: safeNonnegativeInteger,
     jobsCancelled: safeNonnegativeInteger,
   })

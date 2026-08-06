@@ -1,0 +1,452 @@
+"""Worker-only Dream execution over one frozen document/history batch."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Protocol
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.personalization.repository import (
+    AccountMemoryPreference,
+    AccountPersonalizationNotFound,
+    AccountPersonalizationRepository,
+)
+from app.projects.capabilities import Capability
+from app.projects.context import resolve_project_context_in_transaction
+from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
+from app.system_runtime_settings.models import (
+    AgentRuntimePolicyValue,
+    RuntimePolicySection,
+)
+from app.system_settings import SystemModelMaterializer
+from app.system_settings.repository import SystemModelRepository
+from app.worker.service import (
+    JobLeaseAuthority,
+    JobOutcome,
+    JobSettlement,
+    LeaseLost,
+)
+from deerflow.agents.memory.dream import (
+    DREAM_PROMPT_VERSION,
+    DreamHistoryInput,
+    MemoryDocumentInvalid,
+    MemoryDreamError,
+    MemoryDreamInput,
+    MemoryDreamResult,
+    MemoryDreamRunner,
+    validate_memory_document,
+)
+from deerflow.config.app_config import AppConfig
+from deerflow.models import create_chat_model, model_supports_temperature
+from deerflow.persistence.jobs.sql import JobClaim, JobRepository
+from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryDocumentConflict,
+    MemoryDocumentRepository,
+    MemoryDocumentScope,
+    MemoryDreamWork,
+    compute_dream_history_digest,
+    memory_document_digest,
+)
+
+_MEMORY_DREAM_REQUEST_ID = "memory-dream-worker"
+
+
+class DreamRunnerPort(Protocol):
+    async def run(self, value: MemoryDreamInput) -> MemoryDreamResult: ...
+
+
+class MemoryDreamScopeValidator(Protocol):
+    async def __call__(
+        self,
+        session: AsyncSession,
+        claim: JobClaim,
+        *,
+        lock: bool,
+    ) -> bool: ...
+
+
+async def _default_scope_validator(
+    session: AsyncSession,
+    claim: JobClaim,
+    *,
+    lock: bool,
+) -> bool:
+    owner_user_id = claim.scope.owner_user_id
+    if owner_user_id is None:
+        return False
+    try:
+        context = await resolve_project_context_in_transaction(
+            session,
+            uuid.UUID(owner_user_id),
+            claim.scope.project_id,
+            _MEMORY_DREAM_REQUEST_ID,
+            lock=lock,
+        )
+        context.require(Capability.PRIVATE_WORK_CREATE)
+        return True
+    except (ProjectForbidden, ProjectNotFound, ValueError):
+        return False
+
+
+class MemoryDreamJobHandler:
+    """Run a restricted Dream model and defer every write to JobSettlement."""
+
+    def __init__(
+        self,
+        session_factory: Callable[[], AsyncSession],
+        *,
+        app_config: AppConfig | None,
+        model_materializer: SystemModelMaterializer | None = None,
+        runtime_policy_materializer: SystemRuntimePolicyMaterializer | None = None,
+        runner_factory: Callable[[object], DreamRunnerPort] | None = None,
+        repository_builder=MemoryDocumentRepository,
+        job_repository_builder=JobRepository,
+        model_repository_builder=SystemModelRepository,
+        scope_validator: MemoryDreamScopeValidator | None = None,
+        personalization_repository_builder=AccountPersonalizationRepository,
+        retry_initial_seconds: int = 5,
+        retry_max_seconds: int = 300,
+    ) -> None:
+        if (
+            not callable(session_factory)
+            or not callable(repository_builder)
+            or not callable(job_repository_builder)
+            or not callable(model_repository_builder)
+            or not callable(personalization_repository_builder)
+            or (runner_factory is None and not isinstance(app_config, AppConfig))
+            or type(retry_initial_seconds) is not int
+            or type(retry_max_seconds) is not int
+            or retry_initial_seconds < 1
+            or retry_max_seconds < retry_initial_seconds
+        ):
+            raise ValueError("Dream Worker configuration is invalid")
+        self._sessions = session_factory
+        self._app_config = app_config
+        self._model_materializer = model_materializer or SystemModelMaterializer(session_factory)
+        self._runtime_policy_materializer = runtime_policy_materializer or SystemRuntimePolicyMaterializer(session_factory)
+        self._runner_factory = runner_factory or self._make_runner
+        self._repository_builder = repository_builder
+        self._job_repository_builder = job_repository_builder
+        self._model_repository_builder = model_repository_builder
+        self._scope_validator = scope_validator or _default_scope_validator
+        self._personalization_repository_builder = personalization_repository_builder
+        self._retry_initial_seconds = retry_initial_seconds
+        self._retry_max_seconds = retry_max_seconds
+
+    def _repository(self, session: AsyncSession) -> MemoryDocumentRepository:
+        return self._repository_builder(
+            session,
+            jobs=self._job_repository_builder(session),
+        )
+
+    def _make_runner(self, model: object) -> MemoryDreamRunner:
+        if self._app_config is None:
+            raise RuntimeError("Dream app config is unavailable")
+        model_name = getattr(model, "name", None)
+        if not isinstance(model_name, str) or not model_name:
+            raise RuntimeError("Dream model is invalid")
+        runtime_config = self._app_config.with_runtime_models((model,))
+        overrides = {"temperature": 0.0} if model_supports_temperature(model_name, app_config=runtime_config) else None
+        chat_model = create_chat_model(
+            model_name,
+            app_config=runtime_config,
+            attach_tracing=True,
+            model_overrides=overrides,
+        )
+        return MemoryDreamRunner(chat_model)
+
+    @staticmethod
+    def _scope(claim: JobClaim) -> MemoryDocumentScope:
+        return MemoryDocumentScope(
+            project_id=claim.scope.project_id,
+            owner_user_id=claim.scope.owner_user_id or "",
+            namespace=claim.namespace or "",
+        )
+
+    async def _load(
+        self,
+        claim: JobClaim,
+    ) -> tuple[
+        bool,
+        AccountMemoryPreference | None,
+        MemoryDreamWork | None,
+    ]:
+        async with self._sessions() as session, session.begin():
+            allowed = await self._scope_validator(
+                session,
+                claim,
+                lock=False,
+            )
+            if not allowed:
+                return False, None, None
+            try:
+                preference = await self._personalization_repository_builder(session).read_memory(claim.scope.owner_user_id or "")
+            except AccountPersonalizationNotFound:
+                return False, None, None
+            work = await self._repository(session).load_dream_work(
+                self._scope(claim),
+                claim.job_id,
+            )
+        return True, preference, work
+
+    @staticmethod
+    def _input(
+        work: MemoryDreamWork,
+        *,
+        max_tokens: int,
+    ) -> MemoryDreamInput:
+        if (
+            not work.history
+            or work.prompt_version != DREAM_PROMPT_VERSION
+            or work.result_version is not None
+            or work.history_count != len(work.history)
+            or work.history_from != work.history[0].sequence
+            or work.history_to != work.history[-1].sequence
+            or compute_dream_history_digest(work.history) != work.history_digest
+            or memory_document_digest(work.base_content) != work.base_content_digest
+            or any(item.tagged_text is None for item in work.history)
+        ):
+            raise ValueError("Dream frozen work is invalid")
+        return MemoryDreamInput(
+            document=work.base_content,
+            document_version=work.base_document_version,
+            history=tuple(
+                DreamHistoryInput(
+                    sequence=item.sequence,
+                    tagged_text=item.tagged_text or "",
+                )
+                for item in work.history
+            ),
+            max_tokens=max_tokens,
+        )
+
+    async def __call__(
+        self,
+        claim: JobClaim,
+        authority: JobLeaseAuthority,
+    ) -> JobOutcome | JobSettlement:
+        if claim.job_type != "memory_dream" or claim.scope.owner_user_id is None or not claim.namespace or claim.run_id is not None or claim.occurrence_id is not None:
+            return JobOutcome.cancelled()
+        await authority.heartbeat()
+        try:
+            allowed, preference, work = await self._load(claim)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_WORK_UNAVAILABLE",
+            )
+        if not allowed or preference is None or work is None:
+            return self._release_settlement(
+                claim,
+                cancelled=not allowed,
+                public_error_code="MEMORY_DREAM_WORK_UNAVAILABLE",
+            )
+        if authority.cancel_requested or work.cancel_requested or not preference.memory_enabled or preference.version != work.preference_version:
+            return self._release_settlement(claim, cancelled=True)
+        try:
+            frozen_policy = await self._runtime_policy_materializer.materialize_revision(
+                RuntimePolicySection.AGENT_RUNTIME,
+                work.policy_revision,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_POLICY_UNAVAILABLE",
+            )
+        if not isinstance(frozen_policy, AgentRuntimePolicyValue) or not frozen_policy.memory.enabled:
+            return self._release_settlement(claim, cancelled=True)
+        try:
+            model = await self._model_materializer.materialize_exact(
+                model_config_id=work.model_config_id,
+                model_config_version_id=work.model_version_id,
+                payload_checksum=work.model_payload_checksum,
+            )
+            dream_input = self._input(
+                work,
+                max_tokens=frozen_policy.memory.max_injection_tokens,
+            )
+        except asyncio.CancelledError:
+            raise
+        except (MemoryDocumentInvalid, TypeError, ValueError):
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_WORK_INVALID",
+            )
+        except Exception:
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_MODEL_UNAVAILABLE",
+            )
+
+        await authority.heartbeat()
+        if authority.cancel_requested:
+            return self._release_settlement(claim, cancelled=True)
+        try:
+            result = await self._runner_factory(model).run(dream_input)
+            validate_memory_document(
+                result.content,
+                frozen_policy.memory.max_injection_tokens,
+            )
+        except asyncio.CancelledError:
+            raise
+        except MemoryDreamError as error:
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code=error.code,
+            )
+        except (MemoryDocumentInvalid, TypeError, ValueError):
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_OUTPUT_INVALID",
+            )
+        except Exception:
+            return self._release_settlement(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_MODEL_FAILED",
+            )
+        await authority.heartbeat()
+        if authority.cancel_requested:
+            return self._release_settlement(claim, cancelled=True)
+        return self._success_settlement(
+            claim,
+            work=work,
+            content=result.content,
+            max_tokens=frozen_policy.memory.max_injection_tokens,
+        )
+
+    def _success_settlement(
+        self,
+        claim: JobClaim,
+        *,
+        work: MemoryDreamWork,
+        content: str,
+        max_tokens: int,
+    ) -> JobSettlement:
+        async def commit() -> None:
+            async with self._sessions() as session, session.begin():
+                allowed = await self._scope_validator(
+                    session,
+                    claim,
+                    lock=True,
+                )
+                try:
+                    current, policy_revision = await self._runtime_policy_materializer.materialize_current_with_revision_in_session(
+                        session,
+                        RuntimePolicySection.AGENT_RUNTIME,
+                        for_update=True,
+                    )
+                except Exception:
+                    current = None
+                    policy_revision = None
+                try:
+                    current_model = (
+                        await self._model_repository_builder(session).resolve_active_model(
+                            current.memory.model_name,
+                            load_envelope=False,
+                        )
+                        if isinstance(current, AgentRuntimePolicyValue) and current.memory.enabled
+                        else None
+                    )
+                except Exception:
+                    current_model = None
+                try:
+                    preference = await self._personalization_repository_builder(session).read_memory(work.owner_user_id, for_update=True)
+                except AccountPersonalizationNotFound:
+                    preference = None
+                current_model_matches = (
+                    current_model is not None and current_model.model.id == work.model_config_id and current_model.version.id == work.model_version_id and current_model.version.payload_checksum == work.model_payload_checksum
+                )
+                still_valid = (
+                    allowed
+                    and preference is not None
+                    and preference.memory_enabled
+                    and preference.version == work.preference_version
+                    and isinstance(current, AgentRuntimePolicyValue)
+                    and current.memory.enabled
+                    and policy_revision == work.policy_revision
+                    and current.memory.max_injection_tokens == max_tokens
+                    and current_model_matches
+                )
+                repository = self._repository(session)
+                if not still_valid:
+                    await repository.release_dream(
+                        self._scope(claim),
+                        job_id=claim.job_id,
+                        lease_token=claim.lease_token,
+                        now=datetime.now(UTC),
+                        cancelled=True,
+                    )
+                    return
+                validate_memory_document(content, max_tokens)
+                try:
+                    async with session.begin_nested():
+                        await repository.finalize_dream(
+                            self._scope(claim),
+                            job_id=claim.job_id,
+                            lease_token=claim.lease_token,
+                            expected_history_digest=work.history_digest,
+                            expected_base_version=work.base_document_version,
+                            expected_base_digest=work.base_content_digest,
+                            content=content,
+                            now=datetime.now(UTC),
+                        )
+                except MemoryDocumentConflict:
+                    await repository.release_dream(
+                        self._scope(claim),
+                        job_id=claim.job_id,
+                        lease_token=claim.lease_token,
+                        now=datetime.now(UTC),
+                        cancelled=False,
+                        public_error_code="MEMORY_DREAM_COMMIT_CONFLICT",
+                        retry_initial_seconds=self._retry_initial_seconds,
+                        retry_max_seconds=self._retry_max_seconds,
+                    )
+
+        return JobSettlement(JobOutcome.succeeded(), commit)
+
+    def _release_settlement(
+        self,
+        claim: JobClaim,
+        *,
+        cancelled: bool,
+        public_error_code: str = "MEMORY_DREAM_CANCELLED",
+        retryable: bool = True,
+    ) -> JobSettlement:
+        async def commit() -> None:
+            async with self._sessions() as session, session.begin():
+                try:
+                    await self._repository(session).release_dream(
+                        self._scope(claim),
+                        job_id=claim.job_id,
+                        lease_token=claim.lease_token,
+                        now=datetime.now(UTC),
+                        cancelled=cancelled,
+                        public_error_code=public_error_code,
+                        retryable=retryable,
+                        retry_initial_seconds=self._retry_initial_seconds,
+                        retry_max_seconds=self._retry_max_seconds,
+                    )
+                except MemoryDocumentConflict:
+                    raise LeaseLost(claim.job_id) from None
+
+        outcome = JobOutcome.cancelled() if cancelled else JobOutcome.failed(public_error_code)
+        return JobSettlement(outcome, commit)
+
+
+__all__ = ["MemoryDreamJobHandler"]

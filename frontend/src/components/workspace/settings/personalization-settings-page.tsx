@@ -57,9 +57,7 @@ export function PersonalizationSettingsPage() {
             memoryEnabled ? copy.enableSuccess : copy.disableSuccess,
           ),
         onError: (error) =>
-          toast.error(
-            mutationMessage(error, copy.conflict, copy.updateError),
-          ),
+          toast.error(mutationMessage(error, copy.conflict, copy.updateError)),
       },
     );
   };
@@ -77,18 +75,13 @@ export function PersonalizationSettingsPage() {
           toast.success(copy.resetSuccess);
         },
         onError: (error) =>
-          toast.error(
-            mutationMessage(error, copy.conflict, copy.resetError),
-          ),
+          toast.error(mutationMessage(error, copy.conflict, copy.resetError)),
       },
     );
   };
 
   return (
-    <SettingsSection
-      title={copy.title}
-      description={copy.description}
-    >
+    <SettingsSection title={copy.title} description={copy.description}>
       {preference.isPending ? (
         <div className="text-muted-foreground flex items-center gap-2 rounded-lg border px-4 py-8 text-sm">
           <LoaderCircleIcon className="size-4 animate-spin" />
@@ -122,7 +115,7 @@ export function PersonalizationSettingsPage() {
                 {copy.enableDescription}
               </p>
               {!preference.data.platformMemoryAvailable && (
-                <p className="text-amber-700 dark:text-amber-400 mt-2 text-xs">
+                <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
                   {copy.platformUnavailable}
                 </p>
               )}
@@ -170,9 +163,7 @@ export function PersonalizationSettingsPage() {
         <DialogContent closeLabel={t.common.close}>
           <DialogHeader>
             <DialogTitle>{copy.resetDialogTitle}</DialogTitle>
-            <DialogDescription>
-              {copy.resetDialogDescription}
-            </DialogDescription>
+            <DialogDescription>{copy.resetDialogDescription}</DialogDescription>
           </DialogHeader>
           <div className="bg-muted rounded-md px-3 py-2 text-sm font-medium">
             {copy.resetChatNotice}

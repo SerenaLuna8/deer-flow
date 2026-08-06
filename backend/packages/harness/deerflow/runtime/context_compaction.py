@@ -8,7 +8,15 @@ from typing import Any
 
 from langgraph.types import Overwrite
 
-from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
+from deerflow.agents.memory.snip import (
+    MEMORY_ARCHIVE_CONTEXT_KEY,
+    SnipArchiveContext,
+)
+from deerflow.agents.middlewares.summarization_middleware import (
+    ContextTriggerUsage,
+    DeerFlowSummarizationMiddleware,
+    create_summarization_middleware,
+)
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
@@ -46,6 +54,19 @@ class PreparedThreadCompaction:
     update_values: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class ThreadContextUsage:
+    """Current retained Thread context measured against automatic triggers."""
+
+    enabled: bool
+    estimated_tokens: int
+    message_count: int
+    summary_present: bool
+    context_window_tokens: int | None
+    triggers: tuple[ContextTriggerUsage, ...]
+    primary_trigger: ContextTriggerUsage | None
+
+
 def _create_compaction_middleware(
     *,
     app_config: AppConfig,
@@ -66,6 +87,57 @@ def _checkpoint_id(snapshot: Any) -> str:
     return value
 
 
+def has_complete_turns(messages: object) -> bool:
+    """Return whether a materialized Thread state has an archivable turn."""
+
+    return isinstance(messages, list) and bool(DeerFlowSummarizationMiddleware._complete_turn_ranges(messages))
+
+
+def measure_thread_context_usage(
+    snapshot: Any,
+    *,
+    app_config: AppConfig,
+) -> ThreadContextUsage:
+    """Inspect one materialized checkpoint without invoking or mutating it."""
+
+    channel_values = getattr(snapshot, "values", None) or {}
+    if not isinstance(channel_values, dict):
+        raise ContextCompactionFailed("Context checkpoint values are invalid.")
+    messages = channel_values.get("messages")
+    if messages is None:
+        messages = []
+    if not isinstance(messages, list):
+        raise ContextCompactionFailed("Context checkpoint messages are invalid.")
+    summary_value = channel_values.get("summary_text")
+    summary_text = summary_value if isinstance(summary_value, str) else None
+
+    middleware = create_summarization_middleware(app_config=app_config)
+    if middleware is None:
+        return ThreadContextUsage(
+            enabled=False,
+            estimated_tokens=0,
+            message_count=0,
+            summary_present=bool(summary_text),
+            context_window_tokens=None,
+            triggers=(),
+            primary_trigger=None,
+        )
+
+    measurement = middleware.measure_context_usage(
+        list(messages),
+        summary_text=summary_text,
+    )
+    return ThreadContextUsage(
+        enabled=True,
+        estimated_tokens=measurement.estimated_tokens,
+        message_count=measurement.message_count,
+        summary_present=measurement.summary_present,
+        context_window_tokens=measurement.context_window_tokens,
+        triggers=measurement.triggers,
+        primary_trigger=measurement.primary_trigger,
+    )
+
+
 async def prepare_thread_compaction(
     accessor: CheckpointStateAccessor,
     thread_id: str,
@@ -77,6 +149,7 @@ async def prepare_thread_compaction(
     app_config: AppConfig | None = None,
     snapshot: Any | None = None,
     authorization_boundary: object | None = None,
+    memory_archive_context: SnipArchiveContext | None = None,
 ) -> PreparedThreadCompaction:
     """Summarize one checkpoint without persisting the prepared replacement."""
     resolved_app_config = app_config or get_app_config()
@@ -86,6 +159,19 @@ async def prepare_thread_compaction(
     if snapshot is None:
         snapshot = await accessor.aget(read_config)
     source_checkpoint_id = _checkpoint_id(snapshot)
+    if memory_archive_context is not None:
+        if type(memory_archive_context) is not SnipArchiveContext:
+            raise ContextCompactionFailed(
+                "Memory archive context is invalid.",
+            )
+        if memory_archive_context.source_checkpoint_id is not None and memory_archive_context.source_checkpoint_id != source_checkpoint_id:
+            raise ContextCompactionFailed(
+                "Memory archive source checkpoint changed.",
+            )
+        memory_archive_context = replace(
+            memory_archive_context,
+            source_checkpoint_id=source_checkpoint_id,
+        )
 
     channel_values = snapshot.values or {}
     messages = channel_values.get("messages")
@@ -102,6 +188,8 @@ async def prepare_thread_compaction(
     }
 
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
+    if memory_archive_context is not None:
+        runtime_context[MEMORY_ARCHIVE_CONTEXT_KEY] = memory_archive_context
     if agent_name:
         runtime_context["agent_name"] = agent_name
     if authorization_boundary is not None:
@@ -109,10 +197,22 @@ async def prepare_thread_compaction(
     runtime = SimpleNamespace(context=runtime_context)
     result = await middleware.acompact_state(state, runtime, force=force)  # type: ignore[arg-type]
     if result is None:
+        reason = "not_enough_messages"
+        if keep is not None and keep[0] == "messages" and keep[1] == 0 and has_complete_turns(messages):
+            # Dream's keep=messages:0 request is an explicit archive barrier. If
+            # an eligible complete turn exists, returning "not enough" would let
+            # the caller mistake a prompt-budget, model, or SNIP validation
+            # failure for successful exhaustion and continue into Dream. Keep the
+            # failure observable so that workflow can fail closed.
+            reason = "compaction_failed"
         return PreparedThreadCompaction(
             thread_id=thread_id,
             source_checkpoint_id=source_checkpoint_id,
-            result=ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages"),
+            result=ThreadCompactionResult(
+                thread_id=thread_id,
+                compacted=False,
+                reason=reason,
+            ),
         )
 
     return PreparedThreadCompaction(
@@ -130,6 +230,7 @@ async def prepare_thread_compaction(
         update_values={
             "messages": Overwrite(list(result.preserved_messages)),
             "summary_text": result.summary_text,
+            "memory_archive_receipt": result.memory_archive_receipt,
         },
     )
 
@@ -164,6 +265,7 @@ async def compact_thread_context(
     agent_name: str | None = None,
     app_config: AppConfig | None = None,
     authorization_boundary: object | None = None,
+    memory_archive_context: SnipArchiveContext | None = None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     prepared = await prepare_thread_compaction(
@@ -175,5 +277,6 @@ async def compact_thread_context(
         agent_name=agent_name,
         app_config=app_config,
         authorization_boundary=authorization_boundary,
+        memory_archive_context=memory_archive_context,
     )
     return await commit_thread_compaction(accessor, prepared)

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from app.system_settings import SystemModelMaterializer
 from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 
@@ -37,4 +39,31 @@ class DatabaseOneshotModelCaller:
         )
 
 
-__all__ = ["DatabaseOneshotModelCaller"]
+@dataclass(frozen=True, slots=True)
+class ModelConnectionTester:
+    """Run one bounded, untraced model call without creating a Run or a model."""
+
+    app_config: AppConfig
+    timeout_seconds: float = 20.0
+
+    async def test(self, model: ModelConfig) -> bool:
+        try:
+            runtime_config = self.app_config.with_runtime_models((model,))
+            await asyncio.wait_for(
+                run_oneshot_llm(
+                    system_instruction="You are a connectivity probe. Reply with OK.",
+                    user_content="OK",
+                    run_name="admin_model_connection_test",
+                    app_config=runtime_config,
+                    model_name=model.name,
+                    thread_id=None,
+                    attach_tracing=False,
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except Exception:  # noqa: BLE001 - provider failures are intentionally opaque
+            return False
+        return True
+
+
+__all__ = ["DatabaseOneshotModelCaller", "ModelConnectionTester"]

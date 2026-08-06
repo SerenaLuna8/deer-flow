@@ -46,7 +46,6 @@ from deerflow.agents.thread_state import (
 from deerflow.assets.catalog import trusted_asset_context
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import MemoryConfig, should_use_project_memory_search
 from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
@@ -251,18 +250,15 @@ Being proactive with task management demonstrates thoroughness and ensures all r
     return TodoMiddleware(system_prompt=system_prompt, tool_description=tool_description)
 
 
-def _project_memory_tools(
+def _dynamic_context_config(
+    app_config: AppConfig,
     *,
-    private_runtime: object | None,
-    memory_config: MemoryConfig,
-) -> list:
-    """Expose search only when a Worker materialized a private Agent runtime."""
+    private_runtime: bool,
+) -> AppConfig:
+    """Return the frozen Run config; Memory data comes only from its snapshot."""
 
-    if private_runtime is None or not should_use_project_memory_search(memory_config):
-        return []
-    from deerflow.agents.memory.tools import get_project_memory_tools
-
-    return get_project_memory_tools()
+    del private_runtime
+    return app_config
 
 
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
@@ -322,11 +318,19 @@ def build_middlewares(
     resolved_app_config = app_config or get_app_config()
     middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
 
-    # Always inject current date (and optionally memory) as <system-reminder> into the
-    # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
+    # Always inject current date as a <system-reminder>. Private long-term
+    # Memory is available only through the Worker-issued Run snapshot authority.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+    middlewares.append(
+        DynamicContextMiddleware(
+            agent_name=agent_name,
+            app_config=_dynamic_context_config(
+                resolved_app_config,
+                private_runtime=runtime_skills is not None,
+            ),
+        )
+    )
 
     # Deterministically load a full SKILL.md when the user starts the turn with
     # /skill-name. This keeps the base system prompt metadata-only while giving
@@ -684,12 +688,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         enabled=skill_search_enabled,
         container_base_path=container_base_path,
     )
-    # File-backed Agent self-mutation is no longer a runtime tool. Project
-    # Memory contributes only a Worker-authorized read tool.
-    extra_tools = _project_memory_tools(
-        private_runtime=private_runtime,
-        memory_config=resolved_app_config.memory,
-    )
     # Default lead agent (unchanged behavior)
     tool_kwargs = {
         "model_name": model_name,
@@ -703,7 +701,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         tool_kwargs["include_acp"] = False
     raw_tools = get_available_tools(**tool_kwargs)
     private_mcp_tools = list(getattr(private_runtime, "mcp_tools", ())) if private_runtime is not None else []
-    candidate_tools = raw_tools + private_mcp_tools + extra_tools
+    candidate_tools = raw_tools + private_mcp_tools
     configured_tools = candidate_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]

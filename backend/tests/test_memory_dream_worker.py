@@ -1,0 +1,552 @@
+from __future__ import annotations
+
+import hashlib
+import uuid
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from app.personalization.repository import AccountMemoryPreference
+from app.system_runtime_settings.models import AgentRuntimePolicyValue, MemoryPolicy
+from app.worker.memory_dream import MemoryDreamJobHandler
+from app.worker.service import JobSettlement
+from deerflow.agents.memory.dream import (
+    DREAM_PROMPT_VERSION,
+    EMPTY_MEMORY_DOCUMENT,
+    MemoryDreamError,
+    MemoryDreamResult,
+)
+from deerflow.persistence.jobs.sql import JobClaim, JobScope
+from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryDreamHistoryRecord,
+    MemoryDreamWork,
+    compute_dream_history_digest,
+    memory_document_digest,
+    memory_document_unified_diff,
+)
+
+
+class _Transaction:
+    def __init__(self, factory: _SessionFactory) -> None:
+        self.factory = factory
+
+    async def __aenter__(self):
+        self.factory.active += 1
+        return self
+
+    async def __aexit__(self, *_args):
+        self.factory.active -= 1
+        return False
+
+
+class _Session:
+    def __init__(self, factory: _SessionFactory) -> None:
+        self.factory = factory
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def begin(self) -> _Transaction:
+        return _Transaction(self.factory)
+
+    def begin_nested(self) -> _Transaction:
+        return _Transaction(self.factory)
+
+
+class _SessionFactory:
+    def __init__(self) -> None:
+        self.active = 0
+        self.opened = 0
+
+    def __call__(self) -> _Session:
+        self.opened += 1
+        return _Session(self)
+
+
+class _Authority:
+    cancel_requested = False
+
+    def __init__(self) -> None:
+        self.heartbeats = 0
+
+    async def heartbeat(self) -> None:
+        self.heartbeats += 1
+
+
+class _Personalization:
+    def __init__(self, preference: AccountMemoryPreference) -> None:
+        self.preference = preference
+
+    async def read_memory(self, _owner, *, for_update: bool = False):
+        return self.preference
+
+
+class _ModelMaterializer:
+    def __init__(self) -> None:
+        self.exact: list[dict[str, object]] = []
+
+    async def materialize_exact(self, **kwargs):
+        self.exact.append(kwargs)
+        return SimpleNamespace(name="dream-model")
+
+
+class _CurrentModelRepository:
+    def __init__(
+        self,
+        work: MemoryDreamWork,
+        *,
+        version_id: uuid.UUID | None = None,
+    ) -> None:
+        self.work = work
+        self.version_id = version_id or work.model_version_id
+
+    async def resolve_active_model(self, model_ref, *, load_envelope: bool):
+        assert model_ref == "dream-model"
+        assert load_envelope is False
+        return SimpleNamespace(
+            model=SimpleNamespace(id=self.work.model_config_id),
+            version=SimpleNamespace(
+                id=self.version_id,
+                payload_checksum=self.work.model_payload_checksum,
+            ),
+        )
+
+
+class _PolicyMaterializer:
+    def __init__(
+        self,
+        policy: AgentRuntimePolicyValue,
+        *,
+        current_revision: int = 17,
+    ) -> None:
+        self.policy = policy
+        self.current_revision = current_revision
+        self.revisions: list[int] = []
+
+    async def materialize_revision(self, _section, revision: int):
+        self.revisions.append(revision)
+        return self.policy
+
+    async def materialize_current_with_revision_in_session(
+        self,
+        *_args,
+        **_kwargs,
+    ):
+        return self.policy, self.current_revision
+
+
+class _RepositoryState:
+    def __init__(self, work: MemoryDreamWork) -> None:
+        self.work = work
+        self.finalized: list[dict[str, object]] = []
+        self.released: list[dict[str, object]] = []
+
+
+class _Repository:
+    def __init__(self, state: _RepositoryState) -> None:
+        self.state = state
+
+    async def load_dream_work(self, _scope, _job_id):
+        return self.state.work
+
+    async def finalize_dream(self, _scope, **kwargs):
+        self.state.finalized.append(kwargs)
+
+    async def release_dream(self, _scope, **kwargs):
+        self.state.released.append(kwargs)
+        return True
+
+
+class _Runner:
+    def __init__(
+        self,
+        factory: _SessionFactory,
+        *,
+        result: MemoryDreamResult | None = None,
+        error: MemoryDreamError | None = None,
+    ) -> None:
+        self.factory = factory
+        self.result = result
+        self.error = error
+        self.inputs = []
+
+    async def run(self, value):
+        assert self.factory.active == 0, "model wait must not hold a DB transaction"
+        self.inputs.append(value)
+        if self.error is not None:
+            raise self.error
+        assert self.result is not None
+        return self.result
+
+
+def _claim() -> JobClaim:
+    return JobClaim(
+        job_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
+        attempt_id=uuid.UUID("22222222-2222-4222-8222-222222222222"),
+        lease_token="lease-token",
+        job_type="memory_dream",
+        scope=JobScope(
+            uuid.UUID("33333333-3333-4333-8333-333333333333"),
+            "44444444-4444-4444-8444-444444444444",
+        ),
+        run_id=None,
+        occurrence_id=None,
+        retry_safety="safe",
+        cancel_requested=False,
+        namespace="default",
+    )
+
+
+def _work() -> MemoryDreamWork:
+    text = "- [durable] PostgreSQL is the only application database."
+    history = (
+        MemoryDreamHistoryRecord(
+            id=uuid.UUID("55555555-5555-4555-8555-555555555555"),
+            sequence=9,
+            tagged_text=text,
+            content_digest=hashlib.sha256(text.encode()).hexdigest(),
+        ),
+    )
+    return MemoryDreamWork(
+        job_id=_claim().job_id,
+        project_id=_claim().scope.project_id,
+        owner_user_id=_claim().scope.owner_user_id or "",
+        namespace="default",
+        trigger="manual_dream",
+        history_from=9,
+        history_to=9,
+        history_count=1,
+        history_digest=compute_dream_history_digest(history),
+        base_document_version=0,
+        base_content=EMPTY_MEMORY_DOCUMENT,
+        base_content_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+        preference_version=6,
+        policy_revision=17,
+        model_config_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
+        model_version_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
+        model_payload_checksum="a" * 64,
+        prompt_version=DREAM_PROMPT_VERSION,
+        result_version=None,
+        cancel_requested=False,
+        job_status="running",
+        history=history,
+    )
+
+
+def _handler(
+    *,
+    factory: _SessionFactory,
+    state: _RepositoryState,
+    runner: _Runner,
+    preference: AccountMemoryPreference | None = None,
+    current_policy_revision: int = 17,
+    current_model_version_id: uuid.UUID | None = None,
+):
+    policy = AgentRuntimePolicyValue(
+        memory=MemoryPolicy(
+            enabled=True,
+            model_name="dream-model",
+            dream_interval_minutes=120,
+            max_injection_tokens=2_000,
+        )
+    )
+    materializer = _ModelMaterializer()
+    return (
+        MemoryDreamJobHandler(
+            factory,
+            app_config=None,
+            model_materializer=materializer,
+            runtime_policy_materializer=_PolicyMaterializer(
+                policy,
+                current_revision=current_policy_revision,
+            ),
+            runner_factory=lambda _model: runner,
+            repository_builder=lambda _session, **_kwargs: _Repository(state),
+            job_repository_builder=lambda _session: object(),
+            model_repository_builder=lambda _session: _CurrentModelRepository(
+                state.work,
+                version_id=current_model_version_id,
+            ),
+            scope_validator=lambda *_args, **_kwargs: _async_true(),
+            personalization_repository_builder=lambda _session: _Personalization(preference or AccountMemoryPreference(True, 6)),
+        ),
+        materializer,
+    )
+
+
+async def _async_true() -> bool:
+    return True
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_waits_without_db_lock_then_atomically_finalizes() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, model_materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+    assert not state.finalized
+    assert model_materializer.exact == [
+        {
+            "model_config_id": state.work.model_config_id,
+            "model_config_version_id": state.work.model_version_id,
+            "payload_checksum": state.work.model_payload_checksum,
+        }
+    ]
+    await settlement.commit()
+    await settlement.commit()
+    assert len(state.finalized) == 1
+    assert state.finalized[0]["content"] == EMPTY_MEMORY_DOCUMENT
+    assert not state.released
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_transient_failure_retries_the_frozen_batch() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        error=MemoryDreamError("MEMORY_DREAM_TIMEOUT"),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.public_error_code == "MEMORY_DREAM_TIMEOUT"
+    await settlement.commit()
+    assert not state.finalized
+    assert state.released[0]["cancelled"] is False
+    assert state.released[0]["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_can_shrink_a_document_after_the_budget_is_lowered() -> None:
+    previous_document = EMPTY_MEMORY_DOCUMENT.replace(
+        "# 项目背景",
+        "# 项目背景\n\n- " + ("x" * 9_000),
+    )
+    work = replace(
+        _work(),
+        base_content=previous_document,
+        base_content_digest=memory_document_digest(previous_document),
+    )
+    factory = _SessionFactory()
+    state = _RepositoryState(work)
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=True,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+    assert runner.inputs[0].document == previous_document
+    assert runner.inputs[0].max_tokens == 2_000
+    await settlement.commit()
+    assert state.finalized[0]["content"] == EMPTY_MEMORY_DOCUMENT
+
+
+@pytest.mark.asyncio
+async def test_success_commit_policy_drift_persists_cancellation_not_version() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        current_policy_revision=18,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+    await settlement.commit()
+    assert not state.finalized
+    assert len(state.released) == 1
+    assert state.released[0]["job_id"] == _claim().job_id
+    assert state.released[0]["lease_token"] == _claim().lease_token
+    assert state.released[0]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_success_commit_current_model_drift_cancels_the_frozen_work() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        current_model_version_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+    await settlement.commit()
+    assert not state.finalized
+    assert len(state.released) == 1
+    assert state.released[0]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_success_settlement_uses_global_memory_lock_order() -> None:
+    events: list[str] = []
+    factory = _SessionFactory()
+    work = _work()
+
+    async def scope_validator(*_args, **kwargs):
+        assert kwargs["lock"] is True
+        events.append("project")
+        return True
+
+    class PolicyMaterializer(_PolicyMaterializer):
+        async def materialize_current_with_revision_in_session(
+            self,
+            *_args,
+            **kwargs,
+        ):
+            assert kwargs["for_update"] is True
+            events.append("policy")
+            return self.policy, self.current_revision
+
+    class Models(_CurrentModelRepository):
+        async def resolve_active_model(self, model_ref, *, load_envelope: bool):
+            events.append("model")
+            return await super().resolve_active_model(
+                model_ref,
+                load_envelope=load_envelope,
+            )
+
+    class Personalization(_Personalization):
+        async def read_memory(self, owner, *, for_update: bool = False):
+            assert for_update is True
+            events.append("preference")
+            return await super().read_memory(owner, for_update=for_update)
+
+    class Repository(_Repository):
+        async def finalize_dream(self, scope, **kwargs):
+            events.append("document")
+            await super().finalize_dream(scope, **kwargs)
+
+    policy = AgentRuntimePolicyValue(
+        memory=MemoryPolicy(
+            enabled=True,
+            model_name="dream-model",
+            dream_interval_minutes=120,
+            max_injection_tokens=2_000,
+        )
+    )
+    state = _RepositoryState(work)
+    handler = MemoryDreamJobHandler(
+        factory,
+        app_config=None,
+        runner_factory=lambda _model: object(),
+        runtime_policy_materializer=PolicyMaterializer(policy),
+        repository_builder=lambda _session, **_kwargs: Repository(state),
+        job_repository_builder=lambda _session: object(),
+        model_repository_builder=lambda _session: Models(work),
+        scope_validator=scope_validator,
+        personalization_repository_builder=lambda _session: Personalization(
+            AccountMemoryPreference(True, 6),
+        ),
+    )
+
+    settlement = handler._success_settlement(
+        _claim(),
+        work=work,
+        content=EMPTY_MEMORY_DOCUMENT,
+        max_tokens=2_000,
+    )
+    await settlement.commit()
+
+    assert events == [
+        "project",
+        "policy",
+        "model",
+        "preference",
+        "document",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_cancel_releases_processing_history_without_model() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        preference=AccountMemoryPreference(False, 6),
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "cancelled"
+    await settlement.commit()
+    assert not runner.inputs
+    assert state.released[0]["cancelled"] is True
+
+
+def test_server_diff_is_empty_for_no_change_and_real_for_replacement() -> None:
+    assert memory_document_unified_diff(EMPTY_MEMORY_DOCUMENT, EMPTY_MEMORY_DOCUMENT) == ""
+    changed = EMPTY_MEMORY_DOCUMENT.replace("# 项目背景", "# 项目背景\n\n- ActWeave")
+    diff = memory_document_unified_diff(EMPTY_MEMORY_DOCUMENT, changed)
+    assert "--- memory-before.md" in diff
+    assert "+++ memory-after.md" in diff
+    assert "+- ActWeave" in diff

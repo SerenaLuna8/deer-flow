@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  BellIcon,
-  InfoIcon,
-  PaletteIcon,
-  SparklesIcon,
-  UserIcon,
-} from "lucide-react";
+import { BellIcon, PaletteIcon, SparklesIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -16,7 +10,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
@@ -33,7 +26,6 @@ const settingsSectionIcons = {
   personalization: SparklesIcon,
   appearance: PaletteIcon,
   notification: BellIcon,
-  about: InfoIcon,
 } as const;
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
@@ -48,7 +40,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
-    // This allows triggers like "About" to open the dialog directly on that page.
     if (dialogProps.open) {
       setActiveSection(defaultSection);
     }
@@ -107,7 +98,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
               )}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "notification" && <NotificationSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
         </div>

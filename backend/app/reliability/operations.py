@@ -43,9 +43,7 @@ JobType = Literal[
     "automation_run",
     "retention_purge",
     "mcp_discovery",
-    "memory_extract",
-    "memory_consolidate",
-    "memory_retention_purge",
+    "memory_dream",
 ]
 ProviderHealthStatus = Literal["ready", "degraded", "unavailable"]
 

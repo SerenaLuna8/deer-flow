@@ -1,14 +1,15 @@
 ---
 title: Work with Memory
-description: Use project Memory safely across private conversations.
+description: Build and review your private long-term Memory document.
 ---
 
 # Work with Memory
 
-1. Enter a project and open **Memory**.
-2. Confirm project readiness and your Memory capability.
-3. Start a project conversation and state a durable preference or correction.
-4. After the Run finishes, refresh the Memory page to inspect the structured fact.
-5. Edit, import or clear Memory only from the same project context.
+1. Enter a project, start a chat, and state a durable preference or correction.
+2. Use `/compact` when you want to archive older complete turns without changing the visible chat.
+3. Use `/Dream` to compact the current Thread and organize pending Memory, or open **Memory** and choose **Organize now**.
+4. Review the current document, pending count, saved versions, and each real diff on the Memory page.
+5. Use `/dream-log [version]` to open a version directly. Use `/dream-restore <version>` or **Restore this version** and confirm to write that content as a new current version.
+6. In **Settings → Personalization**, disabling Memory pauses learning, Dream, and recall while retaining data. Reset permanently deletes long-term Memory but preserves chats and `/compact` summaries.
 
-Memory is isolated by project and owner. A conversation outside an authenticated project cannot read or update it.
+Memory is isolated by authenticated owner and project. These slash commands are handled by the product and never become ordinary Agent messages.

@@ -222,9 +222,7 @@ class WorkerService:
                 "automation_run",
                 "retention_purge",
                 "mcp_discovery",
-                "memory_extract",
-                "memory_consolidate",
-                "memory_retention_purge",
+                "memory_dream",
             }
         ):
             raise ValueError("worker handlers include an unsupported job type")

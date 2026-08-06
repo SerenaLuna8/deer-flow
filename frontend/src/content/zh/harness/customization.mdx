@@ -94,7 +94,7 @@ sandbox:
 
 ## 项目 Memory 集成
 
-Memory 是项目私有的 PostgreSQL 资源。扩展其外围产品行为时，应使用项目 Memory API 和 admitted private-run hook，并始终保留精确的 account、project、owner、namespace scope。最终运行时不加载全局或文件 Memory adapter。
+Memory 是项目私有的 PostgreSQL 资源。扩展其外围产品行为时，应使用文档 Memory API 和 admitted private-run hook。account 与 project 来自认证客户端 scope；owner 与固定内部 namespace 始终由服务端持有。运行时不加载全局或文件 Memory adapter。
 
 ## 自定义技能
 

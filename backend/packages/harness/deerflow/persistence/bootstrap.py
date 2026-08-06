@@ -21,7 +21,7 @@ from deerflow.persistence.final_schema_contract import (
     verify_m7_catalog,
 )
 
-CURRENT_SCHEMA_REVISION = "full_schema_v3"
+CURRENT_SCHEMA_REVISION = "full_schema_v4"
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 

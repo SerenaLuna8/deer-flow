@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
 from app.quotas.integration import ProjectQuotaEnforcer
-from deerflow.persistence.private_work.memory_v2_management import (
-    MemoryV2ManagementRepository,
+from deerflow.persistence.private_work.memory_document_model import (
+    MemoryDocumentRow,
+    MemoryHistoryEntryRow,
+    RunMemoryContextSnapshotRow,
 )
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
@@ -22,8 +24,6 @@ from deerflow.persistence.private_work.model import (
     RunAssetVersionRow,
     RunMcpGrantSnapshotRow,
     RunSkillCredentialSnapshotRow,
-    UserProjectMemoryFactRow,
-    UserProjectMemoryRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -452,22 +452,23 @@ async def purge_private_scope(
         parameters,
     )
 
-    await MemoryV2ManagementRepository(session).purge_scope(
-        project_id=project_id,
-        owner_user_id=owner_user_id,
-        now=parameters["purged_at"],
-    )
-
     await session.execute(
-        delete(UserProjectMemoryFactRow).where(
-            UserProjectMemoryFactRow.project_id == project_id,
-            *(() if owner_user_id is None else (UserProjectMemoryFactRow.owner_user_id == owner_user_id,)),
+        delete(RunMemoryContextSnapshotRow).where(
+            RunMemoryContextSnapshotRow.project_id == project_id,
+            *(() if owner_user_id is None else (RunMemoryContextSnapshotRow.owner_user_id == owner_user_id,)),
         )
     )
     await session.execute(
-        delete(UserProjectMemoryRow).where(
-            UserProjectMemoryRow.project_id == project_id,
-            *(() if owner_user_id is None else (UserProjectMemoryRow.owner_user_id == owner_user_id,)),
+        delete(MemoryHistoryEntryRow).where(
+            MemoryHistoryEntryRow.project_id == project_id,
+            *(() if owner_user_id is None else (MemoryHistoryEntryRow.owner_user_id == owner_user_id,)),
+        )
+    )
+    # Version and Dream-run rows cascade from the one current document row.
+    await session.execute(
+        delete(MemoryDocumentRow).where(
+            MemoryDocumentRow.project_id == project_id,
+            *(() if owner_user_id is None else (MemoryDocumentRow.owner_user_id == owner_user_id,)),
         )
     )
     await session.execute(

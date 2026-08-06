@@ -11,6 +11,7 @@ import {
   runAbortableAdminModelMutation,
   setAdminModelDefault,
   setAdminModelStatus,
+  testAdminModelConnection,
 } from "./api";
 import {
   adminModelMutationKey,
@@ -23,6 +24,7 @@ import {
   type AdminModelStatusInput,
   type CreateAdminModelInput,
   type ReplaceAdminModelInput,
+  type TestAdminModelConnectionInput,
 } from "./types";
 
 export function adminModelCatalogQueryOptions(accountId: string) {
@@ -81,6 +83,17 @@ export function useReplaceAdminModel(accountId: string) {
         replaceAdminModel(parsed, modelId, input, signal),
       ),
     onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
+  });
+}
+
+export function useTestAdminModelConnection(accountId: string) {
+  const parsed = adminModelAccountIdSchema.parse(accountId);
+  return useMutation({
+    mutationKey: adminModelMutationKey(parsed, "test_connection"),
+    mutationFn: (input: TestAdminModelConnectionInput) =>
+      runAbortableAdminModelMutation(parsed, (signal) =>
+        testAdminModelConnection(parsed, input, signal),
+      ),
   });
 }
 

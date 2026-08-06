@@ -73,10 +73,10 @@ class _PersonalizationService:
         return AccountMemoryResetResult(
             version=expected_version + 1,
             scopes_reset=2,
-            v1_memories=1,
-            source_batches=3,
-            candidates=4,
-            facts=5,
+            history_entries=3,
+            documents=1,
+            versions=4,
+            dream_runs=5,
             snapshots=6,
             jobs_cancelled=2,
         )
@@ -158,10 +158,10 @@ async def test_account_personalization_routes_are_strict_and_account_scoped(
     assert reset_response.json() == {
         "version": 3,
         "scopesReset": 2,
-        "v1Memories": 1,
-        "sourceBatches": 3,
-        "candidates": 4,
-        "facts": 5,
+        "historyEntries": 3,
+        "documents": 1,
+        "versions": 4,
+        "dreamRuns": 5,
         "snapshots": 6,
         "jobsCancelled": 2,
     }

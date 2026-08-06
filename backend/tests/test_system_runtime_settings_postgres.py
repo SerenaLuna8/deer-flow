@@ -164,7 +164,7 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             RuntimePolicySection.AGENT_RUNTIME,
         ).model_dump(mode="python")
         updated_value["max_recursion_limit"] = 77
-        updated_value["memory"]["pipeline_mode"] = "shadow"
+        updated_value["memory"]["dream_interval_minutes"] = 45
         updated = await service.update_policy(
             context,
             RuntimePolicySection.AGENT_RUNTIME,
@@ -197,8 +197,8 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
         assert locked_v2.revision == 2
         assert locked_v1.value.max_recursion_limit == 1_000
         assert locked_v2.value.max_recursion_limit == 77
-        assert locked_v1.value.memory.pipeline_mode == "off"
-        assert locked_v2.value.memory.pipeline_mode == "shadow"
+        assert locked_v1.value.memory.dream_interval_minutes == 120
+        assert locked_v2.value.memory.dream_interval_minutes == 45
         materializer = SystemRuntimePolicyMaterializer(factory)
         materialized_v1 = await materializer.materialize_run_snapshot(
             project_id=project_id,
@@ -212,8 +212,8 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
         )
         assert materialized_v1.max_recursion_limit == 1_000
         assert materialized_v2.max_recursion_limit == 77
-        assert materialized_v1.memory.pipeline_mode == "off"
-        assert materialized_v2.memory.pipeline_mode == "shadow"
+        assert materialized_v1.memory.dream_interval_minutes == 120
+        assert materialized_v2.memory.dream_interval_minutes == 45
         exact_v1 = await materializer.materialize_revision(
             RuntimePolicySection.AGENT_RUNTIME,
             1,

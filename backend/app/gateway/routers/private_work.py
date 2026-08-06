@@ -4,6 +4,7 @@ import asyncio
 import copy
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Literal
 
@@ -32,6 +33,7 @@ from app.gateway.deps import (
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.private_work_schemas import (
     PrivateRunCreateRequest,
+    PrivateThreadContextUsageResponse,
     PrivateThreadTokenUsageResponse,
     PrivateWorkRoute,
     StrictPrivateWorkRequest,
@@ -283,10 +285,12 @@ class PrivateThreadGoalResponse(StrictPrivateWorkResponse):
 
 class PrivateCompactKeep(StrictPrivateWorkRequest):
     type: Literal["fraction", "tokens", "messages"]
-    value: int | float = Field(gt=0)
+    value: int | float = Field(ge=0)
 
     @model_validator(mode="after")
     def validate_value(self) -> PrivateCompactKeep:
+        if self.type != "messages" and float(self.value) <= 0:
+            raise ValueError("fraction and tokens must be greater than 0")
         if self.type == "fraction" and float(self.value) > 1:
             raise ValueError("fraction must not exceed 1")
         if self.type in {"tokens", "messages"} and (not isinstance(self.value, int) or isinstance(self.value, bool)):
@@ -1036,6 +1040,33 @@ async def compact_private_thread(
         summary_updated=result.summary_updated,
         checkpoint_id=result.checkpoint_id,
         total_tokens=result.total_tokens,
+    )
+
+
+@router.get(
+    "/threads/{thread_id}/context-usage",
+    response_model=PrivateThreadContextUsageResponse,
+)
+async def private_thread_context_usage(
+    thread_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_current_agent_runtime_config),
+) -> PrivateThreadContextUsageResponse:
+    try:
+        usage = await _chat_control_service(
+            request,
+            context.request_id,
+        ).context_usage(
+            context,
+            str(thread_id),
+            app_config=config,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return PrivateThreadContextUsageResponse(
+        thread_id=str(thread_id),
+        **asdict(usage),
     )
 
 

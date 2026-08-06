@@ -136,7 +136,10 @@ async def ensure_database(
 
         owner_clause = f' OWNER "{owner_name}"' if owner_name is not None else ""
         try:
-            await connection.execute(f'CREATE DATABASE "{database_name}"{owner_clause}')
+            # A setup target must be genuinely empty.  ``template1`` may carry
+            # deployment-specific extensions (for example TimescaleDB background
+            # workers), so inherit only PostgreSQL's pristine template0.
+            await connection.execute(f'CREATE DATABASE "{database_name}"{owner_clause} TEMPLATE template0')
         except Exception as exc:
             if getattr(exc, "sqlstate", None) != _DUPLICATE_DATABASE_SQLSTATE:
                 raise

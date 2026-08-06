@@ -26,7 +26,11 @@ import type {
   UpdateAccountPersonalizationInput,
 } from "./types";
 
-const UNAVAILABLE_QUERY_KEY = ["account", "unavailable", "personalization"] as const;
+const UNAVAILABLE_QUERY_KEY = [
+  "account",
+  "unavailable",
+  "personalization",
+] as const;
 
 async function invalidateProjectMemory(
   queryClient: QueryClient,
@@ -70,7 +74,8 @@ export function useUpdateAccountPersonalization(accountId: string | null) {
       ? accountPersonalizationMutationKey(accountId, "update-memory")
       : [...UNAVAILABLE_QUERY_KEY, "mutation", "update-memory"],
     mutationFn: (input: UpdateAccountPersonalizationInput) => {
-      if (!accountId) return Promise.reject(new Error("Account is unavailable"));
+      if (!accountId)
+        return Promise.reject(new Error("Account is unavailable"));
       return runAbortableAccountPersonalizationMutation(accountId, (signal) =>
         updateAccountPersonalization(accountId, input, signal),
       );
@@ -104,7 +109,8 @@ export function useResetAccountMemory(accountId: string | null) {
       ? accountPersonalizationMutationKey(accountId, "reset-memory")
       : [...UNAVAILABLE_QUERY_KEY, "mutation", "reset-memory"],
     mutationFn: (input: ResetAccountMemoryInput) => {
-      if (!accountId) return Promise.reject(new Error("Account is unavailable"));
+      if (!accountId)
+        return Promise.reject(new Error("Account is unavailable"));
       return runAbortableAccountPersonalizationMutation(accountId, (signal) =>
         resetAccountMemory(accountId, input, signal),
       );

@@ -55,30 +55,26 @@ the intended network boundary.
 
 ### Project Memory
 
-项目 Memory 的数据与运行策略都以 PostgreSQL 为权威；system admin 在
-`/admin/settings/system` 的 Agent runtime 区域调整 `memory` Pipeline、模型、召回和注入预算。
-新 Run 准入时会冻结完整策略；成功 Run 的长期记忆来源与 `memory_extract` Job 在同一结算事务
-写入，Scheduler 定时准入 `memory_consolidate`，真正的提取和整理都只由 Worker 执行。
+项目 Memory 的数据与运行策略都以 PostgreSQL 为权威。system admin 在
+`/admin/settings/system` 的 Agent runtime 区域只配置四个字段：
 
-- `enabled` 关闭 Memory 注入、被动提取和只读召回。
-- `pipeline_mode` 决定写入与召回阶段：
-  - `off` 不产生 v2 Source/Candidate/Fact，并只读回退到保留的 v1 aggregate；
-  - `shadow` 产生 Source 和 Candidate，但召回仍读取 v1；
-  - `consolidate` 继续把 Candidate 整理成版本化 Fact，但召回仍读取 v1；
-  - `v2` 使用带 Revision 的 Fact 和每 Run 固定的 Recall Snapshot。
-- `search_enabled` 只控制私有 Lead Agent 是否获得 async `memory_search`。模型只能提交
-  query、可选 category 和 top-k，scope 与 Run/lease authority 始终由 Worker 签发。
-- `injection_enabled` 控制模型调用前的隐藏低权限 Memory 注入；它不改变管理 API。
-- `consolidation_interval_minutes` 控制 Scheduler 检查并准入待整理 Candidate 的周期。
-- `candidate_retention_days` 控制 terminal Candidate 正文的保留期；pending Candidate 不在该
-  清理范围内。
-- `search_enabled: false` 不关闭项目 Memory 管理 API，也不停止 durable v2 写入链路。
+- `enabled`：平台总开关。关闭后 Thread 压缩仍可维持短期上下文，但不新增 history、不准入
+  Dream，也不向模型注入长期文档。
+- `model_name`：Dream 使用的系统模型名；Dream 准入冻结精确模型版本。SNIP 继续使用独立的
+  summarization 模型配置，并在归档回执中记录其精确版本。
+- `dream_interval_minutes`：Scheduler 自动准入 Dream 的间隔，范围 `15..1440`，默认 `120`。
+- `max_injection_tokens`：Run 准入时允许冻结的完整 Memory 文档上限；超限会 fail closed，绝不
+  在运行时静默截断正文。
 
-项目 Memory 页通过只读 `GET /api/projects/{project_id}/memory/v2/status` 展示当前已提交的
-`enabled`、Pipeline mode、search/injection 开关、整理周期和保留期；用户在该页面不能修改系统
-策略。v1 aggregate 只保留 scoped GET/status/export 与回退召回；兼容的 reload route 固定返回
-`501` 且不修改数据。import、Fact create/update/delete、内置 `MemoryMiddleware`、进程内
-queue/updater 和 summarization 长期记忆 hook 均已移除。
+账号级 `memory_enabled` 与平台 `enabled` 共同生效。SNIP 把同一带标签输出同时写入 Thread
+`summary_text` 和待整理 history；Scheduler 或手动入口只准入一个 `memory_dream` Job，每批严格
+取最老 20 条。Worker 整理整份 Markdown 文档并在同一事务写版本、server diff、cursor、history
+tombstone 与 Job 终态。新 Run 在准入事务冻结完整文档，之后只通过 Worker 签发的 opaque
+authority 读取该快照；没有 Fact/Candidate Pipeline、`memory_search`、向量召回或旧版回退。
+
+项目页使用 `/api/projects/{project_id}/memory`、`/dream` 和 `/versions` 系列接口查看当前文档、
+立即整理、查看真实 diff 及 CAS 恢复。账号关闭会从下一模型边界停止使用而不删除数据；reset
+清除长期 Memory 数据和 Run Memory 快照，但保留 Thread、消息、文件及 Thread 摘要。
 
 ### Checkpoint 表示
 
@@ -176,14 +172,15 @@ Model configuration is no longer part of `config.yaml`. Since schema version 33,
 top-level `models:` is a rejected tombstone and `make config-upgrade` removes it.
 The setup wizard does not write model definitions to `config.yaml`.
 
-For a new local database, place `DEEPSEEK_API_KEY`,
+For a new local database, place `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`,
 `DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID`, and
 `DEER_FLOW_CREDENTIAL_KEYRING_JSON` in the root `.env` (an explicitly exported
 value has precedence), then run `make setup-db`. Before it creates the target
-database, setup validates the key and keyring and pre-encrypts the key. It then
-writes one system `model_api_key` Credential/envelope and the former example
-DeepSeek V4 Pro configuration in one transaction, with the model active and
-selected as default. Missing or invalid bootstrap secret material fails without
+database, setup validates the keys and keyring and pre-encrypts the keys. It
+then writes a system `model_api_key` Credential/envelope shared by active
+DeepSeek V4 Flash and DeepSeek V4 Pro configurations, plus a separate OpenCode
+Credential/envelope for GPT 5.6 Luna, in one transaction. Flash is selected as
+the default. Missing or invalid bootstrap secret material fails without
 leaving a newly created half-initialized database.
 
 After application startup, sign in as a system admin and use
@@ -589,8 +586,9 @@ sandbox:
 ```
 
 Model-provider keys are intentionally excluded from runtime configuration
-substitution. The local `make setup-db` command consumes `DEEPSEEK_API_KEY` once
-to create the encrypted default-model Credential; later keys and rotations are
+substitution. The local `make setup-db` command consumes `DEEPSEEK_API_KEY` and
+`OPENCODE_API_KEY` once to create the encrypted Credentials for the seeded
+DeepSeek V4 Flash/Pro models and GPT 5.6 Luna; later keys and rotations are
 managed in `/admin/settings/models`. Do not broadcast `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, or similar provider keys to backend runtime processes.
 

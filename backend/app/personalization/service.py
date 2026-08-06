@@ -34,10 +34,10 @@ class AccountPersonalizationView:
 class AccountMemoryResetResult:
     version: int
     scopes_reset: int
-    v1_memories: int
-    source_batches: int
-    candidates: int
-    facts: int
+    history_entries: int
+    documents: int
+    versions: int
+    dream_runs: int
     snapshots: int
     jobs_cancelled: int
 
@@ -120,10 +120,10 @@ class AccountPersonalizationService:
                 return AccountMemoryResetResult(
                     version=result.version,
                     scopes_reset=result.scopes_reset,
-                    v1_memories=result.v1_memories,
-                    source_batches=result.source_batches,
-                    candidates=result.candidates,
-                    facts=result.facts,
+                    history_entries=result.history_entries,
+                    documents=result.documents,
+                    versions=result.versions,
+                    dream_runs=result.dream_runs,
                     snapshots=result.snapshots,
                     jobs_cancelled=result.jobs_cancelled,
                 )

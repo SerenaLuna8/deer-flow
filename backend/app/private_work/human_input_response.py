@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,16 @@ class _HumanInputRequest:
     question: str
     input_mode: str
     options: tuple[_HumanInputOption, ...]
+    source_run_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HumanInputResponsePromotion:
+    """Server-authorized reply plus its exact logical continuation source."""
+
+    kwargs: dict[str, object]
+    continuation_run_id: str | None = None
+    continuation_verified: bool = False
 
 
 def _message_value(message: object, key: str) -> object:
@@ -109,12 +119,18 @@ def _read_request(message: object) -> _HumanInputRequest | None:
             return None
     elif version != 1 or "fields" in payload:
         return None
+    source_run_id = None
+    if "source_run_id" in payload:
+        source_run_id = _non_empty_string(payload.get("source_run_id"))
+        if source_run_id is None or len(source_run_id) > 64:
+            return None
     return _HumanInputRequest(
         request_id=request_id,
         tool_call_id=tool_call_id,
         question=question,
         input_mode=input_mode,
         options=tuple(options),
+        source_run_id=source_run_id,
     )
 
 
@@ -139,10 +155,22 @@ def _latest_open_request(
     request_order: list[str] = []
     ambiguous_request_ids: set[str] = set()
     answered_request_ids: set[str] = set()
+    current_run_id: str | None = None
 
     for message in checkpoint_messages:
+        if _message_type(message) in _HUMAN_MESSAGE_TYPES and _message_value(message, "name") != "summary":
+            # Private Worker execution overwrites this field on every admitted
+            # HumanMessage.  It is therefore a server-owned checkpoint
+            # coordinate, not a continuation target supplied by the reply.
+            stamped_run_id = _non_empty_string(
+                _additional_kwargs(message).get("run_id"),
+            )
+            if stamped_run_id is not None:
+                current_run_id = stamped_run_id
         request = _read_request(message)
         if request is not None:
+            if request.source_run_id is None:
+                request = replace(request, source_run_id=current_run_id)
             existing = requests.get(request.request_id)
             if existing is not None and existing != request:
                 ambiguous_request_ids.add(request.request_id)
@@ -227,34 +255,34 @@ def _has_canonical_content(message: Mapping[str, object], expected: str) -> bool
     return isinstance(block, Mapping) and set(block) == {"type", "text"} and block.get("type") == "text" and block.get("text") == expected
 
 
-def promote_matching_human_input_response(
+def authorize_matching_human_input_response(
     kwargs: Mapping[str, object],
     *,
     checkpoint_messages: Sequence[object],
-) -> dict[str, object]:
-    """Add server-owned visibility metadata to one exact open clarification reply."""
+) -> HumanInputResponsePromotion:
+    """Authorize one exact reply and bind it to the open request's source Run."""
 
     result = copy.deepcopy(dict(kwargs))
     candidate = _candidate_message(kwargs)
     request = _latest_open_request(checkpoint_messages)
     if candidate is None or request is None:
-        return result
+        return HumanInputResponsePromotion(result)
     response = read_human_input_response(_additional_kwargs(candidate))
     if response is None or not _response_matches_request(response, request):
-        return result
+        return HumanInputResponsePromotion(result)
     candidate_id = _non_empty_string(candidate.get("id"))
     if candidate_id is not None and any(_non_empty_string(_message_value(message, "id")) == candidate_id for message in checkpoint_messages):
-        return result
+        return HumanInputResponsePromotion(result)
     expected_content = _canonical_response_text(request, response)
     if not _has_canonical_content(candidate, expected_content):
-        return result
+        return HumanInputResponsePromotion(result)
 
     graph_input = result.get("input")
     if not isinstance(graph_input, dict):
-        return result
+        return HumanInputResponsePromotion(result)
     messages = graph_input.get("messages")
     if not isinstance(messages, list) or len(messages) != 1:
-        return result
+        return HumanInputResponsePromotion(result)
     promoted_message: dict[str, object] = {
         "type": "human",
         "content": [{"type": "text", "text": expected_content}],
@@ -266,7 +294,24 @@ def promote_matching_human_input_response(
     if candidate_id is not None:
         promoted_message["id"] = candidate_id
     graph_input["messages"] = [promoted_message]
-    return result
+    return HumanInputResponsePromotion(
+        result,
+        continuation_run_id=request.source_run_id,
+        continuation_verified=True,
+    )
+
+
+def promote_matching_human_input_response(
+    kwargs: Mapping[str, object],
+    *,
+    checkpoint_messages: Sequence[object],
+) -> dict[str, object]:
+    """Add server-owned visibility metadata to one exact open clarification reply."""
+
+    return authorize_matching_human_input_response(
+        kwargs,
+        checkpoint_messages=checkpoint_messages,
+    ).kwargs
 
 
 class CheckpointHumanInputResponsePromoter:
@@ -286,9 +331,9 @@ class CheckpointHumanInputResponsePromoter:
         context: PrivateWorkContext,
         thread_id: str,
         kwargs: Mapping[str, object],
-    ) -> dict[str, object]:
+    ) -> HumanInputResponsePromotion:
         if not has_human_input_response_candidate(kwargs):
-            return copy.deepcopy(dict(kwargs))
+            return HumanInputResponsePromotion(copy.deepcopy(dict(kwargs)))
         accessor = bind_transaction_checkpoint_state(
             self._project_checkpointer.for_context(context),
             session,
@@ -298,7 +343,7 @@ class CheckpointHumanInputResponsePromoter:
         snapshot = await accessor.aget(checkpoint_config(thread_id))
         values = getattr(snapshot, "values", None)
         messages = values.get("messages", []) if isinstance(values, Mapping) else []
-        return promote_matching_human_input_response(
+        return authorize_matching_human_input_response(
             kwargs,
             checkpoint_messages=(messages if isinstance(messages, list) else []),
         )
@@ -306,6 +351,8 @@ class CheckpointHumanInputResponsePromoter:
 
 __all__ = [
     "CheckpointHumanInputResponsePromoter",
+    "HumanInputResponsePromotion",
+    "authorize_matching_human_input_response",
     "has_human_input_response_candidate",
     "promote_matching_human_input_response",
 ]

@@ -4,36 +4,46 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, override, runtime_checkable
+from typing import Any, Literal, NotRequired, TypedDict, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+    get_buffer_string,
+)
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.memory.snip import (
+    MEMORY_ARCHIVE_CONTEXT_KEY,
+    SNIP_ARCHIVE_PROMPT,
+    MemoryArchiveReceipt,
+    SnipArchiveContext,
+    SnipOutputInvalid,
+    build_memory_archive_receipt,
+    validate_snip_output,
+)
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import validate_summary_prompt_template
 from deerflow.models import create_chat_model
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
+from deerflow.utils.messages import SUMMARY_MESSAGE_NAME, is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
-
-
-@dataclass(frozen=True)
-class SummarizationEvent:
-    """Context emitted before conversation history is summarized away."""
-
-    messages_to_summarize: tuple[AnyMessage, ...]
-    preserved_messages: tuple[AnyMessage, ...]
-    thread_id: str | None
-    agent_name: str | None
-    runtime: Runtime
+_ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 
 
 @dataclass(frozen=True)
@@ -44,13 +54,42 @@ class ContextCompactionResult:
     messages_to_summarize: tuple[AnyMessage, ...]
     preserved_messages: tuple[AnyMessage, ...]
     total_tokens: int
+    memory_archive_receipt: MemoryArchiveReceipt | None
 
 
-@runtime_checkable
-class BeforeSummarizationHook(Protocol):
-    """Hook invoked before summarization removes messages from state."""
+class ContextTriggerUsage(TypedDict):
+    """One configured OR trigger measured against the current retained context."""
 
-    def __call__(self, event: SummarizationEvent) -> None: ...
+    type: Literal["fraction", "tokens", "messages"]
+    configured_value: int | float
+    current_value: int | float
+    threshold_value: int | float
+    remaining_value: int | float
+    progress_percent: float
+    reached: bool
+    context_window_tokens: NotRequired[int]
+    threshold_tokens: NotRequired[int]
+
+
+@dataclass(frozen=True)
+class ContextUsageMeasurement:
+    """Read-only context measurement using the automatic compactor's counter."""
+
+    estimated_tokens: int
+    message_count: int
+    summary_present: bool
+    context_window_tokens: int | None
+    triggers: tuple[ContextTriggerUsage, ...]
+    primary_trigger: ContextTriggerUsage | None
+
+
+@dataclass(frozen=True)
+class _PreparedCompaction:
+    source_messages: tuple[AnyMessage, ...]
+    snip_messages: tuple[AnyMessage, ...]
+    preserved_messages: tuple[AnyMessage, ...]
+    previous_summary: str | None
+    total_tokens: int
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:
@@ -65,29 +104,17 @@ def _resolve_thread_id(runtime: Runtime) -> str | None:
     return thread_id
 
 
-def _resolve_agent_name(runtime: Runtime) -> str | None:
-    """Resolve the current agent name from runtime context or LangGraph config."""
-    agent_name = runtime.context.get("agent_name") if runtime.context else None
-    if agent_name is None:
-        try:
-            config_data = get_config()
-        except RuntimeError:
-            return None
-        agent_name = config_data.get("configurable", {}).get("agent_name")
-    return agent_name
-
-
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
-    """Summarization middleware with pre-compression hook dispatch."""
+    """SNIP compaction that removes only complete conversation turns."""
 
     def __init__(
         self,
         *args,
-        before_summarization: list[BeforeSummarizationHook] | None = None,
+        compact_all_complete_turns: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self._before_summarization_hooks = before_summarization or []
+        self._compact_all_complete_turns = compact_all_complete_turns
         # The summary LLM call runs inside a LangGraph middleware hook, so its token
         # stream would otherwise be captured by the messages-tuple stream callback and
         # broadcast to the frontend as a phantom AI message. Tag a dedicated model copy
@@ -127,13 +154,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
-            summary = response.text.strip()
-            if not summary:
-                logger.warning("Summary model returned empty output; skipping compaction this turn")
-                return None
-            return summary
+            return validate_snip_output(response.text)
+        except SnipOutputInvalid:
+            logger.warning("SNIP model returned invalid output; skipping compaction this turn")
+            return None
         except Exception:
-            logger.exception("Summary generation failed; skipping compaction this turn")
+            logger.exception("SNIP generation failed; skipping compaction this turn")
             return None
 
     async def _asummarize_with(
@@ -162,15 +188,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
-            summary = response.text.strip()
-            if not summary:
-                logger.warning("Summary model returned empty output; skipping compaction this turn")
-                return None
-            return summary
+            return validate_snip_output(response.text)
         except AuthorizationRevoked:
             raise
+        except SnipOutputInvalid:
+            logger.warning("SNIP model returned invalid output; skipping compaction this turn")
+            return None
         except Exception:
-            logger.exception("Summary generation failed; skipping compaction this turn")
+            logger.exception("SNIP generation failed; skipping compaction this turn")
             return None
 
     @staticmethod
@@ -183,40 +208,113 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return [*messages, self._summary_count_message(summary_text)]
 
     @staticmethod
-    def _bound_text(text: str, cap: int) -> str:
-        if len(text) <= cap:
-            return text
-        if cap <= 0:
-            return ""
-        head = cap * 2 // 3
-        omitted_marker = "\n...\n"
-        if cap <= len(omitted_marker):
-            return text[:cap]
-        tail = max(0, cap - head - len(omitted_marker))
-        if tail == 0:
-            return text[:cap]
-        return f"{text[:head]}{omitted_marker}{text[-tail:]}"
+    def _context_progress(current: int | float, threshold: int | float) -> float:
+        if threshold <= 0:
+            raise ValueError("Context trigger threshold must be positive")
+        return round(min(100.0, max(0.0, float(current) / float(threshold) * 100.0)), 2)
 
-    def _trim_summary_section_text(self, text: str, max_tokens: int, *, strategy: str) -> str:
-        if not text.strip():
-            return ""
-        max_tokens = max(1, max_tokens)
-        try:
-            trimmed = trim_messages(
-                [HumanMessage(content=text)],
-                max_tokens=max_tokens,
-                token_counter=self.token_counter,
-                strategy=strategy,
-                allow_partial=True,
-                text_splitter=list,
+    def measure_context_usage(
+        self,
+        messages: list[AnyMessage],
+        *,
+        summary_text: str | None,
+    ) -> ContextUsageMeasurement:
+        """Measure the same retained input used by automatic trigger evaluation.
+
+        This path only invokes the configured token counter and model-profile
+        inspection. It never invokes the summary model or mutates Agent state.
+        """
+
+        trigger_messages = self._messages_for_trigger_count(messages, summary_text)
+        estimated_tokens = self.token_counter(trigger_messages)
+        message_count = len(trigger_messages)
+        context_window_tokens = self._get_profile_limits()
+        if context_window_tokens is not None and context_window_tokens <= 0:
+            raise ValueError("Model max_input_tokens must be positive")
+
+        triggers: list[ContextTriggerUsage] = []
+        for trigger_type, configured_value in self._trigger_conditions:
+            if trigger_type == "messages":
+                threshold = int(configured_value)
+                current = message_count
+                triggers.append(
+                    ContextTriggerUsage(
+                        type="messages",
+                        configured_value=threshold,
+                        current_value=current,
+                        threshold_value=threshold,
+                        remaining_value=max(0, threshold - current),
+                        progress_percent=self._context_progress(current, threshold),
+                        reached=current >= threshold,
+                    )
+                )
+                continue
+
+            if trigger_type == "tokens":
+                threshold_tokens = int(configured_value)
+                reached = estimated_tokens >= threshold_tokens or self._should_summarize_based_on_reported_tokens(
+                    trigger_messages,
+                    float(threshold_tokens),
+                )
+                triggers.append(
+                    ContextTriggerUsage(
+                        type="tokens",
+                        configured_value=threshold_tokens,
+                        current_value=estimated_tokens,
+                        threshold_value=threshold_tokens,
+                        remaining_value=max(0, threshold_tokens - estimated_tokens),
+                        progress_percent=self._context_progress(
+                            estimated_tokens,
+                            threshold_tokens,
+                        ),
+                        reached=reached,
+                        threshold_tokens=threshold_tokens,
+                    )
+                )
+                continue
+
+            if context_window_tokens is None:
+                raise ValueError("Model max_input_tokens is required for fraction triggers")
+            threshold_fraction = float(configured_value)
+            threshold_tokens = max(1, int(context_window_tokens * threshold_fraction))
+            current_fraction = round(estimated_tokens / context_window_tokens, 6)
+            reached = estimated_tokens >= threshold_tokens or self._should_summarize_based_on_reported_tokens(
+                trigger_messages,
+                float(threshold_tokens),
             )
-            if trimmed:
-                content = trimmed[-1].content
-                if isinstance(content, str) and content.strip():
-                    return content
-        except Exception:
-            logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
-        return self._bound_text(text, max_tokens)
+            triggers.append(
+                ContextTriggerUsage(
+                    type="fraction",
+                    configured_value=threshold_fraction,
+                    current_value=current_fraction,
+                    threshold_value=threshold_fraction,
+                    remaining_value=round(
+                        max(0.0, threshold_fraction - current_fraction),
+                        6,
+                    ),
+                    progress_percent=self._context_progress(
+                        current_fraction,
+                        threshold_fraction,
+                    ),
+                    reached=reached,
+                    context_window_tokens=context_window_tokens,
+                    threshold_tokens=threshold_tokens,
+                )
+            )
+
+        primary_trigger = max(
+            triggers,
+            key=lambda trigger: trigger["progress_percent"],
+            default=None,
+        )
+        return ContextUsageMeasurement(
+            estimated_tokens=estimated_tokens,
+            message_count=message_count,
+            summary_present=bool(summary_text),
+            context_window_tokens=context_window_tokens,
+            triggers=tuple(triggers),
+            primary_trigger=primary_trigger,
+        )
 
     @staticmethod
     def _assemble_summary_input_text(
@@ -256,96 +354,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.debug("Failed to count rendered summary prompt; skipping compaction safely", exc_info=True)
             return None
 
-    def _trim_escaped_summary_sections(
-        self,
-        escaped_new_messages: str,
-        escaped_previous_summary: str,
-        content_budget: int,
-    ) -> tuple[str, str]:
-        """Trim escaped section contents while preserving their useful edges."""
-        if content_budget <= 0:
-            return "", ""
-
-        if escaped_previous_summary and escaped_new_messages:
-            if content_budget == 1:
-                previous_summary_budget = 0
-                new_messages_budget = 1
-            else:
-                new_messages_budget = max(1, content_budget // 2)
-                previous_summary_budget = max(1, content_budget - new_messages_budget)
-        elif escaped_previous_summary:
-            previous_summary_budget = content_budget
-            new_messages_budget = 0
-        else:
-            previous_summary_budget = 0
-            new_messages_budget = content_budget
-
-        trimmed_previous_summary = (
-            self._trim_summary_section_text(
-                escaped_previous_summary,
-                previous_summary_budget,
-                strategy="last",
-            )
-            if previous_summary_budget
-            else ""
-        )
-        trimmed_new_messages = (
-            self._trim_summary_section_text(
-                escaped_new_messages,
-                new_messages_budget,
-                strategy="first",
-            )
-            if new_messages_budget
-            else ""
-        )
-        return trimmed_new_messages, trimmed_previous_summary
-
     def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
-        # Escape before applying any budget. Durable conversation text may contain
-        # closing tags, and ``&``, ``<`` and ``>`` expand during escaping. Trimming
-        # the raw text first can therefore produce a rendered prompt several times
-        # larger than ``trim_tokens_to_summarize``.
+        """Escape and assemble the exact selected source without truncation."""
+
         escaped_new_messages = html.escape(formatted_messages, quote=False)
         escaped_previous_summary = html.escape(previous_summary.strip(), quote=False) if previous_summary else ""
-
-        if self.trim_tokens_to_summarize is None:
-            return self._assemble_summary_input_text(
-                escaped_new_messages,
-                escaped_previous_summary,
-            )
-
-        max_tokens = max(1, self.trim_tokens_to_summarize)
-        content_budget = max_tokens
-        # The tokenizer can merge section text with template/wrapper text, so an
-        # additive overhead estimate is not a hard upper bound. Instead, render
-        # and count the exact candidate, subtract any observed overflow, and only
-        # return a candidate whose final prompt is within the configured budget.
-        for _ in range(32):
-            trimmed_new_messages, trimmed_previous_summary = self._trim_escaped_summary_sections(
-                escaped_new_messages,
-                escaped_previous_summary,
-                content_budget,
-            )
-            input_text = self._assemble_summary_input_text(
-                trimmed_new_messages,
-                trimmed_previous_summary,
-            )
-            if input_text is None:
-                return None
-            rendered_tokens = self._count_rendered_summary_prompt_tokens(input_text)
-            if rendered_tokens is None:
-                return None
-            if rendered_tokens <= max_tokens:
-                return input_text
-
-            overflow = rendered_tokens - max_tokens
-            next_budget = content_budget - max(1, overflow)
-            if next_budget <= 0:
-                return None
-            content_budget = next_budget
-
-        logger.warning("Unable to fit rendered summary prompt within configured token budget; skipping compaction this turn")
-        return None
+        return self._assemble_summary_input_text(
+            escaped_new_messages,
+            escaped_previous_summary,
+        )
 
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
@@ -358,14 +375,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.exception("Invalid summary prompt template; skipping compaction this turn")
             return None
 
-        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
-        if not trimmed_messages:
-            trimmed_messages = messages_to_summarize[-1:]
-        if not trimmed_messages:
+        if not messages_to_summarize:
             return None
-        # Format messages to avoid token inflation from metadata when str() is called on
-        # message objects.
-        formatted_messages = get_buffer_string(trimmed_messages)
+        formatted_messages = get_buffer_string(messages_to_summarize)
         formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary)
         if not formatted_messages:
             return None
@@ -391,12 +403,184 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
 
+    @staticmethod
+    def _is_turn_user(message: AnyMessage) -> bool:
+        if is_real_user_message(message):
+            return True
+        return (
+            isinstance(message, HumanMessage)
+            and message.name != SUMMARY_MESSAGE_NAME
+            and not is_dynamic_context_reminder(message)
+            and isinstance(
+                message.additional_kwargs.get("human_input_response"),
+                dict,
+            )
+        )
+
+    @classmethod
+    def _turn_prefix_start(
+        cls,
+        messages: list[AnyMessage],
+        user_index: int,
+    ) -> int:
+        index = user_index
+        while index > 0:
+            candidate = messages[index - 1]
+            hidden_prefix = isinstance(candidate, (HumanMessage, SystemMessage)) and bool(candidate.additional_kwargs.get("hide_from_ui")) and not cls._is_turn_user(candidate)
+            if not is_dynamic_context_reminder(candidate) and not hidden_prefix:
+                break
+            index -= 1
+        return index
+
+    @staticmethod
+    def _clarification_request_tool_call_id(
+        message: AnyMessage,
+        request_id: str,
+    ) -> str | None:
+        if not isinstance(message, ToolMessage) or message.name != _ASK_CLARIFICATION_TOOL_NAME or message.id != request_id:
+            return None
+        tool_call_id = message.tool_call_id
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        artifact = message.artifact
+        if not isinstance(artifact, Mapping):
+            return None
+        payload = artifact.get("human_input")
+        if not isinstance(payload, Mapping):
+            return None
+        version = payload.get("version")
+        if (
+            type(version) is not int
+            or version not in (1, 2)
+            or payload.get("kind") != "human_input_request"
+            or payload.get("source") != _ASK_CLARIFICATION_TOOL_NAME
+            or payload.get("request_id") != request_id
+            or payload.get("tool_call_id") != tool_call_id
+        ):
+            return None
+        return tool_call_id
+
+    @classmethod
+    def _is_clarification_continuation(
+        cls,
+        messages: list[AnyMessage],
+        *,
+        turn_start: int,
+        response_index: int,
+    ) -> bool:
+        """Match one server-hidden reply to its exact request ToolMessage and tool call."""
+
+        response_message = messages[response_index]
+        if not isinstance(response_message, HumanMessage) or response_message.additional_kwargs.get("hide_from_ui") is not True:
+            return False
+        response = read_human_input_response(response_message.additional_kwargs)
+        if response is None or response["source"] != _ASK_CLARIFICATION_TOOL_NAME:
+            return False
+
+        request_index = next(
+            (index for index in range(response_index - 1, turn_start - 1, -1) if isinstance(messages[index], ToolMessage) and messages[index].name == _ASK_CLARIFICATION_TOOL_NAME),
+            None,
+        )
+        if request_index is None:
+            return False
+        tool_call_id = cls._clarification_request_tool_call_id(
+            messages[request_index],
+            response["request_id"],
+        )
+        if tool_call_id is None:
+            return False
+        matching_tool_calls = 0
+        for message in messages[turn_start:request_index]:
+            if not isinstance(message, AIMessage):
+                continue
+            matching_tool_calls += sum(1 for tool_call in message.tool_calls if isinstance(tool_call, Mapping) and tool_call.get("id") == tool_call_id and tool_call.get("name") == _ASK_CLARIFICATION_TOOL_NAME)
+        return matching_tool_calls == 1
+
+    @classmethod
+    def _complete_turn_ranges(
+        cls,
+        messages: list[AnyMessage],
+    ) -> tuple[tuple[int, int], ...]:
+        """Return contiguous complete user turns from the state head."""
+
+        user_indexes = [index for index, message in enumerate(messages) if cls._is_turn_user(message)]
+        if not user_indexes:
+            return ()
+
+        starts = [0]
+        seen_assistant = False
+        for index in range(user_indexes[0] + 1, len(messages)):
+            message = messages[index]
+            if isinstance(message, AIMessage):
+                seen_assistant = True
+                continue
+            if cls._is_turn_user(message) and seen_assistant:
+                if cls._is_clarification_continuation(
+                    messages,
+                    turn_start=starts[-1],
+                    response_index=index,
+                ):
+                    continue
+                starts.append(cls._turn_prefix_start(messages, index))
+                seen_assistant = False
+
+        ranges: list[tuple[int, int]] = []
+        for position, start in enumerate(starts):
+            end = starts[position + 1] if position + 1 < len(starts) else len(messages)
+            turn = messages[start:end]
+            first_user = next(
+                (index for index, message in enumerate(turn) if cls._is_turn_user(message)),
+                None,
+            )
+            if first_user is None:
+                break
+            assistant_messages = [message for message in turn[first_user + 1 :] if isinstance(message, AIMessage)]
+            if not assistant_messages:
+                break
+            tool_calls = [tool_call for message in assistant_messages for tool_call in message.tool_calls]
+            if any(not isinstance(tool_call, dict) or not isinstance(tool_call.get("id"), str) or not tool_call.get("id") for tool_call in tool_calls):
+                break
+            expected_tool_calls = {tool_call["id"] for tool_call in tool_calls}
+            completed_tool_calls = {message.tool_call_id for message in turn[first_user + 1 :] if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id}
+            response_tail = next(
+                (message for message in reversed(turn[first_user + 1 :]) if isinstance(message, (AIMessage, ToolMessage))),
+                None,
+            )
+            if expected_tool_calls != completed_tool_calls or not isinstance(response_tail, AIMessage):
+                break
+            ranges.append((start, end))
+        return tuple(ranges)
+
+    def _requested_cutoff(self, messages: list[AnyMessage]) -> int:
+        if self._compact_all_complete_turns:
+            return len(messages)
+        return self._determine_cutoff_index(messages)
+
+    def _candidate_cutoffs(
+        self,
+        messages: list[AnyMessage],
+        requested_cutoff: int,
+    ) -> tuple[int, ...]:
+        cutoffs: list[int] = []
+        expected_start = 0
+        for start, end in self._complete_turn_ranges(messages):
+            if start != expected_start:
+                break
+            expected_start = end
+            if end <= requested_cutoff:
+                cutoffs.append(end)
+        return tuple(reversed(cutoffs))
+
+    @staticmethod
+    def _snip_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+        return [message for message in messages if not is_dynamic_context_reminder(message)]
+
     def _prepare_compaction(
         self,
         state: AgentState,
         *,
         force: bool = False,
-    ) -> tuple[list[AnyMessage], list[AnyMessage], str | None, int] | None:
+    ) -> _PreparedCompaction | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
@@ -406,15 +590,92 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
 
-        cutoff_index = self._determine_cutoff_index(messages)
-        if cutoff_index <= 0:
+        requested_cutoff = self._requested_cutoff(messages)
+        if requested_cutoff <= 0:
             return None
 
-        messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
-        if not messages_to_summarize:
+        for cutoff_index in self._candidate_cutoffs(
+            messages,
+            requested_cutoff,
+        ):
+            source_messages = messages[:cutoff_index]
+            snip_messages = self._snip_messages(source_messages)
+            if not snip_messages:
+                continue
+            # Rendering the exact prompt is also the budget test. Overflow
+            # moves to the preceding whole-turn boundary; selected text is
+            # never partially token- or character-trimmed.
+            if (
+                self._build_summary_prompt(
+                    snip_messages,
+                    previous_summary=previous_summary,
+                )
+                is None
+            ):
+                continue
+            return _PreparedCompaction(
+                source_messages=tuple(source_messages),
+                snip_messages=tuple(snip_messages),
+                preserved_messages=tuple(messages[cutoff_index:]),
+                previous_summary=previous_summary,
+                total_tokens=total_tokens,
+            )
+        return None
+
+    @staticmethod
+    def _archive_context(runtime: Runtime) -> SnipArchiveContext | None:
+        runtime_context = runtime.context
+        if not isinstance(runtime_context, dict):
             return None
-        return messages_to_summarize, preserved_messages, previous_summary, total_tokens
+        value = runtime_context.get(MEMORY_ARCHIVE_CONTEXT_KEY)
+        return value if type(value) is SnipArchiveContext else None
+
+    @staticmethod
+    def _source_checkpoint_id(
+        runtime: Runtime,
+        archive_context: SnipArchiveContext | None,
+    ) -> str | None:
+        explicit_checkpoint_id = archive_context.source_checkpoint_id if archive_context is not None else None
+        execution_info = getattr(runtime, "execution_info", None)
+        runtime_checkpoint_id = getattr(execution_info, "checkpoint_id", None)
+        if isinstance(runtime_checkpoint_id, str) and runtime_checkpoint_id:
+            if explicit_checkpoint_id is not None and explicit_checkpoint_id != runtime_checkpoint_id:
+                raise ValueError(
+                    "SNIP archive runtime checkpoint does not match its explicit source",
+                )
+            return runtime_checkpoint_id
+        if explicit_checkpoint_id is not None:
+            return explicit_checkpoint_id
+        try:
+            configurable = get_config().get("configurable", {})
+        except RuntimeError:
+            return None
+        value = configurable.get("checkpoint_id")
+        return value if isinstance(value, str) and value else None
+
+    def _receipt(
+        self,
+        prepared: _PreparedCompaction,
+        summary: str,
+        runtime: Runtime,
+    ) -> MemoryArchiveReceipt | None:
+        archive_context = self._archive_context(runtime)
+        if archive_context is None or not archive_context.enabled:
+            return None
+        thread_id = _resolve_thread_id(runtime)
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("SNIP archive Thread identity is unavailable")
+        return build_memory_archive_receipt(
+            archive_context,
+            thread_id=thread_id,
+            source_checkpoint_id=self._source_checkpoint_id(
+                runtime,
+                archive_context,
+            ),
+            previous_summary=prepared.previous_summary,
+            messages=prepared.source_messages,
+            tagged_text=summary,
+        )
 
     def compact_state(
         self,
@@ -426,20 +687,23 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
-        messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
+        summary = self._summarize_with(
+            list(prepared.snip_messages),
+            previous_summary=prepared.previous_summary,
+        )
         if summary is None:
             return None
-        # Hooks may enqueue durable side effects, so fire them only after a valid
-        # non-empty summary exists and compaction is ready to be returned. Hook
-        # failures remain isolated in ``_fire_hooks`` and do not discard a valid
-        # summary or block the state update.
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        try:
+            receipt = self._receipt(prepared, summary, runtime)
+        except (SnipOutputInvalid, ValueError):
+            logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
+            return None
         return ContextCompactionResult(
             summary_text=summary,
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            total_tokens=total_tokens,
+            messages_to_summarize=prepared.source_messages,
+            preserved_messages=prepared.preserved_messages,
+            total_tokens=prepared.total_tokens,
+            memory_archive_receipt=receipt,
         )
 
     async def acompact_state(
@@ -452,20 +716,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
-        messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
         summary = await self._asummarize_with(
-            messages_to_summarize,
-            previous_summary=previous_summary,
+            list(prepared.snip_messages),
+            previous_summary=prepared.previous_summary,
             authorization_context=runtime.context,
         )
         if summary is None:
             return None
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        try:
+            receipt = self._receipt(prepared, summary, runtime)
+        except (SnipOutputInvalid, ValueError):
+            logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
+            return None
         return ContextCompactionResult(
             summary_text=summary,
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            total_tokens=total_tokens,
+            messages_to_summarize=prepared.source_messages,
+            preserved_messages=prepared.preserved_messages,
+            total_tokens=prepared.total_tokens,
+            memory_archive_receipt=receipt,
         )
 
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -478,6 +746,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            "memory_archive_receipt": result.memory_archive_receipt,
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -490,85 +759,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            "memory_archive_receipt": result.memory_archive_receipt,
         }
-
-    def _preserve_dynamic_context_reminders(
-        self,
-        messages_to_summarize: list[AnyMessage],
-        preserved_messages: list[AnyMessage],
-    ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
-
-        These reminders carry the current date and optional memory. If summarization
-        removes them, DynamicContextMiddleware can lose the already-injected reminder
-        and inject a replacement into the wrong point of the conversation.
-
-        The ID-swap triplet produced by ``_make_reminder_and_user_messages`` contains
-        three messages: ``SystemMessage(id=X)`` and ``HumanMessage(id=X__memory)`` are
-        both tagged with ``dynamic_context_reminder=True``, but ``HumanMessage(id=X__user)``
-        carries the original user content and is **not** tagged. Without peer rescue,
-        ``__user`` would stay in ``to_summarize`` and be compressed into prose — orphaning
-        the tagged messages and losing the user question from the model's direct context.
-
-        This method rescues tagged reminders and also rescues any untagged messages whose
-        ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
-        """
-        reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
-        if not reminders:
-            return messages_to_summarize, preserved_messages
-
-        # Collect the base IDs (the stable_id prefix) from tagged reminders.
-        # For a reminder with id="ctx-001__memory", the base is "ctx-001".
-        # For a reminder with id="ctx-001" (SystemMessage), the base is "ctx-001".
-        # removesuffix is suffix-only — it won't strip a "__" that sits in the
-        # middle of a stable_id (e.g. "ctx__001" stays intact, unlike rsplit
-        # which would mis-derive "ctx").  Only known ID-swap suffixes (__memory,
-        # __user) are stripped; __user is not tagged so won't appear in reminders,
-        # but is included defensively.
-        reminder_base_ids: set[str] = set()
-        for msg in reminders:
-            if msg.id:
-                base = msg.id.removesuffix("__memory").removesuffix("__user")
-                reminder_base_ids.add(base)
-
-        # Single-pass partition: walk messages_to_summarize in chronological order
-        # and rescue both tagged reminders and untagged ID-swap peers (whose id
-        # starts with a known base + "__").  This preserves the original message
-        # order within rescued — critical when multiple triplets land in one
-        # summarization window — and eliminates the need for id(m)-based dedup
-        # that the previous reminders+peers concatenation required.
-        rescued: list[AnyMessage] = []
-        remaining: list[AnyMessage] = []
-        for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
-                rescued.append(msg)
-            else:
-                remaining.append(msg)
-        return remaining, rescued + preserved_messages
-
-    def _fire_hooks(
-        self,
-        messages_to_summarize: list[AnyMessage],
-        preserved_messages: list[AnyMessage],
-        runtime: Runtime,
-    ) -> None:
-        if not self._before_summarization_hooks:
-            return
-
-        event = SummarizationEvent(
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            thread_id=_resolve_thread_id(runtime),
-            agent_name=_resolve_agent_name(runtime),
-            runtime=runtime,
-        )
-
-        for hook in self._before_summarization_hooks:
-            try:
-                hook(event)
-            except Exception:
-                hook_name = getattr(hook, "__name__", None) or type(hook).__name__
-                logger.exception("before_summarization hook %s failed", hook_name)
 
 
 def create_summarization_middleware(
@@ -579,7 +771,7 @@ def create_summarization_middleware(
     """Create the configured summarization middleware.
 
     Both the lead-agent automatic path and the manual context-compaction path
-    use this factory so model resolution, hooks, prompt config, and retention
+    use this factory so model resolution, the fixed SNIP prompt, and retention
     defaults cannot drift.
     """
     resolved_app_config = app_config or get_app_config()
@@ -610,14 +802,17 @@ def create_summarization_middleware(
         )
     model = model.with_config(tags=["middleware:summarize"])
 
+    requested_keep = keep or config.keep.to_tuple()
+    compact_all_complete_turns = requested_keep[0] == "messages" and requested_keep[1] == 0
+    effective_keep = ("messages", 1) if compact_all_complete_turns else requested_keep
     kwargs: dict[str, Any] = {
         "model": model,
         "trigger": trigger,
-        "keep": keep or config.keep.to_tuple(),
+        "keep": effective_keep,
+        "compact_all_complete_turns": compact_all_complete_turns,
+        "summary_prompt": SNIP_ARCHIVE_PROMPT,
     }
     if config.trim_tokens_to_summarize is not None:
         kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
-    if config.summary_prompt is not None:
-        kwargs["summary_prompt"] = config.summary_prompt
 
     return DeerFlowSummarizationMiddleware(**kwargs)

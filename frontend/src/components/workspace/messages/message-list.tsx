@@ -79,6 +79,7 @@ import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
 
+import { AssistantActionRow } from "./assistant-action-row";
 import { AssistantProcessDisclosure } from "./assistant-process-disclosure";
 import {
   HumanInputCard,
@@ -822,7 +823,7 @@ export function MessageList({
       }
 
       return (
-        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-focus-within/assistant-turn:opacity-100 group-hover/assistant-turn:opacity-100">
+        <AssistantActionRow>
           {clipboardData && <CopyButton clipboardData={clipboardData} />}
           {canSubmitFeedback && !isStreaming && actionTarget?.id && runId && (
             <RunFeedbackButtons
@@ -904,7 +905,7 @@ export function MessageList({
                 </Button>
               </Tooltip>
             )}
-        </div>
+        </AssistantActionRow>
       );
     },
     [
@@ -1220,7 +1221,7 @@ export function MessageList({
     return (
       <div
         key={`duration-group:${group.id ?? groupIndex}`}
-        className="flex w-full flex-col gap-2"
+        className="flex w-full flex-col gap-3"
       >
         {content}
         {displays.map((display) => (

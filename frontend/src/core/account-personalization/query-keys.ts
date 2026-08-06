@@ -16,14 +16,19 @@ export function accountPersonalizationMutationKey(
   accountId: string,
   action: "update-memory" | "reset-memory",
 ) {
-  return [...accountPersonalizationRoot(accountId), "mutation", action] as const;
+  return [
+    ...accountPersonalizationRoot(accountId),
+    "mutation",
+    action,
+  ] as const;
 }
 
 export function isAccountProjectMemoryQueryKey(
   queryKey: readonly unknown[],
   accountId: string,
 ): boolean {
-  const parsedAccountId = accountPersonalizationAccountIdSchema.parse(accountId);
+  const parsedAccountId =
+    accountPersonalizationAccountIdSchema.parse(accountId);
   return (
     queryKey[0] === "account" &&
     queryKey[1] === parsedAccountId &&

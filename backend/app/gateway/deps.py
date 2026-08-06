@@ -239,10 +239,7 @@ async def gateway_platform_runtime(
         from app.private_work.human_input_response import (
             CheckpointHumanInputResponsePromoter,
         )
-        from app.private_work.memory_service import (
-            PrivateMemoryService,
-            PrivateMemoryV2Service,
-        )
+        from app.private_work.memory_service import PrivateMemoryDocumentService
         from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
         from app.private_work.thread_service import PrivateThreadService
@@ -334,12 +331,6 @@ async def gateway_platform_runtime(
         )
         app.state.private_feedback_service = PrivateFeedbackService(sf)
         app.state.private_file_streamer = PrivateFileStreamer(sf)
-        app.state.project_memory_service = PrivateMemoryService(sf)
-        app.state.project_memory_v2_service = PrivateMemoryV2Service(
-            sf,
-            source_hmac=audit_keyring.memory_source_ref,
-            audit=operational_audit_sink,
-        )
         from app.personalization.service import AccountPersonalizationService
 
         app.state.account_personalization_service = AccountPersonalizationService(sf)
@@ -397,6 +388,10 @@ async def gateway_platform_runtime(
             app.state.private_run_event_store,
             endpoint_policy=mcp_endpoint_policy,
             model_materializer=model_materializer,
+        )
+        app.state.project_memory_service = PrivateMemoryDocumentService(
+            sf,
+            dream_archive_barrier=app.state.project_chat_control_service,
         )
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
@@ -640,7 +635,7 @@ async def get_current_user_from_request(request: Request):
 async def private_work_context(
     project_id: uuid.UUID,
     user=Depends(get_current_user_from_request),
-    session: AsyncSession = Depends(project_session),
+    session: AsyncSession = Depends(project_session, scope="function"),
 ) -> PrivateWorkContext:
     """Resolve the only HTTP-issued project-private authority context."""
 
@@ -684,7 +679,7 @@ async def project_input_polish_context(
 async def automation_context(
     project_id: uuid.UUID,
     user=Depends(get_current_user_from_request),
-    session: AsyncSession = Depends(project_session),
+    session: AsyncSession = Depends(project_session, scope="function"),
 ) -> PrivateWorkContext:
     """Resolve project authority while exposing only Automation errors."""
 
@@ -709,12 +704,15 @@ async def automation_context(
 
 async def require_project_automation_open(
     context: PrivateWorkContext = Depends(automation_context),
-    session: AsyncSession = Depends(project_session),
+    session: AsyncSession = Depends(project_session, scope="function"),
 ) -> None:
     from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 
     try:
-        await FinalSchemaProbe().require_ready(session)
+        # The probe issues SELECTs that autobegin; own that transaction so the
+        # shared dependency cannot pin a pool checkout for the endpoint body.
+        async with session.begin():
+            await FinalSchemaProbe().require_ready(session)
     except (FinalSchemaRequired, FinalSchemaUnavailable):
         raise automation_http_exception(AutomationUnavailable(context.request_id)) from None
 
@@ -722,7 +720,7 @@ async def require_project_automation_open(
 async def require_project_private_open(
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
-    session: AsyncSession = Depends(project_session),
+    session: AsyncSession = Depends(project_session, scope="function"),
 ) -> None:
     """Open project private routes only on the exact final M7 schema."""
 
@@ -732,7 +730,9 @@ async def require_project_private_open(
     from app.final_schema import FinalSchemaProbe, FinalSchemaRequired, FinalSchemaUnavailable
 
     try:
-        await FinalSchemaProbe().require_ready(session)
+        # Streaming responses must not retain the probe's autobegun checkout.
+        async with session.begin():
+            await FinalSchemaProbe().require_ready(session)
     except (FinalSchemaRequired, FinalSchemaUnavailable):
         raise private_work_http_exception(PrivateWorkUnavailable(context.request_id)) from None
 

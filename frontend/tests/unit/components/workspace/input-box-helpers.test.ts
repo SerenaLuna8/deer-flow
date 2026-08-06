@@ -20,11 +20,67 @@ test("routes Dream strictly as a builtin command", () => {
       fileCount: 0,
       status: "ready",
     }),
-  ).toEqual({ kind: "dream-invalid", reason: "arguments" });
+  ).toEqual({
+    kind: "dream-invalid",
+    command: "dream",
+    reason: "arguments",
+  });
   expect(
     getInputSubmitAction({ text: "/dream", fileCount: 1, status: "ready" }),
-  ).toEqual({ kind: "dream-invalid", reason: "attachments" });
+  ).toEqual({
+    kind: "dream-invalid",
+    command: "dream",
+    reason: "attachments",
+  });
   expect(canPolishInput("/dream now")).toBe(false);
+});
+
+test("routes Dream history and restore commands without sending chat text", () => {
+  expect(
+    getInputSubmitAction({
+      text: "/dream-log",
+      fileCount: 0,
+      status: "ready",
+    }),
+  ).toEqual({ kind: "dream-log", version: null });
+  expect(
+    getInputSubmitAction({
+      text: "/dream-log 12",
+      fileCount: 0,
+      status: "ready",
+    }),
+  ).toEqual({ kind: "dream-log", version: 12 });
+  expect(
+    getInputSubmitAction({
+      text: "/dream-restore 12",
+      fileCount: 0,
+      status: "ready",
+    }),
+  ).toEqual({ kind: "dream-restore", version: 12 });
+  expect(
+    getInputSubmitAction({
+      text: "/dream-restore",
+      fileCount: 0,
+      status: "ready",
+    }),
+  ).toEqual({
+    kind: "dream-invalid",
+    command: "dream-restore",
+    reason: "arguments",
+  });
+  expect(
+    getInputSubmitAction({
+      text: "/dream-log 0",
+      fileCount: 0,
+      status: "ready",
+    }),
+  ).toEqual({
+    kind: "dream-invalid",
+    command: "dream-log",
+    reason: "arguments",
+  });
+  expect(canPolishInput("/dream-log 3")).toBe(false);
+  expect(canPolishInput("/dream-restore 3")).toBe(false);
 });
 
 test("keeps latest-checkpoint continuation until one send succeeds", () => {

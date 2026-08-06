@@ -6,290 +6,237 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
-import { MemoryV2Workbench } from "@/components/projects/private-work/memory/memory-v2-workbench";
+import { MemoryDocumentWorkbench } from "@/components/projects/private-work/memory/memory-document-workbench";
 import { GatewayApiError } from "@/core/api/errors";
+import { useI18n } from "@/core/i18n/hooks";
 import {
-  acceptProjectMemoryV2Candidate,
-  disableProjectMemoryV2Fact,
-  exportProjectMemoryV2,
-  getProjectMemoryV2Fact,
-  getProjectMemoryV2Status,
-  hardForgetProjectMemoryV2Fact,
-  listProjectMemoryV2Candidates,
-  listProjectMemoryV2Facts,
-  projectMemoryV2CandidatesQueryKey,
-  projectMemoryV2FactDetailQueryKey,
-  projectMemoryV2FactsQueryKey,
-  projectMemoryV2MutationKey,
-  projectMemoryV2Permissions,
-  projectMemoryV2RootQueryKey,
-  projectMemoryV2StatusQueryKey,
-  rejectProjectMemoryV2Candidate,
-  restoreProjectMemoryV2Fact,
-  reviseProjectMemoryV2Fact,
-  type MemoryV2Candidate,
-  type MemoryV2Fact,
-  type MemoryV2FactListStatus,
+  dreamProjectMemory,
+  getProjectMemory,
+  getProjectMemoryVersion,
+  listProjectMemoryVersions,
+  MEMORY_VERSION_PAGE_SIZE,
+  projectMemoryDocumentQueryKey,
+  projectMemoryMutationKey,
+  projectMemoryPermissions,
+  projectMemoryRootQueryKey,
+  projectMemoryVersionQueryKey,
+  projectMemoryVersionsQueryKey,
+  restoreProjectMemoryVersion,
 } from "@/core/private-work/memory";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { runPrivateWorkAbortable } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
 
-const MEMORY_PAGE_SIZE = 25;
-const MEMORY_FETCH_LIMIT = MEMORY_PAGE_SIZE + 1;
+const MEMORY_FETCH_LIMIT = MEMORY_VERSION_PAGE_SIZE + 1;
 
-function optionalFilter(value: string) {
-  const normalized = value.trim();
-  return normalized.length > 0 ? normalized : undefined;
+function parseSelectedVersion(value: string | null) {
+  if (!value || !/^[1-9][0-9]*$/u.test(value)) return null;
+  const version = Number(value);
+  return Number.isSafeInteger(version) ? version : null;
 }
 
 export function ProjectMemoryPage({ project }: { project: Project }) {
+  const { locale } = useI18n();
   const privateWork = usePrivateWorkAccess();
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const scope = privateWork.scope;
-  const permissions = projectMemoryV2Permissions(project.capabilities);
-  const [factPage, setFactPage] = useState(0);
-  const [candidatePage, setCandidatePage] = useState(0);
-  const [factStatus, setFactStatus] =
-    useState<MemoryV2FactListStatus>("active");
-  const [factQuery, setFactQuery] = useState("");
-  const [factCategory, setFactCategory] = useState("");
-  const [selectedFactId, setSelectedFactId] = useState<string | null>(null);
-  const deferredFactQuery = useDeferredValue(factQuery);
-  const deferredFactCategory = useDeferredValue(factCategory);
-  const factRequest = useMemo(
+  const permissions = projectMemoryPermissions(project.capabilities);
+  const [versionPage, setVersionPage] = useState(0);
+  const previousDreamRunningRef = useRef(false);
+  const selectedVersion = parseSelectedVersion(searchParams.get("version"));
+  const versionRequest = useMemo(
     () => ({
-      status: factStatus,
       limit: MEMORY_FETCH_LIMIT,
-      offset: factPage * MEMORY_PAGE_SIZE,
-      query: optionalFilter(deferredFactQuery),
-      category: optionalFilter(deferredFactCategory),
+      offset: versionPage * MEMORY_VERSION_PAGE_SIZE,
     }),
-    [deferredFactCategory, deferredFactQuery, factPage, factStatus],
+    [versionPage],
   );
-  const candidateRequest = useMemo(
-    () => ({
-      limit: MEMORY_FETCH_LIMIT,
-      offset: candidatePage * MEMORY_PAGE_SIZE,
-    }),
-    [candidatePage],
+
+  const selectVersion = useCallback(
+    (version: number | null) => {
+      const parameters = new URLSearchParams(searchParams.toString());
+      if (version === null) parameters.delete("version");
+      else parameters.set("version", String(version));
+      const query = parameters.toString();
+      router.replace(
+        `/projects/${encodeURIComponent(project.slug)}/memory${query ? `?${query}` : ""}`,
+        { scroll: false },
+      );
+    },
+    [project.slug, router, searchParams],
+  );
+
+  const documentQuery = useQuery({
+    queryKey: projectMemoryDocumentQueryKey(scope),
+    queryFn: ({ signal }) => getProjectMemory(privateWork, signal),
+    enabled: permissions.canRead,
+    refetchInterval: (query) =>
+      query.state.data?.dreamRunning ? 2_000 : false,
+    refetchIntervalInBackground: false,
+  });
+  const versionsQuery = useQuery({
+    queryKey: projectMemoryVersionsQueryKey(scope, versionRequest),
+    queryFn: ({ signal }) =>
+      listProjectMemoryVersions(privateWork, versionRequest, signal),
+    enabled: permissions.canRead,
+    placeholderData: keepPreviousData,
+  });
+  const detailQuery = useQuery({
+    queryKey:
+      selectedVersion === null
+        ? [...projectMemoryRootQueryKey(scope), "version", "none"]
+        : projectMemoryVersionQueryKey(scope, selectedVersion),
+    queryFn: ({ signal }) =>
+      getProjectMemoryVersion(privateWork, selectedVersion!, signal),
+    enabled: permissions.canRead && selectedVersion !== null,
+  });
+
+  const refreshMemory = useCallback(
+    () =>
+      queryClient.invalidateQueries({
+        queryKey: projectMemoryRootQueryKey(scope),
+      }),
+    [queryClient, scope],
+  );
+  const refreshOnConflict = useCallback(
+    (error: Error) => {
+      if (error instanceof GatewayApiError && error.status === 409) {
+        void refreshMemory();
+      }
+    },
+    [refreshMemory],
   );
 
   useEffect(() => {
-    setFactPage(0);
-  }, [deferredFactCategory, deferredFactQuery, factStatus]);
+    const dreamRunning = documentQuery.data?.dreamRunning ?? false;
+    const justFinished = previousDreamRunningRef.current && !dreamRunning;
+    previousDreamRunningRef.current = dreamRunning;
+    if (justFinished) void refreshMemory();
+  }, [documentQuery.data?.dreamRunning, refreshMemory]);
 
-  const factsQuery = useQuery({
-    queryKey: projectMemoryV2FactsQueryKey(scope, factRequest),
-    queryFn: ({ signal }) =>
-      listProjectMemoryV2Facts(privateWork, factRequest, signal),
-    enabled: permissions.canRead,
-    placeholderData: keepPreviousData,
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: false,
-  });
-  const candidatesQuery = useQuery({
-    queryKey: projectMemoryV2CandidatesQueryKey(scope, candidateRequest),
-    queryFn: ({ signal }) =>
-      listProjectMemoryV2Candidates(privateWork, candidateRequest, signal),
-    enabled: permissions.canRead,
-    placeholderData: keepPreviousData,
-    refetchInterval: 15_000,
-    refetchIntervalInBackground: false,
-  });
-  const statusQuery = useQuery({
-    queryKey: projectMemoryV2StatusQueryKey(scope),
-    queryFn: ({ signal }) => getProjectMemoryV2Status(privateWork, signal),
-    enabled: permissions.canRead,
-  });
-  const detailQuery = useQuery({
-    queryKey: projectMemoryV2FactDetailQueryKey(
-      scope,
-      selectedFactId ?? "none",
-    ),
-    queryFn: ({ signal }) =>
-      getProjectMemoryV2Fact(privateWork, selectedFactId!, signal),
-    enabled: permissions.canRead && selectedFactId !== null,
-  });
-
-  const memoryRootQueryKey = projectMemoryV2RootQueryKey(scope);
-  const refreshMemory = () =>
-    queryClient.invalidateQueries({ queryKey: memoryRootQueryKey });
-  const refreshMemoryOnConflict = (error: Error) =>
-    error instanceof GatewayApiError && error.status === 409
-      ? refreshMemory()
-      : undefined;
-
-  const acceptCandidate = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "accept-candidate"),
-    mutationFn: (candidate: MemoryV2Candidate) =>
-      runPrivateWorkAbortable(privateWork, (signal) =>
-        acceptProjectMemoryV2Candidate(privateWork, candidate, signal),
-      ),
-    onSuccess: refreshMemory,
-    onError: refreshMemoryOnConflict,
-  });
-  const rejectCandidate = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "reject-candidate"),
-    mutationFn: (candidate: MemoryV2Candidate) =>
-      runPrivateWorkAbortable(privateWork, (signal) =>
-        rejectProjectMemoryV2Candidate(privateWork, candidate, signal),
-      ),
-    onSuccess: refreshMemory,
-    onError: refreshMemoryOnConflict,
-  });
-  const reviseFact = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "revise-fact"),
-    mutationFn: ({
-      fact,
-      input,
-    }: {
-      fact: MemoryV2Fact;
-      input: {
-        content?: string;
-        category?: string;
-        confidence?: number;
-        reason?: string;
-      };
-    }) =>
-      runPrivateWorkAbortable(privateWork, (signal) =>
-        reviseProjectMemoryV2Fact(privateWork, fact, input, signal),
-      ),
-    onSuccess: refreshMemory,
-    onError: refreshMemoryOnConflict,
-  });
-  const disableFact = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "disable-fact"),
-    mutationFn: (fact: MemoryV2Fact) =>
-      runPrivateWorkAbortable(privateWork, (signal) =>
-        disableProjectMemoryV2Fact(privateWork, fact, signal),
-      ),
-    onSuccess: refreshMemory,
-    onError: refreshMemoryOnConflict,
-  });
-  const restoreFact = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "restore-fact"),
-    mutationFn: (fact: MemoryV2Fact) =>
-      runPrivateWorkAbortable(privateWork, (signal) =>
-        restoreProjectMemoryV2Fact(privateWork, fact, signal),
-      ),
-    onSuccess: refreshMemory,
-    onError: refreshMemoryOnConflict,
-  });
-  const hardForgetFact = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "hard-forget"),
-    mutationFn: (fact: MemoryV2Fact) =>
-      runPrivateWorkAbortable(privateWork, (signal) =>
-        hardForgetProjectMemoryV2Fact(privateWork, fact, signal),
-      ),
-    onSuccess: (_result, fact) => {
-      if (selectedFactId === fact.id) setSelectedFactId(null);
-      return refreshMemory();
-    },
-    onError: refreshMemoryOnConflict,
-  });
-  const exportMemory = useMutation({
-    mutationKey: projectMemoryV2MutationKey(scope, "export"),
+  const dreamMutation = useMutation({
+    mutationKey: projectMemoryMutationKey(scope, "dream"),
     mutationFn: () =>
       runPrivateWorkAbortable(privateWork, (signal) =>
-        exportProjectMemoryV2(privateWork, signal),
+        dreamProjectMemory(privateWork, {}, signal),
       ),
+    onSuccess: async (result) => {
+      await refreshMemory();
+      if (result.disposition === "queued") {
+        toast.success(
+          locale === "zh-CN"
+            ? `已开始整理 ${result.historyCount} 条记忆。`
+            : `Started organizing ${result.historyCount} Memory items.`,
+        );
+      } else if (result.disposition === "already_running") {
+        toast.info(
+          locale === "zh-CN"
+            ? "记忆整理任务正在运行。"
+            : "A Memory organization job is already running.",
+        );
+      } else {
+        toast.info(
+          locale === "zh-CN"
+            ? "当前没有等待整理的记忆。"
+            : "There is no Memory waiting to be organized.",
+        );
+      }
+    },
+    onError: (error) => {
+      refreshOnConflict(error);
+      toast.error(
+        error.message ||
+          (locale === "zh-CN"
+            ? "记忆整理启动失败。"
+            : "Memory organization failed."),
+      );
+    },
+  });
+  const restoreMutation = useMutation({
+    mutationKey: projectMemoryMutationKey(scope, "restore"),
+    mutationFn: (input: {
+      targetVersion: number;
+      expectedCurrentVersion: number;
+    }) =>
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        restoreProjectMemoryVersion(
+          privateWork,
+          input.targetVersion,
+          { expectedCurrentVersion: input.expectedCurrentVersion },
+          signal,
+        ),
+      ),
+    onSuccess: async (result) => {
+      await refreshMemory();
+      selectVersion(result.version);
+      toast.success(
+        locale === "zh-CN"
+          ? `已恢复为新版本 ${result.version}。`
+          : `Restored as new version ${result.version}.`,
+      );
+    },
+    onError: (error) => {
+      refreshOnConflict(error);
+      toast.error(
+        error.message ||
+          (locale === "zh-CN"
+            ? "记忆版本恢复失败。"
+            : "Memory restore failed."),
+      );
+    },
   });
 
-  const factItems = factsQuery.data?.items.slice(0, MEMORY_PAGE_SIZE) ?? [];
-  const candidateItems =
-    candidatesQuery.data?.items.slice(0, MEMORY_PAGE_SIZE) ?? [];
-  const busyCandidateIds = [
-    acceptCandidate.isPending ? acceptCandidate.variables?.id : null,
-    rejectCandidate.isPending ? rejectCandidate.variables?.id : null,
-  ].filter((value): value is string => Boolean(value));
-  const busyFactIds = [
-    reviseFact.isPending ? reviseFact.variables?.fact.id : null,
-    disableFact.isPending ? disableFact.variables?.id : null,
-    restoreFact.isPending ? restoreFact.variables?.id : null,
-    hardForgetFact.isPending ? hardForgetFact.variables?.id : null,
-  ].filter((value): value is string => Boolean(value));
-
-  async function downloadMemory() {
-    const blob = await exportMemory.mutateAsync();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `deer-flow-memory-v2-${new Date().toISOString().replace(/[:.]/gu, "-")}.ndjson`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }
+  const versionItems =
+    versionsQuery.data?.items.slice(0, MEMORY_VERSION_PAGE_SIZE) ?? [];
 
   return (
-    <MemoryV2Workbench
-      projectName={project.display_name}
-      projectSlug={project.slug}
-      facts={{
-        items: factItems,
-        page: factPage,
-        hasNext: (factsQuery.data?.items.length ?? 0) > MEMORY_PAGE_SIZE,
-        isLoading: factsQuery.isLoading,
-        isFetching: factsQuery.isFetching,
-        error: factsQuery.error,
-        retry: () => void factsQuery.refetch(),
-        previous: () => setFactPage((page) => Math.max(0, page - 1)),
-        next: () => setFactPage((page) => page + 1),
-        query: factQuery,
-        category: factCategory,
-        status: factStatus,
-        setQuery: setFactQuery,
-        setCategory: setFactCategory,
-        setStatus: setFactStatus,
+    <MemoryDocumentWorkbench
+      document={{
+        data: documentQuery.data,
+        error: documentQuery.error,
+        isLoading: documentQuery.isLoading,
+        retry: () => void documentQuery.refetch(),
       }}
-      candidates={{
-        items: candidateItems,
-        page: candidatePage,
-        hasNext: (candidatesQuery.data?.items.length ?? 0) > MEMORY_PAGE_SIZE,
-        isLoading: candidatesQuery.isLoading,
-        isFetching: candidatesQuery.isFetching,
-        error: candidatesQuery.error,
-        retry: () => void candidatesQuery.refetch(),
-        previous: () => setCandidatePage((page) => Math.max(0, page - 1)),
-        next: () => setCandidatePage((page) => page + 1),
+      versions={{
+        data: versionItems,
+        error: versionsQuery.error,
+        isLoading: versionsQuery.isLoading,
+        retry: () => void versionsQuery.refetch(),
+        page: versionPage,
+        hasNext:
+          (versionsQuery.data?.items.length ?? 0) > MEMORY_VERSION_PAGE_SIZE,
+        previous: () => setVersionPage((page) => Math.max(0, page - 1)),
+        next: () => setVersionPage((page) => page + 1),
       }}
       detail={{
-        selectedFactId,
-        data: detailQuery.data ?? null,
-        isLoading: detailQuery.isLoading,
+        data: detailQuery.data,
         error: detailQuery.error,
+        isLoading: detailQuery.isLoading,
         retry: () => void detailQuery.refetch(),
-        select: setSelectedFactId,
-      }}
-      status={{
-        data: statusQuery.data ?? null,
-        isLoading: statusQuery.isLoading,
-        error: statusQuery.error,
-        retry: () => void statusQuery.refetch(),
+        selectedVersion,
+        select: selectVersion,
       }}
       actions={{
-        canManage: permissions.canManage,
-        canHardForget: permissions.canHardForget,
-        canExport: permissions.canExport,
-        isExporting: exportMemory.isPending,
-        busyCandidateIds,
-        busyFactIds,
-        exportMemory: downloadMemory,
-        acceptCandidate: (candidate) =>
-          acceptCandidate.mutateAsync(candidate).then(() => undefined),
-        rejectCandidate: (candidate) =>
-          rejectCandidate.mutateAsync(candidate).then(() => undefined),
-        reviseFact: (fact, input) =>
-          reviseFact.mutateAsync({ fact, input }).then(() => undefined),
-        disableFact: (fact) =>
-          disableFact.mutateAsync(fact).then(() => undefined),
-        restoreFact: (fact) =>
-          restoreFact.mutateAsync(fact).then(() => undefined),
-        hardForgetFact: (fact) =>
-          hardForgetFact.mutateAsync(fact).then(() => undefined),
+        canDream: permissions.canDream,
+        canRestore: permissions.canRestore && documentQuery.data !== undefined,
+        dreaming: dreamMutation.isPending,
+        restoringVersion: restoreMutation.isPending
+          ? (restoreMutation.variables?.targetVersion ?? null)
+          : null,
+        dream: () => dreamMutation.mutateAsync().then(() => undefined),
+        restore: (version) =>
+          restoreMutation
+            .mutateAsync({
+              targetVersion: version,
+              expectedCurrentVersion: documentQuery.data?.version ?? 0,
+            })
+            .then(() => undefined),
       }}
     />
   );

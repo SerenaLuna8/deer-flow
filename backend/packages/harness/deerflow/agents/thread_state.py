@@ -17,6 +17,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401
 from deerflow.agents.goal_state import GoalState
+from deerflow.agents.memory.snip import MemoryArchiveReceipt
 from deerflow.config.database_config import (
     DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
     CheckpointChannelMode,
@@ -429,6 +430,7 @@ class ThreadState(AgentState):
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+    memory_archive_receipt: NotRequired[MemoryArchiveReceipt | None]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:

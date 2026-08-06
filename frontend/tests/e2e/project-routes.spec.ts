@@ -4,17 +4,14 @@ import type { Capability, Project } from "@/core/projects/types";
 
 const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
-const FACT_ID = "20000000-0000-4000-8000-000000000001";
-const REVISION_ID = "30000000-0000-4000-8000-000000000001";
-const CANDIDATE_ACCEPT_ID = "40000000-0000-4000-8000-000000000001";
-const CANDIDATE_REJECT_ID = "40000000-0000-4000-8000-000000000002";
-const EVIDENCE_ID = "50000000-0000-4000-8000-000000000001";
+const JOB_ID = "20000000-0000-4000-8000-000000000001";
 const TIMESTAMP = "2026-08-05T00:00:00Z";
 const capabilities: Capability[] = [
   "project.read",
   "project.enter",
   "private_work.read_own",
   "private_work.create",
+  "shared_assets.execute",
 ];
 const project: Project = {
   id: PROJECT_ID,
@@ -42,60 +39,6 @@ const project: Project = {
   request_id: "request-alpha",
 };
 
-function revision(content = "Prefers executable implementation plans") {
-  return {
-    id: REVISION_ID,
-    factId: FACT_ID,
-    revisionNumber: 1,
-    revisionSequence: 1,
-    content,
-    contentDigest: "a".repeat(64),
-    category: "preference",
-    confidence: 0.92,
-    validFrom: TIMESTAMP,
-    validTo: null,
-    lastConfirmedAt: TIMESTAMP,
-    changedBy: "user",
-    sourceCandidateId: CANDIDATE_ACCEPT_ID,
-    supersedesRevisionId: null,
-    changeReason: "User confirmed",
-    contentErasedAt: null,
-    createdAt: TIMESTAMP,
-  };
-}
-
-function memoryFact() {
-  return {
-    id: FACT_ID,
-    factKind: "preference",
-    status: "active" as "active" | "disabled",
-    version: 1,
-    disabledAt: null as string | null,
-    supersededAt: null,
-    deletedAt: null,
-    createdAt: TIMESTAMP,
-    updatedAt: TIMESTAMP,
-    currentRevision: revision(),
-  };
-}
-
-function candidate(id: string, content: string) {
-  return {
-    id,
-    candidateType: "preference",
-    content,
-    confidence: 0.86,
-    retentionClass: "durable",
-    sensitivity: "normal",
-    status: "pending",
-    decisionReason: null,
-    decidedAt: null,
-    contentErasedAt: null,
-    createdAt: TIMESTAMP,
-    updatedAt: TIMESTAMP,
-  };
-}
-
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({
     status,
@@ -105,13 +48,52 @@ function json(route: Route, body: unknown, status = 200) {
 }
 
 async function mockProjectMemoryRoute(page: Page) {
-  let fact = memoryFact();
-  let facts = [fact];
-  let candidates = [
-    candidate(CANDIDATE_ACCEPT_ID, "Keep acceptance criteria explicit"),
-    candidate(CANDIDATE_REJECT_ID, "Temporary conversational detail"),
-  ];
-  let reviseConflictPending = true;
+  let document = {
+    content:
+      "# Working preferences\n\nPrefers executable implementation plans.",
+    version: 3,
+    updatedAt: TIMESTAMP,
+    pendingCount: 2,
+    dreamRunning: false,
+  };
+  const details = new Map<
+    number,
+    {
+      version: number;
+      trigger: "auto_dream" | "manual_dream" | "restore";
+      historyCount: number | null;
+      changed: boolean;
+      createdAt: string;
+      content: string;
+      unifiedDiff: string;
+    }
+  >([
+    [
+      3,
+      {
+        version: 3,
+        trigger: "manual_dream",
+        historyCount: 2,
+        changed: true,
+        createdAt: TIMESTAMP,
+        content: document.content,
+        unifiedDiff:
+          "@@ -1,1 +1,3 @@\n+# Working preferences\n+\n+Prefers executable implementation plans.",
+      },
+    ],
+    [
+      2,
+      {
+        version: 2,
+        trigger: "auto_dream",
+        historyCount: 1,
+        changed: false,
+        createdAt: "2026-08-04T00:00:00Z",
+        content: "# Working preferences",
+        unifiedDiff: "",
+      },
+    ],
+  ]);
 
   await page.route("**/api/**", (route) => {
     const request = route.request();
@@ -143,176 +125,88 @@ async function mockProjectMemoryRoute(page: Page) {
       return json(route, project);
     }
 
-    const memoryBase = `/api/projects/${PROJECT_ID}/memory/v2`;
-    if (path === `${memoryBase}/status` && request.method() === "GET") {
+    const memoryBase = `/api/projects/${PROJECT_ID}/memory`;
+    if (path === memoryBase && request.method() === "GET") {
+      return json(route, document);
+    }
+    if (path === `${memoryBase}/versions` && request.method() === "GET") {
       return json(route, {
-        enabled: true,
-        pipelineMode: "v2",
-        searchEnabled: true,
-        injectionEnabled: true,
-        consolidationIntervalMinutes: 120,
-        candidateRetentionDays: 30,
+        items: [...details.values()].map(
+          ({ content: _content, unifiedDiff: _unifiedDiff, ...summary }) =>
+            summary,
+        ),
       });
     }
-    if (path === `${memoryBase}/facts` && request.method() === "GET") {
-      const status = url.searchParams.get("status") ?? "active";
-      const query = (url.searchParams.get("query") ?? "").toLowerCase();
-      const category = url.searchParams.get("category") ?? "";
-      const items = facts.filter(
-        (item) =>
-          (status === "all" || item.status === status) &&
-          (!query ||
-            item.currentRevision.content.toLowerCase().includes(query)) &&
-          (!category || item.currentRevision.category === category),
-      );
-      return json(route, { namespace: "default", items });
+    const detailMatch = new RegExp(
+      `^${memoryBase}/versions/([1-9][0-9]*)$`,
+      "u",
+    ).exec(path);
+    if (detailMatch && request.method() === "GET") {
+      const detail = details.get(Number(detailMatch[1]));
+      return detail
+        ? json(route, detail)
+        : json(route, { detail: "not found" }, 404);
     }
-    if (path === `${memoryBase}/candidates` && request.method() === "GET") {
-      return json(route, { namespace: "default", items: candidates });
-    }
-    if (
-      path === `${memoryBase}/facts/${FACT_ID}` &&
-      request.method() === "GET"
-    ) {
-      return json(route, {
-        namespace: "default",
-        fact,
-        revisions: [fact.currentRevision],
-        evidence: [
-          {
-            id: EVIDENCE_ID,
-            factId: FACT_ID,
-            revisionId: REVISION_ID,
-            sourceCandidateId: CANDIDATE_ACCEPT_ID,
-            sourceItemId: null,
-            threadId: "source-thread",
-            runId: "source-run",
-            runEventSequence: 2,
-            evidenceExcerpt: "The user requested executable plans.",
-            trustClass: "direct",
-            sourceErasedAt: null,
-            createdAt: TIMESTAMP,
-          },
-        ],
-      });
-    }
-    if (
-      path === `${memoryBase}/facts/${FACT_ID}` &&
-      request.method() === "PATCH"
-    ) {
+    const restoreMatch = new RegExp(
+      `^${memoryBase}/versions/([1-9][0-9]*)/restore$`,
+      "u",
+    ).exec(path);
+    if (restoreMatch && request.method() === "POST") {
       const body = request.postDataJSON() as {
-        content?: string;
-        category?: string;
-        confidence?: number;
+        expectedCurrentVersion?: number;
       };
-      if (reviseConflictPending) {
-        reviseConflictPending = false;
-        fact = {
-          ...fact,
-          version: fact.version + 1,
-          currentRevision: {
-            ...fact.currentRevision,
-            revisionNumber: fact.currentRevision.revisionNumber + 1,
-            revisionSequence: fact.currentRevision.revisionSequence + 1,
-            content: "Updated in another session",
-          },
-        };
-        facts = [fact];
-        return json(
-          route,
-          {
-            detail: {
-              code: "PRIVATE_WORK_CONFLICT",
-              message: "Memory changed while editing",
-            },
-          },
-          409,
-        );
+      if (body.expectedCurrentVersion !== document.version) {
+        return json(route, { detail: "Memory changed" }, 409);
       }
-      fact = {
-        ...fact,
-        version: fact.version + 1,
-        currentRevision: {
-          ...fact.currentRevision,
-          revisionNumber: fact.currentRevision.revisionNumber + 1,
-          revisionSequence: fact.currentRevision.revisionSequence + 1,
-          content: body.content ?? fact.currentRevision.content,
-          category: body.category ?? fact.currentRevision.category,
-          confidence: body.confidence ?? fact.currentRevision.confidence,
-        },
+      const source = details.get(Number(restoreMatch[1]));
+      if (!source) return json(route, { detail: "not found" }, 404);
+      const restored = {
+        version: 4,
+        trigger: "restore",
+        historyCount: null,
+        changed: true,
+        createdAt: TIMESTAMP,
+        content: source.content,
+        unifiedDiff:
+          "@@ -1,3 +1,1 @@\n # Working preferences\n-\n-Prefers executable implementation plans.",
+      } as const;
+      details.set(4, restored);
+      document = {
+        ...document,
+        content: restored.content,
+        version: 4,
       };
-      facts = [fact];
-      return json(route, fact);
+      return json(route, restored);
     }
-    if (
-      path === `${memoryBase}/facts/${FACT_ID}/disable` &&
-      request.method() === "POST"
-    ) {
-      fact = {
-        ...fact,
-        status: "disabled",
-        version: fact.version + 1,
-        disabledAt: TIMESTAMP,
+    if (path === `${memoryBase}/dream` && request.method() === "POST") {
+      const organized = {
+        version: 5,
+        trigger: "manual_dream",
+        historyCount: 2,
+        changed: true,
+        createdAt: TIMESTAMP,
+        content: `${document.content}\n\nPrefers explicit acceptance checks.`,
+        unifiedDiff:
+          "@@ -1 +1,3 @@\n # Working preferences\n+\n+Prefers explicit acceptance checks.",
+      } as const;
+      details.set(5, organized);
+      document = {
+        ...document,
+        content: organized.content,
+        version: 5,
+        pendingCount: 0,
       };
-      facts = [fact];
-      return json(route, fact);
-    }
-    if (
-      path === `${memoryBase}/facts/${FACT_ID}/restore` &&
-      request.method() === "POST"
-    ) {
-      fact = {
-        ...fact,
-        status: "active",
-        version: fact.version + 1,
-        disabledAt: null,
-      };
-      facts = [fact];
-      return json(route, fact);
-    }
-    if (
-      path === `${memoryBase}/facts/${FACT_ID}/hard-forget` &&
-      request.method() === "POST"
-    ) {
-      facts = [];
-      return json(route, {
-        factId: FACT_ID,
-        version: fact.version + 1,
-        status: "deleted",
-        erasedCandidates: 1,
-        erasedRevisions: 2,
-        erasedEvidence: 1,
-        erasedSourceItems: 1,
-      });
-    }
-    const candidateAcceptMatch = new RegExp(
-      `^${memoryBase}/candidates/([^/]+)/accept$`,
-      "u",
-    ).exec(path);
-    if (candidateAcceptMatch && request.method() === "POST") {
-      candidates = candidates.filter(
-        (item) => item.id !== candidateAcceptMatch[1],
+      return json(
+        route,
+        { disposition: "queued", historyCount: 2, jobId: JOB_ID },
+        202,
       );
-      return json(route, fact);
-    }
-    const candidateRejectMatch = new RegExp(
-      `^${memoryBase}/candidates/([^/]+)/reject$`,
-      "u",
-    ).exec(path);
-    if (candidateRejectMatch && request.method() === "POST") {
-      const rejected = candidates.find(
-        (item) => item.id === candidateRejectMatch[1],
-      );
-      candidates = candidates.filter(
-        (item) => item.id !== candidateRejectMatch[1],
-      );
-      return json(route, { ...rejected, status: "rejected" });
     }
     return json(route, { detail: "not found" }, 404);
   });
 }
 
-test("the Memory v2 workbench completes its core management flow", async ({
+test("the Memory document page organizes, diffs and restores versions", async ({
   page,
 }) => {
   await mockProjectMemoryRoute(page);
@@ -322,86 +216,38 @@ test("the Memory v2 workbench completes its core management flow", async ({
   await expect(page).toHaveURL(/\/projects\/alpha\/memory$/u);
   await expect(page.getByTestId("project-shell")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Memory", exact: true }),
+    page.getByRole("heading", { name: "Current memory document" }),
   ).toBeVisible();
-  for (const tab of [
-    "Long-term memory",
-    "Pending review",
-    "Change history",
-    "Settings",
-  ]) {
-    await expect(page.getByRole("tab", { name: tab })).toBeVisible();
-  }
+  await expect(
+    page.getByText("Prefers executable implementation plans."),
+  ).toBeVisible();
+  await expect(page.getByText("2 items", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Organize now" }),
+  ).toBeEnabled();
 
-  const factRow = page
-    .locator("article")
-    .filter({ hasText: "Prefers executable implementation plans" });
-  await factRow.getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("button", { name: /Version 3/u }).click();
+  await expect(
+    page.getByRole("heading", { name: "Document change" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("+Prefers executable implementation plans."),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Restore this version" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Restore version 3?" }),
+  ).toBeVisible();
   await page
     .getByRole("dialog")
-    .getByRole("textbox", { name: "Content", exact: true })
-    .fill("Prefers executable plans with focused acceptance tests");
-  await page.getByRole("button", { name: "Save revision" }).click();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByText("Updated in another session")).toBeVisible();
-
-  const refreshedFactRow = page
-    .locator("article")
-    .filter({ hasText: "Updated in another session" });
-  await refreshedFactRow.getByRole("button", { name: "Edit" }).click();
-  await page
-    .getByRole("dialog")
-    .getByRole("textbox", { name: "Content", exact: true })
-    .fill("Prefers executable plans with focused acceptance tests");
-  await page.getByRole("button", { name: "Save revision" }).click();
-  await expect(
-    page.getByText("Prefers executable plans with focused acceptance tests"),
-  ).toBeVisible();
-
-  await page.getByRole("button", { name: "Stop recall" }).click();
-  await expect(
-    page.getByText("Prefers executable plans with focused acceptance tests"),
-  ).toHaveCount(0);
-  await page.getByRole("combobox").click();
-  await page.getByRole("option", { name: "Disabled" }).click();
-  await page.getByRole("button", { name: "Restore" }).click();
-  await expect(page.getByText("No matching facts")).toBeVisible();
-  await page.getByRole("combobox").click();
-  await page.getByRole("option", { name: "Active" }).click();
-
-  await page.getByRole("tab", { name: "Pending review" }).click();
-  const acceptedCandidate = page
-    .locator("article")
-    .filter({ hasText: "Keep acceptance criteria explicit" });
-  await acceptedCandidate.getByRole("button", { name: "Accept" }).click();
-  await expect(page.getByText("Keep acceptance criteria explicit")).toHaveCount(
-    0,
-  );
-  const rejectedCandidate = page
-    .locator("article")
-    .filter({ hasText: "Temporary conversational detail" });
-  await rejectedCandidate.getByRole("button", { name: "Reject" }).click();
-  await expect(page.getByText("Nothing is waiting for review")).toBeVisible();
-
-  await page.getByRole("tab", { name: "Long-term memory" }).click();
-  await page.getByRole("button", { name: "View history" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Change history" }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("The user requested executable plans."),
-  ).toBeVisible();
-  await page.getByRole("tab", { name: "Long-term memory" }).click();
-
-  await page.getByRole("button", { name: "Forget permanently" }).click();
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Forget permanently" })
+    .getByRole("button", { name: "Restore" })
     .click();
-  await expect(page.getByText("No long-term facts yet")).toBeVisible();
+  await expect(page).toHaveURL(/\/memory\?version=4$/u);
 
-  await page.getByRole("tab", { name: "Settings" }).click();
-  await expect(page.getByText("Memory v2")).toBeVisible();
-  await expect(page.getByText("120 minutes")).toBeVisible();
-  await expect(page.getByText("30 days")).toBeVisible();
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Organize now" }).click();
+  await expect(page.getByText("0 items", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Prefers explicit acceptance checks."),
+  ).toBeVisible();
 });

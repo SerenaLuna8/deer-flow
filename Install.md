@@ -32,7 +32,7 @@ Consider the setup successful when all of the following are true:
 - For Docker setup, `make docker-init` completed successfully and Docker prerequisites are prepared, but services are not assumed to be running yet.
 - For local setup, `make check` passed or reported no missing prerequisites, and `make install` completed successfully.
 - The user receives the exact next command to launch ActWeave.
-- `make setup-db` seeded the encrypted DeepSeek V4 Pro Credential/model as active and default, and the user is told that a system administrator can manage it at `/admin/settings/models`.
+- `make setup-db` seeds active DeepSeek V4 Flash and DeepSeek V4 Pro models that share one encrypted Credential version, plus GPT 5.6 Luna with a separate encrypted OpenCode Credential; Flash remains the default, and a system administrator can manage the catalog at `/admin/settings/models`.
 
 ## Steps
 
@@ -41,7 +41,7 @@ Consider the setup successful when all of the following are true:
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
-- Require PostgreSQL-only `DATABASE_URL` and `POSTGRES_ADMIN_URL` entries in the root `.env` or explicit environment. Do not read or print their values. `make setup-db` loads the root `.env` only when it exists, and explicit environment works without that file. It is the only initialization entry point: it requires an empty target, executes the complete `full_schema.sql`, records `full_schema_v3`, and performs first-install bootstrap. It also requires `DEEPSEEK_API_KEY` plus the Credential keyring environment in the same secret source; the command preflights them before database creation and stores only an encrypted `model_api_key` envelope. Existing legacy, unknown, or nonempty unmanaged databases are not upgraded; provision a new empty target instead. Run `make setup-db`, then run `make check-db`.
+- Require PostgreSQL-only `DATABASE_URL` and `POSTGRES_ADMIN_URL` entries in the root `.env` or explicit environment. Do not read or print their values. `make setup-db` loads the root `.env` only when it exists, and explicit environment works without the file. It is the only initialization entry point: it requires an empty target, executes the complete `full_schema.sql`, records `full_schema_v4`, and performs first-install bootstrap. It also requires `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, and the Credential keyring environment in the same secret source; the command preflights them before database creation and stores only encrypted `model_api_key` envelopes. Existing legacy, unknown, or nonempty unmanaged databases are not upgraded; provision a new empty target instead. Run `make setup-db`, then run `make check-db`.
 - Never rely on application startup to initialize or repair PostgreSQL. Runtime startup and `make check-db` are read-only schema consumers. If an existing database has a legacy or unknown marker, is unmarked and nonempty, or has catalog drift, stop and require a new empty target instead of stamping, resetting, or repairing it.
 - The application compose stack does not provision PostgreSQL. When Docker is available, a standalone `postgres:17-alpine` container is acceptable, but use placeholders for credentials and keep the application role non-superuser. ActWeave does not use RLS; project access is enforced by `ProjectContext` and scoped repositories.
 - If Docker is available:
@@ -55,7 +55,7 @@ Consider the setup successful when all of the following are true:
   - If prerequisites are satisfied, run `make install`.
   - Tell the user the recommended next command is `make dev`.
 - Do not inspect `config.yaml` for model entries: top-level `models:` is removed and rejected. Model definitions and provider secrets are PostgreSQL system settings.
-- Do not print or copy values from `.env`, `frontend/.env`, or other secret-bearing files. Let `make setup-db` load the root `.env` when present; explicit environment variables take precedence and also work without the file. Runtime imports must not load dotenv implicitly. After startup, tell a system administrator that the active/default DeepSeek model is already database-backed and can be inspected or changed at `/admin/settings/models`.
+- Do not print or copy values from `.env`, `frontend/.env`, or other secret-bearing files. Let `make setup-db` load the root `.env` when present; explicit environment variables take precedence and also work without the file. Runtime imports must not load dotenv implicitly. After startup, tell a system administrator that DeepSeek V4 Flash/Pro share one encrypted Credential version and GPT 5.6 Luna uses the separate encrypted OpenCode Credential; all can be inspected or changed at `/admin/settings/models`, and Flash is initially the default.
 - If the repository already appears configured, avoid repeating expensive work unless it is necessary to verify the environment.
 
 ## Verification

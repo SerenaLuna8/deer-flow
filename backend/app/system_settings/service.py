@@ -25,11 +25,13 @@ from app.system_settings.errors import (
     SystemModelStorageUnavailable,
 )
 from app.system_settings.models import (
+    ConnectionTestSystemModelMaterial,
     CreateSystemModel,
     PublicSystemModelView,
     RunModelConfigSnapshotView,
     SystemModelCatalogStateView,
     SystemModelCatalogView,
+    SystemModelConnectionCheck,
     SystemModelVersionView,
     SystemModelView,
     UpdateSystemModel,
@@ -42,6 +44,7 @@ from app.system_settings.validation import (
     ModelSettingsInvalid,
     canonical_model_payload_checksum,
     validate_create_system_model,
+    validate_system_model_connection_test,
     validate_update_system_model,
 )
 from deerflow.persistence.system_settings import (
@@ -348,6 +351,39 @@ class SystemModelCatalogService:
             state.updated_by_user_id = str(actor.user_id)
             await repository.session.flush()
             return _model_view(model, version)
+
+        return await self._admin_operation(issued, operation)
+
+    async def prepare_connection_test(
+        self,
+        context: SystemAuditContext,
+        command: SystemModelConnectionCheck,
+    ) -> ConnectionTestSystemModelMaterial:
+        """Re-authorize and decryptably lock a Credential without persisting a model."""
+
+        issued = self._require_admin(context)
+        try:
+            command = validate_system_model_connection_test(command)
+        except ModelSettingsInvalid:
+            raise SystemModelInvalid(issued.request_id) from None
+
+        async def operation(
+            repository: SystemModelRepository,
+            _actor: SystemAuditContext,
+        ) -> ConnectionTestSystemModelMaterial:
+            credential = await repository.lock_system_credential_reference(
+                command.credential_id,
+                command.credential_version_id,
+                command.credential_env_key,
+                require_current=True,
+                load_envelope=True,
+            )
+            return ConnectionTestSystemModelMaterial(
+                command=command,
+                credential=(credential.credential if credential is not None else None),
+                credential_version=(credential.version if credential is not None else None),
+                envelope=(credential.envelope if credential is not None else None),
+            )
 
         return await self._admin_operation(issued, operation)
 

@@ -252,83 +252,25 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
       "Results from these tools are summarized as Skill file content. Separate with commas.",
   },
   "agent_runtime.memory.enabled": {
-    zh: "启用项目记忆",
-    en: "Enable project Memory",
-    hintZh: "从项目对话中提取可复用事实，并在后续任务中使用。",
+    zh: "启用记忆",
+    en: "Enable Memory",
+    hintZh: "允许学习、Dream 整理和在新 Run 中召回用户私有的长期记忆文档。",
     hintEn:
-      "Extract reusable facts from project conversations and use them in later Runs.",
-  },
-  "agent_runtime.memory.search_enabled": {
-    zh: "允许 Agent 搜索已有记忆",
-    en: "Allow Memory search",
-  },
-  "agent_runtime.memory.debounce_seconds": {
-    zh: "记忆处理等待时间",
-    en: "Memory processing delay",
-    unit: "秒",
+      "Allow learning, Dream organization, and document recall for new Runs.",
   },
   "agent_runtime.memory.model_name": {
-    zh: "记忆整理模型",
-    en: "Memory model",
+    zh: "Dream 模型",
+    en: "Dream model",
   },
-  "agent_runtime.memory.max_facts": {
-    zh: "最多保留事实",
-    en: "Maximum retained facts",
-    unit: "条",
-  },
-  "agent_runtime.memory.fact_confidence_threshold": {
-    zh: "事实最低可信度",
-    en: "Minimum fact confidence",
-    unit: "%",
-  },
-  "agent_runtime.memory.injection_enabled": {
-    zh: "将相关记忆注入上下文",
-    en: "Inject relevant Memory",
+  "agent_runtime.memory.dream_interval_minutes": {
+    zh: "自动 Dream 周期",
+    en: "Automatic Dream interval",
+    unit: "分钟",
   },
   "agent_runtime.memory.max_injection_tokens": {
-    zh: "每次注入上限",
-    en: "Maximum injection size",
+    zh: "记忆文档注入上限",
+    en: "Memory document injection limit",
     unit: "Token",
-  },
-  "agent_runtime.memory.token_counting": {
-    zh: "Token 计算方式",
-    en: "Token counting method",
-  },
-  "agent_runtime.memory.guaranteed_categories": {
-    zh: "始终保留的记忆类别",
-    en: "Guaranteed Memory categories",
-    hintZh: "使用英文逗号分隔。",
-    hintEn: "Separate values with commas.",
-  },
-  "agent_runtime.memory.guaranteed_token_budget": {
-    zh: "保留类别专用预算",
-    en: "Guaranteed category budget",
-    unit: "Token",
-  },
-  "agent_runtime.memory.staleness_review_enabled": {
-    zh: "定期检查过期记忆",
-    en: "Review stale Memory",
-  },
-  "agent_runtime.memory.staleness_age_days": {
-    zh: "超过此时长进入检查",
-    en: "Age before review",
-    unit: "天",
-  },
-  "agent_runtime.memory.staleness_min_candidates": {
-    zh: "开始检查所需候选项",
-    en: "Candidates required to review",
-    unit: "条",
-  },
-  "agent_runtime.memory.staleness_max_removals_per_cycle": {
-    zh: "每轮最多移除",
-    en: "Maximum removals per cycle",
-    unit: "条",
-  },
-  "agent_runtime.memory.staleness_protected_categories": {
-    zh: "清理时保护的类别",
-    en: "Categories protected from cleanup",
-    hintZh: "使用英文逗号分隔。",
-    hintEn: "Separate values with commas.",
   },
   "agent_runtime.tool_search.enabled": {
     zh: "启用工具按需发现",
@@ -1211,8 +1153,8 @@ function agentRuntimeGroups(locale: Locale) {
       title: locale === "zh-CN" ? "记忆" : "Memory",
       description:
         locale === "zh-CN"
-          ? "管理事实提取、搜索、上下文注入和过期记忆清理。"
-          : "Manage fact extraction, search, context injection, and stale Memory cleanup.",
+          ? "管理 Dream 模型、自动整理周期和文档注入上限。"
+          : "Manage the Dream model, automatic organization interval, and document injection limit.",
       icon: BrainIcon,
     },
     {
@@ -1516,23 +1458,8 @@ function AgentRuntimeEditor({
         />
         <fieldset disabled={!value.memory.enabled} className="contents">
           <legend className="sr-only">
-            {locale === "zh-CN" ? "项目记忆详细设置" : "Project Memory details"}
+            {locale === "zh-CN" ? "记忆策略详细设置" : "Memory policy details"}
           </legend>
-          <BooleanField
-            name="agent_runtime.memory.search_enabled"
-            checked={value.memory.search_enabled}
-            onChange={(next) => update("memory.search_enabled", next)}
-          />
-          <BooleanField
-            name="agent_runtime.memory.injection_enabled"
-            checked={value.memory.injection_enabled}
-            onChange={(next) => update("memory.injection_enabled", next)}
-          />
-          <BooleanField
-            name="agent_runtime.memory.staleness_review_enabled"
-            checked={value.memory.staleness_review_enabled}
-            onChange={(next) => update("memory.staleness_review_enabled", next)}
-          />
           <ModelField
             name="agent_runtime.memory.model_name"
             value={value.memory.model_name}
@@ -1541,100 +1468,18 @@ function AgentRuntimeEditor({
             onChange={(next) => update("memory.model_name", next)}
           />
           <NumberField
-            name="agent_runtime.memory.debounce_seconds"
-            value={value.memory.debounce_seconds}
-            min={1}
-            max={300}
-            disabled={!value.memory.search_enabled}
-            onChange={(next) => update("memory.debounce_seconds", next)}
-          />
-          <NumberField
-            name="agent_runtime.memory.max_facts"
-            value={value.memory.max_facts}
-            min={10}
-            max={500}
-            onChange={(next) => update("memory.max_facts", next)}
-          />
-          <NumberField
-            name="agent_runtime.memory.fact_confidence_threshold"
-            value={value.memory.fact_confidence_threshold}
-            min={0}
-            max={100}
-            scale={0.01}
-            onChange={(next) =>
-              update("memory.fact_confidence_threshold", next)
-            }
+            name="agent_runtime.memory.dream_interval_minutes"
+            value={value.memory.dream_interval_minutes}
+            min={15}
+            max={1_440}
+            onChange={(next) => update("memory.dream_interval_minutes", next)}
           />
           <NumberField
             name="agent_runtime.memory.max_injection_tokens"
             value={value.memory.max_injection_tokens}
             min={100}
             max={8_000}
-            disabled={!value.memory.injection_enabled}
             onChange={(next) => update("memory.max_injection_tokens", next)}
-          />
-          <NumberField
-            name="agent_runtime.memory.guaranteed_token_budget"
-            value={value.memory.guaranteed_token_budget}
-            min={50}
-            max={2_000}
-            onChange={(next) => update("memory.guaranteed_token_budget", next)}
-          />
-          <NumberField
-            name="agent_runtime.memory.staleness_age_days"
-            value={value.memory.staleness_age_days}
-            min={30}
-            max={365}
-            disabled={!value.memory.staleness_review_enabled}
-            onChange={(next) => update("memory.staleness_age_days", next)}
-          />
-          <NumberField
-            name="agent_runtime.memory.staleness_min_candidates"
-            value={value.memory.staleness_min_candidates}
-            min={1}
-            max={50}
-            disabled={!value.memory.staleness_review_enabled}
-            onChange={(next) => update("memory.staleness_min_candidates", next)}
-          />
-          <NumberField
-            name="agent_runtime.memory.staleness_max_removals_per_cycle"
-            value={value.memory.staleness_max_removals_per_cycle}
-            min={1}
-            max={50}
-            disabled={!value.memory.staleness_review_enabled}
-            onChange={(next) =>
-              update("memory.staleness_max_removals_per_cycle", next)
-            }
-          />
-          <FieldShell name="agent_runtime.memory.token_counting">
-            <select
-              name="agent_runtime.memory.token_counting"
-              value={value.memory.token_counting}
-              onChange={(event) =>
-                update("memory.token_counting", event.target.value)
-              }
-              className="border-input bg-background h-9 rounded-md border px-3 text-sm"
-            >
-              <option value="tiktoken">
-                {locale === "zh-CN" ? "精确分词" : "Tokenizer"}
-              </option>
-              <option value="char">
-                {locale === "zh-CN" ? "按字符估算" : "Character estimate"}
-              </option>
-            </select>
-          </FieldShell>
-          <StringListField
-            name="agent_runtime.memory.guaranteed_categories"
-            value={value.memory.guaranteed_categories}
-            onChange={(next) => update("memory.guaranteed_categories", next)}
-          />
-          <StringListField
-            name="agent_runtime.memory.staleness_protected_categories"
-            value={value.memory.staleness_protected_categories}
-            onChange={(next) =>
-              update("memory.staleness_protected_categories", next)
-            }
-            disabled={!value.memory.staleness_review_enabled}
           />
         </fieldset>
       </RuntimeGroup>

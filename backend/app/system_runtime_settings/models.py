@@ -30,15 +30,6 @@ ToolName = Annotated[
         pattern=r"^[A-Za-z_][A-Za-z0-9_.:-]*$",
     ),
 ]
-CategoryName = Annotated[
-    str,
-    StringConstraints(
-        strip_whitespace=True,
-        min_length=1,
-        max_length=64,
-        pattern=r"^[A-Za-z][A-Za-z0-9_.:-]*$",
-    ),
-]
 ModelName = Annotated[
     str,
     StringConstraints(
@@ -140,37 +131,9 @@ class SummarizationPolicy(_PolicyModel):
 
 class MemoryPolicy(_PolicyModel):
     enabled: bool = True
-    pipeline_mode: Literal["off", "shadow", "consolidate", "v2"] = "off"
-    consolidation_interval_minutes: int = Field(default=120, ge=15, le=1_440)
-    candidate_retention_days: int = Field(default=30, ge=1, le=365)
-    search_enabled: bool = True
-    debounce_seconds: int = Field(default=30, ge=1, le=300)
     model_name: ModelName | None = None
-    max_facts: int = Field(default=100, ge=10, le=500)
-    fact_confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    injection_enabled: bool = True
+    dream_interval_minutes: int = Field(default=120, ge=15, le=1_440)
     max_injection_tokens: int = Field(default=2_000, ge=100, le=8_000)
-    token_counting: Literal["tiktoken", "char"] = "char"
-    guaranteed_categories: list[CategoryName] = Field(
-        default_factory=lambda: ["correction"],
-        max_length=32,
-    )
-    guaranteed_token_budget: int = Field(default=500, ge=50, le=2_000)
-    staleness_review_enabled: bool = True
-    staleness_age_days: int = Field(default=90, ge=30, le=365)
-    staleness_min_candidates: int = Field(default=3, ge=1, le=50)
-    staleness_max_removals_per_cycle: int = Field(default=10, ge=1, le=50)
-    staleness_protected_categories: list[CategoryName] = Field(
-        default_factory=lambda: ["correction"],
-        max_length=32,
-    )
-
-    @field_validator("guaranteed_categories", "staleness_protected_categories")
-    @classmethod
-    def unique_categories(cls, value: list[str]) -> list[str]:
-        if len(value) != len(set(value)):
-            raise ValueError("categories must be unique")
-        return value
 
 
 class ToolSearchPolicy(_PolicyModel):

@@ -54,6 +54,18 @@ class UpdateSystemModel:
 
 
 @dataclass(frozen=True, slots=True)
+class SystemModelConnectionCheck:
+    """Validated, non-persistent inputs for one administrator connection check."""
+
+    provider_adapter: str
+    provider_model: str
+    settings: Mapping[str, object]
+    credential_id: uuid.UUID | None
+    credential_version_id: uuid.UUID | None
+    credential_env_key: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class SystemModelVersionView:
     id: uuid.UUID
     model_config_id: uuid.UUID
@@ -147,7 +159,21 @@ class LockedSystemModelMaterial:
     snapshot: RunModelConfigSnapshotRow | None = field(default=None, repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionTestSystemModelMaterial:
+    """One verified Credential reference for a transient connection check."""
+
+    command: SystemModelConnectionCheck
+    credential: CredentialRow | None = field(default=None, repr=False)
+    credential_version: CredentialVersionRow | None = field(
+        default=None,
+        repr=False,
+    )
+    envelope: CredentialEnvelopeRow | None = field(default=None, repr=False)
+
+
 __all__ = [
+    "ConnectionTestSystemModelMaterial",
     "CreateSystemModel",
     "LockedSystemModelMaterial",
     "PublicSystemModelView",
@@ -156,5 +182,6 @@ __all__ = [
     "SystemModelCatalogView",
     "SystemModelVersionView",
     "SystemModelView",
+    "SystemModelConnectionCheck",
     "UpdateSystemModel",
 ]

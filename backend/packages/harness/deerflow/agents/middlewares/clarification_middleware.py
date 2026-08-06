@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Any, override
 
@@ -204,6 +204,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         tool_call_id: str,
         request_id: str,
         fields: list[dict[str, Any]] | None = None,
+        source_run_id: str | None = None,
     ) -> dict[str, Any]:
         """Build the versioned structured payload and plain-text fallback."""
         if fields is None:
@@ -229,6 +230,8 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         if tool_call_id:
             payload["tool_call_id"] = tool_call_id
+        if isinstance(source_run_id, str) and source_run_id and len(source_run_id) <= 64:
+            payload["source_run_id"] = source_run_id
 
         if "context" in args:
             context = args.get("context")
@@ -387,11 +390,15 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         tool_call_id = request.tool_call.get("id", "")
 
         request_id = self._stable_message_id(tool_call_id, formatted_message)
+        runtime = getattr(request, "runtime", None)
+        runtime_context = getattr(runtime, "context", None)
+        source_run_id = runtime_context.get("run_id") if isinstance(runtime_context, Mapping) else None
         human_input_payload = self._build_human_input_payload(
             args,
             tool_call_id=tool_call_id,
             request_id=request_id,
             fields=fields,
+            source_run_id=source_run_id,
         )
 
         # Create a ToolMessage with the formatted question

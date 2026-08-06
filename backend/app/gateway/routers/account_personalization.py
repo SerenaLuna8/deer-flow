@@ -49,10 +49,10 @@ class ResetAccountMemoryRequest(_StrictModel):
 class ResetAccountMemoryResponse(_StrictModel):
     version: int = Field(ge=1)
     scopes_reset: int = Field(alias="scopesReset", ge=0)
-    v1_memories: int = Field(alias="v1Memories", ge=0)
-    source_batches: int = Field(alias="sourceBatches", ge=0)
-    candidates: int = Field(ge=0)
-    facts: int = Field(ge=0)
+    history_entries: int = Field(alias="historyEntries", ge=0)
+    documents: int = Field(ge=0)
+    versions: int = Field(ge=0)
+    dream_runs: int = Field(alias="dreamRuns", ge=0)
     snapshots: int = Field(ge=0)
     jobs_cancelled: int = Field(alias="jobsCancelled", ge=0)
 

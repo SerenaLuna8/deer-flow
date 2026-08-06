@@ -1,4 +1,6 @@
-from pydantic import BaseModel, ConfigDict, Field
+import uuid
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 class ModelConfig(BaseModel):
@@ -13,6 +15,9 @@ class ModelConfig(BaseModel):
     )
     model: str = Field(..., description="Model name")
     model_config = ConfigDict(extra="allow")
+    _system_model_config_version_id: uuid.UUID | None = PrivateAttr(
+        default=None,
+    )
     use_responses_api: bool | None = Field(
         default=None,
         description="Whether to route OpenAI ChatOpenAI calls through the /v1/responses API",

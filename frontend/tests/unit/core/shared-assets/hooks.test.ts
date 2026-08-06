@@ -22,7 +22,11 @@ describe("shared asset hooks", () => {
     expect(rs.mocked(useQuery)).toHaveBeenCalledWith(
       expect.objectContaining({
         enabled: false,
-        queryKey: expect.arrayContaining(["asset", "__unselected__", "versions"]),
+        queryKey: expect.arrayContaining([
+          "asset",
+          "__unselected__",
+          "versions",
+        ]),
       }),
     );
   });

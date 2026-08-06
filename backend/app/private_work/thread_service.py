@@ -47,6 +47,7 @@ from app.shared_assets.models import (
     ResolvedAgentSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import AgentRow
@@ -445,7 +446,11 @@ class PrivateThreadService:
                 resolved_app_config,
                 as_node="branch",
             )
-            excluded = {"sandbox", "thread_data"}
+            excluded = {
+                "sandbox",
+                "thread_data",
+                MEMORY_ARCHIVE_RECEIPT_KEY,
+            }
             base_values = {key: value for key, value in replay_base_snapshot.values.items() if key not in excluded}
             selected_values = {key: value for key, value in source_snapshot.values.items() if key not in excluded}
             await target_state.aupdate(

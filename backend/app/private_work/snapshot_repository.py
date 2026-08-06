@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.context import PrivateWorkContext, require_issued_private_work_context
 from app.private_work.errors import (
     PrivateWorkAssetStale,
@@ -22,6 +24,7 @@ from app.private_work.run_repository import (
     PrivateRunRecord,
     PrivateRunRepository,
 )
+from app.private_work.thread_repository import PrivateThreadRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.credential_closure import (
     LockedMcpCredentialClosure,
@@ -52,16 +55,22 @@ from app.system_settings.errors import (
     SystemModelNotFound,
     SystemModelStorageUnavailable,
 )
+from deerflow.agents.memory.dream import validate_memory_document
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
     McpEndpointPolicy,
     validate_project_mcp_definition,
+)
+from deerflow.persistence.private_work.memory_document_model import (
+    MemoryDocumentRow,
+    RunMemoryContextSnapshotRow,
 )
 from deerflow.persistence.private_work.model import (
     RunAssetVersionRow,
     RunMcpGrantSnapshotRow,
     RunSkillCredentialSnapshotRow,
 )
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets.agent_model import (
     AgentRow,
     AgentVersionMcpRefRow,
@@ -206,12 +215,137 @@ class RunSnapshotRepository:
         model_catalog: RunModelSnapshotAdmissionPort | None = None,
         runtime_policy: RunRuntimePolicyAdmissionPort | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
+        personalization_repository_builder=AccountPersonalizationRepository,
     ) -> None:
         self._session_factory = session_factory
         self._model_ref_resolver = model_ref_resolver or ExactModelRefResolver()
         self._model_catalog = model_catalog
         self._runtime_policy = runtime_policy
         self._endpoint_policy = endpoint_policy
+        if not callable(personalization_repository_builder):
+            raise TypeError("personalization repository builder must be callable")
+        self._personalization_repository_builder = personalization_repository_builder
+
+    async def _admit_memory_context_snapshot(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        run_id: str,
+        locked_policy: LockedAgentRuntimePolicy,
+        thread_id: str | None = None,
+        continuation_source_run_id: str | None = None,
+    ) -> None:
+        """Freeze one complete document in the caller's Run transaction."""
+
+        if not isinstance(locked_policy, LockedAgentRuntimePolicy):
+            raise RunSnapshotAssetStale
+        memory = locked_policy.value.memory
+        if continuation_source_run_id is not None:
+            if not isinstance(thread_id, str) or not thread_id or not isinstance(continuation_source_run_id, str) or not continuation_source_run_id or len(continuation_source_run_id) > 64 or continuation_source_run_id == run_id:
+                raise PrivateWorkConflict(context.request_id)
+            # Hold the live preference row even though its enabled bit does
+            # not change the inherited snapshot.  This preserves the global
+            # preference-before-Memory lock order and serializes reset.
+            await self._personalization_repository_builder(session).read_memory(
+                str(context.user_id),
+                for_update=True,
+            )
+            source_run = (
+                await session.execute(
+                    select(RunRow.run_id).where(
+                        RunRow.project_id == context.project_id,
+                        RunRow.owner_user_id == str(context.user_id),
+                        RunRow.thread_id == thread_id,
+                        RunRow.run_id == continuation_source_run_id,
+                        RunRow.status != "deleted",
+                    )
+                )
+            ).scalar_one_or_none()
+            if source_run is None:
+                raise PrivateWorkConflict(context.request_id)
+            source_snapshot = (
+                await session.execute(
+                    select(RunMemoryContextSnapshotRow)
+                    .where(
+                        RunMemoryContextSnapshotRow.project_id == context.project_id,
+                        RunMemoryContextSnapshotRow.owner_user_id == str(context.user_id),
+                        RunMemoryContextSnapshotRow.run_id == continuation_source_run_id,
+                        RunMemoryContextSnapshotRow.namespace == "default",
+                    )
+                    .with_for_update(of=RunMemoryContextSnapshotRow)
+                )
+            ).scalar_one_or_none()
+            # No source row is itself a frozen result.  Falling back to the
+            # current document here would mix two logical-task snapshots.
+            if source_snapshot is None:
+                return
+            try:
+                validate_memory_document(
+                    source_snapshot.content,
+                    memory.max_injection_tokens,
+                )
+                digest = hashlib.sha256(
+                    source_snapshot.content.encode("utf-8"),
+                ).hexdigest()
+                if digest != source_snapshot.content_digest:
+                    raise ValueError("Run Memory snapshot digest drift")
+            except (TypeError, ValueError):
+                raise PrivateWorkConflict(context.request_id) from None
+            session.add(
+                RunMemoryContextSnapshotRow(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    run_id=run_id,
+                    namespace="default",
+                    document_version=int(source_snapshot.document_version),
+                    content=source_snapshot.content,
+                    content_digest=source_snapshot.content_digest,
+                )
+            )
+            return
+        if not memory.enabled:
+            return
+        preference = await self._personalization_repository_builder(session).read_memory(
+            str(context.user_id),
+            for_update=True,
+        )
+        if not preference.memory_enabled:
+            return
+        document = (
+            await session.execute(
+                select(MemoryDocumentRow)
+                .where(
+                    MemoryDocumentRow.project_id == context.project_id,
+                    MemoryDocumentRow.owner_user_id == str(context.user_id),
+                    MemoryDocumentRow.namespace == "default",
+                )
+                .with_for_update(of=MemoryDocumentRow)
+            )
+        ).scalar_one_or_none()
+        if document is None or int(document.version) < 1:
+            return
+        try:
+            validate_memory_document(
+                document.content,
+                memory.max_injection_tokens,
+            )
+            digest = hashlib.sha256(document.content.encode("utf-8")).hexdigest()
+            if digest != document.content_digest:
+                raise ValueError("Memory document digest drift")
+        except (TypeError, ValueError):
+            raise PrivateWorkConflict(context.request_id) from None
+        session.add(
+            RunMemoryContextSnapshotRow(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                run_id=run_id,
+                namespace="default",
+                document_version=int(document.version),
+                content=document.content,
+                content_digest=document.content_digest,
+            )
+        )
 
     @staticmethod
     def _asset_allowed(
@@ -468,6 +602,8 @@ class RunSnapshotRepository:
         thread_id: str,
         request: PrivateRunCreate,
         resolved_agent: ResolvedAgentSnapshot | ResolvedRunAssetClosure,
+        *,
+        continuation_source_run_id: str | None = None,
     ) -> PrivateRunRecord:
         """Write a pending run and exact closure in a caller-owned transaction."""
 
@@ -478,6 +614,8 @@ class RunSnapshotRepository:
             ResolvedAgentSnapshot,
             ResolvedRunAssetClosure,
         ):
+            raise PrivateWorkConflict(context.request_id)
+        if request.follow_up_to_run_id != continuation_source_run_id:
             raise PrivateWorkConflict(context.request_id)
         resolved_closure = resolved_agent if type(resolved_agent) is ResolvedRunAssetClosure else None
         lead_agent = resolved_closure.lead_agent if resolved_closure is not None else resolved_agent
@@ -638,6 +776,15 @@ class RunSnapshotRepository:
             if refreshed is None:
                 raise RunSnapshotAssetStale
             run = refreshed
+        if locked_runtime_policy is not None:
+            await self._admit_memory_context_snapshot(
+                session,
+                context,
+                run_id=run.run_id,
+                locked_policy=locked_runtime_policy,
+                thread_id=thread_id,
+                continuation_source_run_id=continuation_source_run_id,
+            )
         asset_rows = [
             RunAssetVersionRow(
                 project_id=context.project_id,
@@ -739,6 +886,11 @@ class RunSnapshotRepository:
             for material in skill_credential_closures[uuid.UUID(str(version.id))].materials
         )
         await session.flush()
+        await PrivateThreadRepository(session).touch_activity(
+            scope=context.resource_scope,
+            thread_id=thread_id,
+            occurred_at=run.created_at,
+        )
         return run
 
     @staticmethod

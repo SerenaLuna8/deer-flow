@@ -96,9 +96,11 @@ export async function runAbortableAccountPersonalizationMutation<T>(
   accountId: string,
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  const parsedAccountId = accountPersonalizationAccountIdSchema.parse(accountId);
+  const parsedAccountId =
+    accountPersonalizationAccountIdSchema.parse(accountId);
   const controller = new AbortController();
-  const accountControllers = mutationControllers.get(parsedAccountId) ?? new Set();
+  const accountControllers =
+    mutationControllers.get(parsedAccountId) ?? new Set();
   accountControllers.add(controller);
   mutationControllers.set(parsedAccountId, accountControllers);
   try {
@@ -112,7 +114,8 @@ export async function runAbortableAccountPersonalizationMutation<T>(
 }
 
 export function abortAccountPersonalizationAccount(accountId: string): void {
-  const parsedAccountId = accountPersonalizationAccountIdSchema.parse(accountId);
+  const parsedAccountId =
+    accountPersonalizationAccountIdSchema.parse(accountId);
   for (const controller of mutationControllers.get(parsedAccountId) ?? []) {
     controller.abort();
   }

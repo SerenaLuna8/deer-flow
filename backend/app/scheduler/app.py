@@ -18,14 +18,11 @@ from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.ownership import AutomationSchedulerOwnership
 from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
+from app.private_work.memory_dream_service import MemoryDreamSchedulerService
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.quotas.system_policy import SystemQuotaPolicyReader
 from app.reliability.owner_refs import AuditHmacKeyring
-from app.scheduler.memory import (
-    MemoryMaintenanceSchedulerService,
-    resolve_memory_consolidation_runtime,
-)
 from app.scheduler.service import AutomationSchedulerService
 from app.system_runtime_settings import SystemRuntimePolicyService
 from app.system_settings import SystemModelCatalogService
@@ -58,7 +55,7 @@ class SchedulerApp:
     service: AutomationSchedulerService
     session_factory: async_sessionmaker[AsyncSession]
     poll_interval_seconds: float
-    memory_service: MemoryMaintenanceSchedulerService | None = None
+    dream_service: MemoryDreamSchedulerService | None = None
 
     async def run(self, stop_event: asyncio.Event) -> None:
         if not self.enabled:
@@ -92,19 +89,15 @@ class SchedulerApp:
                         "Automation scheduler poll failed: error_type=%s",
                         type(error).__name__,
                     )
-                if self.memory_service is not None:
+                if self.dream_service is not None:
                     try:
                         await self.ownership.verify()
-                        async with self.session_factory() as session, session.begin():
-                            await self.memory_service.admit_due(
-                                session,
-                                now=now,
-                            )
+                        await self.dream_service.admit_due(now=now)
                     except asyncio.CancelledError:
                         raise
                     except Exception as error:  # noqa: BLE001 - isolated poll
                         logger.error(
-                            "Memory scheduler poll failed: error_type=%s",
+                            "Memory Dream scheduler poll failed: error_type=%s",
                             type(error).__name__,
                         )
                 try:
@@ -193,9 +186,7 @@ async def run_scheduler(
             service=service,
             session_factory=session_factory,
             poll_interval_seconds=config.scheduler.poll_interval_seconds,
-            memory_service=MemoryMaintenanceSchedulerService(
-                runtime_resolver=resolve_memory_consolidation_runtime,
-            ),
+            dream_service=MemoryDreamSchedulerService(session_factory),
         ).run(stop_event or asyncio.Event())
     finally:
         await close_engine()

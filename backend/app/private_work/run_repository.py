@@ -30,12 +30,15 @@ class PrivateRunCreate:
     kwargs: dict[str, Any] = field(default_factory=dict)
     model_name: str | None = None
     origin_trace_id: str = field(default_factory=generate_trace_id)
+    follow_up_to_run_id: str | None = None
 
     def __post_init__(self) -> None:
         normalized = normalize_trace_id(self.origin_trace_id)
         if normalized is None:
             raise ValueError("origin_trace_id is invalid")
         object.__setattr__(self, "origin_trace_id", normalized)
+        if self.follow_up_to_run_id is not None and (not isinstance(self.follow_up_to_run_id, str) or not self.follow_up_to_run_id or len(self.follow_up_to_run_id) > 64 or self.follow_up_to_run_id == self.run_id):
+            raise ValueError("follow_up_to_run_id is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +57,7 @@ class PrivateRunRecord:
     model_name: str | None
     created_at: datetime
     updated_at: datetime
+    follow_up_to_run_id: str | None = None
     job_id: uuid.UUID | None = None
 
 
@@ -182,6 +186,7 @@ class PrivateRunRepository:
             model_name=row.model_name,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            follow_up_to_run_id=row.follow_up_to_run_id,
             job_id=row.job_id,
         )
 
@@ -219,6 +224,7 @@ class PrivateRunRepository:
             kwargs_json=dict(request.kwargs),
             origin_trace_id=request.origin_trace_id,
             model_name=request.model_name,
+            follow_up_to_run_id=request.follow_up_to_run_id,
             created_at=now,
             updated_at=now,
         )

@@ -340,6 +340,30 @@ class TestClarificationCommandIdempotency:
         assert merged[0].content == first_message.content
         assert merged[0].artifact == first_message.artifact
 
+    def test_tool_message_stamps_the_server_runtime_run_id(self, middleware):
+        request = SimpleNamespace(
+            tool_call={
+                "name": "ask_clarification",
+                "id": "call-clarify-source",
+                "args": {
+                    "question": "Which environment should I use?",
+                    "clarification_type": "approach_choice",
+                    "options": ["dev", "prod"],
+                },
+            },
+            runtime=SimpleNamespace(
+                context={"run_id": "clarification-source-run"},
+            ),
+        )
+
+        result = middleware.wrap_tool_call(
+            request,
+            lambda _req: pytest.fail("handler should not be called"),
+        )
+
+        message = result.update["messages"][0]
+        assert message.artifact["human_input"]["source_run_id"] == "clarification-source-run"
+
     def test_tool_message_model_dump_preserves_human_input_artifact(self, middleware):
         request = SimpleNamespace(
             tool_call={

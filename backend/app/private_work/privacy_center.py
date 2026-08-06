@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncSessionTransaction,
 )
 
-from app.private_work.memory_v2_export import iter_memory_v2_export_records
 from app.private_work.retention_jobs import (
     RetentionJobAdmission,
     former_owner_retention_key,
@@ -33,12 +32,17 @@ from deerflow.persistence.channel_connections.model import (
 )
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.private_work.memory_document_model import (
+    MemoryDocumentRow,
+    MemoryDocumentVersionRow,
+    MemoryDreamRunRow,
+    MemoryHistoryEntryRow,
+    RunMemoryContextSnapshotRow,
+)
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
     PrivateFileChunkRow,
     PrivateFileRow,
-    UserProjectMemoryFactRow,
-    UserProjectMemoryRow,
 )
 from deerflow.persistence.projects.model import (
     ProjectMembershipRow,
@@ -476,62 +480,122 @@ class PrivacyCenterService:
                     },
                 )
 
-            memories = (
-                select(UserProjectMemoryRow)
+            memory_documents = (
+                select(MemoryDocumentRow)
                 .where(
-                    UserProjectMemoryRow.project_id == scope[0],
-                    UserProjectMemoryRow.owner_user_id == scope[1],
+                    MemoryDocumentRow.project_id == scope[0],
+                    MemoryDocumentRow.owner_user_id == scope[1],
                 )
                 .order_by(
-                    UserProjectMemoryRow.created_at,
-                    UserProjectMemoryRow.id,
+                    MemoryDocumentRow.namespace,
                 )
             )
-            async for row in self._scalar_rows(memories):
+            async for row in self._scalar_rows(memory_documents):
                 yield _export_line(
-                    "memory",
+                    "memory_document",
                     data={
-                        "id": str(row.id),
                         "namespace": row.namespace,
-                        "context_summary": row.context_summary,
-                        "created_at": _iso(row.created_at),
+                        "content": row.content,
+                        "version": row.version,
+                        "dream_cursor": row.dream_cursor,
                         "updated_at": _iso(row.updated_at),
                     },
                 )
 
-            facts = (
-                select(UserProjectMemoryFactRow)
+            memory_versions = (
+                select(MemoryDocumentVersionRow)
                 .where(
-                    UserProjectMemoryFactRow.project_id == scope[0],
-                    UserProjectMemoryFactRow.owner_user_id == scope[1],
+                    MemoryDocumentVersionRow.project_id == scope[0],
+                    MemoryDocumentVersionRow.owner_user_id == scope[1],
                 )
                 .order_by(
-                    UserProjectMemoryFactRow.created_at,
-                    UserProjectMemoryFactRow.id,
+                    MemoryDocumentVersionRow.namespace,
+                    MemoryDocumentVersionRow.version,
                 )
             )
-            async for row in self._scalar_rows(facts):
+            async for row in self._scalar_rows(memory_versions):
                 yield _export_line(
-                    "memory_fact",
+                    "memory_document_version",
                     data={
-                        "id": str(row.id),
-                        "memory_id": str(row.memory_id),
+                        "namespace": row.namespace,
+                        "version": row.version,
                         "content": row.content,
-                        "category": row.category,
-                        "confidence": row.confidence,
-                        "source_thread_id": row.source_thread_id,
-                        "source_run_id": row.source_run_id,
+                        "unified_diff": row.unified_diff,
+                        "trigger": row.trigger,
+                        "history_from": row.history_from,
+                        "history_to": row.history_to,
+                        "history_count": row.history_count,
                         "created_at": _iso(row.created_at),
                     },
                 )
 
-            async for record_type, data in iter_memory_v2_export_records(
-                self._session,
-                project_id=scope[0],
-                owner_user_id=scope[1],
-                namespace=None,
-            ):
-                yield _export_line(record_type, data=data)
+            memory_history = (
+                select(MemoryHistoryEntryRow)
+                .where(
+                    MemoryHistoryEntryRow.project_id == scope[0],
+                    MemoryHistoryEntryRow.owner_user_id == scope[1],
+                )
+                .order_by(MemoryHistoryEntryRow.sequence)
+            )
+            async for row in self._scalar_rows(memory_history):
+                yield _export_line(
+                    "memory_history_entry",
+                    data={
+                        "id": str(row.id),
+                        "sequence": row.sequence,
+                        "namespace": row.namespace,
+                        "thread_id": row.thread_id,
+                        "status": row.status,
+                        "tagged_text": row.tagged_text,
+                        "created_at": _iso(row.created_at),
+                        "consumed_at": _iso(row.consumed_at),
+                    },
+                )
+
+            dream_runs = (
+                select(MemoryDreamRunRow)
+                .where(
+                    MemoryDreamRunRow.project_id == scope[0],
+                    MemoryDreamRunRow.owner_user_id == scope[1],
+                )
+                .order_by(MemoryDreamRunRow.created_at, MemoryDreamRunRow.job_id)
+            )
+            async for row in self._scalar_rows(dream_runs):
+                yield _export_line(
+                    "memory_dream_run",
+                    data={
+                        "job_id": str(row.job_id),
+                        "namespace": row.namespace,
+                        "trigger": row.trigger,
+                        "history_from": row.history_from,
+                        "history_to": row.history_to,
+                        "history_count": row.history_count,
+                        "base_document_version": row.base_document_version,
+                        "result_version": row.result_version,
+                        "created_at": _iso(row.created_at),
+                        "completed_at": _iso(row.completed_at),
+                    },
+                )
+
+            memory_snapshots = (
+                select(RunMemoryContextSnapshotRow)
+                .where(
+                    RunMemoryContextSnapshotRow.project_id == scope[0],
+                    RunMemoryContextSnapshotRow.owner_user_id == scope[1],
+                )
+                .order_by(RunMemoryContextSnapshotRow.created_at, RunMemoryContextSnapshotRow.run_id)
+            )
+            async for row in self._scalar_rows(memory_snapshots):
+                yield _export_line(
+                    "run_memory_context_snapshot",
+                    data={
+                        "run_id": row.run_id,
+                        "namespace": row.namespace,
+                        "document_version": row.document_version,
+                        "content": row.content,
+                        "created_at": _iso(row.created_at),
+                    },
+                )
 
             files = (
                 select(PrivateFileRow)

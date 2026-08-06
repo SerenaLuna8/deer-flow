@@ -63,9 +63,9 @@ Warning 介入会按 thread 和 run 排队，并在下一次模型调用时合�
 
 ### DynamicContextMiddleware
 
-加入当前日期提醒；当私有 Run 启用 Memory 时，通过 Worker 签发的 authority 读取该 Run 冻结的召回来源。v2 会在每个模型边界复用本 Run 的精确有序 Fact Revision 快照，并以隐藏的低权限 Human message 注入。这个中间件不准入或更新长期 Memory。
+加入当前日期提醒；当私有 Run 启用 Memory 时，通过 Worker 签发的 authority 读取该 Run 冻结的有界 Memory 文档。每个模型边界复用同一份精确快照，并把完整文档作为隐藏、低权限 Human message 注入。这个中间件不整理或更新长期 Memory。
 
-长期写入链路位于中间件链之外：成功 Run 结算时准入 durable Source 和 `memory_extract` Job，再由 Scheduler 与 Worker 完成整理。已移除的内置 `MemoryMiddleware`、进程内 queue/updater 和 summarization Memory hook 不再是运行时扩展点。Pipeline mode 和管理行为参见[记忆系统](/docs/harness/memory)。
+长期写入链路独立运行：SNIP 把通过校验的压缩输出归档为待整理历史，Scheduler 或手动请求再准入 durable `memory_dream` Job 交给 Worker。文档、Dream 和版本合同参见[记忆系统](/docs/harness/memory)。
 
 ---
 

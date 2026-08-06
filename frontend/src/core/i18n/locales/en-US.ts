@@ -199,7 +199,9 @@ export const enUS: Translations = {
     goalCommandDescription: "Set, show, or clear an active goal",
     compactCommandDescription:
       "Compact earlier context while keeping the full chat visible",
-    dreamCommandDescription: "Consolidate extracted long-term Memory candidates now",
+    dreamCommandDescription: "Compact this chat, then organize pending Memory",
+    dreamLogCommandDescription: "Open Memory history, optionally at a version",
+    dreamRestoreCommandDescription: "Confirm and restore a Memory version",
     goalLabel: "Goal",
     goalContinuing: "Continuing {count}/{max}",
     goalContinuationTooltip:
@@ -213,12 +215,25 @@ export const enUS: Translations = {
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
     compactFailed: "Context compaction failed.",
-    dreamQueued: "Started consolidating {count} Memory candidates.",
-    dreamAlreadyRunning: "Memory consolidation is already running.",
-    dreamNoCandidates: "There are no Memory candidates waiting to be consolidated.",
-    dreamInvalidArguments: "/Dream does not accept arguments. Send /Dream by itself.",
-    dreamAttachmentsUnsupported: "/Dream cannot be sent with attachments.",
-    dreamFailed: "Failed to start Memory consolidation.",
+    dreamQueued: "Started organizing {count} Memory items.",
+    dreamAlreadyRunning: "Memory organization is already running.",
+    dreamNothingPending: "There is no Memory waiting to be organized.",
+    dreamInvalidArguments:
+      "/Dream does not accept arguments. Send /Dream by itself.",
+    dreamLogInvalidArguments:
+      "Use /dream-log or /dream-log followed by one positive version number.",
+    dreamRestoreInvalidArguments:
+      "Use /dream-restore followed by one positive version number.",
+    dreamAttachmentsUnsupported: "Memory commands cannot include attachments.",
+    dreamFailed: "Failed to organize Memory.",
+    dreamRequiresThread: "/Dream requires an existing chat.",
+    dreamRouteUnavailable: "Memory is not available from this chat.",
+    dreamRestoreSuccess: "Restored Memory as new version {version}.",
+    dreamRestoreFailed: "Failed to restore this Memory version.",
+    dreamRestoreConfirmTitle: "Restore Memory version {version}?",
+    dreamRestoreConfirmDescription:
+      "This writes the selected historical content as a new current version. Later history is preserved.",
+    dreamRestoreConfirmAction: "Restore version",
     suggestions: [
       {
         suggestion: "Write",
@@ -519,9 +534,7 @@ export const enUS: Translations = {
         automation_run: "Automation run",
         retention_purge: "Retention purge",
         mcp_discovery: "MCP tool discovery",
-        memory_extract: "Memory extraction",
-        memory_consolidate: "Memory consolidation",
-        memory_retention_purge: "Memory retention purge",
+        memory_dream: "Memory Dream",
       },
       retrySafety: {
         safe: "Safe to retry",
@@ -593,6 +606,7 @@ export const enUS: Translations = {
       active: "Enabled",
       suspended: "Suspended",
       updatedAt: (formattedDate) => `Updated ${formattedDate}`,
+      updatedAtColumn: "Updated",
       providerModel: "Provider model",
       credential: "Credential",
       environmentKey: "Environment variable",
@@ -643,15 +657,18 @@ export const enUS: Translations = {
       sortOrder: "Sort order",
       sortOrderHint: "Lower values appear first. New models use 0 by default.",
       capabilities: "Model capabilities",
+      capabilitiesAndRuntime: "Capabilities and runtime parameters",
       capabilitiesDescription:
         "These capabilities determine which input and reasoning controls are available in conversations.",
       supportsThinking: "Supports thinking",
       supportsReasoningEffort: "Supports reasoning effort",
       supportsVision: "Supports vision input",
-      commonProviderSettings: "Common Provider settings",
+      commonProviderSettings: "Runtime parameters",
       commonProviderSettingsDescription:
         "Only allowlisted request parameters are saved. Secret values are never stored here.",
       baseUrl: "Base URL",
+      baseUrlHint:
+        "The Provider API base address. Do not include a model-specific path.",
       temperature: "Temperature",
       maxTokens: "Maximum Tokens",
       requestTimeout: "Request timeout (seconds)",
@@ -669,6 +686,13 @@ export const enUS: Translations = {
       environmentKey: "Injected environment variable",
       environmentKeyHint:
         "Only the variable name is saved, for example OPENAI_API_KEY.",
+      testConnection: "Test connection",
+      testingConnection: "Testing…",
+      testConnectionDescription:
+        "Sends a minimal request with the current form configuration and selected Credential. It does not save the model or return a secret to the browser.",
+      connectionSucceeded: "Connection succeeded",
+      connectionFailed:
+        "Connection failed. Check the Provider configuration and Credential, then try again.",
       advancedJson: "Advanced JSON",
       advancedJsonHint:
         "Only allowlisted parameters and fixed structures are supported, such as reasoning_effort, extra_body.reasoning.effort, and the thinking toggle. Unknown fields and arbitrary strings are rejected.",
@@ -1807,6 +1831,35 @@ export const enUS: Translations = {
     removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
+  contextWindow: {
+    title: "Context window",
+    automaticCompression: "Automatic compression progress",
+    loading: "Measuring the current context…",
+    unavailable: "Current context usage is unavailable.",
+    disabled: "Automatic context compression is disabled.",
+    progressLabel: (percent: string) =>
+      `${percent} of the automatic compression threshold reached`,
+    current: "Current",
+    triggerAt: "Compress at",
+    remaining: "Remaining",
+    estimatedContext: "Estimated context",
+    tokenThreshold: "Token threshold",
+    summaryPresent: "Includes the previous compression summary",
+    allConditions: "Configured conditions",
+    anyCondition: "Compression starts when any condition is reached.",
+    primary: "Closest",
+    triggerTypes: {
+      tokens: "Token condition",
+      fraction: "Percentage condition",
+      messages: "Message condition",
+    },
+    tokens: (value: string) => `${value} Tokens`,
+    tokenPair: (current: string, total: string) =>
+      `${current} / ${total} Tokens`,
+    messages: (count: number) =>
+      `${count.toLocaleString("en-US")} message${count === 1 ? "" : "s"}`,
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "Search actions...",
@@ -1832,157 +1885,9 @@ export const enUS: Translations = {
       tools: "Tools",
       skills: "Skills",
       notification: "Notification",
-      about: "About",
     },
     memory: {
       title: "Memory",
-      v2: {
-        description:
-          "Review durable facts, decide pending candidates, and inspect how memory changed.",
-        export: "Export NDJSON",
-        exportSuccess: "Memory export downloaded",
-        tabs: {
-          facts: "Long-term memory",
-          candidates: "Pending review",
-          history: "Change history",
-          settings: "Settings",
-        },
-        facts: {
-          title: "Long-term memory",
-          description:
-            "Active facts may be recalled in future runs. Disabled facts stay available for review.",
-          searchPlaceholder: "Search fact content",
-          categoryPlaceholder: "Filter by category",
-          statusAll: "All states",
-          statusActive: "Active",
-          statusDisabled: "Disabled",
-          count: (count) => `${count} ${count === 1 ? "fact" : "facts"}`,
-          emptyTitle: "No long-term facts yet",
-          emptyDescription:
-            "Accepted candidates will appear here after the memory pipeline processes a conversation.",
-          noMatchesTitle: "No matching facts",
-          noMatchesDescription:
-            "Try a different search term, category, or state filter.",
-          loadError: "Long-term memory could not be loaded.",
-          confidence: "Confidence",
-          version: (version) => `Version ${version}`,
-          updated: (value) => `Updated ${value}`,
-          edit: "Edit",
-          disable: "Stop recall",
-          restore: "Restore",
-          hardForget: "Forget permanently",
-          viewHistory: "View history",
-        },
-        candidates: {
-          title: "Pending review",
-          description:
-            "Accept useful candidates into long-term memory or reject ones that should not be kept.",
-          count: (count) =>
-            `${count} pending ${count === 1 ? "candidate" : "candidates"}`,
-          emptyTitle: "Nothing is waiting for review",
-          emptyDescription:
-            "New candidates appear after eligible conversations are extracted.",
-          loadError: "Pending candidates could not be loaded.",
-          accept: "Accept",
-          reject: "Reject",
-          cannotAccept:
-            "This candidate cannot be accepted because its content or sensitivity is restricted.",
-          retention: "Retention",
-          sensitivity: "Sensitivity",
-          created: (value) => `Created ${value}`,
-          retentionLabels: {
-            permanent: "Permanent",
-            durable: "Durable",
-            ephemeral: "Temporary",
-          },
-          sensitivityLabels: {
-            normal: "Normal",
-            sensitive: "Sensitive",
-            restricted: "Restricted",
-          },
-        },
-        history: {
-          title: "Change history",
-          description:
-            "Select a fact to review its revisions and the current state of its source evidence.",
-          selectTitle: "Select a fact",
-          selectDescription:
-            "Open history from a long-term fact to inspect its revisions here.",
-          loadError: "Fact history could not be loaded.",
-          current: "Current fact",
-          revisions: "Revisions",
-          evidence: "Source evidence",
-          revision: (revision) => `Revision ${revision}`,
-          changedBy: (actor) => `Changed by ${actor}`,
-          reason: (reason) => `Reason: ${reason}`,
-          sourceAvailable: "Source available",
-          sourceDeleted: "Source deleted",
-          sourceUnknown: "Source unavailable",
-          openThread: "Open source chat",
-          noEvidence: "No source evidence is attached to this revision.",
-        },
-        settings: {
-          title: "Memory settings",
-          description:
-            "These values show the runtime policy currently applied to new work.",
-          loadError: "Memory settings could not be loaded.",
-          pipeline: "Pipeline mode",
-          enabled: "Enabled",
-          disabled: "Disabled",
-          search: "Memory search",
-          injection: "Automatic recall",
-          consolidationInterval: "Automatic review interval",
-          retention: "Candidate retention",
-          minutes: (value) => `${value} minutes`,
-          days: (value) => `${value} days`,
-          readOnly:
-            "Memory runtime settings are managed by a system administrator.",
-          modes: {
-            off: "Off",
-            shadow: "Shadow",
-            consolidate: "Legacy recall",
-            v2: "Memory v2",
-          },
-        },
-        pagination: {
-          previous: "Previous",
-          next: "Next",
-          page: (page) => `Page ${page}`,
-        },
-        edit: {
-          title: "Edit memory fact",
-          description:
-            "Saving creates a new revision and preserves the prior version in history.",
-          content: "Content",
-          category: "Category",
-          confidence: "Confidence",
-          reason: "Change reason",
-          reasonPlaceholder: "Optional reason for this revision",
-          cancel: "Cancel",
-          save: "Save revision",
-          success: "Fact revision saved",
-          invalidContent: "Fact content cannot be empty.",
-          invalidCategory: "Fact category cannot be empty.",
-          invalidConfidence: "Confidence must be a number from 0 to 1.",
-        },
-        forget: {
-          title: "Forget this fact permanently?",
-          description:
-            "This erases the fact body, revisions, and linked source material. It cannot be restored.",
-          preview: "Fact to erase",
-          cancel: "Cancel",
-          confirm: "Forget permanently",
-          success: "Fact permanently forgotten",
-        },
-        acceptSuccess: "Candidate accepted into long-term memory",
-        rejectSuccess: "Candidate rejected",
-        disableSuccess: "Fact removed from recall",
-        restoreSuccess: "Fact restored to recall",
-        retry: "Retry",
-        conflict:
-          "Memory changed while you were editing. Refresh and try again.",
-        emptyContent: "(content unavailable)",
-      },
     },
     personalization: {
       title: "Memory",
@@ -2010,7 +1915,7 @@ export const enUS: Translations = {
       resetButton: "Reset",
       resetDialogTitle: "Reset all Memory?",
       resetDialogDescription:
-        "This permanently deletes long-term facts, pending candidates, sources, and Memory snapshots. It cannot be undone.",
+        "This permanently deletes your long-term document, pending history, versions, Dream records, and Memory snapshots. It cannot be undone.",
       resetChatNotice:
         "Chats, thread context, files, and /compact summaries will not be deleted.",
       cancel: "Cancel",

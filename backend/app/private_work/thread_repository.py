@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -168,6 +168,26 @@ class PrivateThreadRepository:
         )
         rows = (await self.session.execute(statement)).scalars()
         return tuple(self._record(row) for row in rows)
+
+    async def touch_activity(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        occurred_at: datetime,
+    ) -> None:
+        """Advance activity ordering without invalidating metadata CAS versions."""
+
+        if not isinstance(occurred_at, datetime) or occurred_at.tzinfo is None:
+            raise PrivateWorkConflict("unknown")
+        await self.session.execute(
+            update(ThreadMetaRow)
+            .where(
+                *self._active_scope(scope, thread_id),
+                ThreadMetaRow.updated_at < func.now(),
+            )
+            .values(updated_at=occurred_at.astimezone(UTC))
+        )
 
     async def patch(
         self,

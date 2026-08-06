@@ -13,6 +13,7 @@ from app.system_settings.credential_adapter import (
     SystemModelCredentialAdapter,
     SystemModelMaterializationUnavailable,
 )
+from app.system_settings.models import ConnectionTestSystemModelMaterial
 from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,
@@ -51,6 +52,22 @@ class SystemModelMaterializer:
         except SystemModelMaterializationUnavailable:
             raise
         except (DBAPIError, RuntimeError, SystemModelRepositoryInvariant):
+            raise SystemModelMaterializationUnavailable() from None
+
+    async def materialize_connection_test(
+        self,
+        material: ConnectionTestSystemModelMaterial,
+    ) -> ModelConfig:
+        """Decrypt and materialize one non-persistent, admin-authorized probe."""
+
+        try:
+            return await asyncio.to_thread(
+                self._credential_adapter.materialize_connection_test,
+                material,
+            )
+        except SystemModelMaterializationUnavailable:
+            raise
+        except RuntimeError:
             raise SystemModelMaterializationUnavailable() from None
 
     async def materialize_exact(

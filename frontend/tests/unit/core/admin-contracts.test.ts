@@ -12,9 +12,7 @@ const JOB_TYPES = [
   "automation_run",
   "retention_purge",
   "mcp_discovery",
-  "memory_extract",
-  "memory_consolidate",
-  "memory_retention_purge",
+  "memory_dream",
 ] as const;
 
 function agentRuntimeSettings() {
@@ -47,24 +45,9 @@ function agentRuntimeSettings() {
     },
     memory: {
       enabled: true,
-      search_enabled: true,
-      debounce_seconds: 10,
       model_name: null,
-      max_facts: 100,
-      fact_confidence_threshold: 0.7,
-      injection_enabled: true,
+      dream_interval_minutes: 120,
       max_injection_tokens: 2_000,
-      token_counting: "char",
-      guaranteed_categories: [],
-      guaranteed_token_budget: 500,
-      staleness_review_enabled: true,
-      staleness_age_days: 90,
-      staleness_min_candidates: 3,
-      staleness_max_removals_per_cycle: 10,
-      staleness_protected_categories: [],
-      pipeline_mode: "off",
-      consolidation_interval_minutes: 120,
-      candidate_retention_days: 30,
     },
     tool_search: { enabled: true, auto_promote_top_k: 3 },
     tool_output: {
@@ -94,17 +77,24 @@ function agentRuntimeSettings() {
   };
 }
 
-describe("PR2 admin contracts", () => {
-  test("accepts the frozen memory pipeline settings", () => {
+describe("admin contracts", () => {
+  test("accepts only the final frozen Memory policy", () => {
     const parsed = agentRuntimeSettingsValueSchema.parse(
       agentRuntimeSettings(),
     );
 
     expect(parsed.memory).toMatchObject({
-      pipeline_mode: "off",
-      consolidation_interval_minutes: 120,
-      candidate_retention_days: 30,
+      enabled: true,
+      model_name: null,
+      dream_interval_minutes: 120,
+      max_injection_tokens: 2_000,
     });
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        ...agentRuntimeSettings(),
+        memory: { ...agentRuntimeSettings().memory, unexpected: true },
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts every persisted job type in rows and filters", () => {

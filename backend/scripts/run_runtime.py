@@ -25,6 +25,7 @@ MODEL_PROVIDER_ENV_NAMES = frozenset(
         "MINIMAX_API_KEY",
         "MOONSHOT_API_KEY",
         "NOVITA_API_KEY",
+        "OPENCODE_API_KEY",
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "STEPFUN_API_KEY",

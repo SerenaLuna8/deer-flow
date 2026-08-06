@@ -19,6 +19,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.checkpointer import ProjectScopedCheckpointer
@@ -32,10 +33,10 @@ from app.private_work.memory_authority import (
     DEFAULT_PRIVATE_MEMORY_NAMESPACE,
     PrivateRunMemoryAuthority,
 )
-from app.private_work.memory_source_admission import MemorySourceAdmissionPort
 from app.private_work.run_admission import (
     AdmittedPrivateRun,
     PersistedRunSnapshot,
+    _strip_client_memory_archive_receipt,
 )
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
@@ -68,6 +69,10 @@ from app.worker.service import (
     JobSettlement,
     LeaseLost,
 )
+from deerflow.agents.memory.snip import (
+    MEMORY_ARCHIVE_CONTEXT_KEY,
+    SnipArchiveContext,
+)
 from deerflow.config.app_config import (
     pop_current_app_config,
     push_current_app_config,
@@ -84,6 +89,9 @@ from deerflow.persistence.jobs.sql import (
     JobRepository,
     JobTerminalEvent,
     JobTerminalResult,
+)
+from deerflow.persistence.private_work.memory_document_repository import (
+    DEFAULT_MEMORY_NAMESPACE,
 )
 from deerflow.persistence.private_work.model import PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -1111,6 +1119,61 @@ class RunAgentPrivateExecutor:
             token_usage_by_model=record.token_usage_by_model,
         )
 
+    async def _memory_archive_context(
+        self,
+        execution: PrivateRunExecution,
+        app_config: Any,
+    ) -> SnipArchiveContext:
+        try:
+            async with self._factory() as session, session.begin():
+                preference = await AccountPersonalizationRepository(
+                    session,
+                ).read_memory(execution.context.user_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise TransientExecutionError(
+                "EXECUTION_AUTHORITY_UNAVAILABLE",
+            ) from None
+
+        enabled = bool(app_config.memory.enabled and preference.memory_enabled)
+        summary_model_ref: uuid.UUID | None = None
+        if enabled:
+            model_name = app_config.summarization.model_name
+            if model_name is None:
+                models = getattr(app_config, "models", None)
+                if not isinstance(models, list) or not models:
+                    raise PermanentExecutionError("RUN_ASSET_STALE")
+                model_name = models[0].name
+            model = app_config.get_model_config(model_name)
+            summary_model_ref = getattr(
+                model,
+                "_system_model_config_version_id",
+                None,
+            )
+            if not isinstance(summary_model_ref, uuid.UUID):
+                raise PermanentExecutionError("RUN_ASSET_STALE")
+        return SnipArchiveContext(
+            enabled=enabled,
+            project_id=execution.context.project_id,
+            owner_user_id=str(execution.context.user_id),
+            namespace=DEFAULT_MEMORY_NAMESPACE,
+            preference_version=preference.version,
+            summary_model_ref=summary_model_ref,
+        )
+
+    @staticmethod
+    def _runner_config(
+        execution: PrivateRunExecution,
+        archive_context: SnipArchiveContext,
+    ) -> dict[str, Any]:
+        config = copy.deepcopy(execution.config)
+        raw_context = config.get("context")
+        runtime_context = dict(raw_context) if isinstance(raw_context, Mapping) else {}
+        runtime_context[MEMORY_ARCHIVE_CONTEXT_KEY] = archive_context
+        config["context"] = runtime_context
+        return config
+
     @staticmethod
     def _graph_input(execution: PrivateRunExecution) -> object:
         if execution.resume_from_checkpoint:
@@ -1119,14 +1182,25 @@ class RunAgentPrivateExecutor:
             if not isinstance(execution.command, Mapping):
                 raise TransientExecutionError("INVALID_RUN_PAYLOAD")
             try:
-                return Command(**dict(execution.command))
+                clean_command = _strip_client_memory_archive_receipt(
+                    execution.command,
+                    command=True,
+                )
+                if not isinstance(clean_command, Mapping):
+                    raise TypeError
+                return Command(**dict(clean_command))
             except (TypeError, ValueError):
                 raise TransientExecutionError("INVALID_RUN_PAYLOAD") from None
         if not isinstance(execution.graph_input, Mapping):
             if execution.graph_input is None:
                 return {}
             raise TransientExecutionError("INVALID_RUN_PAYLOAD")
-        graph_input = copy.deepcopy(dict(execution.graph_input))
+        graph_input = _strip_client_memory_archive_receipt(
+            execution.graph_input,
+            command=False,
+        )
+        if not isinstance(graph_input, dict):
+            raise TransientExecutionError("INVALID_RUN_PAYLOAD")
         messages = graph_input.get("messages")
         if isinstance(messages, list):
             converted: list[object] = []
@@ -1192,7 +1266,6 @@ class RunAgentPrivateExecutor:
         admitted = self._admitted(execution, claim)
         private_runtime = None
         file_authority = None
-        memory_authority = None
         record: RunRecord | None = None
         runtime_config_pushed = False
         try:
@@ -1295,6 +1368,10 @@ class RunAgentPrivateExecutor:
                 # composition always injects the PostgreSQL materializer.
                 raise PermanentExecutionError("RUN_ASSET_STALE")
 
+            archive_context = await self._memory_archive_context(
+                execution,
+                runtime_app_config,
+            )
             push_current_app_config(runtime_app_config)
             runtime_config_pushed = True
             materialize_kwargs: dict[str, object] = {
@@ -1347,14 +1424,6 @@ class RunAgentPrivateExecutor:
                 ),
                 mounts=mounts,
             )
-            memory_authority = PrivateRunMemoryAuthority(
-                self._factory,
-                context=execution.context,
-                claim=claim,
-                thread_id=execution.run.thread_id,
-                namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
-                memory_config=runtime_app_config.memory,
-            )
             run_manager = RunManager()
             record = await run_manager.register_persisted(
                 run_id=execution.run.run_id,
@@ -1383,6 +1452,14 @@ class RunAgentPrivateExecutor:
             )
             if callable(set_boundary):
                 set_boundary(boundary)
+            memory_authority = PrivateRunMemoryAuthority(
+                self._factory,
+                context=execution.context,
+                claim=claim,
+                thread_id=execution.run.thread_id,
+                namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
+                memory_config=runtime_app_config.memory,
+            )
             run_context = RunContext(
                 checkpointer=checkpointer,
                 store=self._store,
@@ -1428,7 +1505,10 @@ class RunAgentPrivateExecutor:
                     ctx=run_context,
                     agent_factory=self._agent_factory,
                     graph_input=self._graph_input(execution),
-                    config=copy.deepcopy(execution.config),
+                    config=self._runner_config(
+                        execution,
+                        archive_context,
+                    ),
                     stream_modes=list(execution.stream_mode),
                     stream_subgraphs=execution.stream_subgraphs,
                     interrupt_before=execution.interrupt_before,
@@ -1544,7 +1624,6 @@ class PrivateRunJobHandler:
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunExecutionQuotaPort | None = None,
         audit: PrivateRunExecutionAuditPort | None = None,
-        memory_source_admission: MemorySourceAdmissionPort | None = None,
     ) -> None:
         if retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
             raise ValueError("invalid private Run retry policy")
@@ -1556,7 +1635,6 @@ class PrivateRunJobHandler:
         self._project_checkpointer = project_checkpointer
         self._quota = quota or _NoopPrivateRunExecutionQuota()
         self._audit = audit or _NoopPrivateRunExecutionAudit()
-        self._memory_source_admission = memory_source_admission
         self._snapshots = RunSnapshotRepository(
             session_factory,
             endpoint_policy=endpoint_policy,
@@ -1792,14 +1870,6 @@ class PrivateRunJobHandler:
                         attempt_usage=result.attempt_usage,
                     )
                     settled_run = settlement.run
-                    if settled_run.status == "success" and self._memory_source_admission is not None:
-                        await self._memory_source_admission.admit_successful_run(
-                            session,
-                            scope=locked_scope,
-                            run=settled_run,
-                            source_job_id=claim.job_id,
-                            source_attempt_id=claim.attempt_id,
-                        )
                     if not settlement.run_terminal_published and settled_run.status in {
                         "success",
                         "error",

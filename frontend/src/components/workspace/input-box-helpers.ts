@@ -21,7 +21,13 @@ export type InputSubmitAction =
   | { kind: "goal"; command: GoalCommand }
   | { kind: "compact" }
   | { kind: "dream" }
-  | { kind: "dream-invalid"; reason: "arguments" | "attachments" }
+  | { kind: "dream-log"; version: number | null }
+  | { kind: "dream-restore"; version: number }
+  | {
+      kind: "dream-invalid";
+      command: "dream" | "dream-log" | "dream-restore";
+      reason: "arguments" | "attachments";
+    }
   | { kind: "stop" }
   | { kind: "empty" }
   | { kind: "message" };
@@ -232,14 +238,54 @@ export function parseCompactCommand(value: string): boolean {
   return /^\/(?:compact|context\s+compact)\s*$/i.test(value.trim());
 }
 
-export function parseDreamCommand(
-  value: string,
-): "valid" | "arguments" | null {
+export function parseDreamCommand(value: string): "valid" | "arguments" | null {
   const trimmed = value.trim();
   if (!/^\/dream(?:\s|$)/i.test(trimmed)) {
     return null;
   }
   return /^\/dream$/i.test(trimmed) ? "valid" : "arguments";
+}
+
+type DreamVersionCommand =
+  | { matched: false }
+  | { matched: true; valid: false }
+  | { matched: true; valid: true; version: number | null };
+
+function parsePositiveVersion(value: string) {
+  if (!/^[1-9][0-9]*$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function parseDreamLogCommand(value: string): DreamVersionCommand {
+  const trimmed = value.trim();
+  const match = /^\/dream-log(?:\s+(.+))?$/i.exec(trimmed);
+  if (!match) {
+    return /^\/dream-log(?:\s|$)/i.test(trimmed)
+      ? { matched: true, valid: false }
+      : { matched: false };
+  }
+  if (match[1] === undefined) {
+    return { matched: true, valid: true, version: null };
+  }
+  const version = parsePositiveVersion(match[1]);
+  return version === null
+    ? { matched: true, valid: false }
+    : { matched: true, valid: true, version };
+}
+
+export function parseDreamRestoreCommand(value: string): DreamVersionCommand {
+  const trimmed = value.trim();
+  const match = /^\/dream-restore\s+(.+)$/i.exec(trimmed);
+  if (!match) {
+    return /^\/dream-restore(?:\s|$)/i.test(trimmed)
+      ? { matched: true, valid: false }
+      : { matched: false };
+  }
+  const version = parsePositiveVersion(match[1]!);
+  return version === null
+    ? { matched: true, valid: false }
+    : { matched: true, valid: true, version };
 }
 
 export function canPolishInput(value: string): boolean {
@@ -253,7 +299,9 @@ export function canPolishInput(value: string): boolean {
   return (
     parseGoalCommand(trimmed) === null &&
     !parseCompactCommand(trimmed) &&
-    parseDreamCommand(trimmed) === null
+    parseDreamCommand(trimmed) === null &&
+    !parseDreamLogCommand(trimmed).matched &&
+    !parseDreamRestoreCommand(trimmed).matched
   );
 }
 
@@ -267,14 +315,52 @@ export function getInputSubmitAction({
   status: string;
 }): InputSubmitAction {
   const goalCommand = parseGoalCommand(text);
+  const dreamLogCommand = parseDreamLogCommand(text);
+  const dreamRestoreCommand = parseDreamRestoreCommand(text);
   const dreamCommand = parseDreamCommand(text);
+  if (dreamRestoreCommand.matched) {
+    if (fileCount > 0) {
+      return {
+        kind: "dream-invalid",
+        command: "dream-restore",
+        reason: "attachments",
+      };
+    }
+    return dreamRestoreCommand.valid && dreamRestoreCommand.version !== null
+      ? { kind: "dream-restore", version: dreamRestoreCommand.version }
+      : {
+          kind: "dream-invalid",
+          command: "dream-restore",
+          reason: "arguments",
+        };
+  }
+  if (dreamLogCommand.matched) {
+    if (fileCount > 0) {
+      return {
+        kind: "dream-invalid",
+        command: "dream-log",
+        reason: "attachments",
+      };
+    }
+    return dreamLogCommand.valid
+      ? { kind: "dream-log", version: dreamLogCommand.version }
+      : {
+          kind: "dream-invalid",
+          command: "dream-log",
+          reason: "arguments",
+        };
+  }
   if (dreamCommand !== null) {
     if (fileCount > 0) {
-      return { kind: "dream-invalid", reason: "attachments" };
+      return {
+        kind: "dream-invalid",
+        command: "dream",
+        reason: "attachments",
+      };
     }
     return dreamCommand === "valid"
       ? { kind: "dream" }
-      : { kind: "dream-invalid", reason: "arguments" };
+      : { kind: "dream-invalid", command: "dream", reason: "arguments" };
   }
   if (goalCommand && fileCount === 0) {
     return { kind: "goal", command: goalCommand };

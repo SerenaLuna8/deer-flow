@@ -13,7 +13,6 @@ from functools import partial
 from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
 from app.private_work.checkpointer import ProjectScopedCheckpointer
-from app.private_work.memory_source_admission import MemorySourceAdmissionService
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.quotas.system_policy import SystemQuotaPolicyReader
@@ -29,11 +28,7 @@ from app.system_runtime_settings.materializer import (
 )
 from app.system_settings import SystemModelMaterializer
 from app.worker.mcp_discovery import McpToolDiscoveryJobHandler
-from app.worker.memory_consolidate import (
-    MemoryConsolidateJobHandler,
-    MemoryRetentionPurgeJobHandler,
-)
-from app.worker.memory_extract import MemoryExtractJobHandler
+from app.worker.memory_dream import MemoryDreamJobHandler
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
@@ -200,11 +195,6 @@ async def run_worker(
                 endpoint_policy=mcp_endpoint_policy,
                 quota=quota_enforcer,
                 audit=audit_sink,
-                memory_source_admission=MemorySourceAdmissionService(
-                    source_hmac=audit_keyring.memory_source_ref,
-                    source_hmac_refs=audit_keyring.memory_source_refs,
-                    job_repository_builder=repository_builder,
-                ),
             )
             active_handlers = {
                 "private_run": private_run_handler,
@@ -222,14 +212,7 @@ async def run_worker(
                     discovery_timeout_seconds=(mcp_security.discovery_timeout_seconds),
                     job_repository_builder=repository_builder,
                 ),
-                "memory_extract": MemoryExtractJobHandler(
-                    session_factory,
-                    app_config=config,
-                    model_materializer=model_materializer,
-                    runtime_policy_materializer=runtime_policy_materializer,
-                    job_repository_builder=repository_builder,
-                ),
-                "memory_consolidate": MemoryConsolidateJobHandler(
+                "memory_dream": MemoryDreamJobHandler(
                     session_factory,
                     app_config=config,
                     model_materializer=model_materializer,
@@ -237,11 +220,6 @@ async def run_worker(
                     job_repository_builder=repository_builder,
                     retry_initial_seconds=config.worker.retry_initial_seconds,
                     retry_max_seconds=config.worker.retry_max_seconds,
-                ),
-                "memory_retention_purge": MemoryRetentionPurgeJobHandler(
-                    session_factory,
-                    runtime_policy_materializer=runtime_policy_materializer,
-                    job_repository_builder=repository_builder,
                 ),
             }
         registry = WorkerRegistry(session_factory, version=WORKER_VERSION)

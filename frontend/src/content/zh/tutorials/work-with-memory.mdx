@@ -1,14 +1,15 @@
 ---
 title: 使用记忆系统
-description: 在项目私有会话之间安全使用 Memory。
+description: 建立并检查自己的私有长期记忆文档。
 ---
 
 # 使用记忆系统
 
-1. 进入项目并打开 **Memory**。
-2. 确认项目 readiness 和自己的 Memory capability。
-3. 新建项目会话，明确表达需要长期保留的偏好或纠正。
-4. Run 结束后刷新 Memory 页面，检查结构化事实。
-5. 只在同一项目上下文中编辑、导入或清理 Memory。
+1. 进入项目并开始对话，明确表达需要长期保留的偏好或纠正。
+2. 需要归档较早的完整轮次时使用 `/compact`；可见聊天记录不会改变。
+3. 使用 `/Dream` 先压缩当前 Thread 再整理待处理 Memory，或打开 **Memory** 并点击“立即整理”。
+4. 在 Memory 页面查看当前文档、待整理数量、已保存版本和每次真实 diff。
+5. 使用 `/dream-log [version]` 直接打开指定版本；使用 `/dream-restore <version>` 或“恢复此版本”，确认后把历史内容写成新的当前版本。
+6. 在“设置 → 个性化”中，关闭 Memory 只暂停学习、Dream 和召回，数据仍保留；重置会永久删除长期 Memory，但保留聊天和 `/compact` 摘要。
 
-Memory 按 project 和 owner 隔离。认证项目之外的会话不能读取或更新它。
+Memory 按认证用户和项目隔离。这些斜杠命令由产品明确处理，不会作为普通消息发送给 Agent。

@@ -27,6 +27,7 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.human_input_response import HumanInputResponsePromotion
 from app.private_work.inbound_dedupe import (
     PrivateRunInboundDelivery,
     ProjectInboundDeliveryRepository,
@@ -58,6 +59,7 @@ from app.shared_assets.errors import (
 from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedRunAssetClosure
 from app.shared_assets.resolver import ProjectAssetResolver
+from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
@@ -182,7 +184,7 @@ class PrivateRunHumanInputResponsePromoter(Protocol):
         context: PrivateWorkContext,
         thread_id: str,
         kwargs: Mapping[str, object],
-    ) -> dict[str, object]: ...
+    ) -> HumanInputResponsePromotion: ...
 
 
 def _matches_server_promoted_human_input_retry(
@@ -231,6 +233,26 @@ def _matches_server_promoted_human_input_retry(
         return False
     normalized_additional.pop("hide_from_ui")
     return normalized == retry_kwargs
+
+
+def _strip_client_memory_archive_receipt(
+    payload: object,
+    *,
+    command: bool,
+) -> object:
+    """Drop only graph-state receipt slots, preserving message/tool payloads."""
+
+    cloned = copy.deepcopy(payload)
+    if not isinstance(cloned, dict):
+        return cloned
+    cloned.pop(MEMORY_ARCHIVE_RECEIPT_KEY, None)
+    if command:
+        update = cloned.get("update")
+        if isinstance(update, Mapping):
+            clean_update = dict(update)
+            clean_update.pop(MEMORY_ARCHIVE_RECEIPT_KEY, None)
+            cloned["update"] = clean_update
+    return cloned
 
 
 class _NoopPrivateRunAdmissionQuota:
@@ -451,8 +473,9 @@ class PrivateRunAdmissionService:
         # config/context and metadata.
         for graph_payload in ("input", "command"):
             if graph_payload in request.kwargs:
-                safe_kwargs[graph_payload] = copy.deepcopy(
+                safe_kwargs[graph_payload] = _strip_client_memory_archive_receipt(
                     request.kwargs[graph_payload],
+                    command=graph_payload == "command",
                 )
         server_request = replace(
             request,
@@ -462,6 +485,7 @@ class PrivateRunAdmissionService:
             metadata=strip_private_client_fields(request.metadata),
             kwargs=self._server_kwargs(safe_kwargs, server_context),
             model_name=None,
+            follow_up_to_run_id=None,
             origin_trace_id=(server_context.origin_trace_id if server_context is not None and server_context.origin_trace_id is not None else normalize_trace_id(context.request_id) or generate_trace_id()),
         )
         try:
@@ -605,16 +629,29 @@ class PrivateRunAdmissionService:
                 # Worker checkpoint writes take the same Thread lock, so the
                 # open-request read and this admission are one serialized
                 # decision rather than a client-owned visibility assertion.
+                continuation_source_run_id: str | None = None
                 if self._human_input_response_promoter is not None:
-                    server_request = replace(
-                        server_request,
-                        kwargs=await self._human_input_response_promoter.promote(
-                            session,
-                            context,
-                            thread_id,
-                            server_request.kwargs,
-                        ),
+                    promotion = await self._human_input_response_promoter.promote(
+                        session,
+                        context,
+                        thread_id,
+                        server_request.kwargs,
                     )
+                    if type(promotion) is not HumanInputResponsePromotion:
+                        raise PrivateWorkConflict(context.request_id)
+                    if promotion.continuation_verified and promotion.continuation_run_id is None:
+                        raise PrivateWorkConflict(context.request_id)
+                    if promotion.continuation_run_id is not None and not promotion.continuation_verified:
+                        raise PrivateWorkConflict(context.request_id)
+                    try:
+                        server_request = replace(
+                            server_request,
+                            kwargs=promotion.kwargs,
+                            follow_up_to_run_id=promotion.continuation_run_id,
+                        )
+                    except ValueError:
+                        raise PrivateWorkConflict(context.request_id) from None
+                    continuation_source_run_id = promotion.continuation_run_id
 
                 resolved = await self._resolver.resolve_run_asset_closure_in_session(
                     session,
@@ -630,6 +667,7 @@ class PrivateRunAdmissionService:
                     thread_id,
                     server_request,
                     resolved,
+                    continuation_source_run_id=continuation_source_run_id,
                 )
                 job = await jobs.enqueue(
                     scope=job_scope,

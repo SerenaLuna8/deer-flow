@@ -572,6 +572,19 @@ export const replaceAdminModelInputSchema = z
     validateProviderSettings(item, context);
   });
 
+export const testAdminModelConnectionInputSchema = z
+  .object({
+    provider_adapter: adminModelProviderAdapterSchema,
+    provider_model: providerFieldSchema,
+    settings: safeAdminModelSettingsSchema,
+    ...credentialBindingFields,
+  })
+  .strict()
+  .superRefine((item, context) => {
+    validateCredentialBinding(item, context);
+    validateProviderSettings(item, context);
+  });
+
 export const adminModelStatusInputSchema = z
   .object({
     status: adminModelStatusSchema,
@@ -593,11 +606,21 @@ export const adminModelMutationResponseSchema = z
   })
   .strict();
 
+export const adminModelConnectionTestResponseSchema = z
+  .object({
+    status: z.enum(["succeeded", "failed"]),
+    request_id: z.string().min(1).max(255),
+  })
+  .strict();
+
 export type AdminModelItem = z.infer<typeof adminModelItemSchema>;
 export type AdminModelCatalog = z.infer<typeof adminModelCatalogSchema>;
 export type CreateAdminModelInput = z.infer<typeof createAdminModelInputSchema>;
 export type ReplaceAdminModelInput = z.infer<
   typeof replaceAdminModelInputSchema
+>;
+export type TestAdminModelConnectionInput = z.infer<
+  typeof testAdminModelConnectionInputSchema
 >;
 export type AdminModelStatusInput = z.infer<typeof adminModelStatusInputSchema>;
 export type AdminModelDefaultInput = z.infer<
@@ -605,4 +628,7 @@ export type AdminModelDefaultInput = z.infer<
 >;
 export type AdminModelMutationResponse = z.infer<
   typeof adminModelMutationResponseSchema
+>;
+export type AdminModelConnectionTestResponse = z.infer<
+  typeof adminModelConnectionTestResponseSchema
 >;

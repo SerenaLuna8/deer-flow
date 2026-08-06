@@ -1,5 +1,4 @@
 import {
-  ArrowLeftIcon,
   ArrowRightIcon,
   BotIcon,
   PlugZapIcon,
@@ -51,15 +50,6 @@ export function ProjectHome({
     <div data-testid="project-home" className="bg-background min-h-screen">
       <ProjectHeader project={project} />
       <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
-        <div>
-          <Link
-            href="/workspace"
-            className="text-muted-foreground hover:text-foreground inline-flex items-center gap-2 text-sm transition-colors"
-          >
-            <ArrowLeftIcon aria-hidden className="size-4" />
-            返回工作空间
-          </Link>
-        </div>
         {tokenUsageSection}
         {project.capabilities.includes("shared_assets.read") && (
           <section>

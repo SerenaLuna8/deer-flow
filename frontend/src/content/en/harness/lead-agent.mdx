@@ -47,7 +47,7 @@ The user message arrives and is added to `ThreadState.messages`. The `ThreadStat
 
 ### Middleware pre-processing
 
-Before the model is called, each active middleware has a chance to modify the state. For example, `DynamicContextMiddleware` reads the Run-frozen Memory source and adds a hidden low-authority Human message, while `SummarizationMiddleware` may condense old Thread messages if the token budget is exceeded.
+Before the model is called, each active middleware has a chance to modify the state. For example, `DynamicContextMiddleware` reads the Run-frozen Memory document snapshot and adds a hidden low-authority Human message, while `SummarizationMiddleware` may condense old Thread messages if the token budget is exceeded.
 
 ### LLM reasoning
 
@@ -67,7 +67,7 @@ If the model needs more information (e.g., a tool returned partial results), the
 
 ### State update
 
-`ThreadState` is updated with new messages, artifacts, and durable Thread context. If a checkpointer is configured, the state is persisted. Long-term Memory is not a Thread-state queue: after an eligible Run succeeds, settlement admits a durable Source and `memory_extract` Job for the separate Worker/Scheduler pipeline.
+`ThreadState` is updated with new messages, artifacts, and durable Thread context. If a checkpointer is configured, the state is persisted. Long-term Memory is not a Thread-state queue: SNIP archives validated compaction output as pending history, and a separate Worker handles durable `memory_dream` Jobs.
 
 </Steps>
 

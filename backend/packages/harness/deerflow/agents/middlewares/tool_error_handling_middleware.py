@@ -48,13 +48,12 @@ _RECOVERY_HINT = "Continue with available context, or choose an alternative tool
 def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
     """Recognize only canonical code-registered read-only tool objects."""
 
-    from deerflow.agents.memory.tools import memory_search_tool
     from deerflow.tools.builtins.list_uploaded_files_tool import (
         list_uploaded_files_tool,
     )
 
     tool = getattr(request, "tool", None)
-    return tool is memory_search_tool or tool is list_uploaded_files_tool
+    return tool is list_uploaded_files_tool
 
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:

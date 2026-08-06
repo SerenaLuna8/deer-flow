@@ -63,9 +63,9 @@ Warning interventions are queued per thread and run, then drained on the next mo
 
 ### DynamicContextMiddleware
 
-Adds the current-date reminder and, when enabled for a private Run, reads the Run-frozen Memory source through Worker-issued authority. v2 recall reuses the Run's exact ordered Fact-Revision snapshot at every model boundary and injects it as a hidden low-authority Human message. It does not admit or update long-term Memory.
+Adds the current-date reminder and, when enabled for a private Run, reads that Run's frozen bounded Memory document through Worker-issued authority. Every model boundary reuses the exact same snapshot and injects the complete document as a hidden low-authority Human message. It does not organize or update long-term Memory.
 
-The long-term write path is outside the middleware chain: successful Run settlement admits a durable Source and `memory_extract` Job, then Scheduler and Worker run consolidation. The removed built-in `MemoryMiddleware`, process-local queue/updater, and summarization Memory hook are not runtime extension points. See [Memory](/docs/harness/memory) for Pipeline modes and management behavior.
+The long-term write path is separate: SNIP archives validated compaction output into pending history, while Scheduler or a manual request admits a durable `memory_dream` Job for the Worker. See [Memory](/docs/harness/memory) for the document, Dream, and version contracts.
 
 ---
 

@@ -6,18 +6,22 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   adminModelAccountIdSchema,
   adminModelCatalogSchema,
+  adminModelConnectionTestResponseSchema,
   adminModelDefaultInputSchema,
   adminModelIdSchema,
   adminModelMutationResponseSchema,
   adminModelStatusInputSchema,
   createAdminModelInputSchema,
   replaceAdminModelInputSchema,
+  testAdminModelConnectionInputSchema,
   type AdminModelCatalog,
+  type AdminModelConnectionTestResponse,
   type AdminModelDefaultInput,
   type AdminModelMutationResponse,
   type AdminModelStatusInput,
   type CreateAdminModelInput,
   type ReplaceAdminModelInput,
+  type TestAdminModelConnectionInput,
 } from "./types";
 
 export class AdminModelSettingsApiError extends Error {
@@ -166,6 +170,23 @@ export async function replaceAdminModel(
     jsonRequestInit("PUT", body, signal),
   );
   return readModelSettingsResponse(response, adminModelMutationResponseSchema);
+}
+
+export async function testAdminModelConnection(
+  accountId: string,
+  input: TestAdminModelConnectionInput,
+  signal?: AbortSignal,
+): Promise<AdminModelConnectionTestResponse> {
+  adminModelAccountIdSchema.parse(accountId);
+  const body = testAdminModelConnectionInputSchema.parse(input);
+  const response = await requestModelSettings(
+    `${modelSettingsBaseURL()}/test-connection`,
+    jsonRequestInit("POST", body, signal),
+  );
+  return readModelSettingsResponse(
+    response,
+    adminModelConnectionTestResponseSchema,
+  );
 }
 
 export async function setAdminModelStatus(

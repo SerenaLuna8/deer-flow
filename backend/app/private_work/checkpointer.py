@@ -4,7 +4,6 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -33,19 +32,41 @@ from app.private_work.errors import (
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
-from deerflow.persistence.private_work.memory_v2_management import (
-    MemoryV2ManagementRepository,
+from deerflow.agents.memory.snip import (
+    MEMORY_ARCHIVE_RECEIPT_KEY,
+    MEMORY_ARCHIVE_RECEIPT_VERSION,
+    SNIP_ARCHIVE_PROMPT_VERSION,
+)
+from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryDocumentRepository,
+    MemoryDocumentScope,
+    MemoryHistoryActivation,
 )
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
     PrivateFileRow,
-    UserProjectMemoryFactRow,
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 PRIVATE_SCOPE_MARKER = "deerflow_private_scope"
 _T = TypeVar("_T")
+_MEMORY_ARCHIVE_RECEIPT_FIELDS = frozenset(
+    {
+        "version",
+        "project_id",
+        "owner_user_id",
+        "namespace",
+        "thread_id",
+        "source_checkpoint_id",
+        "source_digest",
+        "tagged_text",
+        "content_digest",
+        "preference_version",
+        "snip_prompt_version",
+        "summary_model_ref",
+    }
+)
 
 
 class PrivateCheckpointQuotaPort(Protocol):
@@ -205,25 +226,97 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         if marker != self._scope_marker:
             raise PrivateWorkNotFound(self._context.request_id)
 
+    @staticmethod
+    def _checkpoint_id(config: RunnableConfig | None) -> str | None:
+        if not isinstance(config, Mapping):
+            return None
+        configurable = config.get("configurable")
+        if not isinstance(configurable, Mapping):
+            return None
+        checkpoint_id = configurable.get("checkpoint_id")
+        return checkpoint_id if isinstance(checkpoint_id, str) and checkpoint_id else None
+
+    def _memory_history_activation(
+        self,
+        item: CheckpointTuple,
+        *,
+        thread_id: str,
+    ) -> MemoryHistoryActivation | None:
+        checkpoint = item.checkpoint
+        if not isinstance(checkpoint, Mapping):
+            raise ValueError("Checkpoint payload is invalid")
+        channel_values = checkpoint.get("channel_values")
+        if not isinstance(channel_values, Mapping):
+            return None
+        receipt = channel_values.get(MEMORY_ARCHIVE_RECEIPT_KEY)
+        if receipt is None:
+            return None
+        if not isinstance(receipt, Mapping) or set(receipt) != _MEMORY_ARCHIVE_RECEIPT_FIELDS or receipt.get("version") != MEMORY_ARCHIVE_RECEIPT_VERSION or receipt.get("snip_prompt_version") != SNIP_ARCHIVE_PROMPT_VERSION:
+            raise ValueError("Checkpoint Memory receipt is invalid")
+
+        context = require_issued_private_work_context(self._context)
+        if receipt.get("project_id") != str(context.project_id) or receipt.get("owner_user_id") != str(context.user_id) or receipt.get("thread_id") != thread_id:
+            raise ValueError("Checkpoint Memory receipt scope is invalid")
+        tagged_text = receipt.get("tagged_text")
+        if not isinstance(tagged_text, str) or channel_values.get("summary_text") != tagged_text:
+            raise ValueError("Checkpoint Memory receipt summary is invalid")
+        committed_checkpoint_id = self._checkpoint_id(item.config)
+        if committed_checkpoint_id is None:
+            raise ValueError("Checkpoint Memory receipt commit is invalid")
+        try:
+            summary_model_ref = uuid.UUID(str(receipt["summary_model_ref"]))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Checkpoint Memory model is invalid") from None
+        return MemoryHistoryActivation(
+            scope=MemoryDocumentScope(
+                project_id=context.project_id,
+                owner_user_id=str(context.user_id),
+                namespace=receipt.get("namespace"),
+            ),
+            thread_id=thread_id,
+            source_checkpoint_id=receipt.get("source_checkpoint_id"),
+            committed_checkpoint_id=committed_checkpoint_id,
+            source_digest=receipt.get("source_digest"),
+            tagged_text=tagged_text,
+            content_digest=receipt.get("content_digest"),
+            preference_version=receipt.get("preference_version"),
+            snip_prompt_version=receipt.get("snip_prompt_version"),
+            summary_model_ref=summary_model_ref,
+        )
+
+    async def _repair_memory_archive_receipt(
+        self,
+        session: AsyncSession,
+        item: CheckpointTuple,
+        *,
+        thread_id: str,
+    ) -> None:
+        activation = self._memory_history_activation(
+            item,
+            thread_id=thread_id,
+        )
+        if activation is None:
+            return
+        await MemoryDocumentRepository(session).activate_history(activation)
+
     @asynccontextmanager
     async def _locked_active(
         self,
         thread_id: str,
         capability: Capability,
         authorization_operation: str,
-    ) -> AsyncIterator[None]:
+    ) -> AsyncIterator[AsyncSession]:
         try:
             if self._authorization_boundary is not None:
                 await getattr(self._authorization_boundary, authorization_operation)()
             async with self._session_factory() as session:
                 async with session.begin():
-                    if self._authorization_boundary is None:
-                        await self._revalidator.require(
-                            session,
-                            self._context,
-                            capability,
-                            lock=True,
-                        )
+                    await self._revalidator.require(
+                        session,
+                        self._context,
+                        capability,
+                        lock=True,
+                    )
                     record = await PrivateThreadRepository(session).get(
                         scope=self._context.resource_scope,
                         thread_id=thread_id,
@@ -231,7 +324,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     )
                     if record is None:
                         raise PrivateWorkNotFound(self._context.request_id)
-                    yield
+                    yield session
         except PrivateWorkError:
             raise
         except DBAPIError:
@@ -244,16 +337,21 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             thread_id,
             Capability.PRIVATE_WORK_READ_OWN,
             "before_checkpoint_read",
-        ):
+        ) as session:
             try:
                 item = await self._raw.aget_tuple(clean_config)
+                if item is not None:
+                    self._validate_marker(item, thread_id=thread_id)
+                    await self._repair_memory_archive_receipt(
+                        session,
+                        item,
+                        thread_id=thread_id,
+                    )
+                return item
             except PrivateWorkError:
                 raise
             except Exception:
                 raise PrivateWorkUnavailable(self._context.request_id) from None
-            if item is not None:
-                self._validate_marker(item, thread_id=thread_id)
-            return item
 
     async def aget_tuple_already_authorized(
         self,
@@ -269,13 +367,18 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         clean_config = self._sanitize_config(config, thread_id=thread_id)
         try:
             item = await self._raw.aget_tuple(clean_config)
+            if item is not None:
+                self._validate_marker(item, thread_id=thread_id)
+                await self._repair_memory_archive_receipt(
+                    session,
+                    item,
+                    thread_id=thread_id,
+                )
+            return item
         except PrivateWorkError:
             raise
         except Exception:
             raise PrivateWorkUnavailable(self._context.request_id) from None
-        if item is not None:
-            self._validate_marker(item, thread_id=thread_id)
-        return item
 
     async def aget(self, config: RunnableConfig) -> Checkpoint | None:
         item = await self.aget_tuple(config)
@@ -368,10 +471,22 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             thread_id,
             Capability.PRIVATE_WORK_CREATE,
             "before_checkpoint_write",
-        ):
+        ) as session:
             try:
+                clean_config = self._sanitize_config(
+                    config,
+                    thread_id=thread_id,
+                )
+                source = await self._raw.aget_tuple(clean_config)
+                if source is not None:
+                    self._validate_marker(source, thread_id=thread_id)
+                    await self._repair_memory_archive_receipt(
+                        session,
+                        source,
+                        thread_id=thread_id,
+                    )
                 written_config = await self._raw.aput(
-                    self._sanitize_config(config, thread_id=thread_id),
+                    clean_config,
                     checkpoint,
                     self._sanitize_metadata(metadata),
                     new_versions,
@@ -380,6 +495,11 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 if item is None:
                     raise PrivateWorkNotFound(self._context.request_id)
                 self._validate_marker(item, thread_id=thread_id)
+                await self._repair_memory_archive_receipt(
+                    session,
+                    item,
+                    thread_id=thread_id,
+                )
                 return written_config
             except PrivateWorkError:
                 raise
@@ -421,8 +541,20 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             )
             if record is None:
                 raise PrivateWorkNotFound(self._context.request_id)
+            clean_config = self._sanitize_config(
+                config,
+                thread_id=thread_id,
+            )
+            source = await self._raw.aget_tuple(clean_config)
+            if source is not None:
+                self._validate_marker(source, thread_id=thread_id)
+                await self._repair_memory_archive_receipt(
+                    session,
+                    source,
+                    thread_id=thread_id,
+                )
             written_config = await self._raw.aput(
-                self._sanitize_config(config, thread_id=thread_id),
+                clean_config,
                 checkpoint,
                 self._sanitize_metadata(metadata),
                 new_versions,
@@ -431,6 +563,11 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             if item is None:
                 raise PrivateWorkNotFound(self._context.request_id)
             self._validate_marker(item, thread_id=thread_id)
+            await self._repair_memory_archive_receipt(
+                session,
+                item,
+                thread_id=thread_id,
+            )
             return written_config
         except PrivateWorkError:
             raise
@@ -555,26 +692,6 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     ).scalar_one_or_none()
                     if incomplete_run is not None:
                         raise PrivateWorkConflict(context.request_id)
-                    erased_at = datetime.now(UTC)
-                    await MemoryV2ManagementRepository(session).erase_sources(
-                        context.resource_scope,
-                        thread_id=thread_id,
-                        run_id=None,
-                        reason="thread_deleted",
-                        now=erased_at,
-                    )
-                    await session.execute(
-                        update(UserProjectMemoryFactRow)
-                        .where(
-                            UserProjectMemoryFactRow.project_id == context.project_id,
-                            UserProjectMemoryFactRow.owner_user_id == str(context.user_id),
-                            UserProjectMemoryFactRow.source_thread_id == thread_id,
-                        )
-                        .values(
-                            source_thread_id=None,
-                            source_run_id=None,
-                        )
-                    )
                     deleted = await repository.mark_deleted(
                         scope=context.resource_scope,
                         thread_id=thread_id,

@@ -53,6 +53,11 @@ import {
 } from "./api";
 import { useCoalescedStreamMessages } from "./coalesce";
 import {
+  fetchThreadContextUsage,
+  threadContextUsageQueryKey,
+  type ThreadContextUsageResponse,
+} from "./context-usage";
+import {
   buildRootThreadStreamOptions,
   createDeferredThreadStreamDetach,
   isRootStreamCallback,
@@ -493,6 +498,109 @@ function attachRunIdWithinKnownTurns(messages: Message[]): Message[] {
   });
 }
 
+function projectOriginalUserContent(message: Message): Message {
+  if (message.type !== "human") {
+    return message;
+  }
+  const originalContent = message.additional_kwargs?.original_user_content;
+  if (typeof originalContent !== "string") {
+    return message;
+  }
+  return {
+    ...message,
+    content: [{ type: "text", text: originalContent }],
+  } as Message;
+}
+
+function repairInjectedUserOrder(messages: Message[]): Message[] {
+  let repaired = [...messages];
+  const reminderIds = repaired.flatMap((message) => {
+    const id = message.id;
+    return typeof id === "string" &&
+      id.length > 0 &&
+      message.additional_kwargs?.hide_from_ui === true &&
+      message.additional_kwargs?.dynamic_context_reminder === true
+      ? [id]
+      : [];
+  });
+
+  for (const reminderId of reminderIds) {
+    const userId = `${reminderId}__user`;
+    const memoryId = `${reminderId}__memory`;
+    const injectedUser = repaired.find(
+      (message) => message.type === "human" && message.id === userId,
+    );
+    if (!injectedUser) {
+      continue;
+    }
+    const injectedMemory = repaired.filter(
+      (message) => message.id === memoryId,
+    );
+    const withoutInjected = repaired.filter(
+      (message) => message.id !== userId && message.id !== memoryId,
+    );
+    const reminderIndex = withoutInjected.findIndex(
+      (message) => message.id === reminderId,
+    );
+    if (reminderIndex < 0) {
+      continue;
+    }
+    withoutInjected.splice(
+      reminderIndex + 1,
+      0,
+      ...injectedMemory,
+      injectedUser,
+    );
+    repaired = withoutInjected;
+  }
+  return repaired;
+}
+
+function alignSanitizedHistoryUserIds(
+  historyMessages: Message[],
+  threadMessages: Message[],
+): Message[] {
+  const reminderIds = new Set(
+    threadMessages.flatMap((message) => {
+      const id = message.id;
+      return typeof id === "string" &&
+        message.additional_kwargs?.hide_from_ui === true &&
+        message.additional_kwargs?.dynamic_context_reminder === true
+        ? [id]
+        : [];
+    }),
+  );
+  const injectedUserIds = new Set(
+    threadMessages.flatMap((message) => {
+      const id = message.id;
+      if (
+        message.type !== "human" ||
+        typeof id !== "string" ||
+        !id.endsWith("__user")
+      ) {
+        return [];
+      }
+      const reminderId = id.slice(0, -"__user".length);
+      return reminderIds.has(reminderId) ? [id] : [];
+    }),
+  );
+
+  return historyMessages.map((message) => {
+    const projected = projectOriginalUserContent(message);
+    if (
+      projected.type !== "human" ||
+      typeof projected.id !== "string" ||
+      typeof projected.additional_kwargs?.original_user_content !== "string"
+    ) {
+      return projected;
+    }
+    const injectedId = `${projected.id}__user`;
+    return injectedUserIds.has(injectedId)
+      ? ({ ...projected, id: injectedId } as Message)
+      : projected;
+  });
+}
+
 export function mergeRunMessageRows(
   previous: RunMessage[],
   incoming: RunMessage[],
@@ -834,7 +942,13 @@ export function mergeMessages(
   // identities (`run:<id>+tool:<id>` in history versus `tool:<id>` live),
   // survives dedupe twice, and a partially hydrated latest clarification can
   // appear before an older checkpoint HumanMessage.
-  const scopedThreadMessages = attachRunIdWithinKnownTurns(threadMessages);
+  const scopedThreadMessages = attachRunIdWithinKnownTurns(
+    repairInjectedUserOrder(threadMessages),
+  );
+  const projectedHistoryMessages = alignSanitizedHistoryUserIds(
+    historyMessages,
+    scopedThreadMessages,
+  );
   const threadMessageIds = new Set(
     scopedThreadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
@@ -851,7 +965,7 @@ export function mergeMessages(
       .filter(isNonEmptyString),
   );
   const admissionMessages: Message[] = [];
-  const regularHistoryMessages = historyMessages.filter((message) => {
+  const regularHistoryMessages = projectedHistoryMessages.filter((message) => {
     if (!isRunAdmissionMessage(message)) {
       return true;
     }
@@ -870,7 +984,7 @@ export function mergeMessages(
   const savedTurnDurations = new Map<string, number>();
   const savedReasoningDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
-  for (const msg of historyMessages) {
+  for (const msg of projectedHistoryMessages) {
     const identity = messageIdentity(msg);
     if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
@@ -1332,6 +1446,12 @@ export function invalidateStoppedThreadCaches(
     queryKey: scopedThreadQueryKey(
       scope,
       ...threadTokenUsageQueryKey(threadId),
+    ),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(
+      scope,
+      ...threadContextUsageQueryKey(threadId),
     ),
   });
   void queryClient.invalidateQueries({
@@ -3301,6 +3421,34 @@ export function useThreadTokenUsage(
         return null;
       }
       return fetchThreadTokenUsage(threadId, privateWork);
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useThreadContextUsage(
+  threadId?: string | null,
+  {
+    enabled = true,
+    privateWork: explicitPrivateWork,
+  }: { enabled?: boolean; privateWork?: ProjectPrivateWorkScope } = {},
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  return useQuery<ThreadContextUsageResponse | null>({
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...threadContextUsageQueryKey(threadId),
+    ),
+    queryFn: async ({ signal }) => {
+      if (!threadId) {
+        return null;
+      }
+      return fetchThreadContextUsage(threadId, {
+        apiBaseURL: privateWork.apiBaseURL,
+        signal,
+      });
     },
     enabled: enabled && Boolean(threadId),
     retry: false,

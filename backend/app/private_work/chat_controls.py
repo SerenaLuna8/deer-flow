@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import deerflow.utils.llm_text as llm_text
+from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.authorization import PrivateRequestAuthorizationBoundary
 from app.private_work.checkpoint_lineage import (
     CheckpointLineageError,
@@ -56,14 +57,21 @@ from app.system_settings import (
     SystemModelMaterializationUnavailable,
     SystemModelMaterializer,
 )
+from deerflow.agents.memory.snip import SnipArchiveContext
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.mcp_definition_policy import McpEndpointPolicy
+from deerflow.persistence.private_work.memory_document_repository import (
+    DEFAULT_MEMORY_NAMESPACE,
+)
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
     ThreadCompactionResult,
+    ThreadContextUsage,
     commit_thread_compaction,
+    has_complete_turns,
+    measure_thread_context_usage,
     prepare_thread_compaction,
 )
 from deerflow.runtime.events.store import RunEventStore
@@ -243,13 +251,24 @@ class ProjectChatControlService:
                     as_node="manual_compaction",
                 )
                 source = await locked_state.aget(checkpoint_config(thread_id))
-                if snapshot_checkpoint_id(source) is None:
+                source_checkpoint_id = snapshot_checkpoint_id(source)
+                if source_checkpoint_id is None:
                     raise PrivateWorkNotFound(context.request_id)
+                preference = await AccountPersonalizationRepository(
+                    session,
+                ).read_memory(context.user_id)
 
             runtime_config = await self._materialize_compaction_config(
                 context,
                 thread_id,
                 app_config,
+            )
+            archive_context = self._compaction_archive_context(
+                context,
+                runtime_config,
+                preference_version=preference.version,
+                preference_enabled=preference.memory_enabled,
+                source_checkpoint_id=source_checkpoint_id,
             )
             prepared = await prepare_thread_compaction(
                 self._state(
@@ -264,6 +283,7 @@ class ProjectChatControlService:
                 app_config=runtime_config,
                 snapshot=source,
                 authorization_boundary=authorization_boundary,
+                memory_archive_context=archive_context,
             )
             if not prepared.result.compacted:
                 return prepared.result
@@ -311,6 +331,51 @@ class ProjectChatControlService:
             )
             raise PrivateWorkUnavailable(context.request_id) from None
 
+    async def context_usage(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        app_config: AppConfig,
+    ) -> ThreadContextUsage:
+        """Measure the authorized materialized Thread head without writing it."""
+
+        context = require_issued_private_work_context(context)
+        try:
+            await self._validate_control_authority(
+                context,
+                thread_id,
+                reject_incomplete_run=False,
+            )
+            runtime_config = await self._materialize_compaction_config(
+                context,
+                thread_id,
+                app_config,
+            )
+            snapshot = await self._state(
+                context,
+                runtime_config,
+                as_node="context_usage",
+            ).aget(checkpoint_config(thread_id))
+            if snapshot_checkpoint_id(snapshot) is None:
+                raise PrivateWorkNotFound(context.request_id)
+            return measure_thread_context_usage(
+                snapshot,
+                app_config=runtime_config,
+            )
+        except PrivateWorkError:
+            raise
+        except (ContextCompactionFailed, ValueError):
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except Exception:
+            logger.exception(
+                "Project context usage measurement failed: request_id=%s",
+                context.request_id,
+            )
+            raise PrivateWorkUnavailable(context.request_id) from None
+
     async def _materialize_compaction_config(
         self,
         context: PrivateWorkContext,
@@ -341,6 +406,87 @@ class ProjectChatControlService:
         if runtime_model.name != model_ref and model_ref != "default":
             raise PrivateWorkUnavailable(context.request_id)
         return app_config.with_runtime_models((runtime_model,))
+
+    def _compaction_archive_context(
+        self,
+        context: PrivateWorkContext,
+        app_config: AppConfig,
+        *,
+        preference_version: int,
+        preference_enabled: bool,
+        source_checkpoint_id: str,
+    ) -> SnipArchiveContext:
+        requested_enabled = bool(app_config.memory.enabled and preference_enabled)
+        effective_enabled = requested_enabled
+        summary_model_ref: uuid.UUID | None = None
+        if requested_enabled:
+            model_name = app_config.summarization.model_name
+            model = app_config.get_model_config(model_name) if model_name is not None else (app_config.models[0] if app_config.models else None)
+            summary_model_ref = getattr(
+                model,
+                "_system_model_config_version_id",
+                None,
+            )
+            if not isinstance(summary_model_ref, uuid.UUID):
+                if self._model_materializer is not None:
+                    raise PrivateWorkUnavailable(context.request_id)
+                # Isolated service tests may inject an unmaterialized AppConfig.
+                # They retain Thread compaction but cannot author durable
+                # history without an exact PostgreSQL model-version identity.
+                effective_enabled = False
+        return SnipArchiveContext(
+            enabled=effective_enabled,
+            project_id=context.project_id,
+            owner_user_id=str(context.user_id),
+            namespace=DEFAULT_MEMORY_NAMESPACE,
+            preference_version=preference_version,
+            summary_model_ref=summary_model_ref,
+            source_checkpoint_id=source_checkpoint_id,
+        )
+
+    async def lock_and_verify_dream_archive_ready(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        thread_id: str,
+        *,
+        app_config: AppConfig,
+    ) -> bool:
+        """Lock one Thread and verify its current head has no complete turns.
+
+        The checkpoint read uses the caller-owned SQL transaction, so any
+        carried archive receipt is repaired before this method returns. The
+        caller must keep the transaction open through Dream admission; every
+        production checkpoint writer also locks the Thread row and therefore
+        cannot race a new head between this proof and admission.
+        """
+
+        context = require_issued_private_work_context(context)
+        if not session.in_transaction():
+            raise PrivateWorkUnavailable(context.request_id)
+        await self._lock_thread(
+            session,
+            context,
+            thread_id,
+            Capability.PRIVATE_WORK_CREATE,
+            Capability.SHARED_ASSETS_EXECUTE,
+            reject_incomplete_run=True,
+        )
+        state = bind_transaction_checkpoint_state(
+            self._saver(context),
+            session,
+            app_config,
+            as_node="dream_archive_barrier",
+        )
+        snapshot = await state.aget(checkpoint_config(thread_id))
+        if snapshot_checkpoint_id(snapshot) is None:
+            raise PrivateWorkNotFound(context.request_id)
+        messages = (snapshot.values or {}).get("messages")
+        if messages is None:
+            return True
+        if not isinstance(messages, list):
+            raise PrivateWorkUnavailable(context.request_id)
+        return not has_complete_turns(messages)
 
     async def branch(
         self,

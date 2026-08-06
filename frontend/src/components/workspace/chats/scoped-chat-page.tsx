@@ -561,6 +561,7 @@ export function ScopedChatPage({
                       )}
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
+                      threadExists={!isNewThread}
                       agentMetadata={threadMetadata.data?.metadata}
                       draftConversationScope={isNewThread ? "new" : threadId}
                       autoFocus={isWelcomeMode}
@@ -589,6 +590,11 @@ export function ScopedChatPage({
                       }
                       goalCommandsEnabled={scope.goalVisible !== false}
                       compactCommandEnabled={scope.compactVisible !== false}
+                      memoryRoutePath={
+                        scope.threadBasePath.endsWith("/chats")
+                          ? `${scope.threadBasePath.slice(0, -"/chats".length)}/memory`
+                          : undefined
+                      }
                       uploadsEnabled={scope.canUpload}
                       followupSuggestionsEnabled={
                         scope.followupSuggestionsEnabled !== false

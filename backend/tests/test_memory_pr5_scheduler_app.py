@@ -58,6 +58,7 @@ class _Automation:
     def __init__(self) -> None:
         self.reconcile_sessions: list[int] = []
         self.admit_sessions: list[int] = []
+        self.admitted = asyncio.Event()
 
     async def reconcile_admitted_runs(self, session) -> None:
         self.reconcile_sessions.append(session.identity)
@@ -67,24 +68,23 @@ class _Automation:
         self.admit_sessions.append(session.identity)
 
 
-class _Memory:
-    def __init__(self, stop_event: asyncio.Event) -> None:
-        self.stop_event = stop_event
-        self.sessions: list[int] = []
+class _Dream:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.admitted = asyncio.Event()
 
-    async def admit_due(self, session, *, now) -> None:
+    async def admit_due(self, *, now) -> None:
         assert now.tzinfo is not None
-        self.sessions.append(session.identity)
-        self.stop_event.set()
-        raise RuntimeError("injected isolated Memory poll failure")
+        self.calls += 1
+        self.admitted.set()
 
 
 @pytest.mark.asyncio
-async def test_scheduler_keeps_automation_and_memory_in_separate_transactions() -> None:
+async def test_pr3_scheduler_keeps_automation_and_dream_in_separate_transactions() -> None:
     stop_event = asyncio.Event()
     factory = _SessionFactory()
     automation = _Automation()
-    memory = _Memory(stop_event)
+    dream = _Dream()
     ownership = _Ownership()
     app = SchedulerApp(
         enabled=True,
@@ -92,12 +92,16 @@ async def test_scheduler_keeps_automation_and_memory_in_separate_transactions() 
         service=automation,
         session_factory=factory,
         poll_interval_seconds=0.01,
-        memory_service=memory,
+        dream_service=dream,
     )
 
-    await app.run(stop_event)
+    task = asyncio.create_task(app.run(stop_event))
+    await asyncio.wait_for(dream.admitted.wait(), timeout=1)
+    stop_event.set()
+    await task
 
     assert automation.reconcile_sessions == [0]
     assert automation.admit_sessions == [1]
-    assert memory.sessions == [2]
+    assert dream.calls == 1
+    assert len(factory.sessions) == 2
     assert ownership.verify_calls == 1

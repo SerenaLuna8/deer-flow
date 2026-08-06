@@ -46,23 +46,33 @@ class SystemRuntimePolicyMaterializer:
         self._session_factory = session_factory
 
     @staticmethod
-    async def materialize_current_in_session(
+    async def materialize_current_with_revision_in_session(
         session: AsyncSession,
         section: RuntimePolicySection | str,
         *,
         for_update: bool = False,
-    ) -> RuntimePolicyValue:
+    ) -> tuple[RuntimePolicyValue, int]:
+        """Materialize one locked current pointer and return its exact revision.
+
+        Callers that must freeze both the policy value and its revision must not
+        issue a second ``current`` query: the pointer could otherwise change
+        between reads.  The repository join supplies both from one snapshot.
+        """
+
         try:
             parsed_section = RuntimePolicySection(section)
             _policy, version = await SystemRuntimePolicyRepository(session).current(
                 parsed_section,
                 for_update=for_update,
             )
-            return _materialize_exact(
-                parsed_section,
-                schema_version=int(version.schema_version),
-                value=dict(version.value),
-                checksum=version.payload_checksum,
+            return (
+                _materialize_exact(
+                    parsed_section,
+                    schema_version=int(version.schema_version),
+                    value=dict(version.value),
+                    checksum=version.payload_checksum,
+                ),
+                int(version.version_number),
             )
         except SystemRuntimePolicyUnavailable:
             raise
@@ -75,6 +85,20 @@ class SystemRuntimePolicyMaterializer:
             ValueError,
         ):
             raise SystemRuntimePolicyUnavailable from None
+
+    @staticmethod
+    async def materialize_current_in_session(
+        session: AsyncSession,
+        section: RuntimePolicySection | str,
+        *,
+        for_update: bool = False,
+    ) -> RuntimePolicyValue:
+        value, _revision = await SystemRuntimePolicyMaterializer.materialize_current_with_revision_in_session(
+            session,
+            section,
+            for_update=for_update,
+        )
+        return value
 
     async def materialize_current(
         self,

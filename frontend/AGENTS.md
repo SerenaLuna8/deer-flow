@@ -147,16 +147,22 @@ require their exact server capability. Viewer can read/list/export and delete th
 ready upload/workspace/output files, but never sees mutation controls that require
 create/manage authority.
 
-The project Memory page is a v2 workbench with four regions: active/disabled long-term Facts,
-pending Candidates, selected-Fact Revision/Evidence history, and read-only Pipeline settings. Fact
-queries support server-side text search, category/status filters, and bounded `limit/offset`
-pagination; Candidate pages are bounded the same way. Candidate accept/reject sends the exact
-server `updatedAt`, while Fact edit, disable, restore, and irreversible hard forget send the exact
-visible Fact version. A `409` is an explicit stale-view result and triggers scoped refresh rather
-than an optimistic overwrite. Every account/project/namespace query has a strict Zod response,
-forwards the active AbortSignal, and renders distinct loading, error, empty, and next-page states.
-The settings region reads `/memory/v2/status`; it does not edit system policy. The old v1 aggregate
-has no frontend write path and remains a backend read-only rollback source only.
+The project Memory page presents one owner-private long-term document, its current version and
+pending count, immediate Dream admission, and bounded version history with the real unified diff
+and explicit restore confirmation. The client uses only `/memory`, `/memory/dream`, and the
+`/memory/versions` family; it never sends owner or namespace. Every response is strict Zod,
+requests forward the active AbortSignal, and loading, error, empty, running, and pagination states
+remain distinct. Read, Dream, and restore controls derive only from server-issued capabilities.
+A `409` refreshes the scoped Memory root rather than applying an optimistic overwrite.
+
+`/Dream` drains the existing current Thread with the dedicated
+`keep={type: messages, value: 0}` boundary before admitting Dream with that exact `threadId`.
+It repeats whole-turn compaction until Gateway explicitly returns `not_enough_messages`; any
+other non-compacted result, missing checkpoint progress, or the bounded pass limit fails closed
+and does not admit Dream.
+`/dream-log [version]` navigates to the Memory page, and `/dream-restore <version>` requires an
+explicit confirmation before calling restore. These built-ins, like `/compact`, never enter the
+ordinary Agent message stream.
 
 Durable SSE cursor and deduplication state is keyed by account/project/thread. Event IDs are
 thread-monotonic; duplicate IDs and duplicate terminal frames are ignored. Gateway restart
@@ -250,6 +256,13 @@ usage snapshots must never reduce a displayed cumulative total. The SubtaskCard 
 model to its configured display name, falls back to the model identifier, and hides per-subtask
 Token totals when global `token_usage.enabled` is false. Keep project-scoped historical step
 fetching and the `inferred < custom_event < tool_result` status authority ordering intact.
+
+The composer context-window indicator is separate from cumulative Thread/Run Token usage. It reads
+the current retained checkpoint through the strict project-scoped `context-usage` contract and
+measures progress against the current automatic-compression trigger. `tokens`, `fraction`, and
+`messages` keep their own units; multiple triggers are OR conditions and the server-selected
+primary trigger drives the compact ring. Hide the indicator for new/mock/non-runnable Threads, and
+invalidate it after terminal Runs, stop, `/compact`, and `/Dream`.
 
 Input polish is project-scoped and never runs without `private_work.create` plus
 `shared_assets.execute`. The server revalidates the current Thread Agent snapshot and
@@ -552,6 +565,10 @@ query for the active account while leaving Thread and other private-work caches 
 - `ProjectContextProvider` owns project resolution and enter.
 - `ProjectPrivateWorkProvider` owns the scoped client, reconnect state, and teardown.
 - `ScopedChatPage` owns project composer busy state, branch/edit/regenerate actions, and navigation.
+- `ProjectConversationRail` preserves the server's `updated_at DESC, thread_id DESC` pages and,
+  only on the bare project `/chats` route after a settled successful query, replaces the route with
+  the first Thread. Empty/error states remain on the landing page and direct Thread URLs never
+  redirect.
 - `MessageList` owns human-input answered/latest/pending gating, latest-turn edit eligibility,
   and the single group-tail Run-duration display.
 - `core/threads/hooks.ts` owns pre-submit upload state, scoped prepare/submit replay, optimistic
@@ -561,8 +578,8 @@ query for the active account while leaving Thread and other private-work caches 
   Sidecar persist only the mode; submit and replay derive runtime fields after all stored context
   so a legacy standalone reasoning-effort value cannot override the selected mode.
 - Project Memory and Connection pages own their scoped queries and mutations; the Memory page owns
-  its v2 Fact/Candidate/history/status query roots and CAS invalidation, while shared presentation
-  components remain pure.
+  the document, Dream, version/detail, restore, and conflict-invalidation roots, while shared
+  presentation components remain pure.
 - Static demo fixtures and adapters are separate from the production client registry.
 
 Human-input replies are ordinary human messages with `hide_from_ui: true` and the structured

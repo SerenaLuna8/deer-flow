@@ -16,13 +16,14 @@ from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.errors import PrivateWorkConflict
 from app.private_work.human_input_response import (
     CheckpointHumanInputResponsePromoter,
+    authorize_matching_human_input_response,
     promote_matching_human_input_response,
 )
 from app.private_work.run_admission import (
     PrivateRunAdmissionService,
     _matches_server_promoted_human_input_retry,
 )
-from app.private_work.run_repository import PrivateRunCreate
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime import checkpoint_mode as checkpoint_mode_state
@@ -39,6 +40,7 @@ def _request_message(
     question: str = QUESTION,
     input_mode: str = "choice_with_other",
     payload_tool_call_id: str | None = None,
+    source_run_id: str | None = None,
 ) -> ToolMessage:
     options = [
         {
@@ -72,6 +74,8 @@ def _request_message(
                 "required": True,
             }
         ]
+    if source_run_id is not None:
+        human_input["source_run_id"] = source_run_id
     return ToolMessage(
         id=request_id,
         content=f"❓ {question}",
@@ -117,6 +121,90 @@ def _request_kwargs(
             ]
         }
     }
+
+
+def test_exact_response_authorizes_the_open_request_source_run() -> None:
+    source_run_id = "clarification-source-run"
+
+    promotion = authorize_matching_human_input_response(
+        _request_kwargs(),
+        checkpoint_messages=[
+            HumanMessage(
+                content="Deploy the application",
+                name="user-input",
+                additional_kwargs={"run_id": source_run_id},
+            ),
+            _request_message(),
+        ],
+    )
+
+    assert promotion.continuation_run_id == source_run_id
+    promoted = _input_message(promotion.kwargs)
+    additional_kwargs = promoted["additional_kwargs"]
+    assert isinstance(additional_kwargs, dict)
+    assert additional_kwargs["hide_from_ui"] is True
+
+
+def test_exact_response_keeps_source_run_after_prior_messages_are_compacted() -> None:
+    promotion = authorize_matching_human_input_response(
+        _request_kwargs(),
+        checkpoint_messages=[
+            _request_message(source_run_id="clarification-source-run"),
+        ],
+    )
+
+    assert promotion.continuation_run_id == "clarification-source-run"
+    assert promotion.continuation_verified is True
+
+
+def test_request_artifact_overrides_an_older_human_run_marker() -> None:
+    promotion = authorize_matching_human_input_response(
+        _request_kwargs(),
+        checkpoint_messages=[
+            HumanMessage(
+                content="Earlier turn",
+                name="user-input",
+                additional_kwargs={"run_id": "older-run"},
+            ),
+            _request_message(source_run_id="clarification-source-run"),
+        ],
+    )
+
+    assert promotion.continuation_verified is True
+    assert promotion.continuation_run_id == "clarification-source-run"
+
+
+def test_exact_response_without_a_source_run_is_not_safe_to_continue() -> None:
+    promotion = authorize_matching_human_input_response(
+        _request_kwargs(),
+        checkpoint_messages=[_request_message()],
+    )
+
+    assert promotion.continuation_verified is True
+    assert promotion.continuation_run_id is None
+
+
+def test_unmatched_response_does_not_authorize_a_source_run() -> None:
+    response = _response()
+    response["request_id"] = "clarification:not-open"
+
+    promotion = authorize_matching_human_input_response(
+        _request_kwargs(response=response),
+        checkpoint_messages=[
+            HumanMessage(
+                content="Deploy the application",
+                name="user-input",
+                additional_kwargs={"run_id": "clarification-source-run"},
+            ),
+            _request_message(),
+        ],
+    )
+
+    assert promotion.continuation_run_id is None
+    assert promotion.continuation_verified is False
+    additional_kwargs = _input_message(promotion.kwargs)["additional_kwargs"]
+    assert isinstance(additional_kwargs, dict)
+    assert "hide_from_ui" not in additional_kwargs
 
 
 def _promoted_message(
@@ -379,6 +467,7 @@ async def test_run_admission_persists_gateway_authorized_visibility(
     )
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     thread_id = f"human-input-{uuid.uuid4()}"
+    source_run_id = f"human-input-source-{uuid.uuid4()}"
     raw_checkpointer = InMemorySaver()
     scoped_checkpointer = ProjectScopedCheckpointer(raw_checkpointer, seed.factory)
     app_config = AppConfig.model_validate(
@@ -410,8 +499,18 @@ async def test_run_admission_persists_gateway_authorized_visibility(
                 thread_id=thread_id,
                 agent=ThreadAgentRef(seed.project_agent_id, "project"),
             )
+            await PrivateRunRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                request=PrivateRunCreate(
+                    run_id=source_run_id,
+                    status="success",
+                ),
+            )
 
-        await append_checkpoint_messages([_request_message()])
+        await append_checkpoint_messages(
+            [_request_message(source_run_id=source_run_id)],
+        )
 
         service = PrivateRunAdmissionService(
             seed.factory,
@@ -435,6 +534,7 @@ async def test_run_admission_persists_gateway_authorized_visibility(
         message = graph_input["messages"][0]
         assert message["additional_kwargs"]["hide_from_ui"] is True
         assert message["additional_kwargs"]["human_input_response"] == _response()
+        assert admitted.run.follow_up_to_run_id == source_run_id
 
         immediate_retry = await service.admit(
             seed.owner_a,
