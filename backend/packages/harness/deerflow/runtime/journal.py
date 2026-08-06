@@ -5,12 +5,13 @@ RunEventStore. It standardizes callback data into RunEvent records and
 handles token usage accumulation.
 
 Key design decisions:
-- on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
-- on_chat_model_start captures the first user-visible prompt as llm.human.input and
+- on_llm_new_token observes lead-Agent reasoning/output boundaries; complete
+  messages are still persisted only via on_llm_end
+- on_chat_model_start captures structured prompts as llm_request (OpenAI format) and
   extracts the first human message for run.input, because it is more reliable than
   on_chain_start (fires on every node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
-- on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
+- on_llm_end emits llm_response in OpenAI Chat Completions format
 - Token usage accumulated in memory, written to RunRow on run completion
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
 """
@@ -20,37 +21,40 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.runtime.events.catalog import (
-    LLM_AI_RESPONSE_EVENT,
-    LLM_ERROR_EVENT,
-    LLM_HUMAN_INPUT_EVENT,
-    LLM_TOOL_RESULT_EVENT,
-    MEMORY_CONTEXT_EVENT,
-    MIDDLEWARE_EVENT_PATTERN,
-    RUN_END_EVENT,
-    RUN_ERROR_EVENT,
-    RUN_START_EVENT,
-)
-from deerflow.utils.messages import message_to_text, restore_original_human_message
+from deerflow.utils.messages import message_to_text
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
+    from deerflow.runtime.private_scope import PrivateResourceScope
 
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
+_REASONING_DURATION_KEY = "reasoning_duration_ms"
+_MAX_REASONING_DURATION_MS = 24 * 60 * 60 * 1000
+
+
+@dataclass
+class _ReasoningWindow:
+    """Server-observed reasoning interval for one LangChain model call."""
+
+    started_at: float | None = None
+    ended_at: float | None = None
+    inline_buffer: str = ""
+    inline_think_open: bool = False
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -64,161 +68,8 @@ def _should_persist_human_input_message(message: BaseMessage) -> bool:
     return response is not None and response["source"] in _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES
 
 
-def _coerce_seed_message(message: Any) -> Any:
-    """Return ``message`` as a ``BaseMessage``, deserializing dict form if needed.
-
-    ``_checkpoint_messages`` (threads.py) returns whatever the snapshot holds,
-    and its sibling branch-matching helpers all handle a message being either a
-    ``BaseMessage`` or a ``model_dump()``-shaped dict (serde differences across
-    checkpoint backends/modes). The seed path must handle both too — otherwise a
-    dict-backed checkpoint seeds nothing and the branch silently reports
-    ``skipped_empty`` while history exists. Unparseable dicts fall through
-    unchanged and are dropped by the ``isinstance(BaseMessage)`` guard.
-    """
-    if isinstance(message, BaseMessage):
-        return message
-    if isinstance(message, Mapping):
-        msg_type = message.get("type")
-        if isinstance(msg_type, str) and msg_type:
-            try:
-                return messages_from_dict([{"type": msg_type, "data": dict(message)}])[0]
-            except Exception:
-                logger.warning("branch seed: could not deserialize checkpoint message dict (type=%s)", msg_type)
-    return message
-
-
-def _build_history_seed_events(
-    messages: Sequence[Any],
-    *,
-    thread_id: str,
-    run_id_prefix: str,
-    seed_metadata: Mapping[str, Any],
-) -> list[dict]:
-    """Serialize checkpoint messages into run-event rows.
-
-    Rows are grouped into one synthetic run per checkpoint turn
-    (``{run_id_prefix}-{n}``), a new turn starting at every persisted human
-    message — the same boundary a real run has, since a run begins with a
-    human input (including the allowlisted hidden ``ask_clarification``
-    reply, which resumes as its own run). ``run_id`` is a *turn* identity to
-    the feed's consumers, not merely a provenance tag: regenerating the last
-    inherited answer resolves that row's ``run_id`` as the superseded source
-    (``_find_target_run_id``) and ``GET /messages/page`` then drops **every**
-    row carrying it. One shared id for the whole seed therefore deleted the
-    complete inherited history on the branch's first regenerate (#4458); one
-    id per turn confines the drop to the turn actually regenerated.
-
-    Mirrors RunJournal's message-event contract so seeded rows are
-    indistinguishable from journaled ones except by the supplied seed metadata:
-    same event types, ``category="message"``, ``content=message.model_dump()``,
-    the human-input persistence rule
-    (``_should_persist_human_input_message``), the original-user-text
-    restoration, and the same treatment of ``hide_from_ui`` AI/tool rows —
-    RunJournal persists them (``on_llm_end`` / ``_persist_tool_result_message``
-    do not filter) and the frontend hides them client-side, so the seed writes
-    them too rather than dropping them.
-
-    The one deliberate divergence, because a checkpoint message carries no run
-    scope: AI rows omit RunJournal's run-scoped enrichment (``usage`` /
-    ``latency_ms`` / ``llm_call_index``), and ``caller`` is stamped
-    ``lead_agent`` rather than the message's original caller (unrecoverable
-    here). Neither is observable today — no consumer indexes those metadata
-    keys, and per-message ``caller`` drives no attribution (the ``by_caller``
-    usage panel is run-scoped, not fed from the message feed).
-    """
-    events: list[dict] = []
-    created_at = datetime.now(UTC).isoformat()
-    # Messages ahead of the first human turn (none in practice) stay in turn 0.
-    turn_index = 0
-    for raw_message in messages:
-        message = _coerce_seed_message(raw_message)
-        if not isinstance(message, BaseMessage):
-            continue
-        if isinstance(message, HumanMessage):
-            if not _should_persist_human_input_message(message):
-                continue
-            turn_index += 1
-            event_type = "llm.human.input"
-            content = restore_original_human_message(message).model_dump()
-            metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
-        elif isinstance(message, AIMessage):
-            event_type = "llm.ai.response"
-            content = message.model_dump()
-            metadata = {"caller": "lead_agent", **seed_metadata}
-        elif isinstance(message, ToolMessage):
-            event_type = "llm.tool.result"
-            content = message.model_dump()
-            metadata = dict(seed_metadata)
-        else:
-            # System / remove / summary artifacts never enter the thread feed.
-            continue
-        events.append(
-            {
-                "thread_id": thread_id,
-                "run_id": f"{run_id_prefix}-{turn_index}",
-                "event_type": event_type,
-                "category": "message",
-                "content": content,
-                "metadata": metadata,
-                "created_at": created_at,
-            }
-        )
-    return events
-
-
-def build_branch_history_seed_events(
-    messages: Sequence[Any],
-    *,
-    thread_id: str,
-    run_id_prefix: str,
-    parent_thread_id: str,
-) -> list[dict]:
-    """Serialize inherited branch history into the branch's empty event feed."""
-    return _build_history_seed_events(
-        messages,
-        thread_id=thread_id,
-        run_id_prefix=run_id_prefix,
-        seed_metadata={
-            "branch_seed": True,
-            "branch_parent_thread_id": parent_thread_id,
-        },
-    )
-
-
-def build_checkpoint_history_seed_events(
-    messages: Sequence[Any],
-    *,
-    thread_id: str,
-    run_id_prefix: str,
-) -> list[dict]:
-    """Serialize legacy checkpoint history for a thread's empty event feed.
-
-    Reuse the branch seed's message normalization and per-turn synthetic run
-    grouping, but stamp migration-specific metadata so these rows are not
-    misidentified as history inherited from another thread.
-    """
-    return _build_history_seed_events(
-        messages,
-        thread_id=thread_id,
-        run_id_prefix=run_id_prefix,
-        seed_metadata={"checkpoint_history_seed": True},
-    )
-
-
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
-
-    # Subagents may execute on a persistent event loop in another thread. This
-    # handler owns loop-local tasks and a store/pool created for the parent run,
-    # so the isolated-loop context copier must not inherit it. LangGraph's own
-    # stream callbacks remain inheritable and keep child token frames flowing.
-    deerflow_loop_bound = True
-
-    # Every callback only updates in-memory run state or schedules async IO.
-    # Keeping callbacks on the run's event-loop thread serializes mutations
-    # from parallel tool calls and prevents cancelled executor callbacks from
-    # racing terminal delivery recording and flush.
-    run_inline = True
 
     def __init__(
         self,
@@ -230,6 +81,7 @@ class RunJournal(BaseCallbackHandler):
         flush_threshold: int = 20,
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
+        scope: PrivateResourceScope | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -239,6 +91,7 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        self._scope = scope
 
         # Write buffer
         self._buffer: list[dict] = []
@@ -266,7 +119,6 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
-        self._memory_context_recorded = False
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -277,17 +129,16 @@ class RunJournal(BaseCallbackHandler):
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
+        self._reasoning_windows: dict[str, _ReasoningWindow] = {}
+        self._finalized_reasoning_durations: dict[str, int] = {}
 
         # LLM request/response tracking
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._tool_call_callers: dict[str, str] = {}
+        self._tool_run_callers: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
-
-        # Artifact-production tracking for the terminal run.delivery event
-        # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
-        self._produced_artifacts: list[tuple[str, str | None]] = []
-        self._produced_artifact_keys: set[tuple[str, str | None]] = set()
 
     # -- Lifecycle callbacks --
 
@@ -298,6 +149,8 @@ class RunJournal(BaseCallbackHandler):
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
+        if caller not in (None, "lead_agent"):
+            return
         self._msg_count += 1
 
         # ``last_ai_message`` should represent the lead agent's user-facing
@@ -325,8 +178,8 @@ class RunJournal(BaseCallbackHandler):
             # Root graph invocation — emit a single trace event for the run start.
             chain_name = (serialized or {}).get("name", "unknown")
             self._put(
-                event_type=RUN_START_EVENT.event_type,
-                category=RUN_START_EVENT.category,
+                event_type="run.start",
+                category="trace",
                 content={"chain": chain_name},
                 metadata={"caller": caller, **(metadata or {})},
             )
@@ -344,18 +197,13 @@ class RunJournal(BaseCallbackHandler):
         if parent_run_id is not None:
             return
         self._reconcile_final_tool_messages(outputs)
-        self._put(
-            event_type=RUN_END_EVENT.event_type,
-            category=RUN_END_EVENT.category,
-            content=outputs,
-            metadata={"status": "success"},
-        )
+        self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._put(
-            event_type=RUN_ERROR_EVENT.event_type,
-            category=RUN_ERROR_EVENT.category,
+            event_type="run.error",
+            category="error",
             content=str(error),
             metadata={"error_type": type(error).__name__},
         )
@@ -372,7 +220,7 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Capture the first user-visible prompt as llm.human.input.
+        """Capture structured prompt messages for llm_request event.
 
         This is also the canonical place to extract the first human message:
         messages are fully structured here, it fires only on real LLM calls,
@@ -397,15 +245,14 @@ class RunJournal(BaseCallbackHandler):
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if _should_persist_human_input_message(m):
-                        persisted_message = restore_original_human_message(m)
-                        self.set_first_human_message(self._message_text(persisted_message))
+                        self.set_first_human_message(m.text)
                         self._put(
-                            event_type=LLM_HUMAN_INPUT_EVENT.event_type,
-                            category=LLM_HUMAN_INPUT_EVENT.category,
-                            content=persisted_message.model_dump(),
+                            event_type="llm.human.input",
+                            category="message",
+                            content=m.model_dump(),
                             metadata={"caller": caller},
                         )
-                        self._record_message_summary(persisted_message, caller=caller)
+                        self._record_message_summary(m, caller=caller)
                         break
                 if self._first_human_msg:
                     break
@@ -413,6 +260,55 @@ class RunJournal(BaseCallbackHandler):
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
         # Fallback: on_chat_model_start is preferred. This just tracks latency.
         self._llm_start_times[str(run_id)] = time.monotonic()
+
+    def on_llm_new_token(
+        self,
+        token: str | list[str | dict[str, Any]],
+        *,
+        chunk: Any = None,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Observe the lead Agent's reasoning boundary without persisting deltas.
+
+        The duration begins with the first non-empty reasoning delta and ends
+        when the first visible answer delta arrives. A reasoning-only tool-call
+        step is closed in ``on_llm_end``. Subagent and middleware calls are
+        deliberately excluded.
+        """
+
+        del token, parent_run_id, kwargs
+        rid = str(run_id)
+        if self._identify_caller(tags) != "lead_agent":
+            self._reasoning_windows.pop(rid, None)
+            return
+        if rid in self._finalized_reasoning_durations:
+            return
+
+        message = getattr(chunk, "message", None)
+        if message is None:
+            return
+        window = self._reasoning_windows.setdefault(rid, _ReasoningWindow())
+        has_reasoning = self._message_has_structured_reasoning(message)
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and not has_reasoning:
+            (
+                has_inline_reasoning,
+                has_visible_content,
+            ) = self._classify_inline_reasoning_delta(window, content)
+            has_reasoning = has_inline_reasoning
+        else:
+            has_visible_content = self._message_has_visible_content(message)
+        if not has_reasoning and not has_visible_content:
+            return
+
+        observed_at = time.monotonic()
+        if has_reasoning and window.started_at is None:
+            window.started_at = observed_at
+        if has_visible_content and window.started_at is not None and window.ended_at is None:
+            window.ended_at = observed_at
 
     def on_llm_end(
         self,
@@ -425,21 +321,45 @@ class RunJournal(BaseCallbackHandler):
     ) -> None:
         messages: list[AnyMessage] = []
         logger.debug("on_llm_end %s: tags=%s", run_id, tags)
-        for generation in response.generations:
-            for gen in generation:
-                if hasattr(gen, "message"):
-                    messages.append(gen.message)
-                else:
-                    logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
+        # LangChain groups candidate generations per model input. The graph
+        # consumes the first candidate from each group; alternatives must not
+        # enter ActWeave's authoritative conversation history.
+        for candidates in response.generations:
+            if not candidates:
+                continue
+            selected = candidates[0]
+            if hasattr(selected, "message"):
+                messages.append(selected.message)
+            else:
+                logger.warning(
+                    "on_llm_end %s: selected generation has no message attribute: %s",
+                    run_id,
+                    selected,
+                )
 
-        for message in messages:
-            caller = self._identify_caller(tags)
+        caller = self._identify_caller(tags)
+        rid = str(run_id)
+        start = self._llm_start_times.pop(rid, None)
+        observed_at = time.monotonic()
+        latency_ms = int((observed_at - start) * 1000) if start else None
+        selected_reasoning_duration_ms = self._complete_reasoning_window(
+            rid=rid,
+            caller=caller,
+            observed_at=observed_at,
+        )
+
+        for message_index, message in enumerate(messages):
             self._remember_current_run_tool_calls(message, caller=caller)
 
-            # Latency
-            rid = str(run_id)
-            start = self._llm_start_times.pop(rid, None)
-            latency_ms = int((time.monotonic() - start) * 1000) if start else None
+            # A batched callback can contain more than one selected message,
+            # but the single observed stream window belongs only to its first
+            # message. Reusing it across the remaining batch would fabricate a
+            # duration for content that was not observed on that stream.
+            reasoning_duration_ms = selected_reasoning_duration_ms if message_index == 0 else None
+            self._replace_reasoning_duration(
+                message,
+                reasoning_duration_ms,
+            )
 
             # Token usage from message
             usage = getattr(message, "usage_metadata", None)
@@ -465,11 +385,14 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
-            # Message event: checkpoint-aligned llm.ai.response payload.
+            # Trace event: llm_response (OpenAI completion format)
             self._put(
-                event_type=LLM_AI_RESPONSE_EVENT.event_type,
-                category=LLM_AI_RESPONSE_EVENT.category,
-                content=message.model_dump(),
+                event_type="llm.ai.response",
+                category="message" if caller == "lead_agent" else "trace",
+                content=self._message_payload(
+                    message,
+                    reasoning_duration_ms=reasoning_duration_ms,
+                ),
                 metadata={
                     "caller": caller,
                     "usage": usage_dict,
@@ -515,53 +438,200 @@ class RunJournal(BaseCallbackHandler):
             self._counted_message_llm_run_ids.add(str(run_id))
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._llm_start_times.pop(str(run_id), None)
-        self._put(
-            event_type=LLM_ERROR_EVENT.event_type,
-            category=LLM_ERROR_EVENT.category,
-            content=str(error),
-        )
+        rid = str(run_id)
+        self._llm_start_times.pop(rid, None)
+        self._reasoning_windows.pop(rid, None)
+        self._finalized_reasoning_durations.pop(rid, None)
+        self._put(event_type="llm.error", category="trace", content=str(error))
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
-        """Handle tool start event, cache tool call ID for later correlation"""
-        tool_call_id = str(run_id)
-        logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
+        """Cache the exact callback-run caller for later tool-result correlation."""
+        tool_run_id = str(run_id)
+        self._tool_run_callers[tool_run_id] = self._identify_caller(tags)
+        logger.debug("Tool start for node %s, tool_run_id=%s, tags=%s", run_id, tool_run_id, tags)
 
-    def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
+    def on_tool_end(self, output, *, run_id, parent_run_id=None, tags=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
-                self._persist_tool_result_message(msg)
+                self._persist_tool_result_message(msg, caller=self._tool_message_caller(msg, run_id=run_id, tags=tags))
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
-                # A non-empty ``artifacts`` update is only produced on the
-                # success path (e.g. present_files returns an error ToolMessage
-                # without touching state when validation fails), so its
-                # presence is the artifact-production signal (#4272 slice 1).
-                artifacts = cmd.update.get("artifacts")
-                artifact_tool_names: set[str] = set()
                 for message in messages:
                     if isinstance(message, BaseMessage):
-                        self._persist_tool_result_message(message)
-                        if artifacts and isinstance(message, ToolMessage):
-                            tool_call_id = getattr(message, "tool_call_id", None)
-                            if isinstance(tool_call_id, str):
-                                tool_name = self._current_run_tool_call_names.get(tool_call_id)
-                                if tool_name:
-                                    artifact_tool_names.add(tool_name)
+                        self._persist_tool_result_message(message, caller=self._tool_message_caller(message, run_id=run_id, tags=tags))
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
-                if artifacts:
-                    artifact_tool_name = next(iter(artifact_tool_names)) if len(artifact_tool_names) == 1 else None
-                    self._record_produced_artifacts(artifacts, artifact_tool_name)
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
+            self._tool_run_callers.pop(str(run_id), None)
             logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --
+
+    @staticmethod
+    def _non_empty_text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    @classmethod
+    def _message_has_structured_reasoning(cls, message: Any) -> bool:
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and cls._non_empty_text(additional_kwargs.get("reasoning_content")):
+            return True
+
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("type") not in {"thinking", "reasoning"}:
+                continue
+            if any(cls._non_empty_text(block.get(key)) for key in ("thinking", "reasoning", "text", "content")):
+                return True
+        return False
+
+    @staticmethod
+    def _partial_tag_suffix(value: str, marker: str) -> str:
+        lowered = value.lower()
+        max_length = min(len(lowered), len(marker) - 1)
+        for length in range(max_length, 0, -1):
+            if lowered.endswith(marker[:length]):
+                return value[-length:]
+        return ""
+
+    @classmethod
+    def _classify_inline_reasoning_delta(
+        cls,
+        window: _ReasoningWindow,
+        content: str,
+    ) -> tuple[bool, bool]:
+        """Classify incremental ``<think>`` text, including split tags."""
+
+        data = f"{window.inline_buffer}{content}"
+        window.inline_buffer = ""
+        has_reasoning = False
+        has_visible_content = False
+
+        while data:
+            lowered = data.lower()
+            if window.inline_think_open:
+                has_reasoning = True
+                close_index = lowered.find("</think")
+                if close_index < 0:
+                    window.inline_buffer = cls._partial_tag_suffix(
+                        data,
+                        "</think",
+                    )
+                    return has_reasoning, has_visible_content
+                close_end = lowered.find(">", close_index + len("</think"))
+                if close_end < 0:
+                    window.inline_buffer = data[close_index:]
+                    return has_reasoning, has_visible_content
+                window.inline_think_open = False
+                data = data[close_end + 1 :]
+                continue
+
+            open_index = lowered.find("<think")
+            if open_index < 0:
+                partial = cls._partial_tag_suffix(data, "<think")
+                visible = data[: len(data) - len(partial)] if partial else data
+                has_visible_content = has_visible_content or bool(visible.strip())
+                window.inline_buffer = partial
+                return has_reasoning, has_visible_content
+
+            has_visible_content = has_visible_content or bool(data[:open_index].strip())
+            open_end = lowered.find(">", open_index + len("<think"))
+            if open_end < 0:
+                window.inline_buffer = data[open_index:]
+                return has_reasoning, has_visible_content
+            window.inline_think_open = True
+            has_reasoning = True
+            data = data[open_end + 1 :]
+
+        return has_reasoning, has_visible_content
+
+    @classmethod
+    def _message_has_visible_content(cls, message: Any) -> bool:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            stripped = content.strip()
+            return bool(stripped) and "<think" not in stripped.lower()
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if isinstance(block, str) and block.strip():
+                return True
+            if not isinstance(block, Mapping):
+                continue
+            if block.get("type") in {"thinking", "reasoning"}:
+                continue
+            if any(cls._non_empty_text(block.get(key)) for key in ("text", "content", "output_text")):
+                return True
+        return False
+
+    def _complete_reasoning_window(
+        self,
+        *,
+        rid: str,
+        caller: str,
+        observed_at: float,
+    ) -> int | None:
+        finalized = self._finalized_reasoning_durations.get(rid)
+        if finalized is not None:
+            return finalized
+        window = self._reasoning_windows.pop(rid, None)
+        if caller != "lead_agent" or window is None:
+            return None
+
+        started_at = window.started_at
+        if started_at is None:
+            return None
+
+        ended_at = window.ended_at if window.ended_at is not None else observed_at
+        elapsed_ms = int(round(max(0.0, ended_at - started_at) * 1000))
+        duration_ms = min(elapsed_ms, _MAX_REASONING_DURATION_MS)
+        self._finalized_reasoning_durations[rid] = duration_ms
+        return duration_ms
+
+    @staticmethod
+    def _replace_reasoning_duration(
+        message: Any,
+        duration_ms: int | None,
+    ) -> None:
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        projected_kwargs = dict(additional_kwargs) if isinstance(additional_kwargs, Mapping) else {}
+        projected_kwargs.pop(_REASONING_DURATION_KEY, None)
+        if duration_ms is not None:
+            projected_kwargs[_REASONING_DURATION_KEY] = duration_ms
+        try:
+            message.additional_kwargs = projected_kwargs
+        except (AttributeError, TypeError, ValueError):
+            logger.debug(
+                "Could not attach observed reasoning duration to model message",
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _message_payload(
+        message: Any,
+        *,
+        reasoning_duration_ms: int | None,
+    ) -> dict[str, Any]:
+        payload = message.model_dump()
+        if not isinstance(payload, Mapping):
+            return {}
+        projected = dict(payload)
+        additional_kwargs = projected.get("additional_kwargs")
+        projected_kwargs = dict(additional_kwargs) if isinstance(additional_kwargs, Mapping) else {}
+        projected_kwargs.pop(_REASONING_DURATION_KEY, None)
+        if reasoning_duration_ms is not None:
+            projected_kwargs[_REASONING_DURATION_KEY] = reasoning_duration_ms
+        projected["additional_kwargs"] = projected_kwargs
+        return projected
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
@@ -580,8 +650,6 @@ class RunJournal(BaseCallbackHandler):
         return getattr(tool_call, key, None)
 
     def _remember_current_run_tool_calls(self, message: AnyMessage, *, caller: str) -> None:
-        if caller != "lead_agent":
-            return
         is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
         if not is_ai_message:
             return
@@ -592,19 +660,34 @@ class RunJournal(BaseCallbackHandler):
             tool_call_id = self._tool_call_value(tool_call, "id")
             if not isinstance(tool_call_id, str) or not tool_call_id:
                 continue
+            self._tool_call_callers[tool_call_id] = caller
             name = self._tool_call_value(tool_call, "name")
-            self._current_run_tool_call_names[tool_call_id] = str(name or "")
+            if caller == "lead_agent":
+                self._current_run_tool_call_names[tool_call_id] = str(name or "")
 
-    def _persist_tool_result_message(self, message: BaseMessage) -> None:
+    def _tool_message_caller(self, message: BaseMessage, *, run_id: UUID, tags: list[str] | None) -> str:
+        caller = self._tool_run_callers.get(str(run_id))
+        if caller is not None:
+            return caller
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if isinstance(tool_call_id, str) and tool_call_id:
+            caller = self._tool_call_callers.get(tool_call_id)
+            if caller is not None:
+                return caller
+        return self._identify_caller(tags)
+
+    def _persist_tool_result_message(self, message: BaseMessage, *, caller: str = "lead_agent") -> None:
         self._put(
-            event_type=LLM_TOOL_RESULT_EVENT.event_type,
-            category=LLM_TOOL_RESULT_EVENT.category,
+            event_type="llm.tool.result",
+            category="message" if caller == "lead_agent" else "trace",
             content=message.model_dump(),
+            metadata={"caller": caller},
         )
-        identity = self._message_identity(message)
-        if identity:
-            self._persisted_tool_message_identities.add(identity)
-        self._record_message_summary(message)
+        if caller == "lead_agent":
+            identity = self._message_identity(message)
+            if identity:
+                self._persisted_tool_message_identities.add(identity)
+        self._record_message_summary(message, caller=caller)
 
     def _final_output_messages(self, outputs: Any) -> list[Any]:
         if isinstance(outputs, Mapping):
@@ -632,7 +715,7 @@ class RunJournal(BaseCallbackHandler):
             if not isinstance(message, ToolMessage):
                 continue
             if self._should_reconcile_tool_message(message):
-                self._persist_tool_result_message(message)
+                self._persist_tool_result_message(message, caller="lead_agent")
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         self._buffer.append(
@@ -660,7 +743,7 @@ class RunJournal(BaseCallbackHandler):
         if not self._buffer:
             return
         # Skip if a flush is already in flight — avoids concurrent writes
-        # to the same SQLite file from multiple fire-and-forget tasks.
+        # from multiple fire-and-forget tasks.
         if self._pending_flush_tasks:
             return
         try:
@@ -676,7 +759,10 @@ class RunJournal(BaseCallbackHandler):
 
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
-            await self._store.put_batch(batch)
+            if self._scope is None:
+                await self._store.put_batch(batch)
+            else:
+                await self._store.put_batch(batch, scope=self._scope)
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -698,8 +784,10 @@ class RunJournal(BaseCallbackHandler):
     def _identify_caller(self, tags: list[str] | None) -> str:
         _tags = tags or []
         for tag in _tags:
-            if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:") or tag == "lead_agent"):
+            if isinstance(tag, str) and (tag.startswith("subagent:") or tag.startswith("middleware:")):
                 return tag
+        if "lead_agent" in _tags:
+            return "lead_agent"
         # Default to lead_agent: the main agent graph does not inject
         # callback tags, while subagents and middleware explicitly tag
         # themselves.
@@ -816,72 +904,16 @@ class RunJournal(BaseCallbackHandler):
 
         Args:
             tag: Short identifier for the middleware (e.g., "title", "summarize",
-                 "guardrail"). Used to form event_type="middleware:{tag}" and
-                 limited by the persisted event-type column width.
+                 "guardrail"). Used to form event_type="middleware:{tag}".
             name: Full middleware class name.
             hook: Lifecycle hook that triggered the action (e.g., "after_model").
             action: Specific action performed (e.g., "generate_title").
             changes: Dict describing the state changes made.
         """
         self._put(
-            event_type=MIDDLEWARE_EVENT_PATTERN.event_type(tag),
-            category=MIDDLEWARE_EVENT_PATTERN.category,
+            event_type=f"middleware:{tag}",
+            category="middleware",
             content={"name": name, "hook": hook, "action": action, "changes": changes},
-        )
-
-    def record_memory_context(self, *, content_sha256: str) -> None:
-        """Record the effective hidden memory block for this run.
-
-        The full block already lives in checkpoint state and may contain user
-        data, so the event stores only its exact SHA-256 identity. Operators
-        consume it through the existing run-events debug API to compare the
-        effective memory used by different runs without copying that content.
-        """
-        if self._memory_context_recorded:
-            return
-        self._put(
-            event_type=MEMORY_CONTEXT_EVENT.event_type,
-            category=MEMORY_CONTEXT_EVENT.category,
-            content={"content_sha256": content_sha256},
-        )
-        self._memory_context_recorded = True
-
-    def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
-        """Accumulate produced artifact paths, deduped by (path, tool_name)."""
-        if not isinstance(artifacts, list):
-            return
-        for path in artifacts:
-            if not isinstance(path, str) or not path:
-                continue
-            key = (path, tool_name)
-            if key not in self._produced_artifact_keys:
-                self._produced_artifact_keys.add(key)
-                self._produced_artifacts.append(key)
-
-    def get_delivery_content(self) -> dict[str, Any]:
-        """Return the terminal delivery fact accumulated for this run.
-
-        This is a fact record, not a verdict: runs that produced no artifacts
-        emit ``presented: 0``.
-        """
-        by_tool: dict[str, list[str]] = {}
-        paths: list[str] = []
-        for path, tool_name in self._produced_artifacts:
-            paths.append(path)
-            if tool_name:
-                by_tool.setdefault(tool_name, []).append(path)
-        return {"presented": len(paths), "paths": paths, "by_tool": by_tool}
-
-    def record_delivery(self) -> None:
-        """Buffer the terminal ``run.delivery`` event for this run (#4272 slice 1).
-
-        Kept for direct journal users. The worker uses the event store's
-        idempotent singleton write so crash recovery can safely backfill it.
-        """
-        self._put(
-            event_type="run.delivery",
-            category="outputs",
-            content=self.get_delivery_content(),
         )
 
     async def flush(self) -> None:
@@ -901,7 +933,10 @@ class RunJournal(BaseCallbackHandler):
             batch = self._buffer[: self._flush_threshold]
             del self._buffer[: self._flush_threshold]
             try:
-                await self._store.put_batch(batch)
+                if self._scope is None:
+                    await self._store.put_batch(batch)
+                else:
+                    await self._store.put_batch(batch, scope=self._scope)
             except Exception:
                 self._buffer = batch + self._buffer
                 raise

@@ -20,14 +20,10 @@ import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
-import {
-  streamdownPluginsWithoutRawHtml,
-  streamdownWordAnimation,
-} from "@/core/streamdown";
-import {
-  SafeStreamdown,
-  toStreamdownComponents,
-} from "@/core/streamdown/components";
+import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
+import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
+import { SafeStreamdown } from "@/core/streamdown/components";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
 import {
@@ -48,19 +44,21 @@ export function SubtaskCard({
   taskId,
   threadId,
   runId,
-  isLoading,
 }: {
   className?: string;
   taskId: string;
   threadId?: string;
   runId?: string;
-  isLoading: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const task = useSubtask(taskId)!;
   const { models, tokenUsageEnabled } = useModels();
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(
+    task.status === "in_progress",
+  );
   const updateSubtask = useUpdateSubtask();
+  const privateWork = useProjectPrivateWorkScope();
   const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
   const tokenLabel = tokenUsageEnabled
     ? formatSubtaskTokenUsage(task.usage)
@@ -69,7 +67,7 @@ export function SubtaskCard({
     ? tokenLabel
       ? `${tokenLabel} ${t.tokenUsage.label}`
       : task.status === "in_progress"
-        ? t.tokenUsage.collecting
+        ? undefined
         : t.tokenUsage.unavailableShort
     : undefined;
 
@@ -90,7 +88,7 @@ export function SubtaskCard({
       return;
     }
     backfilledRef.current = true;
-    fetchSubtaskSteps(threadId, runId, taskId)
+    fetchSubtaskSteps(privateWork, threadId, runId, taskId)
       .then((steps) => {
         if (steps.length > 0) {
           updateSubtask({ id: taskId, steps });
@@ -100,7 +98,15 @@ export function SubtaskCard({
         // Allow a retry on the next expand if the fetch failed.
         backfilledRef.current = false;
       });
-  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+  }, [
+    collapsed,
+    stepsCount,
+    threadId,
+    runId,
+    taskId,
+    updateSubtask,
+    privateWork,
+  ]);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -199,10 +205,8 @@ export function SubtaskCard({
             <ChainOfThoughtStep
               label={
                 <SafeStreamdown
-                  {...streamdownPluginsWithoutRawHtml}
-                  animated={streamdownWordAnimation}
-                  components={toStreamdownComponents({ a: CitationLink })}
-                  isAnimating={isLoading}
+                  {...streamdownPluginsWithWordAnimation}
+                  components={{ a: CitationLink }}
                 >
                   {task.prompt}
                 </SafeStreamdown>
@@ -227,7 +231,11 @@ export function SubtaskCard({
                     (step.tool_name ?? t.subtasks[task.status])
                   ) : (
                     <div className="text-muted-foreground line-clamp-3 text-sm">
-                      <MarkdownContent content={step.text} isLoading={false} />
+                      <MarkdownContent
+                        content={step.text}
+                        isLoading={false}
+                        rehypePlugins={rehypePlugins}
+                      />
                     </div>
                   )
                 }
@@ -244,7 +252,11 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 label={
                   task.result ? (
-                    <MarkdownContent content={task.result} isLoading={false} />
+                    <MarkdownContent
+                      content={task.result}
+                      isLoading={false}
+                      rehypePlugins={rehypePlugins}
+                    />
                   ) : null
                 }
               ></ChainOfThoughtStep>
@@ -252,7 +264,11 @@ export function SubtaskCard({
           )}
           {task.status === "failed" && (
             <ChainOfThoughtStep
-              label={<div className="text-red-500">{task.error}</div>}
+              label={
+                <div className="text-red-500">
+                  {task.error ?? t.subtasks.failed}
+                </div>
+              }
               icon={<XCircleIcon className="size-4 text-red-500" />}
             ></ChainOfThoughtStep>
           )}

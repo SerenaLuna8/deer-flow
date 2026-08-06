@@ -54,7 +54,10 @@ export function buildThreadsSearchQueryOptions(
 ) {
   return {
     queryKey: ["threads", "search", params],
-    queryFn: async () => {
+    queryFn: async (context?: { signal: AbortSignal }) => {
+      const requestParams = context?.signal
+        ? { ...params, signal: context.signal }
+        : params;
       const maxResults = params.limit;
       const initialOffset = params.offset ?? 0;
       const DEFAULT_PAGE_SIZE = 50;
@@ -63,7 +66,7 @@ export function buildThreadsSearchQueryOptions(
       // delegate to a single search call with the original parameters.
       if (maxResults !== undefined && maxResults <= 0) {
         const response =
-          await apiClient.threads.search<AgentThreadState>(params);
+          await apiClient.threads.search<AgentThreadState>(requestParams);
         return filterThreadSearchResults(response as AgentThread[], params);
       }
 
@@ -90,7 +93,7 @@ export function buildThreadsSearchQueryOptions(
         }
 
         const response = (await apiClient.threads.search<AgentThreadState>({
-          ...params,
+          ...requestParams,
           limit: currentLimit,
           offset,
         })) as AgentThread[];

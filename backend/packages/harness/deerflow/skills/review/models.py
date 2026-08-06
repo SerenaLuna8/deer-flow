@@ -1,4 +1,4 @@
-"""Shared contracts and deterministic helpers for skill review."""
+"""Shared contracts and deterministic helpers for Skill review."""
 
 from __future__ import annotations
 
@@ -32,9 +32,15 @@ SKILLSCAN_SEVERITY_MAP: dict[str, Severity] = {
 
 @dataclass(frozen=True)
 class PackageLimits:
-    max_files: int = 4096
-    max_file_bytes: int = 64 * 1024 * 1024
-    max_total_bytes: int = 512 * 1024 * 1024
+    """Bounds shared by every snapshot reader.
+
+    Defaults match dev's authoritative package boundary: at most 16,384 files
+    and 100 MiB for either one file or the complete package.
+    """
+
+    max_files: int = 16_384
+    max_file_bytes: int = 100 * 1024 * 1024
+    max_total_bytes: int = 100 * 1024 * 1024
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -49,11 +55,16 @@ DEFAULT_PACKAGE_LIMITS = PackageLimits()
 
 def stable_json_dumps(data: Any) -> str:
     """Serialize review data in a byte-stable, path-independent form."""
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def normalize_relative_path(path: str) -> str:
-    """Normalize a package-relative path and reject escape attempts."""
+    """Normalize one package-relative path and reject escapes."""
     raw = path.replace("\\", "/").strip()
     if not raw:
         raise ValueError("path must not be empty")
@@ -98,7 +109,9 @@ def make_finding(
     return finding
 
 
-def sort_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def sort_findings(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     return sorted(
         findings,
         key=lambda item: (
@@ -111,8 +124,15 @@ def sort_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def summarize_findings(findings: list[dict[str, Any]]) -> dict[str, int]:
-    summary = {"blockers": 0, "errors": 0, "warnings": 0, "infos": 0}
+def summarize_findings(
+    findings: list[dict[str, Any]],
+) -> dict[str, int]:
+    summary = {
+        "blockers": 0,
+        "errors": 0,
+        "warnings": 0,
+        "infos": 0,
+    }
     for finding in findings:
         severity = finding.get("severity")
         if severity == "blocker":

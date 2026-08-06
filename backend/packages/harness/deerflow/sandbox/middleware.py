@@ -12,9 +12,11 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +52,74 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         super().__init__()
         self._lazy_init = lazy_init
 
-    def _acquire_sandbox(self, thread_id: str, *, user_id: str) -> str:
+    @staticmethod
+    def _private_sandbox_id(runtime: Runtime) -> str | None:
+        authority = require_private_file_authority(runtime.context or {})
+        if authority is None:
+            return None
+        sandbox_id = getattr(authority, "sandbox_id", None)
+        if type(sandbox_id) is not str or not sandbox_id:
+            raise RuntimeError("Private file authority is unavailable")
+        return sandbox_id
+
+    @staticmethod
+    def _private_sandbox_update(
+        state: SandboxMiddlewareState,
+        runtime: Runtime,
+    ) -> dict | None:
+        del state
+        sandbox_id = SandboxMiddleware._private_sandbox_id(runtime)
+        if sandbox_id is None:
+            return None
+        run_id = (runtime.context or {}).get("run_id")
+        if type(run_id) is not str or not run_id:
+            raise RuntimeError("Private Run identity is unavailable")
+        return {"sandbox": {"sandbox_id": sandbox_id, "run_id": run_id}}
+
+    @staticmethod
+    def _run_mounts(runtime: Runtime) -> tuple[RunScopedReadOnlyMount, ...]:
+        raw = (runtime.context or {}).get("__run_read_only_mounts", ())
+        if not isinstance(raw, tuple) or any(type(item) is not RunScopedReadOnlyMount for item in raw):
+            return ()
+        return raw
+
+    def _acquire_sandbox(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+        sandbox_id = (
+            provider.acquire_with_mounts(
+                thread_id,
+                user_id=user_id,
+                mounts=mounts,
+            )
+            if mounts
+            else provider.acquire(thread_id, user_id=user_id)
+        )
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str) -> str:
+    async def _acquire_sandbox_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        sandbox_id = (
+            await provider.acquire_with_mounts_async(
+                thread_id,
+                user_id=user_id,
+                mounts=mounts,
+            )
+            if mounts
+            else await provider.acquire_async(thread_id, user_id=user_id)
+        )
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
@@ -67,46 +128,69 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_update = self._private_sandbox_update(state, runtime)
+        if private_update is not None:
+            return private_update
         # Skip acquisition if lazy_init is enabled
         if self._lazy_init:
             return super().before_agent(state, runtime)
 
         # Eager initialization (original behavior)
-        if "sandbox" not in state or state["sandbox"] is None:
+        mounts = self._run_mounts(runtime)
+        if mounts or "sandbox" not in state or state["sandbox"] is None:
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return super().before_agent(state, runtime)
-            sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
+            sandbox_id = self._acquire_sandbox(
+                thread_id,
+                user_id=resolve_runtime_user_id(runtime),
+                mounts=mounts,
+            )
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_update = self._private_sandbox_update(state, runtime)
+        if private_update is not None:
+            return private_update
         # Skip acquisition if lazy_init is enabled
         if self._lazy_init:
             return await super().abefore_agent(state, runtime)
 
         # Eager initialization (original behavior), but use the async provider
         # hook so blocking sandbox startup/polling runs outside the event loop.
-        if "sandbox" not in state or state["sandbox"] is None:
+        mounts = self._run_mounts(runtime)
+        if mounts or "sandbox" not in state or state["sandbox"] is None:
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
-            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+            sandbox_id = await self._acquire_sandbox_async(
+                thread_id,
+                user_id=resolve_runtime_user_id(runtime),
+                mounts=mounts,
+            )
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_sandbox_id = self._private_sandbox_id(runtime)
+        if private_sandbox_id is not None:
+            existing = self._read_sandbox_id_from_state(state)
+            if existing is not None and existing != private_sandbox_id:
+                raise RuntimeError("Private file authority is unavailable")
+            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
             if fork_restored:
-                # The wrapped value replays the parent thread's sandbox state;
-                # releasing it here would evict the parent's warm sandbox.
-                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                logger.info(
+                    "Not releasing fork-restored sandbox %s",
+                    sandbox_id,
+                )
                 return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             get_sandbox_provider().release(sandbox_id)
@@ -123,13 +207,20 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        private_sandbox_id = self._private_sandbox_id(runtime)
+        if private_sandbox_id is not None:
+            existing = self._read_sandbox_id_from_state(state)
+            if existing is not None and existing != private_sandbox_id:
+                raise RuntimeError("Private file authority is unavailable")
+            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
             if fork_restored:
-                # The wrapped value replays the parent thread's sandbox state;
-                # releasing it here would evict the parent's warm sandbox.
-                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                logger.info(
+                    "Not releasing fork-restored sandbox %s",
+                    sandbox_id,
+                )
                 return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             await self._release_sandbox_async(sandbox_id)

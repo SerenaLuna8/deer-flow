@@ -1,12 +1,17 @@
 "use client";
 
 import { LogOutIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { fetch, getCsrfHeaders } from "@/core/api/fetcher";
+import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  AUTH_SUBMIT_TIMEOUT_MS,
+  fetchWithAuthTimeout,
+  isAbortError,
+} from "@/core/auth/request";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -22,6 +27,14 @@ export function AccountSettingsPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const requestControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      requestControllerRef.current?.abort();
+    },
+    [],
+  );
 
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,21 +51,29 @@ export function AccountSettingsPage() {
     }
 
     setLoading(true);
+    requestControllerRef.current?.abort();
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     try {
-      const res = await fetch("/api/v1/auth/change-password", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...getCsrfHeaders(),
+      const res = await fetchWithAuthTimeout(
+        fetchWithAuth,
+        "/api/v1/auth/change-password",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            current_password: currentPassword,
+            new_password: newPassword,
+          }),
         },
-        body: JSON.stringify({
-          current_password: currentPassword,
-          new_password: newPassword,
-        }),
-      });
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
-        const data = await res.json();
+        const data: unknown = await res.json();
         const authError = parseAuthError(data);
         setError(authError.message);
         return;
@@ -62,10 +83,20 @@ export function AccountSettingsPage() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-    } catch {
+    } catch (requestError) {
+      if (
+        controller.signal.aborted ||
+        isAbortError(requestError) ||
+        requestError instanceof AuthRequiredError
+      ) {
+        return;
+      }
       setError(t.settings.account.networkError);
     } finally {
-      setLoading(false);
+      if (requestControllerRef.current === controller) {
+        requestControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 

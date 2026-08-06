@@ -1,4 +1,4 @@
-import type { UploadLimits } from "./api";
+import type { UploadLimits } from "./limits";
 
 const MACOS_APP_BUNDLE_CONTENT_TYPES = new Set([
   "",
@@ -38,7 +38,8 @@ export function splitUnsupportedUploadFiles(fileList: File[] | FileList) {
 export type UploadLimitViolationCode =
   | "max_file_size"
   | "max_files"
-  | "max_total_size";
+  | "max_total_size"
+  | "project_storage_remaining";
 
 export interface UploadLimitViolation {
   code: UploadLimitViolationCode;
@@ -73,6 +74,7 @@ export function validateUploadLimits(
     max_file_size: [],
     max_files: [],
     max_total_size: [],
+    project_storage_remaining: [],
   };
 
   for (const file of incoming) {
@@ -88,6 +90,10 @@ export function validateUploadLimits(
       rejectedByCode.max_total_size.push(file);
       continue;
     }
+    if (totalSize + file.size > limits.project_storage.remaining_bytes) {
+      rejectedByCode.project_storage_remaining.push(file);
+      continue;
+    }
 
     accepted.push(file);
     fileCount += 1;
@@ -98,11 +104,13 @@ export function validateUploadLimits(
     max_file_size: limits.max_file_size,
     max_files: limits.max_files,
     max_total_size: limits.max_total_size,
+    project_storage_remaining: limits.project_storage.remaining_bytes,
   };
   const codes: UploadLimitViolationCode[] = [
     "max_file_size",
     "max_files",
     "max_total_size",
+    "project_storage_remaining",
   ];
   const violations = codes.flatMap((code) =>
     rejectedByCode[code].length > 0

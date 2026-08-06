@@ -1,11 +1,33 @@
 """Configuration for conversation summarization."""
 
+from string import Formatter
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
+_SUMMARY_PROMPT_CONTRACT_ERROR = "summary_prompt must be a valid format template whose only replacement field is {messages}"
+
+
+def validate_summary_prompt_template(template: str) -> str:
+    """Validate the trusted summary prompt's narrow formatting contract.
+
+    Literal braces remain available through Python's normal ``{{`` / ``}}``
+    escaping, while conversions, format specifications, attribute/index access,
+    and every replacement field other than the required ``{messages}`` are
+    rejected. Keeping the contract here makes malformed deployment config fail
+    during Pydantic validation instead of at the first live compaction.
+    """
+    try:
+        parsed = tuple(Formatter().parse(template))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(_SUMMARY_PROMPT_CONTRACT_ERROR) from exc
+
+    fields = [(field_name, format_spec, conversion) for _, field_name, format_spec, conversion in parsed if field_name is not None]
+    if not fields or any(field_name != "messages" or format_spec or conversion for field_name, format_spec, conversion in fields):
+        raise ValueError(_SUMMARY_PROMPT_CONTRACT_ERROR)
+    return template
 
 
 class ContextSize(BaseModel):
@@ -28,10 +50,7 @@ class SummarizationConfig(BaseModel):
     )
     model_name: str | None = Field(
         default=None,
-        description="Model name to use for summarization. None = summarize with the model the run "
-        "actually executes with (the lead run's model, a subagent's own model, or a thread's "
-        "custom-agent model), not config.models[0]. When set, that model generates and the run's "
-        "own model is used as a fallback if the configured summary provider fails.",
+        description="Model name to use for summarization (None = use a lightweight model)",
     )
     trigger: ContextSize | list[ContextSize] | None = Field(
         default=None,
@@ -59,6 +78,13 @@ class SummarizationConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_SKILL_FILE_READ_TOOL_NAMES),
         description="Tool names treated as skill-file reads when capturing loaded skills into the durable skill_context channel.",
     )
+
+    @field_validator("summary_prompt")
+    @classmethod
+    def validate_summary_prompt(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_summary_prompt_template(value)
 
 
 # Global configuration instance

@@ -9,7 +9,12 @@ import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any, Literal
+
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    neutralize_untrusted_tags,
+)
 
 try:
     from defusedxml import ElementTree as SafeET  # type: ignore[import-not-found]
@@ -21,7 +26,6 @@ import yaml
 ToolOutputKind = Literal["json", "csv", "tsv", "yaml", "xml", "code", "text", "unknown"]
 
 _KEY_LIMIT = 12
-_SCALAR_LIMIT = 6
 _TABLE_SAMPLE_ROWS = 50
 _TABLE_COLUMN_LIMIT = 18
 _TEXT_HEADER_LIMIT = 16
@@ -31,6 +35,19 @@ _CODE_SYMBOL_LIMIT = 24
 _JSON_SHAPE_MAX_DEPTH = 2
 _JSON_STRUCTURE_LIMIT = 24
 _JSON_STRUCTURE_DEPTH = 4
+
+# Every synopsis is model-facing untrusted data. Keep both individual
+# structural labels and the aggregate representation bounded independently of
+# the input format, then keep the complete rendered preview under one final
+# ceiling even if a caller supplies oversized head/tail budgets.
+_MAX_RENDERED_PREVIEW_CHARS = 12_000
+_MAX_SYNOPSIS_METADATA_CHARS = 4_000
+_MAX_SYNOPSIS_ITEM_CHARS = 512
+_MAX_SYNOPSIS_SAMPLE_CHARS = 512
+_MAX_STRUCTURAL_NAME_CHARS = 160
+_MAX_TOOL_NAME_CHARS = 160
+_MAX_VIRTUAL_PATH_CHARS = 1_024
+_MAX_RAW_SAMPLE_CHARS = 4_000
 
 # Hard cap on the synopsis input size. Beyond this threshold the full parse
 # is skipped and only a raw head/tail sample is emitted. This bounds the
@@ -63,66 +80,72 @@ class ToolOutputSynopsis:
 def build_tool_output_synopsis(content: str, *, tool_name: str = "") -> ToolOutputSynopsis:
     """Return a typed synopsis for *content* without using an LLM."""
     if content == "":
-        return ToolOutputSynopsis(
-            kind="unknown",
-            title="Empty output",
-            summary=["The tool returned an empty string."],
-            structure=[],
-            notable_items=[],
+        return _bounded_synopsis(
+            ToolOutputSynopsis(
+                kind="unknown",
+                title="Empty output",
+                summary=["The tool returned an empty string."],
+                structure=[],
+                notable_items=[],
+            )
         )
 
     # Size guard: parsing the full content above the threshold is a DoS risk
     # (XML entity expansion, YAML alias bombs, memory/CPU from raw text).
     # Fall back to a raw head/tail sample to bound the worst case.
     if len(content.encode("utf-8")) > _MAX_SYNOPSIS_INPUT_BYTES:
-        return ToolOutputSynopsis(
-            kind="unknown",
-            title="Oversized output",
-            summary=[
-                f"The output has {len(content)} characters ({len(content.encode('utf-8')) / 1024 / 1024:.1f} MB). Parsing skipped due to size limit.",
-            ],
-            structure=[],
-            notable_items=[],
-            sample=_head_tail_sample(content, _TEXT_EXCERPT_CHARS * 2),
+        return _bounded_synopsis(
+            ToolOutputSynopsis(
+                kind="unknown",
+                title="Oversized output",
+                summary=[
+                    f"The output has {len(content)} characters ({len(content.encode('utf-8')) / 1024 / 1024:.1f} MB). Parsing skipped due to size limit.",
+                ],
+                structure=[],
+                notable_items=[],
+                sample=_head_tail_sample(content, _TEXT_EXCERPT_CHARS * 2),
+            )
         )
 
     if _looks_binary(content):
-        return ToolOutputSynopsis(
-            kind="unknown",
-            title="Binary-like output",
-            summary=[f"The output has {len(content)} characters and includes non-text control bytes."],
-            structure=[],
-            notable_items=[],
-            sample=_head_tail_sample(content, _TEXT_EXCERPT_CHARS * 2),
+        return _bounded_synopsis(
+            ToolOutputSynopsis(
+                kind="unknown",
+                title="Binary-like output",
+                summary=[f"The output has {len(content)} characters and includes non-text control bytes."],
+                structure=[],
+                notable_items=[],
+                sample=_head_tail_sample(content, _TEXT_EXCERPT_CHARS * 2),
+            )
         )
 
     stripped = content.strip()
     json_synopsis = _try_json(content)
     if json_synopsis is not None:
-        return json_synopsis
+        return _bounded_synopsis(json_synopsis)
 
     xml_synopsis = _try_xml(stripped)
     if xml_synopsis is not None:
-        return xml_synopsis
+        return _bounded_synopsis(xml_synopsis)
 
     if "\t" in content:
         table = _try_table(content, delimiter="\t", kind="tsv")
         if table is not None:
-            return table
+            return _bounded_synopsis(table)
 
     if "," in content:
         table = _try_table(content, delimiter=",", kind="csv")
         if table is not None:
-            return table
+            return _bounded_synopsis(table)
 
     yaml_synopsis = _try_yaml(content)
     if yaml_synopsis is not None:
-        return yaml_synopsis
+        return _bounded_synopsis(yaml_synopsis)
 
     if _looks_code(content):
-        return _summarize_code(content)
+        return _bounded_synopsis(_summarize_code(content))
 
-    return _summarize_text(content, tool_name=tool_name)
+    return _bounded_synopsis(_summarize_text(content, tool_name=tool_name))
 
 
 def render_tool_output_preview(
@@ -143,15 +166,33 @@ def render_tool_output_preview(
     tail_chars from the end of *content*.
     """
     total = len(content)
+    safe_tool_name = _bounded_untrusted_text(tool_name or "unknown", _MAX_TOOL_NAME_CHARS)
+    safe_virtual_path = _bounded_untrusted_text(virtual_path, _MAX_VIRTUAL_PATH_CHARS)
     synopsis = build_tool_output_synopsis(content, tool_name=tool_name)
-    head_budget = max(0, head_chars)
-    tail_budget = max(0, tail_chars)
+    head_budget, tail_budget = _bounded_raw_budgets(head_chars, tail_chars)
     # For text kind, skip excerpts in the synopsis when a raw sample will be
     # appended (avoids duplicating head/tail bytes in both places).
     if synopsis.kind == "text" and head_budget + tail_budget > 0 and len(content) > head_budget + tail_budget:
-        synopsis = _summarize_text(content, tool_name=tool_name, include_excerpts=False)
+        synopsis = _bounded_synopsis(_summarize_text(content, tool_name=tool_name, include_excerpts=False))
+    if synopsis.kind in {"csv", "tsv"}:
+        raw_head_row = _table_first_row_from_raw_head(
+            content,
+            delimiter="," if synopsis.kind == "csv" else "\t",
+            head_budget=head_budget,
+        )
+        if raw_head_row is not None:
+            synopsis = _bounded_synopsis(
+                ToolOutputSynopsis(
+                    kind=synopsis.kind,
+                    title=synopsis.title,
+                    summary=synopsis.summary,
+                    structure=[*synopsis.structure, raw_head_row],
+                    notable_items=synopsis.notable_items,
+                    sample=synopsis.sample,
+                )
+            )
     lines = [
-        f"[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens).]",
+        f"[Full {safe_tool_name} output saved to {safe_virtual_path} ({total} chars, ~{total // 4} tokens).]",
         f"[Preview kind: {synopsis.kind}. This is a structured synopsis, not a raw head/tail truncation.]",
         "",
         f"{synopsis.title}:",
@@ -169,15 +210,16 @@ def render_tool_output_preview(
         lines.extend(f"- {item}" for item in synopsis.notable_items)
 
     raw_sample = _build_raw_sample(content, head_budget=head_budget, tail_budget=tail_budget, existing=synopsis.sample)
+    raw_sample = _head_tail_sample(raw_sample, _MAX_RAW_SAMPLE_CHARS)
     if raw_sample:
         lines.append("")
         lines.append("Raw sample (head + tail, clipped to head_chars / tail_chars):")
         lines.append(raw_sample)
 
-    lines.append("")
-    lines.append("Access:")
-    lines.append(f"- Use read_file on {virtual_path} with start_line and end_line to inspect the raw output.")
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    access = f"\n\nAccess:\n- Use read_file on {safe_virtual_path} with start_line and end_line to inspect the raw output."
+    body_budget = max(0, _MAX_RENDERED_PREVIEW_CHARS - len(access))
+    return f"{_clip(body, body_budget)}{access}"
 
 
 def _clip(value: str, limit: int) -> str:
@@ -185,7 +227,82 @@ def _clip(value: str, limit: int) -> str:
         return ""
     if len(value) <= limit:
         return value
+    if limit <= 3:
+        return value[:limit]
     return value[: max(0, limit - 3)] + "..."
+
+
+def _bounded_untrusted_text(value: object, limit: int) -> str:
+    """Render one untrusted structural label without control-token authority."""
+
+    text = neutralize_untrusted_tags(str(value))
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    return _clip(text, limit)
+
+
+def _bounded_structural_name(value: object) -> str:
+    return _bounded_untrusted_text(value, _MAX_STRUCTURAL_NAME_CHARS)
+
+
+def _bounded_synopsis(synopsis: ToolOutputSynopsis) -> ToolOutputSynopsis:
+    """Bound and neutralize every non-raw synopsis field."""
+
+    remaining = _MAX_SYNOPSIS_METADATA_CHARS
+
+    def take(value: str) -> str:
+        nonlocal remaining
+        if remaining <= 0:
+            return ""
+        bounded = _bounded_untrusted_text(
+            value,
+            min(_MAX_SYNOPSIS_ITEM_CHARS, remaining),
+        )
+        remaining -= len(bounded)
+        return bounded
+
+    title = take(synopsis.title)
+
+    def take_items(values: list[str]) -> list[str]:
+        result: list[str] = []
+        for value in values:
+            bounded = take(value)
+            if not bounded:
+                break
+            result.append(bounded)
+        return result
+
+    summary = take_items(synopsis.summary)
+    structure = take_items(synopsis.structure)
+    notable_items = take_items(synopsis.notable_items)
+    sample = _head_tail_sample(synopsis.sample, _MAX_SYNOPSIS_SAMPLE_CHARS)
+    return ToolOutputSynopsis(
+        kind=synopsis.kind,
+        title=title,
+        summary=summary,
+        structure=structure,
+        notable_items=notable_items,
+        sample=sample,
+    )
+
+
+def _bounded_raw_budgets(head_chars: int, tail_chars: int) -> tuple[int, int]:
+    requested_head = max(0, head_chars)
+    requested_tail = max(0, tail_chars)
+    requested_total = requested_head + requested_tail
+    if requested_total <= _MAX_RAW_SAMPLE_CHARS:
+        return requested_head, requested_tail
+    if requested_head == 0:
+        return 0, _MAX_RAW_SAMPLE_CHARS
+    if requested_tail == 0:
+        return _MAX_RAW_SAMPLE_CHARS, 0
+    head_budget = max(
+        1,
+        min(
+            _MAX_RAW_SAMPLE_CHARS - 1,
+            (_MAX_RAW_SAMPLE_CHARS * requested_head) // requested_total,
+        ),
+    )
+    return head_budget, _MAX_RAW_SAMPLE_CHARS - head_budget
 
 
 def _build_raw_sample(content: str, *, head_budget: int, tail_budget: int, existing: str) -> str:
@@ -198,7 +315,7 @@ def _build_raw_sample(content: str, *, head_budget: int, tail_budget: int, exist
     two slices would overlap.
     """
     if existing:
-        return existing
+        return _head_tail_sample(existing, head_budget + tail_budget)
     if head_budget <= 0 and tail_budget <= 0:
         return ""
     if len(content) <= head_budget + tail_budget:
@@ -232,8 +349,39 @@ def _head_tail_sample(content: str, limit: int) -> str:
         return ""
     if len(content) <= limit:
         return content
-    half = max(1, limit // 2)
-    return f"{content[:half]}\n...\n{content[-half:]}"
+    marker = "\n...\n"
+    if limit <= len(marker):
+        return content[:limit]
+    payload = limit - len(marker)
+    head = max(1, payload // 2)
+    tail = payload - head
+    return f"{content[:head]}{marker}{content[-tail:] if tail else ''}"
+
+
+def _table_first_row_from_raw_head(
+    content: str,
+    *,
+    delimiter: str,
+    head_budget: int,
+) -> str | None:
+    """Format the first table row only when it is wholly inside raw head."""
+
+    if head_budget <= 0:
+        return None
+    raw_head = content[:head_budget]
+    if len(raw_head) < len(content):
+        raw_head = raw_head.rsplit("\n", 1)[0]
+    try:
+        rows = list(islice(csv.reader(io.StringIO(raw_head), delimiter=delimiter), 2))
+    except csv.Error:
+        return None
+    if len(rows) < 2 or len(rows[0]) < 2 or len(rows[0]) != len(rows[1]):
+        return None
+    pairs = [f"{_bounded_structural_name(column.strip() or f'column_{index + 1}')}={_bounded_untrusted_text(cell, 80)}" for index, (column, cell) in enumerate(islice(zip(rows[0], rows[1]), _TABLE_COLUMN_LIMIT))]
+    return _bounded_untrusted_text(
+        f"first data row: {' | '.join(pairs)}",
+        _MAX_SYNOPSIS_ITEM_CHARS,
+    )
 
 
 def _looks_binary(content: str) -> bool:
@@ -258,17 +406,11 @@ def _type_name(value: Any) -> str:
     return "string"
 
 
-def _short_value(value: Any) -> str:
-    if isinstance(value, str):
-        return json.dumps(_clip(value, 80), ensure_ascii=False)
-    return _clip(repr(value), 80)
-
-
 def _json_shape(value: Any, *, depth: int = 0) -> str:
     if depth >= _JSON_SHAPE_MAX_DEPTH:
         return "..."
     if isinstance(value, dict):
-        keys = [str(key) for key in list(value.keys())[:_KEY_LIMIT]]
+        keys = [_bounded_structural_name(key) for key in islice(value.keys(), _KEY_LIMIT)]
         suffix = f": {', '.join(keys)}" if keys else ""
         return f"object(keys={len(value)}{suffix})"
     if isinstance(value, list):
@@ -279,7 +421,7 @@ def _json_shape(value: Any, *, depth: int = 0) -> str:
 
 
 def _json_path(parent: str, key: Any) -> str:
-    key_text = str(key)
+    key_text = _bounded_structural_name(key)
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key_text):
         return f"{parent}.{key_text}"
     return f"{parent}[{json.dumps(key_text, ensure_ascii=False)}]"
@@ -287,7 +429,7 @@ def _json_path(parent: str, key: Any) -> str:
 
 def _json_container_description(value: Any) -> str:
     if isinstance(value, dict):
-        keys = [str(key) for key in list(value.keys())[:_KEY_LIMIT]]
+        keys = [_bounded_structural_name(key) for key in islice(value.keys(), _KEY_LIMIT)]
         suffix = f"; keys {', '.join(keys)}" if keys else ""
         return f"object keys {len(value)}{suffix}"
     if isinstance(value, list):
@@ -314,7 +456,7 @@ def _json_container_paths(value: Any, *, limit: int = _JSON_STRUCTURE_LIMIT) -> 
         if len(paths) >= limit or depth >= _JSON_STRUCTURE_DEPTH:
             return
         if isinstance(node, dict):
-            for key, child in list(node.items())[:_KEY_LIMIT]:
+            for key, child in islice(node.items(), _KEY_LIMIT):
                 if len(paths) >= limit:
                     break
                 next_path = _json_path(current_path, key)
@@ -331,30 +473,6 @@ def _json_container_paths(value: Any, *, limit: int = _JSON_STRUCTURE_LIMIT) -> 
     return paths
 
 
-def _scalar_examples(value: Any, *, path: str = "$", limit: int = _SCALAR_LIMIT) -> list[str]:
-    examples: list[str] = []
-
-    def walk(node: Any, current: str, depth: int) -> None:
-        if len(examples) >= limit or depth >= _JSON_STRUCTURE_DEPTH:
-            return
-        if isinstance(node, dict):
-            for key, child in list(node.items())[:_KEY_LIMIT]:
-                walk(child, f"{current}.{key}", depth + 1)
-                if len(examples) >= limit:
-                    break
-            return
-        if isinstance(node, list):
-            for index, child in enumerate(node[:2]):
-                walk(child, f"{current}[{index}]", depth + 1)
-                if len(examples) >= limit:
-                    break
-            return
-        examples.append(f"{current}: {_short_value(node)}")
-
-    walk(value, path, 0)
-    return examples
-
-
 def _try_json(content: str) -> ToolOutputSynopsis | None:
     stripped = content.strip()
     if not stripped.startswith(("{", "[")):
@@ -369,16 +487,11 @@ def _try_json(content: str) -> ToolOutputSynopsis | None:
     summary: list[str] = []
     structure: list[str] = [f"shape: {_json_shape(value)}"]
     structure.extend(_json_container_paths(value))
-    notable = _scalar_examples(value)
-    # NOTE: scalar examples may surface values from anywhere in the parsed
-    # structure (not just head/tail bytes). This is expected behaviour — the
-    # synopsis is a structural summary, not a confidentiality filter. Operators
-    # who relied on the old preview to only expose head/tail snippets should
-    # review their tool outputs for sensitive mid-document values.
+    notable: list[str] = []
     if isinstance(value, dict):
-        keys = [str(key) for key in value.keys()]
-        summary.append(f"JSON object with {len(keys)} top-level keys.")
-        summary.append(f"Top-level keys: {', '.join(keys[:_KEY_LIMIT]) or '(none)'}")
+        keys = [_bounded_structural_name(key) for key in islice(value.keys(), _KEY_LIMIT)]
+        summary.append(f"JSON object with {len(value)} top-level keys.")
+        summary.append(f"Top-level keys: {', '.join(keys) or '(none)'}")
     elif isinstance(value, list):
         summary.append(f"JSON array with {len(value)} items.")
         if value:
@@ -408,13 +521,14 @@ def _try_xml(stripped: str) -> ToolOutputSynopsis | None:
     except Exception:
         return None
 
+    root_tag = _bounded_structural_name(root.tag)
     child_counts = Counter(child.tag for child in list(root))
-    structure = [f"root tag: {root.tag}", f"root attributes: {len(root.attrib)}"]
-    structure.extend(f"{tag}: {count}" for tag, count in child_counts.most_common(_KEY_LIMIT))
+    structure = [f"root tag: {root_tag}", f"root attributes: {len(root.attrib)}"]
+    structure.extend(f"{_bounded_structural_name(tag)}: {count}" for tag, count in child_counts.most_common(_KEY_LIMIT))
     return ToolOutputSynopsis(
         kind="xml",
         title="XML output",
-        summary=[f"XML document with root tag {root.tag}."],
+        summary=[f"XML document with root tag {root_tag}."],
         structure=structure,
         notable_items=[],
     )
@@ -453,16 +567,9 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
     if any(cell.startswith((" ", "\t")) for cell in raw_header):
         return None
 
-    columns = [cell.strip() or f"column_{idx + 1}" for idx, cell in enumerate(raw_header)]
+    columns = [_bounded_structural_name(cell.strip() or f"column_{idx + 1}") for idx, cell in enumerate(raw_header)]
     total_nonempty_lines = sum(1 for line in content.splitlines() if line.strip())
     data_rows = max(0, total_nonempty_lines - 1)
-    # Render the first data row as a key=value list so quoted cells that
-    # contain the delimiter do not get rejoined into a comma-separated
-    # string that misleads the model about column count.
-    first_data_pairs: list[str] = []
-    if len(rows) > 1:
-        for col_name, cell in list(zip(columns, rows[1]))[:_TABLE_COLUMN_LIMIT]:
-            first_data_pairs.append(f"{col_name}={_clip(cell, 80)}")
     title = "CSV table output" if kind == "csv" else "TSV table output"
     label = kind.upper()
     return ToolOutputSynopsis(
@@ -471,7 +578,8 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
         summary=[f"{label} table with {data_rows} data rows and {width} columns."],
         structure=[
             f"columns: {', '.join(columns[:_TABLE_COLUMN_LIMIT])}",
-            f"first data row: {' | '.join(first_data_pairs) or '(none)'}",
+            f"sampled consistent data rows: {len(consistent)}",
+            f"first data row cells: {len(rows[1]) if len(rows) > 1 else 0}",
         ],
         notable_items=[],
     )
@@ -537,10 +645,10 @@ def _try_yaml(content: str) -> ToolOutputSynopsis | None:
     summary: list[str]
     structure: list[str] = []
     if isinstance(value, dict):
-        keys = [str(key) for key in value.keys()]
-        summary = [f"YAML object with {len(keys)} top-level keys.", f"Top-level keys: {', '.join(keys[:_KEY_LIMIT])}"]
-        for key, child in list(value.items())[:_KEY_LIMIT]:
-            structure.append(f"{key}: {_type_name(child)}")
+        keys = [_bounded_structural_name(key) for key in islice(value.keys(), _KEY_LIMIT)]
+        summary = [f"YAML object with {len(value)} top-level keys.", f"Top-level keys: {', '.join(keys)}"]
+        for key, child in islice(value.items(), _KEY_LIMIT):
+            structure.append(f"{_bounded_structural_name(key)}: {_type_name(child)}")
     else:
         summary = [f"YAML array with {len(value)} items."]
         if value:
@@ -567,14 +675,14 @@ def _summarize_code(content: str) -> ToolOutputSynopsis:
         stripped = line.strip()
         import_match = re.match(r"^(?:from\s+(\S+)\s+import|import\s+(\S+))", stripped)
         if import_match:
-            imports.append(_one_line(import_match.group(1) or import_match.group(2) or "", 160))
+            imports.append(_bounded_structural_name(import_match.group(1) or import_match.group(2) or ""))
             continue
         symbol_match = re.match(
             r"^(class|def|async\s+def|function|export\s+function|pub\s+fn|fn)\s+([A-Za-z_]\w*)",
             stripped,
         )
         if symbol_match:
-            symbols.append(_one_line(f"{symbol_match.group(1)} {symbol_match.group(2)}", 180))
+            symbols.append(_bounded_structural_name(f"{symbol_match.group(1)} {symbol_match.group(2)}"))
 
     structure = [f"line count: {len(lines)}"]
     if imports:
@@ -592,26 +700,21 @@ def _summarize_code(content: str) -> ToolOutputSynopsis:
 def _summarize_text(content: str, *, tool_name: str = "", include_excerpts: bool = True) -> ToolOutputSynopsis:
     lines = content.splitlines()
     normalized = re.sub(r"\s+", " ", content).strip()
-    headers: list[str] = []
-    seen: set[str] = set()
+    header_count = 0
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
         if not (re.match(r"^#{1,6}\s+", stripped) or re.match(r"^[A-Z0-9][A-Z0-9\s:_-]{6,}$", stripped)):
             continue
-        header = _one_line(stripped, 160)
-        if header in seen:
-            continue
-        seen.add(header)
-        headers.append(header)
-        if len(headers) >= _TEXT_HEADER_LIMIT:
+        header_count += 1
+        if header_count >= _TEXT_HEADER_LIMIT:
             break
 
-    tool_hint = f" from {tool_name}" if tool_name else ""
+    tool_hint = f" from {_bounded_structural_name(tool_name)}" if tool_name else ""
     summary_lines = [
         f"Text output{tool_hint} with {len(content)} characters, {len(normalized.split()) if normalized else 0} words, and {len(lines)} lines.",
-        f"Detected section headers: {' | '.join(headers) if headers else 'none detected'}.",
+        f"Detected section header candidates: {header_count}{'+' if header_count == _TEXT_HEADER_LIMIT else ''}.",
     ]
     # Include opening/closing excerpts only when no raw head/tail sample will
     # be appended by render_tool_output_preview (avoids duplicating the same

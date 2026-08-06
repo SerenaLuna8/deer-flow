@@ -5,17 +5,6 @@ from starlette.testclient import TestClient
 
 from app.gateway.auth_middleware import AuthMiddleware, _is_public
 from app.gateway.csrf_middleware import CSRFMiddleware
-from deerflow.config.authorization_config import AuthorizationConfig
-
-
-@pytest.fixture(autouse=True)
-def _default_route_authorization_config(monkeypatch):
-    """Keep minimal middleware apps independent of a repository config.yaml."""
-    monkeypatch.setattr(
-        "app.gateway.authz._get_route_authorization_config",
-        lambda: AuthorizationConfig(),
-    )
-
 
 # ── _is_public unit tests ─────────────────────────────────────────────────
 
@@ -249,7 +238,7 @@ def test_auth_disabled_stamps_default_admin_user_without_cookie(monkeypatch):
     assert res.json() == {
         "id": "default",
         "email": "default@test.local",
-        "system_role": "admin",
+        "system_role": "system_admin",
         "context_user_id": "default",
     }
 
@@ -264,7 +253,7 @@ def test_auth_disabled_auth_me_reuses_middleware_user_without_cookie(monkeypatch
     assert res.json() == {
         "id": "default",
         "email": "default@test.local",
-        "system_role": "admin",
+        "system_role": "system_admin",
         "needs_setup": False,
     }
 
@@ -283,8 +272,9 @@ def test_auth_disabled_does_not_clobber_valid_session_cookie(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
     monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", fake_current_user)
     client = TestClient(_make_app())
+    client.cookies.set("access_token", "valid-session")
 
-    res = client.get("/api/whoami", cookies={"access_token": "valid-session"})
+    res = client.get("/api/whoami")
 
     assert res.status_code == 200
     assert res.json() == {
@@ -363,9 +353,7 @@ def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(mon
 
 
 def test_protected_path_with_junk_cookie_rejected(client):
-    """Junk cookie → 401. Middleware strictly validates the JWT now
-    (AUTH_TEST_PLAN test 7.5.8); it no longer silently passes bad
-    tokens through to the route handler."""
+    """Junk cookie → 401 instead of reaching the route handler."""
     client.cookies.set("access_token", "some-token")
     res = client.get("/api/models")
     assert res.status_code == 401

@@ -1,8 +1,16 @@
-# DeerFlow - Unified Development Environment
+# ActWeave — Weave intelligence into action.
 
-.PHONY: help config config-upgrade check install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.DEFAULT_GOAL := help
 
-BASH ?= bash
+.PHONY: \
+	help \
+	setup config config-upgrade check doctor install setup-sandbox support-bundle \
+	setup-db check-db reconcile-usage rotate-credentials import-project-skills \
+	test \
+	detect-thread-boundaries detect-blocking-io \
+	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
+	docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway up down
+
 BACKEND_UV_RUN = cd backend && uv run
 
 # Detect OS for Windows compatibility
@@ -16,53 +24,92 @@ else
     RUN_WITH_GIT_BASH =
 endif
 
-FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+SERVE = $(RUN_WITH_GIT_BASH) ./scripts/serve.sh
+DOCKER = $(RUN_WITH_GIT_BASH) ./scripts/docker.sh
+DEPLOY = $(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
 
 help:
-	@echo "DeerFlow Development Commands:"
-	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
-	@echo "  make doctor          - Check configuration and system requirements"
-	@echo "  make support-bundle  - Create a redacted issue summary, AI draft, and evidence bundle"
-	@echo "  make config          - Generate local config files (aborts if config already exists)"
-	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
-	@echo "  make check           - Check if all required tools are installed"
-	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
-	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
-	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
-	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
-	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
-	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
-	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
-	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
-	@echo "  make nginx           - Start nginx alone in the foreground (local dev config)"
-	@echo "  make stop            - Stop all running services"
-	@echo "  make clean           - Clean up processes and temporary files"
+	@echo "ActWeave — Weave intelligence into action."
 	@echo ""
-	@echo "Docker Production Commands:"
-	@echo "  make up              - Build and start production Docker services (localhost:2026)"
-	@echo "  make down            - Stop and remove production Docker containers"
+	@echo "命令"
 	@echo ""
-	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Pull the sandbox image"
-	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
-	@echo "  make docker-stop     - Stop Docker development services"
-	@echo "  make docker-logs     - View Docker development logs"
-	@echo "  make docker-logs-frontend - View Docker frontend logs"
-	@echo "  make docker-logs-gateway - View Docker gateway logs"
-	@echo "  make docker-logs-redis - View Docker Redis logs"
+	@echo "本地服务："
+	@echo "  make dev                              启动开发环境（热更新，入口 localhost:2026）"
+	@echo "  make dev-daemon                       后台启动开发环境"
+	@echo "  make start                            启动本地生产模式"
+	@echo "  make start-daemon                     后台启动本地生产模式"
+	@echo "  make gateway                          单独启动 Gateway"
+	@echo "  make worker                           单独启动 Worker"
+	@echo "  make scheduler                        单独启动 Scheduler"
+	@echo "  make nginx                            单独启动本地 Nginx"
+	@echo "  make stop                             停止本地服务"
+	@echo "  make clean                            停止服务并清理本地运行状态和日志"
+	@echo ""
+	@echo "配置与安装："
+	@echo "  make setup                            运行交互式初始化向导"
+	@echo "  make config                           从示例生成本地配置"
+	@echo "  make config-upgrade                   升级并补齐 config.yaml"
+	@echo "  make check                            检查必要工具"
+	@echo "  make doctor                           检查配置和运行环境"
+	@echo "  make install                          安装前后端依赖"
+	@echo "  make setup-sandbox                    预拉取 Sandbox 容器镜像"
+	@echo "  make support-bundle                   生成脱敏诊断材料"
+	@echo ""
+	@echo "PostgreSQL 与运维："
+	@echo "  make setup-db                         空库安装当前 head 并初始化"
+	@echo "  make check-db                         只读检查 revision 与数据库状态"
+	@echo "  make reconcile-usage ARGS=...         校准配额用量"
+	@echo "  make rotate-credentials ARGS=...      轮换 Credential envelope"
+	@echo "  make import-project-skills ARGS=...   显式导入 Project Skill"
+	@echo ""
+	@echo "测试："
+	@echo "  POSTGRES_TEST_URL=... make test       运行后端核心测试（含真实 PostgreSQL）"
+	@echo "  make detect-thread-boundaries         检查异步和线程边界"
+	@echo "  make detect-blocking-io               检查后端阻塞 IO"
+	@echo ""
+	@echo "Docker："
+	@echo "  make docker-init                      拉取 Sandbox 镜像"
+	@echo "  make docker-start                     启动 Docker 开发环境"
+	@echo "  make docker-stop                      停止 Docker 开发环境"
+	@echo "  make docker-logs                      查看 Docker 日志"
+	@echo "  make docker-logs-frontend             查看 Frontend 日志"
+	@echo "  make docker-logs-gateway              查看 Gateway 日志"
+	@echo "  make up                               构建并启动 Compose 容器"
+	@echo "  make down                             停止 Compose 容器"
 
-## Setup & Diagnosis
+# Tests
+test:
+	@$(MAKE) -C backend test
+
+# Configuration and diagnostics
 setup:
 	@$(BACKEND_UV_RUN) python ../scripts/setup_wizard.py
 
 doctor:
 	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
 
+# PostgreSQL and operations
+setup-db:
+	@$(MAKE) -C backend setup-db
+
+reconcile-usage:
+	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"
+
+rotate-credentials:
+	@$(MAKE) -C backend rotate-credentials ARGS="$(ARGS)"
+
+import-project-skills:
+	@$(MAKE) -C backend import-project-skills ARGS="$(ARGS)"
+
+check-db:
+	@$(MAKE) -C backend check-db
+
+# Support and static diagnostics
 support-bundle:
 	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
 
 detect-thread-boundaries:
-	@$(BACKEND_UV_RUN) python ../scripts/detect_thread_boundaries.py --json-output ../.deer-flow/thread-boundary-inventory.json
+	@$(PYTHON) ./scripts/detect_thread_boundaries.py
 
 detect-blocking-io:
 	@$(MAKE) -C backend detect-blocking-io
@@ -73,19 +120,15 @@ config:
 config-upgrade:
 	@$(RUN_WITH_GIT_BASH) ./scripts/config-upgrade.sh
 
-# Check required tools
 check:
 	@$(PYTHON) ./scripts/check.py
 
-# Install all dependencies
+# Dependency installation
 install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
-	@cd frontend && $(FRONTEND_PNPM) install
-	@echo "Installing pre-commit hooks..."
-	@uv tool install pre-commit
-	@pre-commit install --overwrite
+	@$(PYTHON) ./scripts/pnpm.py install
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="
@@ -96,81 +139,65 @@ install:
 	@echo "  make setup-sandbox"
 	@echo ""
 
-# Pre-pull sandbox Docker image (optional but recommended)
 setup-sandbox:
 	@$(RUN_WITH_GIT_BASH) ./scripts/setup-sandbox.sh
 
-# Start all services in development mode (with hot-reloading)
-dev:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev
+# Local service lifecycle
+gateway:
+	@$(MAKE) -C backend gateway
 
-# Start all services in production mode (with optimizations)
-start:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod
+worker:
+	@$(MAKE) -C backend worker
 
-# Start all services in daemon mode (background)
-dev-daemon:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev --daemon
+scheduler:
+	@$(MAKE) -C backend scheduler
 
-# Start prod services in daemon mode (background)
-start-daemon:
-	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon
+dev: check
+	@$(SERVE) --dev
 
-# Start nginx alone in the foreground with the local dev config
+start: check
+	@$(SERVE) --prod
+
+dev-daemon: check
+	@$(SERVE) --dev --daemon
+
+start-daemon: check
+	@$(SERVE) --prod --daemon
+
 nginx:
 	@$(RUN_WITH_GIT_BASH) ./scripts/nginx.sh
 
-# Stop all services
 stop:
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --stop
+	@$(SERVE) --stop
 
-# Clean up
 clean: stop
 	@echo "Cleaning up..."
 	@-rm -rf backend/.deer-flow 2>/dev/null || true
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"
 
-# ==========================================
-# Docker Development Commands
-# ==========================================
-
-# Initialize Docker containers and install dependencies
+# Docker development
 docker-init:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh init
+	@$(DOCKER) init
 
-# Start Docker development environment
 docker-start:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start
+	@$(DOCKER) start
 
-# Stop Docker development environment
 docker-stop:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh stop
+	@$(DOCKER) stop
 
-# View Docker development logs
 docker-logs:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs
+	@$(DOCKER) logs
 
-# View Docker development logs
 docker-logs-frontend:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
+	@$(DOCKER) logs --frontend
+
 docker-logs-gateway:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
-docker-logs-redis:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --redis
+	@$(DOCKER) logs --gateway
 
-# ==========================================
-# Production Docker Commands
-# ==========================================
-
-# Build and start production services
+# Docker production
 up:
-	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
+	@$(DEPLOY)
 
-# Stop and remove production containers
 down:
-	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh down
+	@$(DEPLOY) down

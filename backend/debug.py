@@ -28,6 +28,9 @@ try:
 except ImportError:
     _HAS_PROMPT_TOOLKIT = False
 
+# This file is a direct, opt-in developer entry point rather than a
+# Gateway/Worker/Scheduler runtime. Production entry points must never perform
+# implicit dotenv loading because model provider keys are PostgreSQL-backed.
 load_dotenv()
 
 _LOG_FMT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

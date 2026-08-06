@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cleanup-containers.sh - Clean up DeerFlow sandbox containers
+# cleanup-containers.sh - Clean up ActWeave sandbox containers
 #
 # This script cleans up both Docker and Apple Container runtime containers
 # to ensure compatibility across different container runtimes.

@@ -1,4 +1,4 @@
-"""Eval-manifest adapters for deterministic skill review facts."""
+"""Eval-manifest adapters for deterministic review facts."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from typing import Any
 from deerflow.skills.review.models import make_finding
 
 
-def analyze_eval_manifests(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def analyze_eval_manifests(
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     files = {str(entry["path"]): entry for entry in snapshot.get("files", [])}
     eval_files = [path for path in sorted(files) if path.startswith("evals/") and path.endswith(".json")]
     findings: list[dict[str, Any]] = []
-    aggregate = {
+    aggregate: dict[str, Any] = {
         "schema": None,
         "valid": None,
         "case_count": 0,
@@ -70,19 +72,19 @@ def analyze_eval_manifests(snapshot: dict[str, Any]) -> tuple[dict[str, Any], li
 
 
 def _classify_manifest(payload: Any) -> dict[str, Any]:
-    if isinstance(payload, dict) and isinstance(payload.get("schema_version"), str):
+    if isinstance(payload, dict) and isinstance(
+        payload.get("schema_version"),
+        str,
+    ):
         cases = payload.get("cases")
         if isinstance(cases, list):
             return _case_stats("versioned", cases)
-        return {"schema": "versioned", "valid": True, "case_count": 0, "positive_trigger_cases": 0, "negative_trigger_cases": 0}
-
+        return _case_stats("versioned", [])
     if isinstance(payload, dict) and isinstance(payload.get("evals"), list):
         return _case_stats("skill-creator-evals", payload["evals"])
-
     if isinstance(payload, list):
         return _case_stats("trigger-eval-list", payload)
-
-    return {"schema": "unknown", "valid": True, "case_count": 0, "positive_trigger_cases": 0, "negative_trigger_cases": 0}
+    return _case_stats("unknown", [])
 
 
 def _case_stats(schema: str, cases: list[Any]) -> dict[str, Any]:
@@ -91,10 +93,9 @@ def _case_stats(schema: str, cases: list[Any]) -> dict[str, Any]:
     for case in cases:
         if not isinstance(case, dict):
             continue
-        should_trigger = case.get("should_trigger")
-        if should_trigger is True:
+        if case.get("should_trigger") is True:
             positive += 1
-        elif should_trigger is False:
+        elif case.get("should_trigger") is False:
             negative += 1
     return {
         "schema": schema,

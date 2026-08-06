@@ -56,6 +56,7 @@ export function NotificationSettingsPage() {
             <Switch
               aria-label={t.settings.notification.title}
               disabled={permission !== "granted"}
+              className="data-[state=checked]:bg-success focus-visible:ring-selection/30"
               checked={
                 permission === "granted" && settings.notification.enabled
               }

@@ -1,6 +1,6 @@
 ---
 title: 自定义与扩展
-description: DeerFlow 的可插拔架构意味着系统的大多数部分都可以在不 fork 核心的情况下被替换或扩展。本页面列举了扩展点，并解释如何使用每一个。
+description: ActWeave 的可插拔架构意味着系统的大多数部分都可以在不 fork 核心的情况下被替换或扩展。本页面列举了扩展点，并解释如何使用每一个。
 ---
 
 import { Callout } from "nextra/components";
@@ -8,12 +8,12 @@ import { Callout } from "nextra/components";
 # 自定义与扩展
 
 <Callout type="info" emoji="🔧">
-  DeerFlow
+  ActWeave
   设计为可适配的。你可以通过编写自定义中间件、添加新工具、构建技能包以及通过
   config.yaml 的 <code>use:</code> 字段替换任何内置组件来扩展 Agent 行为。
 </Callout>
 
-DeerFlow 的可插拔架构意味着系统的大多数部分都可以在不 fork 核心的情况下被替换或扩展。本页面列举了扩展点，并解释如何使用每一个。
+ActWeave 的可插拔架构意味着系统的大多数部分都可以在不 fork 核心的情况下被替换或扩展。本页面列举了扩展点，并解释如何使用每一个。
 
 ## 自定义中间件
 
@@ -92,31 +92,9 @@ sandbox:
   use: mypackage.sandbox:MyCustomSandboxProvider
 ```
 
-## 自定义记忆存储
+## 项目 Memory 集成
 
-通过实现 `MemoryStorage` 将基于文件的记忆替换为任何持久化存储：
-
-```python
-from deerflow.agents.memory.storage import MemoryStorage
-from typing import Any
-
-class RedisMemoryStorage(MemoryStorage):
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
-        ...
-
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
-        ...
-
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
-        ...
-```
-
-在 `config.yaml` 中配置：
-
-```yaml
-memory:
-  storage_class: mypackage.storage:RedisMemoryStorage
-```
+Memory 是项目私有的 PostgreSQL 资源。扩展其外围产品行为时，应使用文档 Memory API 和 admitted private-run hook。account 与 project 来自认证客户端 scope；owner 与固定内部 namespace 始终由服务端持有。运行时不加载全局或文件 Memory adapter。
 
 ## 自定义技能
 
@@ -126,30 +104,17 @@ memory:
 
 ## 自定义模型
 
-任何与 LangChain 兼容的聊天模型都可以通过在 `use:` 字段中指定来使用：
+应用不会从 `config.yaml` 导入任意模型类路径。新增 adapter 是代码级扩展：实现
+LangChain `BaseChatModel` 接口，经过审查后把固定类路径加入服务端 provider-adapter
+allowlist，并部署代码。
 
-```yaml
-models:
-  - name: my-custom-model
-    use: mypackage.models:MyCustomChatModel
-    # 任何额外字段都作为 kwargs 传递给构造函数
-    base_url: http://my-model-server:8080
-    api_key: $MY_MODEL_API_KEY
-```
-
-模型类必须实现 LangChain 的 `BaseChatModel` 接口。
+部署完成后，由 system admin 在 `/admin/settings/models` 创建版本，只保存有界且不含
+secret 的 provider 设置，并绑定精确的加密 System Credential 版本。浏览器不会接受
+Python 类路径或明文 provider key。
 
 ## 自定义检查点
 
-线程状态持久化可以使用任何与 LangGraph 兼容的检查点器：
-
-```yaml
-checkpointer:
-  type: sqlite
-  connection_string: ./my-checkpoints.db
-```
-
-对于自定义后端，实现 LangGraph 的 `BaseCheckpointSaver` 接口，并在初始化 `DeerFlowClient` 时以编程方式配置它。
+应用配置始终从必需的 PostgreSQL `database.url` 派生线程持久化设置。嵌入式集成仍可在初始化 `DeerFlowClient` 时以编程方式传入 LangGraph `BaseCheckpointSaver` 实现；不再提供独立的 checkpointer YAML 配置段。
 
 <Cards num={2}>
   <Cards.Card title="集成指南" href="/docs/harness/integration-guide" />

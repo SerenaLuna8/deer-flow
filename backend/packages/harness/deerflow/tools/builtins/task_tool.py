@@ -1,28 +1,40 @@
 """Task tool for delegating work to subagents."""
 
 import asyncio
+import inspect
 import logging
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
+from pydantic import BaseModel
 
-from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
+from deerflow.error_codes import SUBAGENT_EXECUTION_FAILED_ERROR_CODE
+from deerflow.guardrails.provider import (
+    GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
+    copy_guardrail_attribution,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
     cleanup_background_task,
     get_background_task_result,
     request_cancel_background_task,
+)
+from deerflow.subagents.runtime_catalog import (
+    RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
+    trusted_runtime_agent_catalog,
 )
 from deerflow.subagents.status_contract import (
     SubagentStatusValue,
@@ -32,7 +44,6 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
-from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -42,6 +53,120 @@ logger = logging.getLogger(__name__)
 # Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
 # write it back to the triggering AIMessage's usage_metadata.
 _subagent_usage_cache: dict[str, dict[str, int]] = {}
+
+
+async def _invoke_on_owner_loop(
+    owner_loop: asyncio.AbstractEventLoop,
+    target,
+    *args,
+    **kwargs,
+):
+    """Run a loop-bound trusted callback on the parent Worker's event loop."""
+
+    async def invoke():
+        result = target(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    if asyncio.get_running_loop() is owner_loop:
+        return await invoke()
+    future = asyncio.run_coroutine_threadsafe(invoke(), owner_loop)
+    return await asyncio.wrap_future(future)
+
+
+class _OwnerLoopAuthorityProxy:
+    """Marshal opaque authorization-boundary methods back to their owner loop."""
+
+    def __init__(self, target: object, owner_loop: asyncio.AbstractEventLoop):
+        self._target = target
+        self._owner_loop = owner_loop
+
+    def __getattr__(self, name: str):
+        target = getattr(self._target, name)
+        if not callable(target):
+            return target
+
+        async def invoke(*args, **kwargs):
+            return await _invoke_on_owner_loop(
+                self._owner_loop,
+                target,
+                *args,
+                **kwargs,
+            )
+
+        return invoke
+
+
+class _OwnerLoopCheckerProxy:
+    """Marshal a trusted callable authorization fallback to its owner loop."""
+
+    def __init__(self, target, owner_loop: asyncio.AbstractEventLoop):
+        self._target = target
+        self._owner_loop = owner_loop
+
+    async def __call__(self):
+        return await _invoke_on_owner_loop(self._owner_loop, self._target)
+
+
+class _OwnerLoopSkillSecretProviderProxy:
+    """Marshal private Skill secret refresh back to the owner Worker loop."""
+
+    def __init__(self, target, owner_loop: asyncio.AbstractEventLoop):
+        self._target = target
+        self._owner_loop = owner_loop
+
+    async def __call__(self, *args, **kwargs):
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target,
+            *args,
+            **kwargs,
+        )
+
+
+def _trusted_private_mcp_tools(
+    parent_context: dict[str, Any],
+) -> tuple[BaseTool, ...]:
+    """Return only opaque Worker-installed private MCP proxy objects."""
+
+    raw_tools = parent_context.get("__runtime_mcp_tools")
+    if not isinstance(raw_tools, tuple):
+        return ()
+    from deerflow.tools.mcp_metadata import is_private_mcp_tool
+
+    trusted: list[BaseTool] = []
+    for candidate in raw_tools:
+        if not isinstance(candidate, BaseTool) or not is_private_mcp_tool(candidate):
+            return ()
+        trusted.append(candidate)
+    return tuple(trusted)
+
+
+def _wrap_private_mcp_tool_for_owner_loop(
+    admitted_tool: BaseTool,
+    owner_loop: asyncio.AbstractEventLoop,
+) -> StructuredTool:
+    """Keep delegated MCP calls on the parent loop that owns the exact runtime."""
+
+    args_schema = admitted_tool.args_schema
+    if not isinstance(args_schema, type) or not issubclass(args_schema, BaseModel):
+        raise RuntimeError("Private MCP tool schema is unavailable")
+
+    async def invoke(**arguments):
+        return await _invoke_on_owner_loop(
+            owner_loop,
+            admitted_tool.ainvoke,
+            dict(arguments),
+        )
+
+    return StructuredTool.from_function(
+        coroutine=invoke,
+        name=admitted_tool.name,
+        description=admitted_tool.description,
+        args_schema=args_schema,
+        return_direct=admitted_tool.return_direct,
+        response_format=admitted_tool.response_format,
+        metadata=dict(admitted_tool.metadata or {}),
+    )
 
 
 def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
@@ -65,6 +190,62 @@ def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
     return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+
+
+def _trusted_agent_prompt_bundle(parent_context: dict[str, Any]) -> object | None:
+    """Accept only the Worker-installed opaque immutable bundle shape.
+
+    JSON request bodies cannot manufacture an object with these attributes, so
+    client context dictionaries/strings fail closed without importing the lead
+    prompt module here (which would reintroduce the task/subagent import cycle).
+    """
+
+    bundle = parent_context.get("__agent_prompt_bundle")
+    required = (
+        "payload_schema_version",
+        "agents_instructions",
+        "soul",
+        "identity",
+        "user_context",
+    )
+    if bundle is None or not all(hasattr(bundle, name) for name in required):
+        return None
+    return bundle
+
+
+def _trusted_skill_scoped_secrets(
+    parent_context: dict[str, Any],
+) -> dict[str, dict[str, str]] | None:
+    """Copy only the Worker-installed private Skill secret carrier.
+
+    Private request preparation strips every double-underscore and secret-like
+    client key. Requiring the opaque private scope here keeps a non-private
+    caller from manufacturing this internal inheritance channel.
+    """
+
+    if "private_scope" not in parent_context:
+        return None
+    raw = parent_context.get("__skill_scoped_secrets")
+    if not isinstance(raw, Mapping):
+        return None
+    copied: dict[str, dict[str, str]] = {}
+    for path, values in raw.items():
+        if (
+            not isinstance(path, str)
+            or not path
+            or not isinstance(
+                values,
+                Mapping,
+            )
+        ):
+            return None
+        env: dict[str, str] = {}
+        for name, value in values.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                return None
+            env[name] = value
+        copied[path] = env
+    return copied
 
 
 async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
@@ -100,9 +281,13 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, tas
     if cleanup_task.cancelled():
         return
 
-    exc = cleanup_task.exception()
-    if exc is not None:
-        logger.error(f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}")
+    if cleanup_task.exception() is not None:
+        logger.error(
+            "[trace=%s] Deferred cleanup failed for task %s: error_code=%s",
+            trace_id,
+            task_id,
+            SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+        )
 
 
 def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int) -> None:
@@ -172,7 +357,10 @@ def _report_subagent_usage(runtime: Any, result: Any) -> None:
         journal.record_external_llm_usage_records(records)
         result.usage_reported = True
     except Exception:
-        logger.warning("Failed to report subagent token usage", exc_info=True)
+        logger.warning(
+            "Failed to report subagent token usage: error_code=%s",
+            SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
+        )
 
 
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
@@ -235,24 +423,20 @@ async def task_tool(
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> str | Command:
-    """Delegate a bounded task to a specialized subagent in its own context.
+    """Delegate a task to a specialized subagent that runs in its own context.
 
-    Delegate only when expected benefit clearly exceeds delegation overhead.
-    Useful benefits are:
-    - Material wall-clock savings from independent parallel work
-    - Specialist tools, skills, models, or domain instructions
-    - Context isolation for a bounded, unusually context-heavy investigation
+    Subagents help you:
+    - Preserve context by keeping exploration and implementation separate
+    - Handle complex multi-step tasks autonomously
+    - Execute commands or operations in isolated contexts
 
     Built-in subagent types:
-    - **general-purpose**: A capable agent for bounded exploration and action. Use
-      when the assignment has clear specialist or context-isolation benefit, or is
-      one of several independent, non-overlapping tasks that can actually run in
-      parallel.
+    - **general-purpose**: A capable agent for complex, multi-step tasks that require
+      both exploration and action. Use when the task requires complex reasoning,
+      multiple dependent steps, or would benefit from isolated context.
     - **bash**: Command execution specialist for running bash commands. This is only
       available when host bash is explicitly allowed or when using an isolated shell
-      sandbox such as `AioSandboxProvider`. Use it only for a bounded shell workflow
-      with clear context-isolation or independent-parallel benefit.
-      Routine git, build, test, or deploy operations are not sufficient reason to delegate.
+      sandbox such as `AioSandboxProvider`.
 
     Additional custom subagent types may be defined in config.yaml under
     `subagents.custom_agents`. Each custom type can have its own system prompt,
@@ -260,22 +444,14 @@ async def task_tool(
     is provided, the error message will list all available types.
 
     When to use this tool:
-    - Independent tasks that materially reduce wall-clock time when run in parallel
-    - A specialist subagent provides capability unavailable on the direct path
-    - Bounded exploration that would otherwise displace important parent context
+    - Complex tasks requiring multiple steps or tools
+    - Tasks that produce verbose output
+    - When you want to isolate context from the main conversation
+    - Parallel research or exploration tasks
 
     When NOT to use this tool:
-    - Merely because a task is complex, multi-step, verbose, or touches a large repo
-    - Splitting dependent steps across parallel subagents; keep the chain together
-      and delegate it as one bounded task only when specialist or context-isolation
-      benefit clearly wins
-    - Parallel work with overlapping files, shared mutable state, or external side effects
+    - Simple, single-step operations (use tools directly)
     - Tasks requiring user interaction or clarification
-
-    Costs to include in the delegation decision:
-    - Repeating the same repository discovery in multiple contexts
-    - Coordination, verification, and synthesis of returned results
-    - Any task the parent can complete more cheaply with direct tools
 
     Args:
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -284,10 +460,37 @@ async def task_tool(
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     cache_token_usage = _token_usage_cache_enabled(runtime_app_config)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    parent_context = runtime.context if runtime is not None else None
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    private_run = "private_scope" in parent_context
+    runtime_agent_catalog = trusted_runtime_agent_catalog(parent_context.get(RUNTIME_AGENT_CATALOG_CONTEXT_KEY)) if private_run else None
+    runtime_agent_profile = runtime_agent_catalog.get(subagent_type) if runtime_agent_catalog is not None else None
+    static_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    available_subagent_names = list(
+        dict.fromkeys(
+            [
+                *static_subagent_names,
+                *(runtime_agent_catalog.names if runtime_agent_catalog else ()),
+            ]
+        )
+    )
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    if runtime_agent_profile is not None:
+        config = SubagentConfig(
+            name=runtime_agent_profile.key,
+            description=runtime_agent_profile.description,
+            system_prompt=None,
+            tools=None,
+            disallowed_tools=["task"],
+            # The executor receives only this profile's exact runtime Skill
+            # tuple below; ``None`` loads that tuple, while ``[]`` would
+            # incorrectly suppress even the explicitly referenced Skills.
+            skills=None,
+            model=runtime_agent_profile.model_name,
+        )
+    else:
+        config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None:
         available = ", ".join(available_subagent_names)
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
@@ -346,24 +549,24 @@ async def task_tool(
     # None when absent (e.g. internal-auth runs) so guardrail behavior is
     # unchanged. Without this, role-aware policy silently mis-attributes any
     # tool call delegated to a subagent (user_role=None).
-    parent_context = runtime.context if runtime is not None else None
-    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    guardrail_attribution = copy_guardrail_attribution(parent_context.get(GUARDRAIL_ATTRIBUTION_CONTEXT_KEY)) if private_run else None
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
     run_id = parent_context.get("run_id")
+    if guardrail_attribution is not None:
+        user_id = guardrail_attribution.get("user_id")
+        user_role = guardrail_attribution.get("user_role")
+        oauth_provider = guardrail_attribution.get("oauth_provider")
+        oauth_id = guardrail_attribution.get("oauth_id")
+        run_id = guardrail_attribution.get("run_id")
     # IM-channel sender identity: group chats share one thread across senders,
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
-    # Propagate authorization identity: is_internal (strict bool) and
-    # authz_attributes (validated Mapping, copied). These follow the same
-    # server-side provenance as user_role/oauth — see inject_authenticated_user_context.
-    is_internal = parent_context.get("is_internal") is True
-    authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
-    if parent_available_skills is not None:
+    if runtime_agent_profile is None and parent_available_skills is not None:
         overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
 
     if overrides:
@@ -375,24 +578,46 @@ async def task_tool(
 
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
+    effective_tool_groups = runtime_agent_profile.tool_groups if runtime_agent_profile is not None else parent_tool_groups
     resolved_app_config = runtime_app_config
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
         resolved_app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
-    # Subagents should not have subagent tools enabled (prevent recursive nesting).
-    # Subagents also must not get list_uploaded_files — they have an independent
-    # ThreadState where runtime.state["uploaded_files"] is absent, so the
-    # current-run file exclusion would not work.
+    # Subagents should not have subagent tools enabled (prevent recursive nesting)
     available_tools_kwargs = {
         "model_name": effective_model,
-        "groups": parent_tool_groups,
+        "groups": effective_tool_groups,
         "subagent_enabled": False,
-        "include_upload_tool": False,
     }
+    if private_run:
+        # Private Runs may use only the exact admitted proxies installed by the
+        # Worker below. Never fall back to process-global MCP or ACP discovery.
+        available_tools_kwargs["include_mcp"] = False
+        available_tools_kwargs["include_acp"] = False
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    from deerflow.assets.catalog import trusted_asset_context
+
+    raw_asset_context = parent_context.get("project_context") or parent_context.get("asset_context")
+    asset_context = trusted_asset_context(raw_asset_context)
+    if asset_context is not None:
+        available_tools_kwargs["asset_context"] = asset_context
+    tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
+    if private_run:
+        owner_loop = asyncio.get_running_loop()
+        admitted_mcp_tools = runtime_agent_profile.mcp_tools if runtime_agent_profile is not None else _trusted_private_mcp_tools(parent_context)
+        existing_names = {tool.name for tool in tools}
+        for admitted_tool in admitted_mcp_tools:
+            if admitted_tool.name in existing_names:
+                raise RuntimeError("Private MCP tool name conflicts with another tool")
+            tools.append(
+                _wrap_private_mcp_tool_for_owner_loop(
+                    admitted_tool,
+                    owner_loop,
+                )
+            )
+            existing_names.add(admitted_tool.name)
 
     # Create executor
     executor_kwargs = {
@@ -409,10 +634,54 @@ async def task_tool(
         "oauth_id": oauth_id,
         "run_id": run_id,
         "channel_user_id": channel_user_id,
-        "is_internal": is_internal,
-        "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
     }
+    if guardrail_attribution is not None:
+        executor_kwargs["guardrail_attribution"] = guardrail_attribution
+    # Preserve the server-issued private Run boundary across delegation.
+    # Passing only sandbox/thread_data state is insufficient: the subagent's
+    # own ThreadDataMiddleware and SandboxMiddleware need the opaque authority
+    # objects to keep the parent's projected workspace and must not release the
+    # parent's private sandbox when delegated execution finishes.
+    if "private_scope" in parent_context:
+        executor_kwargs["private_scope"] = parent_context["private_scope"]
+        executor_kwargs["file_authority"] = parent_context.get("__file_authority")
+        owner_loop = asyncio.get_running_loop()
+        authorization_boundary = parent_context.get("__authorization_boundary")
+        if authorization_boundary is not None:
+            executor_kwargs["authorization_boundary"] = _OwnerLoopAuthorityProxy(
+                authorization_boundary,
+                owner_loop,
+            )
+        authorization_checker = parent_context.get("__authorization_checker")
+        if callable(authorization_checker):
+            executor_kwargs["authorization_checker"] = _OwnerLoopCheckerProxy(
+                authorization_checker,
+                owner_loop,
+            )
+        skill_secret_provider = parent_context.get(
+            "__skill_secret_provider",
+        )
+        if callable(skill_secret_provider):
+            executor_kwargs["skill_secret_provider"] = _OwnerLoopSkillSecretProviderProxy(
+                skill_secret_provider,
+                owner_loop,
+            )
+    run_read_only_mounts = parent_context.get("__run_read_only_mounts")
+    if isinstance(run_read_only_mounts, tuple):
+        executor_kwargs["run_read_only_mounts"] = run_read_only_mounts
+    agent_prompt_bundle = runtime_agent_profile.prompt_bundle if runtime_agent_profile is not None else _trusted_agent_prompt_bundle(parent_context)
+    if agent_prompt_bundle is not None:
+        executor_kwargs["agent_prompt_bundle"] = agent_prompt_bundle
+    runtime_skills = runtime_agent_profile.runtime_skills if runtime_agent_profile is not None else parent_context.get("__runtime_skills")
+    if isinstance(runtime_skills, tuple):
+        executor_kwargs["runtime_skills"] = runtime_skills
+    if runtime_agent_profile is not None:
+        executor_kwargs["agent_model_settings"] = runtime_agent_profile.model_settings
+    if "skill_secret_provider" not in executor_kwargs:
+        skill_scoped_secrets = _trusted_skill_scoped_secrets(parent_context)
+        if skill_scoped_secrets is not None:
+            executor_kwargs["skill_scoped_secrets"] = skill_scoped_secrets
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     executor = SubagentExecutor(**executor_kwargs)
@@ -432,14 +701,13 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    await aemit_custom_event(
+    writer(
         {
             "type": "task_started",
             "task_id": task_id,
             "description": description,
             "model_name": effective_model,
-        },
-        writer=writer,
+        }
     )
 
     try:
@@ -448,9 +716,14 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                await aemit_custom_event(
-                    {"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"},
-                    writer=writer,
+                writer(
+                    {
+                        "type": "task_failed",
+                        "task_id": task_id,
+                        "error": "Task disappeared from background tasks",
+                        "model_name": effective_model,
+                        "usage": None,
+                    }
                 )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
@@ -458,6 +731,7 @@ async def task_tool(
                     tool_call_id=tool_call_id,
                     status="failed",
                     error=error,
+                    model_name=effective_model,
                 )
 
             # Log status changes for debugging
@@ -465,9 +739,8 @@ async def task_tool(
                 logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
                 last_status = result.status
 
-            # The collector publishes cumulative records. Reuse one snapshot for
-            # both live progress and the terminal event so the frontend can
-            # replace, rather than add, its per-task total.
+            # Token records are cumulative. Reuse one snapshot for progress and
+            # terminal events so consumers replace rather than add totals.
             usage = _summarize_usage(getattr(result, "token_usage_records", None))
 
             # Check for new AI messages and send task_running events
@@ -477,7 +750,7 @@ async def task_tool(
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
                     message = ai_messages[i]
-                    await aemit_custom_event(
+                    writer(
                         {
                             "type": "task_running",
                             "task_id": task_id,
@@ -486,8 +759,7 @@ async def task_tool(
                             "total_messages": current_message_count,
                             "usage": usage,
                             "model_name": effective_model,
-                        },
-                        writer=writer,
+                        }
                     )
                     logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
                 last_message_count = current_message_count
@@ -496,15 +768,14 @@ async def task_tool(
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                writer(
                     {
                         "type": "task_completed",
                         "task_id": task_id,
                         "result": result.result,
                         "usage": usage,
                         "model_name": effective_model,
-                    },
-                    writer=writer,
+                    }
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
@@ -522,17 +793,16 @@ async def task_tool(
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                writer(
                     {
                         "type": "task_failed",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    },
-                    writer=writer,
+                    }
                 )
-                logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+                logger.error("[trace=%s] Task %s failed", trace_id, task_id)
                 cleanup_background_task(task_id)
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
@@ -548,17 +818,16 @@ async def task_tool(
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                writer(
                     {
                         "type": "task_cancelled",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    },
-                    writer=writer,
+                    }
                 )
-                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                logger.info("[trace=%s] Task %s cancelled", trace_id, task_id)
                 cleanup_background_task(task_id)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
@@ -570,17 +839,16 @@ async def task_tool(
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                await aemit_custom_event(
+                writer(
                     {
                         "type": "task_timed_out",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    },
-                    writer=writer,
+                    }
                 )
-                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+                logger.warning("[trace=%s] Task %s timed out", trace_id, task_id)
                 cleanup_background_task(task_id)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
@@ -603,14 +871,13 @@ async def task_tool(
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
-                await aemit_custom_event(
+                writer(
                     {
                         "type": "task_timed_out",
                         "task_id": task_id,
                         "usage": usage,
                         "model_name": effective_model,
-                    },
-                    writer=writer,
+                    }
                 )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from

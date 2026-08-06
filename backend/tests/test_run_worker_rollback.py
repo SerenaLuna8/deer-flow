@@ -1,403 +1,69 @@
 import asyncio
-import copy
 from contextlib import suppress
 from types import SimpleNamespace
-from typing import Annotated, Any, NotRequired, TypedDict
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage
-from langgraph.channels.delta import DeltaChannel
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph import StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.types import Overwrite
 
-from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
-from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
+from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import (
-    RollbackPoint,
     RunContext,
     _agent_factory_supports_app_config,
     _build_runtime_context,
-    _bump_channel_version,
-    _capture_rollback_point,
     _collect_pre_existing_message_ids,
-    _ensure_interrupted_title,
+    _complete_state_replacement_values,
     _extract_llm_error_fallback_message,
     _install_runtime_context,
-    _LargeFileToolChunkBatcher,
     _rollback_to_pre_run_checkpoint,
     _try_extract_from_message,
     run_agent,
 )
+from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
+from deerflow.runtime.skill_context_authority import (
+    VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+)
 
 
 class FakeCheckpointer:
-    def __init__(self):
+    def __init__(self, *, put_result):
         self.adelete_thread = AsyncMock()
-        self.aget_tuple = AsyncMock(return_value=None)
+        self.aput = AsyncMock(return_value=put_result)
         self.aput_writes = AsyncMock()
 
 
-@pytest.mark.anyio
-async def test_pending_cancel_stops_waiting_for_prior_finalization():
-    run_manager = RunManager()
-    prior = await run_manager.create("thread-cancel-while-waiting")
-    prior.status = RunStatus.interrupted
-    prior.finalizing = True
-    record = await run_manager.create("thread-cancel-while-waiting")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    factory_called = False
-
-    def agent_factory(**_kwargs):
-        nonlocal factory_called
-        factory_called = True
-        raise AssertionError("cancelled pending run must not build an agent")
-
-    record.task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=None),
-            agent_factory=agent_factory,
-            graph_input={"messages": []},
-            config={},
-        )
-    )
-    await asyncio.sleep(0)
-
-    outcome = await run_manager.cancel(record.run_id)
-    await asyncio.wait_for(record.task, timeout=0.2)
-
-    assert outcome == CancelOutcome.cancelled
-    assert prior.finalizing is True
-    assert factory_called is False
-    assert record.status == RunStatus.interrupted
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+def test_public_run_error_rejects_unclassified_message() -> None:
+    with pytest.raises(TypeError, match="PublicRunErrorCode"):
+        PublicRunError("provider-secret-sentinel")  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
-async def test_remote_cancel_wins_when_graph_finishes_before_owner_heartbeat():
-    store = MemoryRunStore()
-    ownership = RunOwnershipConfig(
-        heartbeat_enabled=True,
-        lease_seconds=30,
-        grace_seconds=10,
-    )
-    owner = RunManager(
-        store=store,
-        worker_id="worker-a",
-        run_ownership_config=ownership,
-    )
-    peer = RunManager(
-        store=store,
-        worker_id="worker-b",
-        run_ownership_config=ownership,
-    )
-    record = await owner.create_or_reject("thread-cancel-race")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    started = asyncio.Event()
-    release = asyncio.Event()
+def test_public_run_error_codes_have_closed_stable_payloads() -> None:
+    expected_messages = {
+        PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
+        PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
+        PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
+    }
 
-    class _FinishingAgent:
-        async def astream(
-            self,
-            graph_input,
-            config=None,
-            stream_mode=None,
-            subgraphs=False,
-        ):
-            del graph_input, config, stream_mode, subgraphs
-            started.set()
-            await release.wait()
-            yield {"messages": []}
-
-    task = asyncio.create_task(
-        run_agent(
-            bridge,
-            owner,
-            record,
-            ctx=RunContext(
-                checkpointer=None,
-                event_store=MemoryRunEventStore(),
-            ),
-            agent_factory=lambda **_kwargs: _FinishingAgent(),
-            graph_input={},
-            config={},
-        )
-    )
-    record.task = task
-
-    await asyncio.wait_for(started.wait(), timeout=1)
-    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
-    release.set()
-    await asyncio.wait_for(task, timeout=1)
-
-    stored = await store.get(record.run_id)
-    assert stored is not None
-    assert stored["status"] == "error"
-    assert stored["error"] == "Rolled back by user"
-    assert record.status == RunStatus.error
+    assert set(PublicRunErrorCode) == set(expected_messages)
+    for code, expected_message in expected_messages.items():
+        error = PublicRunError(code)
+        assert error.code is code
+        assert error.public_message == expected_message
 
 
-def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
-    materialized_messages = tuple(messages)
-    return RollbackPoint(
-        config={
-            "configurable": {
-                "thread_id": "thread-1",
-                "checkpoint_ns": "",
-                "checkpoint_id": checkpoint_id,
-            }
-        },
-        state_values={},
-        messages=materialized_messages,
-        metadata={"source": "input"},
-        pending_writes=tuple(pending_writes),
-    )
-
-
-def _stub_mutation_graph(monkeypatch, *, restored_config):
-    """Replace the rollback mutation graph with a stub returning ``restored_config``."""
-    mock_graph = SimpleNamespace()
-    mock_graph.aupdate_state = AsyncMock(return_value=restored_config)
-    monkeypatch.setattr(
-        "deerflow.runtime.runs.worker.build_state_mutation_graph",
-        lambda *args, **kwargs: mock_graph,
-    )
-    return mock_graph
-
-
-def _rollback_accessor(checkpointer):
-    return CheckpointStateAccessor(graph=SimpleNamespace(), checkpointer=checkpointer, mode="full")
-
-
-class _DeltaChannelState(TypedDict):
-    messages: Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=1000)]
-
-
-class _FullChannelState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-
-
-def _build_message_append_graph(state_schema: type, checkpointer: Any):
-    async def _append_message(state: dict[str, Any]) -> dict[str, Any]:
-        return {"messages": [HumanMessage(content=f"turn-{len(state.get('messages') or [])}")]}
-
-    builder = StateGraph(state_schema)
-    builder.add_node("append_message", _append_message)
-    builder.set_entry_point("append_message")
-    builder.set_finish_point("append_message")
-    return builder.compile(checkpointer=checkpointer)
-
-
-@pytest.mark.parametrize("tool_name", ["write_file", "str_replace"])
-def test_large_file_tool_chunk_batcher_streams_bounded_batches(tool_name: str):
-    batcher = _LargeFileToolChunkBatcher(batch_size=2)
-    first = AIMessageChunk(
-        content="",
-        id="ai-1",
-        tool_call_chunks=[
-            {
-                "id": "call-1",
-                "index": 0,
-                "name": tool_name,
-                "args": '{"path":"/mnt/user-data/outputs/report.md","content":"Hel',
-            }
-        ],
-    )
-    continuation = AIMessageChunk(
-        content="",
-        id="ai-1",
-        tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
-    )
-
-    assert batcher.push((first, {})) == []
-    published = batcher.push((continuation, {}))
-    assert len(published) == 1
-    message, metadata = published[0]
-    assert metadata == {}
-    assert message.tool_calls[0]["args"]["content"] == "Hello"
-    assert batcher.flush() == []
-
-
-def test_large_file_tool_chunk_batcher_preserves_visible_and_non_file_chunks():
-    batcher = _LargeFileToolChunkBatcher()
-    visible_text = AIMessageChunk(content="Writing the report now.", id="ai-1")
-    search_tool = AIMessageChunk(
-        content="",
-        id="ai-2",
-        tool_call_chunks=[
-            {
-                "id": "call-2",
-                "index": 0,
-                "name": "web_search",
-                "args": '{"query":"vector databases"}',
-            }
-        ],
-    )
-    write_with_reasoning = AIMessageChunk(
-        content="",
-        id="ai-3",
-        additional_kwargs={"reasoning_content": "Choosing a filename."},
-        tool_call_chunks=[
-            {
-                "id": "call-3",
-                "index": 0,
-                "name": "write_file",
-                "args": '{"path":"/mnt/user-data/outputs/report.md"}',
-            }
-        ],
-    )
-
-    assert batcher.push((visible_text, {})) == [(visible_text, {})]
-    assert batcher.push((search_tool, {})) == [(search_tool, {})]
-    visible_reasoning = batcher.push((write_with_reasoning, {}))
-    assert len(visible_reasoning) == 1
-    filtered_message, filtered_metadata = visible_reasoning[0]
-    assert filtered_metadata == {}
-    assert filtered_message.additional_kwargs == {"reasoning_content": "Choosing a filename."}
-    assert filtered_message.tool_call_chunks == []
-    pending_file_chunks = batcher.flush()
-    assert len(pending_file_chunks) == 1
-    assert pending_file_chunks[0][0].tool_call_chunks[0]["name"] == "write_file"
-
-
-def test_large_file_tool_chunk_batcher_separates_subgraph_namespaces():
-    batcher = _LargeFileToolChunkBatcher()
-    first = AIMessageChunk(
-        content="",
-        id="shared-ai-id",
-        tool_call_chunks=[{"id": "call-a", "index": 0, "name": "write_file", "args": '{"path":"a.md","content":"A'}],
-    )
-    second = AIMessageChunk(
-        content="",
-        id="shared-ai-id",
-        tool_call_chunks=[{"id": "call-b", "index": 0, "name": "write_file", "args": '{"path":"b.md","content":"B'}],
-    )
-
-    assert batcher.push((first, {"langgraph_checkpoint_ns": "task-a"})) == []
-    published = batcher.push((second, {"langgraph_checkpoint_ns": "task-b"}))
-
-    assert len(published) == 1
-    assert published[0][1]["langgraph_checkpoint_ns"] == "task-a"
-    assert batcher.flush()[0][1]["langgraph_checkpoint_ns"] == "task-b"
-
-
-@pytest.mark.parametrize("metadata", [None, "not-a-dict"])
-def test_large_file_tool_chunk_batcher_accepts_non_dict_metadata(metadata: Any):
-    batcher = _LargeFileToolChunkBatcher(batch_size=1)
-    message = AIMessageChunk(
-        content="",
-        id="ai-file",
-        tool_call_chunks=[
-            {
-                "id": "call-file",
-                "index": 0,
-                "name": "write_file",
-                "args": '{"path":"report.md","content":"draft"}',
-            }
-        ],
-    )
-
-    published = batcher.push((message, metadata))
-
-    assert len(published) == 1
-    assert published[0][0].tool_call_chunks[0]["args"] == '{"path":"report.md","content":"draft"}'
-    assert published[0][1] == {}
-
-
-def test_large_file_tool_chunk_batcher_does_not_retain_non_file_names():
-    batcher = _LargeFileToolChunkBatcher()
-
-    for index in range(100):
-        message = AIMessageChunk(
-            content="",
-            id=f"ai-{index}",
-            tool_call_chunks=[
-                {
-                    "id": f"call-{index}",
-                    "index": 0,
-                    "name": "web_search",
-                    "args": '{"query":"deerflow"}',
-                }
-            ],
-        )
-
-        assert batcher.push((message, {})) == [(message, {})]
-
-    assert batcher.tool_names == {}
-
-
-def test_large_file_tool_chunk_batcher_starts_batching_after_split_name_matches():
-    batcher = _LargeFileToolChunkBatcher(batch_size=1)
-    name_prefix = AIMessageChunk(
-        content="",
-        id="ai-file",
-        tool_call_chunks=[{"id": "call-file", "index": 0, "name": "write_", "args": ""}],
-    )
-    name_suffix = AIMessageChunk(
-        content="",
-        id="ai-file",
-        tool_call_chunks=[
-            {
-                "index": 0,
-                "name": "file",
-                "args": '{"path":"report.md","content":"draft"}',
-            }
-        ],
-    )
-
-    assert batcher.push((name_prefix, {})) == [(name_prefix, {})]
-    assert set(batcher.tool_names.values()) == {"write_"}
-    assert len(batcher.push((name_suffix, {}))) == 1
-    assert set(batcher.tool_names.values()) == {"write_file"}
-
-
-def test_large_file_tool_chunk_batcher_keeps_identity_across_batches_then_releases_it():
-    batcher = _LargeFileToolChunkBatcher(batch_size=1)
-    first = AIMessageChunk(
-        content="",
-        id="ai-file",
-        tool_call_chunks=[
-            {
-                "id": "call-file",
-                "index": 0,
-                "name": "write_file",
-                "args": '{"path":"report.md","content":"Hel',
-            }
-        ],
-    )
-    continuation = AIMessageChunk(
-        content="",
-        id="ai-file",
-        tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
-    )
-
-    assert len(batcher.push((first, {}))) == 1
-    assert len(batcher.push((continuation, {}))) == 1
-    assert set(batcher.tool_names.values()) == {"write_file"}
-
-    assert batcher.finish() == []
-    assert batcher.tool_names == {}
+def _make_checkpoint(checkpoint_id: str, messages: list[str], version: int):
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = checkpoint_id
+    checkpoint["channel_values"] = {"messages": messages}
+    checkpoint["channel_versions"] = {"messages": version}
+    return checkpoint
 
 
 def test_build_runtime_context_includes_app_config_when_present():
@@ -408,6 +74,113 @@ def test_build_runtime_context_includes_app_config_when_present():
     assert context["thread_id"] == "thread-1"
     assert context["run_id"] == "run-1"
     assert context["app_config"] is app_config
+
+
+def test_build_runtime_context_rejects_forged_pre_run_message_boundary():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"forged-message"}},
+    )
+
+    assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in context
+
+
+def test_build_runtime_context_rejects_forged_stop_reason():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {"stop_reason": "forged-terminal-reason"},
+    )
+
+    assert "stop_reason" not in context
+
+
+def test_build_runtime_context_rejects_caller_slash_activation_run_marker():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            _SLASH_SKILL_ACTIVATION_RUN_KEY: {
+                "version": 1,
+                "owner_token": "caller-forged",
+            }
+        },
+    )
+
+    assert _SLASH_SKILL_ACTIVATION_RUN_KEY not in context
+
+
+def test_build_runtime_context_rejects_caller_verified_skill_read_evidence():
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            VERIFIED_SKILL_SOURCE_CONTEXT_KEY: {
+                "version": 1,
+                "owner_token": "caller-forged",
+                "paths": ["/mnt/skills/custom/forged/SKILL.md"],
+            }
+        },
+    )
+
+    assert VERIFIED_SKILL_SOURCE_CONTEXT_KEY not in context
+
+
+def test_build_runtime_context_rejects_forged_memory_authority():
+    forged = object()
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            "__memory_authority": forged,
+            "memory_authority": forged,
+        },
+    )
+
+    assert "__memory_authority" not in context
+    assert "memory_authority" not in context
+
+
+def test_build_runtime_context_installs_worker_memory_authority():
+    authority = object()
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        None,
+        memory_authority=authority,
+    )
+
+    assert context["__memory_authority"] is authority
+
+
+def test_build_runtime_context_replaces_forged_guardrail_attribution():
+    forged = {
+        "user_id": "forged-user",
+        "authz_attributes": {"project_role": "forged-admin"},
+    }
+    issued = {
+        "user_id": "trusted-user",
+        "user_role": "runner",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "is_subagent": False,
+        "authz_attributes": {"project_role": "runner"},
+    }
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {"__guardrail_attribution": forged},
+        private_scope=object(),
+        guardrail_attribution=issued,
+    )
+
+    assert context["__guardrail_attribution"] == issued
+    assert context["__guardrail_attribution"] is not issued
+    assert context["__guardrail_attribution"]["authz_attributes"] is not issued["authz_attributes"]
 
 
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
@@ -428,213 +201,374 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["app_config"] is app_config
 
 
-def test_install_runtime_context_overrides_internal_pre_existing_message_ids():
-    config = {"context": {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}}
+def test_install_runtime_context_overwrites_pre_run_boundary_from_worker():
+    config = {
+        "context": {
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"forged-message"},
+        }
+    }
 
     _install_runtime_context(
         config,
         {
-            "thread_id": "record-thread",
+            "thread_id": "thread-1",
             "run_id": "run-1",
-            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old-ai"}),
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"trusted-message"}),
         },
     )
 
-    assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+    assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"trusted-message"})
+
+
+def test_install_runtime_context_clears_stale_stop_reason():
+    config = {
+        "context": {
+            "stop_reason": "stale-terminal-reason",
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+        },
+    )
+
+    assert "stop_reason" not in config["context"]
+
+
+def test_install_runtime_context_never_installs_stop_reason():
+    config = {}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "stop_reason": "untrusted-terminal-reason",
+        },
+    )
+
+    assert "stop_reason" not in config["context"]
+
+
+def test_install_runtime_context_clears_slash_marker_when_private_config_is_reused():
+    config = {
+        "context": {
+            "thread_id": "thread-1",
+            "run_id": "run-old",
+            _SLASH_SKILL_ACTIVATION_RUN_KEY: {
+                "version": 1,
+                "owner_token": "old-owner-token",
+                "project_id": "project-a",
+                "owner_user_id": "owner-a",
+                "run_id": "run-old",
+                "message_key": "id:msg-1",
+            },
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-new",
+            "private_scope": PrivateResourceScope(
+                project_id="project-a",
+                owner_user_id="owner-a",
+                membership_version=2,
+            ),
+            "user_id": "owner-a",
+        },
+    )
+
+    assert config["context"]["run_id"] == "run-new"
+    assert _SLASH_SKILL_ACTIVATION_RUN_KEY not in config["context"]
+
+
+def test_install_runtime_context_clears_verified_reads_when_config_is_reused():
+    config = {
+        "context": {
+            "thread_id": "thread-1",
+            "run_id": "run-old",
+            VERIFIED_SKILL_SOURCE_CONTEXT_KEY: {
+                "version": 1,
+                "owner_token": "old-owner-token",
+                "identity": [
+                    "private-v1",
+                    "project-a",
+                    "owner-a",
+                    "run-old",
+                ],
+                "paths": ["/mnt/skills/custom/old/SKILL.md"],
+            },
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-new",
+            "private_scope": PrivateResourceScope(
+                project_id="project-a",
+                owner_user_id="owner-a",
+                membership_version=2,
+            ),
+            "user_id": "owner-a",
+        },
+    )
+
+    assert config["context"]["run_id"] == "run-new"
+    assert VERIFIED_SKILL_SOURCE_CONTEXT_KEY not in config["context"]
+
+
+def test_install_runtime_context_overwrites_forged_memory_authority():
+    exact = object()
+    config = {
+        "context": {
+            "__memory_authority": "forged-memory-authority",
+            "memory_authority": "forged-memory-authority",
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "private_scope": object(),
+            "__memory_authority": exact,
+        },
+    )
+
+    assert config["context"]["__memory_authority"] is exact
+    assert "memory_authority" not in config["context"]
+
+
+def test_install_runtime_context_clears_stale_memory_authority():
+    config = {
+        "context": {
+            "__memory_authority": object(),
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "thread-1",
+            "run_id": "run-2",
+            "private_scope": object(),
+        },
+    )
+
+    assert "__memory_authority" not in config["context"]
 
 
 @pytest.mark.anyio
-async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values():
-    run_manager = RunManager()
-    record = await run_manager.create("thread-file-stream")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    complete_message = AIMessage(
-        content="",
-        id="ai-file",
-        tool_calls=[
-            {
-                "id": "call-file",
-                "name": "write_file",
-                "args": {
-                    "path": "/mnt/user-data/outputs/report.md",
-                    "content": "Hello world",
-                },
-                "type": "tool_call",
-            }
-        ],
-    )
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            yield (
-                "messages",
-                (
-                    AIMessageChunk(
-                        content="",
-                        id="ai-file",
-                        tool_call_chunks=[
-                            {
-                                "id": "call-file",
-                                "index": 0,
-                                "name": "write_file",
-                                "args": '{"path":"/mnt/user-data/outputs/report.md","content":"Hello',
-                            }
-                        ],
-                    ),
-                    {},
-                ),
-            )
-            yield (
-                "messages",
-                (
-                    AIMessageChunk(
-                        content="",
-                        id="ai-file",
-                        tool_call_chunks=[{"index": 0, "name": None, "args": ' world"}'}],
-                    ),
-                    {},
-                ),
-            )
-            yield ("values", {"messages": [complete_message]})
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None),
-        agent_factory=lambda **_kwargs: DummyAgent(),
-        graph_input={},
-        config={},
-        stream_modes=["messages-tuple", "values"],
-    )
-
-    message_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "messages"]
-    assert len(message_events) == 1
-    assert message_events[0][2][0]["tool_calls"][0]["args"]["content"] == "Hello world"
-    values_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "values"]
-    assert any(event["messages"][0]["tool_calls"][0]["args"]["content"] == "Hello world" for event in values_events)
-
-
 @pytest.mark.parametrize(
-    ("stream_error", "flush_publish_error", "expected_error"),
+    "checkpointer",
     [
-        (True, False, "stream failed"),
-        (True, True, "stream failed"),
-        (False, True, "flush publish failed"),
-    ],
-)
-@pytest.mark.anyio
-async def test_run_agent_handles_pending_file_args_when_stream_or_flush_raises(stream_error: bool, flush_publish_error: bool, expected_error: str):
-    run_manager = RunManager()
-    record = await run_manager.create("thread-file-stream-error")
-
-    async def publish(_run_id: str, event: str, _data: Any):
-        if flush_publish_error and event == "messages":
-            raise RuntimeError("flush publish failed")
-
-    bridge = SimpleNamespace(
-        publish=AsyncMock(side_effect=publish),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            yield (
-                "messages",
-                (
-                    AIMessageChunk(
-                        content="",
-                        id="ai-file",
-                        tool_call_chunks=[
-                            {
-                                "id": "call-file",
-                                "index": 0,
-                                "name": "write_file",
-                                "args": '{"path":"report.md","content":"partial',
-                            }
-                        ],
-                    ),
-                    {},
-                ),
+        SimpleNamespace(aget_tuple=AsyncMock(side_effect=RuntimeError("database detail must not leak"))),
+        SimpleNamespace(
+            aget_tuple=AsyncMock(
+                return_value=SimpleNamespace(
+                    config={
+                        "configurable": {
+                            "thread_id": "private-thread",
+                            "checkpoint_ns": "",
+                            "checkpoint_id": "checkpoint-1",
+                        }
+                    },
+                    checkpoint={"channel_values": {"messages": "malformed"}},
+                    metadata={},
+                    pending_writes=[],
+                )
             )
-            if stream_error:
-                raise RuntimeError("stream failed")
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None),
-        agent_factory=lambda **_kwargs: DummyAgent(),
-        graph_input={},
-        config={},
-        stream_modes=["messages-tuple", "values"],
-    )
-
-    message_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "messages"]
-    assert len(message_events) == 1
-    assert message_events[0][2][0]["tool_call_chunks"][0]["args"].endswith('"content":"partial')
-    error_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "error"]
-    assert error_events[0][2]["message"] == expected_error
-
-
-@pytest.mark.anyio
-async def test_run_agent_keeps_file_chunks_unbatched_without_values_mode():
+        ),
+        SimpleNamespace(
+            aget_tuple=AsyncMock(
+                return_value=SimpleNamespace(
+                    config={
+                        "configurable": {
+                            "thread_id": "private-thread",
+                            "checkpoint_ns": "",
+                            "checkpoint_id": "checkpoint-1",
+                        }
+                    },
+                    checkpoint={"channel_values": {"messages": [AIMessage(content="history without id")]}},
+                    metadata={},
+                    pending_writes=[],
+                )
+            )
+        ),
+    ],
+    ids=["read-failed", "malformed", "history-without-stable-id"],
+)
+async def test_private_run_fails_closed_when_pre_run_message_boundary_is_unavailable(
+    checkpointer,
+):
     run_manager = RunManager()
-    record = await run_manager.create("thread-file-messages-only")
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="private-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
     bridge = SimpleNamespace(
         publish=AsyncMock(),
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
-    chunks = [
-        AIMessageChunk(
-            content="",
-            id="ai-file",
-            tool_call_chunks=[
-                {
-                    "id": "call-file",
-                    "index": 0,
-                    "name": "write_file",
-                    "args": '{"path":"report.md","content":"Hel',
-                }
-            ],
-        ),
-        AIMessageChunk(
-            content="",
-            id="ai-file",
-            tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
-        ),
-    ]
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            for chunk in chunks:
-                yield (chunk, {})
+    factory = MagicMock()
 
     await run_agent(
         bridge,
         run_manager,
         record,
-        ctx=RunContext(checkpointer=None),
-        agent_factory=lambda **_kwargs: DummyAgent(),
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=factory,
         graph_input={},
         config={},
-        stream_modes=["messages-tuple"],
     )
 
-    message_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "messages"]
-    assert len(message_events) == 2
-    assert message_events[0][0]["tool_call_chunks"][0]["args"].endswith('"content":"Hel')
-    assert message_events[1][0]["tool_call_chunks"][0]["args"] == 'lo"}'
+    assert record.status == RunStatus.error
+    assert record.error == "Private Run pre-run message boundary is unavailable"
+    error_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert error_events == [
+        {
+            "message": "Private Run pre-run message boundary is unavailable",
+            "name": "PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE",
+        }
+    ]
+    factory.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_private_run_allows_first_empty_checkpoint():
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="private-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
+    captured = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["boundary"] = config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
+            yield {"messages": []}
+
+    def factory(*, config):
+        del config
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert captured["boundary"] == frozenset()
+
+
+@pytest.mark.anyio
+async def test_private_run_forces_persisted_thread_and_root_checkpoint_namespace():
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="persisted-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, Any] = {}
+
+    class DummyAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            del graph_input, stream_mode, subgraphs
+            captured["stream_configurable"] = dict(config["configurable"])
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_configurable"] = dict(config["configurable"])
+        return DummyAgent()
+
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=None),
+    )
+    caller_config = {
+        "configurable": {
+            "thread_id": "forged-thread",
+            "checkpoint_ns": "forged-subgraph",
+            "checkpoint_id": "admitted-checkpoint",
+            "checkpoint_map": {"": "admitted-checkpoint"},
+        }
+    }
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=factory,
+        graph_input={},
+        config=caller_config,
+    )
+
+    for configurable in (
+        captured["factory_configurable"],
+        captured["stream_configurable"],
+        caller_config["configurable"],
+    ):
+        assert configurable["thread_id"] == "persisted-thread"
+        assert configurable["checkpoint_ns"] == ""
+        assert configurable["checkpoint_id"] == "admitted-checkpoint"
+        assert configurable["checkpoint_map"] == {"": "admitted-checkpoint"}
+    for checkpoint_call in checkpointer.aget_tuple.await_args_list:
+        durable_configurable = checkpoint_call.args[0]["configurable"]
+        assert durable_configurable["thread_id"] == "persisted-thread"
+        assert durable_configurable["checkpoint_ns"] == ""
 
 
 @pytest.mark.anyio
@@ -671,6 +605,8 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
     assert captured["factory_context"]["app_config"] is app_config
     assert captured["astream_context"]["app_config"] is app_config
+    assert captured["factory_context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
+    assert captured["astream_context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
     fetched = await run_manager.get(record.run_id)
     assert fetched is not None
     assert fetched.status == RunStatus.success
@@ -679,9 +615,25 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
 
 @pytest.mark.anyio
-async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context():
+@pytest.mark.parametrize("incoming_model_name", [None, "forged-client-model"])
+async def test_private_run_agent_factory_receives_authoritative_persisted_model_name(
+    incoming_model_name: str | None,
+) -> None:
+    from deerflow.agents.lead_agent.agent import _get_runtime_config
+    from deerflow.runtime.private_scope import PrivateResourceScope
+
     run_manager = RunManager()
-    record = await run_manager.create("thread-1")
+    record = await run_manager.register_persisted(
+        run_id="private-run",
+        thread_id="private-thread",
+        assistant_id="project-assistant",
+        model_name="deepseek-v4",
+        scope=PrivateResourceScope(
+            project_id="exact-project",
+            owner_user_id="exact-owner",
+            membership_version=1,
+        ),
+    )
     bridge = SimpleNamespace(
         publish=AsyncMock(),
         publish_end=AsyncMock(),
@@ -689,154 +641,55 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
     )
     captured: dict[str, object] = {}
 
-    class DummyCheckpointer:
-        async def aget_tuple(self, _config):
-            return SimpleNamespace(
-                config={"configurable": {"checkpoint_id": "checkpoint-1"}},
-                checkpoint={"channel_values": {}},
-                metadata={},
-                pending_writes=[],
-            )
+    class PrivateRuntime:
+        async def aclose(self) -> None:
+            return None
+
+    private_runtime = PrivateRuntime()
 
     class DummyAgent:
-        async def aget_state(self, _config):
-            return SimpleNamespace(
-                values={
-                    "messages": [
-                        HumanMessage(id="h1", content="question"),
-                        AIMessage(id="a1", content="answer"),
-                    ]
-                },
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": "checkpoint-1",
-                    }
-                },
-                parent_config=None,
-                metadata={},
-                next=(),
-                tasks=(),
-                created_at=None,
-            )
+        metadata = {"model_name": "deepseek-v4"}
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            captured["context"] = config["context"]
+            captured["astream_model_name"] = config["configurable"].get("model_name")
+            captured["astream_context_model_name"] = config["context"].get("model_name")
             yield {"messages": []}
 
-    def factory(*, config):
+    def factory(*, config, private_runtime):
+        captured["factory_model_name"] = config["configurable"].get("model_name")
+        captured["factory_context_model_name"] = config["context"].get("model_name")
+        captured["factory_resolved_model_name"] = _get_runtime_config(config).get("model_name")
+        captured["private_runtime"] = private_runtime
         return DummyAgent()
 
+    configurable = {} if incoming_model_name is None else {"model_name": incoming_model_name}
     await run_agent(
         bridge,
         run_manager,
         record,
-        ctx=RunContext(checkpointer=DummyCheckpointer()),
+        ctx=RunContext(
+            checkpointer=None,
+            private_agent_runtime=private_runtime,
+        ),
         agent_factory=factory,
         graph_input={},
-        config={},
+        config={
+            "configurable": configurable,
+            "context": {"model_name": "forged-context-model"},
+        },
     )
+    await asyncio.sleep(0)
 
-    context = captured["context"]
-    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"h1", "a1"})
-
-
-@pytest.mark.anyio
-async def test_run_agent_marks_rollback_unusable_when_capture_fails():
-    """A failed pre-run capture must disable rollback entirely.
-
-    Rollback now restores messages by forking the pre-run checkpoint through
-    the graph (raw checkpoint blobs cannot reconstruct Delta-channel history),
-    so there is no safe fallback when materialization fails: the worker must
-    report ``snapshot_capture_failed=True`` with no rollback point rather
-    than restoring an empty or partial message history.
-    """
-    run_manager = RunManager()
-    record = await run_manager.create("thread-1")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-
-    class DummyCheckpointer:
-        async def aget_tuple(self, _config):
-            return SimpleNamespace(
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": "checkpoint-1",
-                    }
-                },
-                checkpoint={"id": "checkpoint-1", "channel_values": {}},
-                metadata={"source": "loop"},
-                pending_writes=[],
-            )
-
-    class DummyAgent:
-        async def aget_state(self, _config):
-            # Cancel after the worker crosses its startup barrier so this test
-            # exercises the running rollback path, not pending cancellation.
-            record.abort_action = "rollback"
-            record.abort_event.set()
-            raise RuntimeError("materialization failed")
-
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            yield {"messages": []}
-
-    with patch(
-        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
-        new_callable=AsyncMock,
-    ) as rollback:
-        await run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=DummyCheckpointer()),
-            agent_factory=lambda *, config: DummyAgent(),
-            graph_input={},
-            config={},
-        )
-
-    rollback.assert_awaited_once()
-    rollback_kwargs = rollback.await_args.kwargs
-    assert rollback_kwargs["snapshot_capture_failed"] is True
-    assert rollback_kwargs["rollback_point"] is None
-
-
-@pytest.mark.anyio
-async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snapshot():
-    run_manager = RunManager()
-    record = await run_manager.create("thread-1")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    captured: dict[str, object] = {}
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            captured["context"] = config["context"]
-            yield {"messages": []}
-
-    def factory(*, config):
-        return DummyAgent()
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None),
-        agent_factory=factory,
-        graph_input={},
-        config={"context": {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}},
-    )
-
-    context = captured["context"]
-    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
+    assert captured == {
+        "factory_model_name": "deepseek-v4",
+        "factory_context_model_name": "deepseek-v4",
+        "factory_resolved_model_name": "deepseek-v4",
+        "astream_model_name": "deepseek-v4",
+        "astream_context_model_name": "deepseek-v4",
+        "private_runtime": private_runtime,
+    }
+    assert record.status == RunStatus.success
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 @pytest.mark.anyio
@@ -882,150 +735,6 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched is not None
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
-
-
-@pytest.mark.anyio
-async def test_run_agent_rolls_back_failed_edit_replay_and_publishes_restored_values():
-    run_manager = RunManager()
-    record = await run_manager.create(
-        "thread-1",
-        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
-    )
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    before_messages = [HumanMessage(id="h1", content="original"), AIMessage(id="a1", content="answer")]
-
-    class DummyCheckpointer:
-        async def aget_tuple(self, _config):
-            return SimpleNamespace(
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": "checkpoint-1",
-                    }
-                },
-                checkpoint={"id": "checkpoint-1", "channel_values": {}},
-                metadata={"source": "loop"},
-                pending_writes=[],
-            )
-
-    class DummyAgent:
-        async def aget_state(self, _config):
-            return SimpleNamespace(
-                values={"messages": before_messages},
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": "checkpoint-1",
-                    }
-                },
-                parent_config=None,
-                metadata={},
-                next=(),
-                tasks=(),
-                created_at=None,
-            )
-
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            raise RuntimeError("edit replay failed")
-            if False:
-                yield  # pragma: no cover - keep this an async generator
-
-    error_status_finalizing_states: list[bool] = []
-    original_set_status = run_manager.set_status
-
-    async def _set_status(run_id, status, **kwargs):
-        if run_id == record.run_id and status == RunStatus.error:
-            error_status_finalizing_states.append(record.finalizing)
-        return await original_set_status(run_id, status, **kwargs)
-
-    run_manager.set_status = _set_status  # type: ignore[method-assign]
-    with patch(
-        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
-        new_callable=AsyncMock,
-    ) as rollback:
-        rollback.return_value = True
-        await run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=DummyCheckpointer()),
-            agent_factory=lambda *, config: DummyAgent(),
-            graph_input={},
-            config={},
-        )
-
-    fetched = await run_manager.get(record.run_id)
-    assert fetched is not None
-    assert fetched.status == RunStatus.error
-    assert error_status_finalizing_states == [True]
-    rollback.assert_awaited_once()
-    publish_events = [call_args.args[1] for call_args in bridge.publish.await_args_list]
-    assert "error" in publish_events
-    assert "values" in publish_events
-    assert publish_events.index("values") > publish_events.index("error")
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
-
-
-@pytest.mark.anyio
-async def test_failed_edit_replay_does_not_publish_restored_values_when_snapshot_capture_failed():
-    run_manager = RunManager()
-    record = await run_manager.create(
-        "thread-1",
-        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
-    )
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-
-    class DummyCheckpointer:
-        async def aget_tuple(self, _config):
-            return SimpleNamespace(
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": "checkpoint-1",
-                    }
-                },
-                checkpoint={"id": "checkpoint-1", "channel_values": {}},
-                metadata={"source": "loop"},
-                pending_writes=[],
-            )
-
-    class DummyAgent:
-        async def aget_state(self, _config):
-            raise RuntimeError("snapshot capture failed")
-
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            raise RuntimeError("edit replay failed")
-            if False:
-                yield  # pragma: no cover - keep this an async generator
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=DummyCheckpointer()),
-        agent_factory=lambda *, config: DummyAgent(),
-        graph_input={},
-        config={},
-    )
-
-    fetched = await run_manager.get(record.run_id)
-    assert fetched is not None
-    assert fetched.status == RunStatus.error
-    publish_events = [call_args.args[1] for call_args in bridge.publish.await_args_list]
-    assert "error" in publish_events
-    assert "values" not in publish_events
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
@@ -1132,37 +841,42 @@ async def test_run_agent_defaults_root_run_name_from_configurable_agent_name():
 
 
 @pytest.mark.anyio
-async def test_rollback_forks_pre_run_checkpoint_without_deleting_thread(monkeypatch):
-    checkpointer = FakeCheckpointer()
-    mock_graph = _stub_mutation_graph(
-        monkeypatch,
-        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
-    )
-    rollback_point = _make_rollback_point(
-        pending_writes=[
-            ("task-a", "messages", {"content": "first"}),
-            ("task-a", "status", "done"),
-            ("task-b", "events", {"type": "tool"}),
-        ],
-    )
+async def test_rollback_restores_snapshot_without_deleting_thread():
+    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
 
     await _rollback_to_pre_run_checkpoint(
-        accessor=_rollback_accessor(checkpointer),
         checkpointer=checkpointer,
         thread_id="thread-1",
         run_id="run-1",
-        rollback_point=rollback_point,
+        pre_run_checkpoint_id="ckpt-1",
+        pre_run_snapshot={
+            "checkpoint_ns": "",
+            "checkpoint": {
+                "id": "ckpt-1",
+                "channel_versions": {"messages": 3},
+                "channel_values": {"messages": ["before"]},
+            },
+            "metadata": {"source": "input"},
+            "pending_writes": [
+                ("task-a", "messages", {"content": "first"}),
+                ("task-a", "status", "done"),
+                ("task-b", "events", {"type": "tool"}),
+            ],
+        },
         snapshot_capture_failed=False,
     )
 
     checkpointer.adelete_thread.assert_not_awaited()
-    mock_graph.aupdate_state.assert_awaited_once()
-    update_config, update_values = mock_graph.aupdate_state.await_args.args[:2]
-    assert update_config["configurable"]["checkpoint_id"] == "ckpt-1"
-    overwrite = update_values["messages"]
-    assert isinstance(overwrite, Overwrite)
-    assert overwrite.value == ["before"]
-    assert mock_graph.aupdate_state.await_args.kwargs["as_node"] == "rollback_restore"
+    checkpointer.aput.assert_awaited_once()
+    restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
+    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    assert restored_checkpoint["id"] != "ckpt-1"
+    assert "channel_versions" in restored_checkpoint
+    assert "channel_values" in restored_checkpoint
+    assert restored_checkpoint["channel_versions"] == {"messages": 3}
+    assert restored_checkpoint["channel_values"] == {"messages": ["before"]}
+    assert restored_metadata == {"source": "input"}
+    assert new_versions == {"messages": 3}
     assert checkpointer.aput_writes.await_args_list == [
         call(
             {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
@@ -1178,506 +892,225 @@ async def test_rollback_forks_pre_run_checkpoint_without_deleting_thread(monkeyp
 
 
 @pytest.mark.anyio
-async def test_rollback_skips_when_rollback_point_has_no_checkpoint_id(monkeypatch):
-    """A rollback point without a checkpoint id cannot anchor a fork - skip safely."""
-    checkpointer = FakeCheckpointer()
-    mock_graph = _stub_mutation_graph(
-        monkeypatch,
-        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
-    )
-
-    await _rollback_to_pre_run_checkpoint(
-        accessor=_rollback_accessor(checkpointer),
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        run_id="run-1",
-        rollback_point=_make_rollback_point(checkpoint_id=None),
-        snapshot_capture_failed=False,
-    )
-
-    checkpointer.adelete_thread.assert_not_awaited()
-    mock_graph.aupdate_state.assert_not_awaited()
-    checkpointer.aput_writes.assert_not_awaited()
-
-
-class _ArtifactChannelState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    artifacts: Annotated[list[str], merge_artifacts]
-
-
-def _build_message_and_artifact_graph(checkpointer: Any):
-    async def _append(state: dict[str, Any]) -> dict[str, Any]:
-        n = len(state.get("messages") or [])
-        return {"messages": [HumanMessage(content=f"turn-{n}")], "artifacts": [f"a{n}"]}
-
-    builder = StateGraph(_ArtifactChannelState)
-    builder.add_node("append", _append)
-    builder.set_entry_point("append")
-    builder.set_finish_point("append")
-    return builder.compile(checkpointer=checkpointer)
-
-
-class _ExtensionFullState(TypedDict):
-    """Full-mode schema with a channel base ThreadState does not know about.
-
-    Mirrors a custom ``AgentMiddleware.state_schema`` contribution (memory,
-    todos, uploads, …): absent from the base schema the mutation graph falls
-    back to, so a base-schema restore silently drops it.
-    """
-
-    messages: Annotated[list[AnyMessage], add_messages]
-    memory_notes: NotRequired[str]
-
-
-class _ExtensionDeltaState(TypedDict):
-    messages: Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=1000)]
-    memory_notes: NotRequired[str]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    "mode,state_schema",
-    [("full", _ExtensionFullState), ("delta", _ExtensionDeltaState)],
-)
-async def test_rollback_preserves_middleware_contributed_channels(mode, state_schema):
-    """The rollback mutation graph must compile with the thread's effective schema.
-
-    Regression: ``_rollback_to_pre_run_checkpoint`` used to build the mutation
-    graph from the base ThreadState fallback, silently dropping channels
-    contributed by custom middleware from the restored checkpoint.
-    """
-    checkpointer = InMemorySaver()
-
-    async def _step(state: dict[str, Any]) -> dict[str, Any]:
-        n = len(state.get("messages") or [])
-        return {"messages": [HumanMessage(content=f"turn-{n}")], "memory_notes": f"note-{n}"}
-
-    builder = StateGraph(state_schema)
-    builder.add_node("step", _step)
-    builder.set_entry_point("step")
-    builder.set_finish_point("step")
-    graph = builder.compile(checkpointer=checkpointer)
-
-    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
-    thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-    await graph.ainvoke({}, thread_config)
-    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
-    assert rollback_point is not None
-
-    await graph.ainvoke({}, thread_config)
-
-    await _rollback_to_pre_run_checkpoint(
-        accessor=accessor,
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        run_id="run-1",
-        rollback_point=rollback_point,
-        snapshot_capture_failed=False,
-    )
-
-    latest_snapshot = await accessor.aget(thread_config)
-    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0"]
-    assert latest_snapshot.values["memory_notes"] == "note-0"
-
-
-@pytest.mark.anyio
-async def test_rollback_restores_non_message_channels_via_fork_inheritance():
-    """Rollback overwrites only messages; sibling reducer channels must be
-    restored to their pre-run values by forking the pre-run checkpoint
-    (non-updated channels inherit from the parent). Locks in the load-bearing
-    assumption of the rollback design."""
-    checkpointer = InMemorySaver()
-    graph = _build_message_and_artifact_graph(checkpointer)
-    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="full")
-    thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-    await graph.ainvoke({}, thread_config)
-    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
-    assert rollback_point is not None
-
-    await graph.ainvoke({}, thread_config)
-    cancelled_snapshot = await accessor.aget(thread_config)
-    assert cancelled_snapshot.values["artifacts"] == ["a0", "a1"]
-    assert [message.content for message in cancelled_snapshot.values["messages"]] == ["turn-0", "turn-1"]
-
-    await _rollback_to_pre_run_checkpoint(
-        accessor=accessor,
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        run_id="run-1",
-        rollback_point=rollback_point,
-        snapshot_capture_failed=False,
-    )
-
-    latest_snapshot = await accessor.aget(thread_config)
-    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0"]
-    assert latest_snapshot.values["artifacts"] == ["a0"]
-
-
-@pytest.mark.anyio
 async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointer():
-    """Full-mode: the restored fork becomes latest, keeps pre-run values and
-    pre-run pending writes, and drops writes attached to the cancelled run."""
     checkpointer = InMemorySaver()
-    graph = _build_message_append_graph(_FullChannelState, checkpointer)
-    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="full")
-    thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-    await graph.ainvoke({}, thread_config)
-    pre_run_snapshot = await accessor.aget(thread_config)
-    pre_run_checkpoint_id = pre_run_snapshot.config["configurable"]["checkpoint_id"]
-    pre_run_config = {
-        "configurable": {
-            "thread_id": "thread-1",
-            "checkpoint_ns": "",
-            "checkpoint_id": pre_run_checkpoint_id,
-        }
-    }
-    checkpointer.put_writes(pre_run_config, [("title", "pending-before")], task_id="task-before")
-
-    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
-    assert rollback_point is not None
-    assert rollback_point.pending_writes == (("task-before", "title", "pending-before"),)
-
-    await graph.ainvoke({}, thread_config)
-    cancelled_snapshot = await accessor.aget(thread_config)
-    cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
-    checkpointer.put_writes(
-        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": cancelled_checkpoint_id}},
-        [("title", "pending-after")],
-        task_id="task-after",
-    )
+    thread_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    before_checkpoint = _make_checkpoint("0001", ["before"], 1)
+    before_config = checkpointer.put(thread_config, before_checkpoint, {"step": 1}, {"messages": 1})
+    after_checkpoint = _make_checkpoint("0002", ["after"], 2)
+    after_config = checkpointer.put(before_config, after_checkpoint, {"step": 2}, {"messages": 2})
+    checkpointer.put_writes(after_config, [("messages", "pending-after")], task_id="task-after")
 
     await _rollback_to_pre_run_checkpoint(
-        accessor=accessor,
         checkpointer=checkpointer,
         thread_id="thread-1",
         run_id="run-1",
-        rollback_point=rollback_point,
+        pre_run_checkpoint_id="0001",
+        pre_run_snapshot={
+            "checkpoint_ns": "",
+            "checkpoint": before_checkpoint,
+            "metadata": {"step": 1},
+            "pending_writes": [("task-before", "messages", "pending-before")],
+        },
         snapshot_capture_failed=False,
     )
 
-    latest_snapshot = await accessor.aget(thread_config)
-    restored_checkpoint_id = latest_snapshot.config["configurable"]["checkpoint_id"]
-    assert restored_checkpoint_id not in (pre_run_checkpoint_id, cancelled_checkpoint_id)
-    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0"]
+    latest = checkpointer.get_tuple(thread_config)
 
-    latest_tuple = await checkpointer.aget_tuple(thread_config)
-    assert latest_tuple.pending_writes == [("task-before", "title", "pending-before")]
-    restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
-    assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == pre_run_checkpoint_id
+    assert latest is not None
+    assert latest.config["configurable"]["checkpoint_id"] != "0001"
+    assert latest.config["configurable"]["checkpoint_id"] != "0002"
+    assert latest.checkpoint["channel_values"] == {"messages": ["before"]}
+    assert latest.pending_writes == [("task-before", "messages", "pending-before")]
+    assert ("task-after", "messages", "pending-after") not in latest.pending_writes
 
 
 @pytest.mark.anyio
 async def test_rollback_deletes_thread_when_no_snapshot_exists():
-    checkpointer = FakeCheckpointer()
+    checkpointer = FakeCheckpointer(put_result=None)
 
     await _rollback_to_pre_run_checkpoint(
-        accessor=_rollback_accessor(checkpointer),
         checkpointer=checkpointer,
         thread_id="thread-1",
         run_id="run-1",
-        rollback_point=None,
+        pre_run_checkpoint_id=None,
+        pre_run_snapshot=None,
         snapshot_capture_failed=False,
     )
 
     checkpointer.adelete_thread.assert_awaited_once_with("thread-1")
+    checkpointer.aput.assert_not_awaited()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_raises_when_restore_config_has_no_checkpoint_id(monkeypatch):
-    checkpointer = FakeCheckpointer()
-    _stub_mutation_graph(
-        monkeypatch,
-        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
+async def test_private_rollback_without_checkpoint_never_deletes_business_thread():
+    checkpointer = FakeCheckpointer(put_result=None)
+
+    restored = await _rollback_to_pre_run_checkpoint(
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        pre_run_checkpoint_id=None,
+        pre_run_snapshot=None,
+        snapshot_capture_failed=False,
+        allow_thread_delete=False,
     )
+
+    assert restored is False
+    checkpointer.adelete_thread.assert_not_awaited()
+    checkpointer.aput.assert_not_awaited()
+    checkpointer.aput_writes.assert_not_awaited()
+
+
+def test_state_replacement_rejects_channels_outside_effective_schema():
+    mutation_graph = SimpleNamespace(channels={"messages": object()})
+
+    with pytest.raises(RuntimeError, match="outside the effective schema"):
+        _complete_state_replacement_values(
+            mutation_graph=mutation_graph,
+            selected_values={
+                "messages": [],
+                "unknown_middleware_channel": "must-not-be-dropped",
+            },
+            current_values={"messages": []},
+            run_id="run-1",
+            operation="rollback",
+        )
+
+
+@pytest.mark.anyio
+async def test_rollback_raises_when_restore_config_has_no_checkpoint_id():
+    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}})
 
     with pytest.raises(RuntimeError, match="did not return checkpoint_id"):
         await _rollback_to_pre_run_checkpoint(
-            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            rollback_point=_make_rollback_point(pending_writes=[("task-a", "messages", "value")]),
+            pre_run_checkpoint_id="ckpt-1",
+            pre_run_snapshot={
+                "checkpoint_ns": "",
+                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
+                "metadata": {},
+                "pending_writes": [("task-a", "messages", "value")],
+            },
             snapshot_capture_failed=False,
         )
 
     checkpointer.adelete_thread.assert_not_awaited()
+    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_capture_rollback_point_normalizes_missing_checkpoint_ns():
-    """Snapshots whose config omits ``checkpoint_ns`` must anchor the root namespace."""
+async def test_rollback_normalizes_none_checkpoint_ns_to_root_namespace():
+    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
 
-    class _TupleCheckpointer:
-        async def aget_tuple(self, _config):
-            return SimpleNamespace(pending_writes=[])
-
-    class _SnapshotAgent:
-        async def aget_state(self, _config):
-            return SimpleNamespace(
-                values={"messages": [HumanMessage(id="h1", content="before")]},
-                config={"configurable": {"thread_id": "thread-1", "checkpoint_id": "ckpt-1"}},
-                metadata={"source": "loop"},
-            )
-
-    checkpointer = _TupleCheckpointer()
-    accessor = CheckpointStateAccessor(graph=_SnapshotAgent(), checkpointer=checkpointer, mode="full")
-
-    rollback_point = await _capture_rollback_point(accessor, checkpointer, {"configurable": {"thread_id": "thread-1"}})
-
-    assert rollback_point is not None
-    assert rollback_point.config["configurable"]["checkpoint_ns"] == ""
-    assert rollback_point.config["configurable"]["checkpoint_id"] == "ckpt-1"
-    assert [message.content for message in rollback_point.messages] == ["before"]
-    assert rollback_point.metadata == {"source": "loop"}
-
-
-@pytest.mark.anyio
-async def test_capture_rollback_point_returns_none_without_checkpoint():
-    """A thread with no checkpoints has no rollback point (delete/reset contract)."""
-
-    class _EmptyAgent:
-        async def aget_state(self, _config):
-            return SimpleNamespace(
-                values={},
-                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
-                metadata={},
-            )
-
-    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
-    accessor = CheckpointStateAccessor(graph=_EmptyAgent(), checkpointer=checkpointer, mode="full")
-
-    assert await _capture_rollback_point(accessor, checkpointer, {"configurable": {"thread_id": "thread-1"}}) is None
-
-
-@pytest.mark.anyio
-async def test_rollback_raises_on_malformed_pending_write_not_a_tuple(monkeypatch):
-    """pending_writes containing a non-3-tuple item should raise RuntimeError."""
-    checkpointer = FakeCheckpointer()
-    _stub_mutation_graph(
-        monkeypatch,
-        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+    await _rollback_to_pre_run_checkpoint(
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        pre_run_checkpoint_id="ckpt-1",
+        pre_run_snapshot={
+            "checkpoint_ns": None,
+            "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
+            "metadata": {},
+            "pending_writes": [],
+        },
+        snapshot_capture_failed=False,
     )
+
+    checkpointer.aput.assert_awaited_once()
+    restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
+    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    assert restored_checkpoint["id"] != "ckpt-1"
+    assert restored_checkpoint["channel_versions"] == {}
+    assert restored_metadata == {}
+    assert new_versions == {}
+
+
+@pytest.mark.anyio
+async def test_rollback_raises_on_malformed_pending_write_not_a_tuple():
+    """pending_writes containing a non-3-tuple item should raise RuntimeError."""
+    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
 
     with pytest.raises(RuntimeError, match="rollback failed: pending_write is not a 3-tuple"):
         await _rollback_to_pre_run_checkpoint(
-            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            rollback_point=_make_rollback_point(
-                pending_writes=[
+            pre_run_checkpoint_id="ckpt-1",
+            pre_run_snapshot={
+                "checkpoint_ns": "",
+                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
+                "metadata": {},
+                "pending_writes": [
                     ("task-a", "messages", "valid"),  # valid
                     ["only", "two"],  # malformed: only 2 elements
                 ],
-            ),
+            },
             snapshot_capture_failed=False,
         )
 
+    # aput succeeded but aput_writes should not be called due to malformed data
+    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_raises_on_malformed_pending_write_non_string_channel(monkeypatch):
+async def test_rollback_raises_on_malformed_pending_write_non_string_channel():
     """pending_writes containing a non-string channel should raise RuntimeError."""
-    checkpointer = FakeCheckpointer()
-    _stub_mutation_graph(
-        monkeypatch,
-        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
-    )
+    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
 
     with pytest.raises(RuntimeError, match="rollback failed: pending_write has non-string channel"):
         await _rollback_to_pre_run_checkpoint(
-            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            rollback_point=_make_rollback_point(
-                pending_writes=[
+            pre_run_checkpoint_id="ckpt-1",
+            pre_run_snapshot={
+                "checkpoint_ns": "",
+                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
+                "metadata": {},
+                "pending_writes": [
                     ("task-a", 123, "value"),  # malformed: channel is not a string
                 ],
-            ),
+            },
             snapshot_capture_failed=False,
         )
 
+    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_propagates_aput_writes_failure(monkeypatch):
+async def test_rollback_propagates_aput_writes_failure():
     """If aput_writes fails, the exception should propagate (not be swallowed)."""
-    checkpointer = FakeCheckpointer()
+    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+    # Simulate aput_writes failure
     checkpointer.aput_writes.side_effect = RuntimeError("Database connection lost")
-    _stub_mutation_graph(
-        monkeypatch,
-        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
-    )
 
     with pytest.raises(RuntimeError, match="Database connection lost"):
         await _rollback_to_pre_run_checkpoint(
-            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            rollback_point=_make_rollback_point(
-                pending_writes=[
+            pre_run_checkpoint_id="ckpt-1",
+            pre_run_snapshot={
+                "checkpoint_ns": "",
+                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
+                "metadata": {},
+                "pending_writes": [
                     ("task-a", "messages", "value"),
                 ],
-            ),
+            },
             snapshot_capture_failed=False,
         )
 
+    # aput succeeded, aput_writes was called but failed
+    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_rollback_linearizes_delta_restore_onto_cancelled_head():
-    """Delta rollback replaces state on the head instead of creating a fork.
-
-    The cancelled path has already attached writes to the pre-run checkpoint,
-    so forking that checkpoint would replay sibling writes. The restored
-    checkpoint must instead descend from the cancelled head and replace the
-    captured messages there.
-    """
-    checkpointer = InMemorySaver()
-    graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
-    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
-    thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-    await graph.ainvoke({}, thread_config)
-    await graph.ainvoke({}, thread_config)
-    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
-    assert rollback_point is not None
-    assert [message.content for message in rollback_point.messages] == ["turn-0", "turn-1"]
-    pre_run_checkpoint_id = rollback_point.config["configurable"]["checkpoint_id"]
-
-    await graph.ainvoke({}, thread_config)  # the run that gets cancelled
-    cancelled_snapshot = await accessor.aget(thread_config)
-    cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
-    assert len(cancelled_snapshot.values["messages"]) == 3
-
-    await _rollback_to_pre_run_checkpoint(
-        accessor=accessor,
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        run_id="run-1",
-        rollback_point=rollback_point,
-        snapshot_capture_failed=False,
-    )
-
-    latest_snapshot = await accessor.aget(thread_config)
-    restored_checkpoint_id = latest_snapshot.config["configurable"]["checkpoint_id"]
-    assert restored_checkpoint_id not in (pre_run_checkpoint_id, cancelled_checkpoint_id)
-    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0", "turn-1"]
-
-    restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
-    assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == cancelled_checkpoint_id
-    assert restored_tuple.metadata.get("source") == "update"
-    # A non-snapshot Delta checkpoint must not persist the full message list.
-    raw_messages = restored_tuple.checkpoint.get("channel_values", {}).get("messages")
-    assert not isinstance(raw_messages, list)
-
-
-@pytest.mark.anyio
-async def test_rollback_restores_pre_run_pending_writes_for_delta_checkpoints():
-    """Pre-run pending writes are re-attached to the restored checkpoint; writes
-    attached to the cancelled run are not."""
-    checkpointer = InMemorySaver()
-    graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
-    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
-    thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-    await graph.ainvoke({}, thread_config)
-    pre_run_snapshot = await accessor.aget(thread_config)
-    pre_run_checkpoint_id = pre_run_snapshot.config["configurable"]["checkpoint_id"]
-    checkpointer.put_writes(
-        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": pre_run_checkpoint_id}},
-        [("title", "in-flight-title")],
-        task_id="task-in-flight",
-    )
-
-    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
-    assert rollback_point is not None
-    assert rollback_point.pending_writes == (("task-in-flight", "title", "in-flight-title"),)
-
-    await graph.ainvoke({}, thread_config)  # cancelled run
-    cancelled_snapshot = await accessor.aget(thread_config)
-    cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
-    checkpointer.put_writes(
-        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": cancelled_checkpoint_id}},
-        [("title", "cancelled-title")],
-        task_id="task-cancelled",
-    )
-
-    await _rollback_to_pre_run_checkpoint(
-        accessor=accessor,
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        run_id="run-1",
-        rollback_point=rollback_point,
-        snapshot_capture_failed=False,
-    )
-
-    latest_tuple = await checkpointer.aget_tuple(thread_config)
-    assert latest_tuple.pending_writes == [("task-in-flight", "title", "in-flight-title")]
-    assert [message.content for message in (await accessor.aget(thread_config)).values["messages"]] == ["turn-0"]
-
-
-@pytest.mark.anyio
-async def test_rollback_linearizes_delta_restore_sqlite_reopen(tmp_path):
-    """Same linear restore contract against a disk-backed saver, verified after a
-    close/reopen so only persisted bytes can satisfy the assertions."""
-    db_path = tmp_path / "rollback.sqlite3"
-
-    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-        await checkpointer.setup()
-        graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
-        accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
-        thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-        await graph.ainvoke({}, thread_config)
-        await graph.ainvoke({}, thread_config)
-        rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
-        assert rollback_point is not None
-        pre_run_checkpoint_id = rollback_point.config["configurable"]["checkpoint_id"]
-
-        await graph.ainvoke({}, thread_config)  # cancelled run
-        cancelled_snapshot = await accessor.aget(thread_config)
-        cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
-
-        await _rollback_to_pre_run_checkpoint(
-            accessor=accessor,
-            checkpointer=checkpointer,
-            thread_id="thread-1",
-            run_id="run-1",
-            rollback_point=rollback_point,
-            snapshot_capture_failed=False,
-        )
-
-        restored_snapshot = await accessor.aget(thread_config)
-        restored_checkpoint_id = restored_snapshot.config["configurable"]["checkpoint_id"]
-        assert restored_checkpoint_id not in (pre_run_checkpoint_id, cancelled_checkpoint_id)
-        assert [message.content for message in restored_snapshot.values["messages"]] == ["turn-0", "turn-1"]
-        restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
-        assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == cancelled_checkpoint_id
-
-    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
-        graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
-        accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
-        thread_config = {"configurable": {"thread_id": "thread-1"}}
-
-        latest_snapshot = await accessor.aget(thread_config)
-        assert latest_snapshot.config["configurable"]["checkpoint_id"] == restored_checkpoint_id
-        assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0", "turn-1"]
-
-        restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
-        assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == cancelled_checkpoint_id
-        raw_messages = restored_tuple.checkpoint.get("channel_values", {}).get("messages")
-        assert not isinstance(raw_messages, list)
 
 
 def test_agent_factory_supports_app_config_detects_supported_signature():
@@ -1717,14 +1150,6 @@ def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
     assert ctx["thread_id"] == "real-thread"
     assert ctx["run_id"] == "real-run"
     assert ctx["agent_name"] == "ok"
-
-
-def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
-    caller_context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}
-
-    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
-
-    assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in ctx
 
 
 def test_build_runtime_context_ignores_non_dict_caller_context():
@@ -1979,21 +1404,28 @@ def test_extract_llm_error_fallback_message_default_filter_is_empty():
     assert _extract_llm_error_fallback_message(state) == "Connection error."
 
 
-def test_collect_pre_existing_message_ids_pulls_ids_from_values():
-    values = {
-        "messages": [
-            AIMessage(id="a", content="x"),
-            AIMessage(id="b", content="y"),
-            AIMessage(content="no-id-here"),  # ignored
-        ]
+def test_collect_pre_existing_message_ids_pulls_ids_from_snapshot():
+    snapshot = {
+        "checkpoint": {
+            "channel_values": {
+                "messages": [
+                    AIMessage(id="a", content="x"),
+                    AIMessage(id="b", content="y"),
+                    AIMessage(content="no-id-here"),  # ignored
+                ]
+            }
+        }
     }
-    assert _collect_pre_existing_message_ids(values) == {"a", "b"}
+    assert _collect_pre_existing_message_ids(snapshot) == {"a", "b"}
 
 
 def test_collect_pre_existing_message_ids_handles_missing_pieces():
     assert _collect_pre_existing_message_ids(None) == set()
     assert _collect_pre_existing_message_ids({}) == set()
-    assert _collect_pre_existing_message_ids({"messages": None}) == set()
+    assert _collect_pre_existing_message_ids({"checkpoint": None}) == set()
+    assert _collect_pre_existing_message_ids({"checkpoint": {}}) == set()
+    assert _collect_pre_existing_message_ids({"checkpoint": {"channel_values": None}}) == set()
+    assert _collect_pre_existing_message_ids({"checkpoint": {"channel_values": {"messages": None}}}) == set()
 
 
 @pytest.mark.anyio
@@ -2038,23 +1470,6 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run():
             )
 
     class DummyAgent:
-        async def aget_state(self, _config):
-            return SimpleNamespace(
-                values={"messages": [stale_fallback]},
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": "ckpt-stale",
-                    }
-                },
-                parent_config=None,
-                metadata={},
-                next=(),
-                tasks=(),
-                created_at=None,
-            )
-
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             # Replay the prior fallback message (as LangGraph would when using
             # stream_mode="values") and then yield a fresh successful AIMessage.
@@ -2084,90 +1499,13 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run():
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
-class _FakeCheckpointTuple:
-    """Minimal stand-in for ``CheckpointTuple`` used by ``_ensure_interrupted_title``."""
-
-    def __init__(self, *, checkpoint: dict, metadata: dict, config: dict | None = None):
-        self.checkpoint = checkpoint
-        self.metadata = metadata
-        self.config = config or {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
-
-
-class _TitleCheckpointer:
-    """Captures ``aput`` arguments and exposes ``get_next_version`` like DB savers."""
-
-    def __init__(self, *, tuple_value: _FakeCheckpointTuple | None, put_result: dict | None = None):
-        self.aget_tuple = AsyncMock(return_value=tuple_value)
-        self.aput = AsyncMock(return_value=put_result or {})
-
-    def get_next_version(self, current, _channel):
-        if current is None:
-            return 1
-        if isinstance(current, int):
-            return current + 1
-        if isinstance(current, str):
-            try:
-                return str(int(current) + 1)
-            except ValueError:
-                return f"{current}.1"
-        return 1
-
-
 @pytest.mark.anyio
-async def test_interrupted_title_finalization_blocks_new_same_thread_run(monkeypatch):
-    """A cancelled run must remain active while its title-only checkpoint is finalizing."""
+async def test_interrupted_run_never_generates_an_automatic_title(monkeypatch):
+    """Only a successful first exchange may trigger automatic title generation."""
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Old Prompt"},
-    )
-
-    initial_checkpoint = {
-        "id": "ckpt-old",
-        "ts": "2026-06-29T00:00:00Z",
-        "channel_values": {"messages": [{"type": "human", "content": "old prompt"}]},
-        "channel_versions": {"messages": 1},
-    }
-
-    class _BlockingTitleCheckpointer:
-        def __init__(self) -> None:
-            self.latest_checkpoint = copy.deepcopy(initial_checkpoint)
-            self.latest_metadata = {"source": "loop", "step": 1}
-            self.title_write_started = asyncio.Event()
-            self.release_title_write = asyncio.Event()
-
-        async def aget_tuple(self, config):
-            del config
-            return _FakeCheckpointTuple(
-                checkpoint=copy.deepcopy(self.latest_checkpoint),
-                metadata=dict(self.latest_metadata),
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": self.latest_checkpoint["id"],
-                    }
-                },
-            )
-
-        async def aput(self, config, checkpoint, metadata, new_versions):
-            del config, new_versions
-            self.title_write_started.set()
-            await self.release_title_write.wait()
-            self.latest_checkpoint = copy.deepcopy(checkpoint)
-            self.latest_metadata = dict(metadata)
-            return {
-                "configurable": {
-                    "thread_id": "thread-1",
-                    "checkpoint_ns": "",
-                    "checkpoint_id": checkpoint["id"],
-                }
-            }
-
-        def get_next_version(self, current, _channel):
-            return (current or 0) + 1
+    generate = MagicMock(return_value={"title": "Must not be used"})
+    monkeypatch.setattr(TitleMiddleware, "_generate_title_result", generate)
 
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
@@ -2176,7 +1514,10 @@ async def test_interrupted_title_finalization_blocks_new_same_thread_run(monkeyp
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
-    checkpointer = _BlockingTitleCheckpointer()
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=None),
+        aput=AsyncMock(),
+    )
 
     class _AbortingAgent:
         metadata = {"model_name": "fake-test-model"}
@@ -2195,30 +1536,19 @@ async def test_interrupted_title_finalization_blocks_new_same_thread_run(monkeyp
         del config
         return _AbortingAgent()
 
-    task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=checkpointer),
-            agent_factory=factory,
-            graph_input={"messages": [{"role": "user", "content": "old prompt"}]},
-            config={},
-        )
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer),
+        agent_factory=factory,
+        graph_input={"messages": [{"role": "user", "content": "old prompt"}]},
+        config={},
     )
-    record.task = task
 
-    try:
-        await asyncio.wait_for(checkpointer.title_write_started.wait(), timeout=1.0)
-        with pytest.raises(ConflictError, match="active run"):
-            await run_manager.create_or_reject("thread-1", multitask_strategy="reject")
-    finally:
-        checkpointer.release_title_write.set()
-        await task
-
-    records = await run_manager.list_by_thread("thread-1")
-    assert [item.run_id for item in records] == [record.run_id]
-    assert checkpointer.latest_checkpoint["channel_values"]["messages"] == [{"type": "human", "content": "old prompt"}]
+    assert record.status == RunStatus.interrupted
+    generate.assert_not_called()
+    checkpointer.aput.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -2268,237 +1598,6 @@ async def test_finalizing_run_only_blocks_reject_strategy():
         release_cleanup.set()
         with suppress(asyncio.CancelledError):
             await task
-
-
-@pytest.mark.anyio
-async def test_admitted_pending_replacement_does_not_steal_interrupted_title_recovery(monkeypatch):
-    """The old run must still write the fallback title before releasing a serialized replacement."""
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Old Prompt"},
-    )
-
-    initial_checkpoint = {
-        "id": "ckpt-old",
-        "ts": "2026-06-29T00:00:00Z",
-        "channel_values": {"messages": [{"type": "human", "content": "Old prompt"}]},
-        "channel_versions": {"messages": 1},
-    }
-
-    run_manager = RunManager()
-    old_record = await run_manager.create("thread-1")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    checkpointer = _TitleCheckpointer(
-        tuple_value=_FakeCheckpointTuple(
-            checkpoint=initial_checkpoint,
-            metadata={"source": "loop", "step": 1},
-            config={
-                "configurable": {
-                    "thread_id": "thread-1",
-                    "checkpoint_ns": "",
-                    "checkpoint_id": "ckpt-old",
-                }
-            },
-        ),
-    )
-
-    old_title_gate_entered = asyncio.Event()
-    release_old_title_gate = asyncio.Event()
-    original_wait_for_prior_finalizing = run_manager.wait_for_prior_finalizing
-
-    async def _wait_for_prior_finalizing(thread_id, run_id, **kwargs):
-        if run_id == old_record.run_id and old_record.status == RunStatus.interrupted and old_record.finalizing:
-            old_title_gate_entered.set()
-            await release_old_title_gate.wait()
-        return await original_wait_for_prior_finalizing(thread_id, run_id, **kwargs)
-
-    run_manager.wait_for_prior_finalizing = _wait_for_prior_finalizing  # type: ignore[method-assign]
-
-    class _AbortingAgent:
-        metadata = {"model_name": "fake-test-model"}
-        checkpointer: Any | None = None
-        store: Any | None = None
-        interrupt_before_nodes = None
-        interrupt_after_nodes = None
-
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            old_record.abort_event.set()
-            if False:
-                yield  # pragma: no cover
-
-    def factory(*, config):
-        del config
-        return _AbortingAgent()
-
-    old_task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_manager,
-            old_record,
-            ctx=RunContext(checkpointer=checkpointer),
-            agent_factory=factory,
-            graph_input={"messages": [{"role": "user", "content": "Old prompt"}]},
-            config={},
-        )
-    )
-    old_record.task = old_task
-
-    try:
-        await asyncio.wait_for(old_title_gate_entered.wait(), timeout=1.0)
-        replacement_record = await run_manager.create_or_reject("thread-1", multitask_strategy="interrupt")
-        assert replacement_record.status == RunStatus.pending
-
-        release_old_title_gate.set()
-        await old_task
-    finally:
-        release_old_title_gate.set()
-        if not old_task.done():
-            old_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await old_task
-
-    checkpointer.aput.assert_awaited_once()
-    _, written_checkpoint, _, _ = checkpointer.aput.await_args.args
-    assert written_checkpoint["channel_values"]["title"] == "Old Prompt"
-
-
-@pytest.mark.anyio
-async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_replacement(monkeypatch):
-    """A replacement run admitted by multitask interrupt must not lose its newer checkpoint."""
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Old prompt"},
-    )
-
-    old_checkpoint = {
-        "id": "ckpt-old",
-        "ts": "2026-06-29T00:00:00Z",
-        "channel_values": {"messages": [{"type": "human", "content": "Old prompt"}]},
-        "channel_versions": {"messages": 1},
-    }
-    replacement_messages = [
-        {"type": "human", "content": "Old prompt"},
-        {"type": "human", "content": "Replacement prompt"},
-    ]
-    replacement_checkpoint = {
-        "id": "ckpt-replacement",
-        "ts": "2026-06-29T00:00:01Z",
-        "channel_values": {"messages": replacement_messages},
-        "channel_versions": {"messages": 2},
-    }
-
-    class _ReplacementRaceCheckpointer:
-        def __init__(self) -> None:
-            self.latest_checkpoint = copy.deepcopy(old_checkpoint)
-            self.latest_metadata = {"source": "loop", "step": 1}
-            self.title_write_started = asyncio.Event()
-            self.replacement_checkpoint_written = asyncio.Event()
-
-        async def aget_tuple(self, config):
-            del config
-            return _FakeCheckpointTuple(
-                checkpoint=copy.deepcopy(self.latest_checkpoint),
-                metadata=dict(self.latest_metadata),
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": self.latest_checkpoint["id"],
-                    }
-                },
-            )
-
-        async def aput(self, config, checkpoint, metadata, new_versions):
-            del config, new_versions
-            self.title_write_started.set()
-            await self.replacement_checkpoint_written.wait()
-            self.latest_checkpoint = copy.deepcopy(checkpoint)
-            self.latest_metadata = dict(metadata)
-            return {
-                "configurable": {
-                    "thread_id": "thread-1",
-                    "checkpoint_ns": "",
-                    "checkpoint_id": checkpoint["id"],
-                }
-            }
-
-        def get_next_version(self, current, _channel):
-            return (current or 0) + 1
-
-    run_manager = RunManager()
-    old_record = await run_manager.create("thread-1")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    checkpointer = _ReplacementRaceCheckpointer()
-    old_agent_started = asyncio.Event()
-
-    class _BlockingAgent:
-        metadata = {"model_name": "fake-test-model"}
-        checkpointer: Any | None = None
-        store: Any | None = None
-        interrupt_before_nodes = None
-        interrupt_after_nodes = None
-
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            old_agent_started.set()
-            while True:
-                await asyncio.sleep(0.05)
-            if False:
-                yield  # pragma: no cover
-
-    def factory(*, config):
-        del config
-        return _BlockingAgent()
-
-    old_task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_manager,
-            old_record,
-            ctx=RunContext(checkpointer=checkpointer),
-            agent_factory=factory,
-            graph_input={"messages": [{"role": "user", "content": "Old prompt"}]},
-            config={},
-        )
-    )
-    old_record.task = old_task
-
-    try:
-        await asyncio.wait_for(old_agent_started.wait(), timeout=1.0)
-        replacement_record = await run_manager.create_or_reject("thread-1", multitask_strategy="interrupt")
-        assert replacement_record.run_id != old_record.run_id
-        await run_manager.set_status(replacement_record.run_id, RunStatus.running)
-
-        with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(checkpointer.title_write_started.wait(), timeout=0.25)
-
-        checkpointer.latest_checkpoint = copy.deepcopy(replacement_checkpoint)
-        checkpointer.latest_metadata = {"source": "loop", "step": 2}
-        checkpointer.replacement_checkpoint_written.set()
-        await old_task
-    finally:
-        checkpointer.replacement_checkpoint_written.set()
-        if not old_task.done():
-            old_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await old_task
-
-    assert checkpointer.latest_checkpoint["channel_values"]["messages"] == replacement_messages
 
 
 @pytest.mark.anyio
@@ -2559,551 +1658,3 @@ async def test_replacement_run_waits_for_prior_finalizing_run():
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_reloads_latest_checkpoint_before_write():
-    """If the checkpoint advances before the title write, preserve the newer messages."""
-    from deerflow.config.title_config import TitleConfig
-
-    old_checkpoint = {
-        "id": "ckpt-old",
-        "ts": "2026-06-29T00:00:00Z",
-        "channel_values": {"messages": [{"type": "human", "content": "Old prompt"}]},
-        "channel_versions": {"messages": 1},
-    }
-    new_messages = [{"type": "human", "content": "New prompt"}]
-    new_checkpoint = {
-        "id": "ckpt-new",
-        "ts": "2026-06-29T00:00:01Z",
-        "channel_values": {"messages": new_messages},
-        "channel_versions": {"messages": 2},
-    }
-
-    class _AdvancingTitleCheckpointer:
-        def __init__(self) -> None:
-            self.read_count = 0
-            self.aput = AsyncMock(return_value={})
-
-        async def aget_tuple(self, config):
-            del config
-            self.read_count += 1
-            checkpoint = old_checkpoint if self.read_count == 1 else new_checkpoint
-            return _FakeCheckpointTuple(
-                checkpoint=copy.deepcopy(checkpoint),
-                metadata={"source": "loop", "step": self.read_count},
-                config={
-                    "configurable": {
-                        "thread_id": "thread-1",
-                        "checkpoint_ns": "",
-                        "checkpoint_id": checkpoint["id"],
-                    }
-                },
-            )
-
-        def get_next_version(self, current, _channel):
-            return (current or 0) + 1
-
-    checkpointer = _AdvancingTitleCheckpointer()
-    app_config = SimpleNamespace(title=TitleConfig(enabled=True, max_chars=40, max_words=20))
-
-    title = await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=app_config)
-
-    assert title == "New prompt"
-    _, written_checkpoint, _, _ = checkpointer.aput.await_args.args
-    assert written_checkpoint["channel_values"]["messages"] == new_messages
-    assert written_checkpoint["channel_values"]["title"] == "New prompt"
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_bumps_channel_version_and_declares_it_in_new_versions(monkeypatch):
-    """Regression for #3859 review: DB-backed savers (Sqlite/Postgres) strip inline
-    ``channel_values`` from ``put`` and only persist blobs for channels listed in
-    ``new_versions``. The helper must therefore bump ``channel_versions["title"]``
-    and pass ``{"title": next_version}`` so the fallback title actually survives
-    a fresh ``aget_tuple`` after the worker's finally hook.
-    """
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Generated Title"},
-    )
-
-    initial_checkpoint = {
-        "id": "ckpt-1",
-        "ts": "2026-06-29T00:00:00Z",
-        "channel_values": {"messages": [{"type": "human", "content": "hi"}]},
-        "channel_versions": {"messages": 5},
-    }
-    checkpointer = _TitleCheckpointer(
-        tuple_value=_FakeCheckpointTuple(
-            checkpoint=initial_checkpoint,
-            metadata={"source": "loop", "step": 7},
-        ),
-    )
-
-    title = await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-
-    assert title == "Generated Title"
-    checkpointer.aput.assert_awaited_once()
-    write_config, written_checkpoint, written_metadata, new_versions = checkpointer.aput.await_args.args
-
-    # The title channel must be declared in new_versions — without this, DB
-    # savers drop the inline channel_values["title"] from the persisted blob.
-    assert new_versions == {"title": 1}
-    # Channel versions on the checkpoint itself must also reflect the bump,
-    # so a subsequent aget_tuple reconstructs channel_values with the title.
-    assert written_checkpoint["channel_versions"]["title"] == 1
-    # Pre-existing channel versions must be preserved.
-    assert written_checkpoint["channel_versions"]["messages"] == 5
-    # The fallback title rides into channel_values for the (legacy / single-table)
-    # savers that inline the snapshot.
-    assert written_checkpoint["channel_values"]["title"] == "Generated Title"
-    assert written_metadata["source"] == "update"
-    assert written_metadata["step"] == 8
-    assert written_metadata["writes"] == {"runtime_interrupt_title": {"title": "Generated Title"}}
-    # The write is parented to the checkpoint it was derived from - without
-    # the parent pointer the saver stores a root checkpoint, severing
-    # Delta-channel replay ancestry and full-mode history walks.
-    assert write_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "ckpt-1"}}
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_writes_graph_input_fallback_without_checkpoint(monkeypatch):
-    """When no checkpoint exists, graph_input should still seed the fallback title write."""
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    captured_state: dict[str, Any] = {}
-
-    def _generate(self, state, allow_partial_exchange=False):
-        del self
-        captured_state.update(state)
-        assert allow_partial_exchange is True
-        return {"title": "Graph Input Title"}
-
-    monkeypatch.setattr(TitleMiddleware, "_generate_title_result", _generate)
-
-    checkpointer = _TitleCheckpointer(tuple_value=None)
-
-    title = await _ensure_interrupted_title(
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        app_config=None,
-        graph_input={"messages": [{"role": "user", "content": "Please name this thread"}]},
-    )
-
-    assert title == "Graph Input Title"
-    assert captured_state["messages"] == [{"role": "user", "content": "Please name this thread"}]
-    checkpointer.aput.assert_awaited_once()
-    _, written_checkpoint, written_metadata, new_versions = checkpointer.aput.await_args.args
-    assert written_checkpoint["channel_values"]["title"] == "Graph Input Title"
-    assert written_metadata["writes"] == {"runtime_interrupt_title": {"title": "Graph Input Title"}}
-    assert set(new_versions.keys()) == {"title"}
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_bumps_existing_string_version(monkeypatch):
-    """When the checkpointer lacks ``get_next_version`` and the prior title
-    version is a string (some savers use UUID-shaped versions), the helper must
-    still produce a strictly different value rather than overwriting in place.
-    """
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "T"},
-    )
-
-    initial_checkpoint = {
-        "id": "ckpt-1",
-        "ts": "2026-06-29T00:00:00Z",
-        "channel_values": {"messages": [{"type": "human", "content": "hi"}]},
-        "channel_versions": {"title": "v3"},
-    }
-
-    class _NoGetNextVersion:
-        def __init__(self):
-            self.aget_tuple = AsyncMock(
-                return_value=_FakeCheckpointTuple(
-                    checkpoint=initial_checkpoint,
-                    metadata={},
-                ),
-            )
-            self.aput = AsyncMock(return_value={})
-
-    checkpointer = _NoGetNextVersion()
-    await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-
-    _, written_checkpoint, _, new_versions = checkpointer.aput.await_args.args
-    bumped = written_checkpoint["channel_versions"]["title"]
-    assert bumped != "v3", "title version must change so DB savers persist the update"
-    assert new_versions == {"title": bumped}
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_skips_when_title_already_set():
-    """If the checkpoint already carries a title, no new checkpoint is written."""
-    checkpointer = _TitleCheckpointer(
-        tuple_value=_FakeCheckpointTuple(
-            checkpoint={
-                "id": "ckpt-1",
-                "channel_values": {"messages": [], "title": "Already there"},
-                "channel_versions": {"title": 1},
-            },
-            metadata={},
-        ),
-    )
-
-    title = await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-
-    assert title == "Already there"
-    checkpointer.aput.assert_not_awaited()
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_round_trip_with_real_sqlite_checkpointer(tmp_path):
-    """Full round-trip against a real ``AsyncSqliteSaver`` on a disk-backed DB.
-
-    Mirrors what Gateway constructs in production via ``make_checkpointer`` when
-    ``database.backend == "sqlite"``, then closes and re-opens the saver to
-    simulate a fresh connection. The fallback title must survive that boundary —
-    this is the scenario the #3874 review flagged as broken before the
-    ``new_versions={"title": ...}`` fix.
-    """
-    from langchain_core.messages import HumanMessage
-    from langgraph.checkpoint.base import empty_checkpoint
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-    from deerflow.config.title_config import TitleConfig
-
-    db_path = str(tmp_path / "ckpt.db")
-    thread_cfg = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
-
-    # 1. Seed a first-turn checkpoint that has a human message and NO title —
-    #    the same shape the agent leaves behind when interrupted mid-stream.
-    async with AsyncSqliteSaver.from_conn_string(db_path) as writer:
-        await writer.setup()
-        ck = empty_checkpoint()
-        ck["channel_values"] = {
-            "messages": [HumanMessage(content="Why is the sky blue?").model_dump()],
-        }
-        ck["channel_versions"] = {"messages": 1}
-        await writer.aput(thread_cfg, ck, {"source": "loop", "step": 1, "writes": {}}, {"messages": 1})
-
-    # 2. Run the worker helper through a *fresh* saver instance — this is what
-    #    the lifespan-owned checkpointer pool does for each request.
-    title_config = TitleConfig(enabled=True, max_chars=40, max_words=20)
-    app_config = SimpleNamespace(title=title_config)
-    async with AsyncSqliteSaver.from_conn_string(db_path) as worker_saver:
-        title = await _ensure_interrupted_title(
-            checkpointer=worker_saver,
-            thread_id="thread-1",
-            app_config=app_config,
-        )
-    assert title, "fallback title must be generated from the seeded user message"
-
-    # 3. Open ANOTHER fresh saver and confirm the title survives — this is the
-    #    invariant the #3874 review was guarding: ``new_versions={}`` would
-    #    cause DB savers to drop the title blob, so a fresh aget_tuple would
-    #    read back without it.
-    async with AsyncSqliteSaver.from_conn_string(db_path) as reader:
-        tup = await reader.aget_tuple(thread_cfg)
-    assert tup is not None
-    persisted = tup.checkpoint.get("channel_values", {}).get("title")
-    assert persisted == title
-
-
-# ---------------------------------------------------------------------------
-# _bump_channel_version — invariant: the returned version MUST differ from
-# the prior value, no matter the checkpointer's versioning scheme.
-# ---------------------------------------------------------------------------
-
-
-class _CheckpointerWithIntVersion:
-    """A checkpointer whose ``get_next_version`` increments integers (default LangGraph behavior)."""
-
-    @staticmethod
-    def get_next_version(current, _channel):
-        return (current or 0) + 1
-
-
-class _CheckpointerWithBrokenGetNextVersion:
-    """A checkpointer whose ``get_next_version`` raises — must fall back, not propagate."""
-
-    @staticmethod
-    def get_next_version(current, _channel):
-        raise RuntimeError("simulated saver bug")
-
-
-def test_bump_channel_version_uses_checkpointer_get_next_version_when_available():
-    """Happy path — saver's ``get_next_version`` result is preferred over our fallback."""
-    assert _bump_channel_version(_CheckpointerWithIntVersion(), 5) == 6
-
-
-def test_bump_channel_version_falls_back_on_broken_get_next_version():
-    """A raising ``get_next_version`` must not propagate; the defensive path bumps from prior.
-
-    Without this, a saver bug would leave ``new_versions={"title": v}`` no-op
-    on DB savers — the very class of bug the #3874 review flagged.
-    """
-    bumped = _bump_channel_version(_CheckpointerWithBrokenGetNextVersion(), 7)
-    assert bumped == 8
-
-
-# ---------------------------------------------------------------------------
-# _ensure_interrupted_title — additional defensive boundaries
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_handles_none_messages_channel(monkeypatch):
-    """A partially-initialized checkpoint with ``messages=None`` must not crash."""
-    from deerflow.config.title_config import TitleConfig
-
-    initial_checkpoint = {
-        "id": "ckpt-1",
-        "channel_values": {"messages": None},
-        "channel_versions": {},
-    }
-    checkpointer = _TitleCheckpointer(
-        tuple_value=_FakeCheckpointTuple(checkpoint=initial_checkpoint, metadata={}),
-    )
-    app_config = SimpleNamespace(title=TitleConfig(enabled=True, max_chars=40, max_words=20))
-
-    assert await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=app_config) is None
-    checkpointer.aput.assert_not_awaited()
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_propagates_aput_error_to_caller(monkeypatch):
-    """Exceptions from ``aput`` propagate — the caller (worker.run_agent finally block) is responsible for swallowing them.
-
-    This test pins the contract: the helper itself does NOT silently eat saver errors,
-    so a structural saver regression remains visible in the logs at the call site.
-    """
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Generated"},
-    )
-
-    initial_checkpoint = {
-        "id": "ckpt-1",
-        "channel_values": {"messages": [{"type": "human", "content": "hi"}]},
-        "channel_versions": {"messages": 1},
-    }
-    checkpointer = _TitleCheckpointer(
-        tuple_value=_FakeCheckpointTuple(checkpoint=initial_checkpoint, metadata={}),
-    )
-    checkpointer.aput.side_effect = RuntimeError("simulated DB write failure")
-
-    with pytest.raises(RuntimeError, match="simulated DB write failure"):
-        await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_idempotent_across_repeated_calls(monkeypatch):
-    """Second invocation against the now-titled checkpoint must not re-write.
-
-    Regression anchor for the case where a brittle helper might re-trigger
-    on subsequent finally-hook runs (e.g. retries) and rewrite the title.
-    """
-    from langgraph.checkpoint.memory import InMemorySaver
-
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "First Title"},
-    )
-
-    checkpointer = InMemorySaver()
-    cfg = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
-    ck = empty_checkpoint()
-    ck["channel_values"] = {"messages": [{"type": "human", "content": "hi"}]}
-    ck["channel_versions"] = {"messages": 1}
-    await checkpointer.aput(cfg, ck, {"source": "loop", "step": 1, "writes": {}}, {"messages": 1})
-
-    first = await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-    assert first == "First Title"
-
-    # Second call: title is now present, so the helper short-circuits without
-    # rewriting — even if the middleware were to suggest a different title.
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Different Title"},
-    )
-    second = await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-    assert second == "First Title"
-
-    tup = await checkpointer.aget_tuple(cfg)
-    assert tup.checkpoint["channel_values"]["title"] == "First Title"
-
-
-@pytest.mark.anyio
-async def test_ensure_interrupted_title_preserves_non_title_channel_versions(monkeypatch):
-    """Bumping ``channel_versions["title"]`` must not modify other channels' versions.
-
-    Regression anchor: an earlier draft built ``new_versions`` from
-    ``dict(channel_versions)`` and would have erroneously declared every
-    channel as "needs new blob" on DB savers.
-    """
-    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
-
-    monkeypatch.setattr(
-        TitleMiddleware,
-        "_generate_title_result",
-        lambda self, state, allow_partial_exchange=False: {"title": "Generated"},
-    )
-
-    initial_checkpoint = {
-        "id": "ckpt-1",
-        "channel_values": {
-            "messages": [{"type": "human", "content": "hi"}],
-            "artifacts": [],
-            "todos": None,
-        },
-        "channel_versions": {"messages": 5, "artifacts": 3, "todos": 1},
-    }
-    checkpointer = _TitleCheckpointer(
-        tuple_value=_FakeCheckpointTuple(checkpoint=initial_checkpoint, metadata={}),
-    )
-
-    await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=None)
-
-    _, written_checkpoint, _, new_versions = checkpointer.aput.await_args.args
-    # Only the title channel is declared in new_versions.
-    assert set(new_versions.keys()) == {"title"}
-    # Other channel versions are preserved verbatim on the written checkpoint.
-    assert written_checkpoint["channel_versions"]["messages"] == 5
-    assert written_checkpoint["channel_versions"]["artifacts"] == 3
-    assert written_checkpoint["channel_versions"]["todos"] == 1
-
-
-@pytest.mark.anyio
-async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
-    """The worker's interrupted-title hook must remain non-fatal — any exception
-    from the helper (DB saver bug, middleware bug, etc.) must not propagate past
-    the run boundary or prevent the subsequent threads_meta sync block from
-    running. This pins the integration of helper + finally try/except, not just
-    the helper itself.
-    """
-    import deerflow.runtime.runs.worker as worker_module
-
-    helper_called = asyncio.Event()
-
-    async def _boom(*_args, **_kwargs):
-        helper_called.set()
-        raise RuntimeError("forced helper failure")
-
-    monkeypatch.setattr(worker_module, "_ensure_interrupted_title", _boom)
-
-    run_manager = RunManager()
-    record = await run_manager.create("thread-1")
-
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-
-    class _MinimalCheckpointer:
-        async def aget_tuple(self, config):
-            return None
-
-        async def aput(self, *args, **kwargs):
-            return {}
-
-    captured_status: dict[str, Any] = {}
-
-    class _ThreadStore:
-        async def update_display_name(self, thread_id, title):
-            captured_status["display_name"] = (thread_id, title)
-
-        async def update_status(self, thread_id, status):
-            captured_status["status"] = (thread_id, status)
-
-    class _AbortingAgent:
-        def __init__(self) -> None:
-            self.metadata = {"model_name": "fake-test-model"}
-            self.checkpointer: Any | None = None
-            self.store: Any | None = None
-            self.interrupt_before_nodes = None
-            self.interrupt_after_nodes = None
-
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            # Abort immediately so the run lands in the interrupted branch.
-            record.abort_event.set()
-            if False:
-                yield  # pragma: no cover — make this an async generator
-            return
-
-    def factory(*, config):
-        del config
-        return _AbortingAgent()
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=_MinimalCheckpointer(), thread_store=_ThreadStore()),
-        agent_factory=factory,
-        graph_input={"messages": []},
-        config={},
-    )
-
-    # The helper raised, but the run still reaches the threads_meta status sync
-    # and ``publish_end`` — i.e. the SSE stream is closed cleanly and the row
-    # reflects the run outcome.
-    assert helper_called.is_set()
-    assert captured_status.get("status") == ("thread-1", "interrupted")
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
-
-
-@pytest.mark.anyio
-async def test_worker_skips_execution_and_finalization_after_ownership_loss():
-    """A fenced worker closes its stream without starting or finalizing work."""
-    run_manager = RunManager()
-    record = await run_manager.create("thread-lease-lost")
-    record.ownership_lost = True
-    record.abort_event.set()
-    record.status = RunStatus.error
-
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    thread_store = SimpleNamespace(
-        update_display_name=AsyncMock(),
-        update_status=AsyncMock(),
-    )
-    on_run_completed = AsyncMock()
-    agent_factory = MagicMock(side_effect=AssertionError("fenced worker started the agent"))
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(
-            checkpointer=None,
-            thread_store=thread_store,
-            on_run_completed=on_run_completed,
-        ),
-        agent_factory=agent_factory,
-        graph_input={"messages": []},
-        config={},
-    )
-
-    agent_factory.assert_not_called()
-    thread_store.update_display_name.assert_not_awaited()
-    thread_store.update_status.assert_not_awaited()
-    on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_awaited_once_with(record.run_id)

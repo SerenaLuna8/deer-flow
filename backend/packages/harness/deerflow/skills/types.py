@@ -12,25 +12,21 @@ class SkillCategory(StrEnum):
 
     - ``PUBLIC``: built-in skill bundled with the platform, read-only.
     - ``CUSTOM``: user-authored skill that can be edited or deleted.
-    - ``INTEGRATION``: managed third-party integration skill, read-only.
-    - ``LEGACY``: global custom skill from before user-isolation migration,
-      presented as read-only (visible but not editable/deletable). These
-      skills are mounted at ``/mnt/skills/legacy/<name>/`` in the sandbox.
+    Runtime Skill objects are materialized only from an immutable run-admission
+    snapshot; these values describe their run-local mount layout.
     """
 
     PUBLIC = "public"
     CUSTOM = "custom"
-    INTEGRATION = "integrations"
-    LEGACY = "legacy"
 
 
 @dataclass(frozen=True)
 class SecretRequirement:
     """A request-scoped secret a skill declares it needs (issue #3861).
 
-    ``name`` is both the key looked up in the request's ``context.secrets`` and
-    the environment variable name injected into the skill's sandbox subprocess
-    when the skill is activated.
+    ``name`` is both the key looked up in the Skill-scoped internal secret
+    carrier (or the legacy flat ``context.secrets`` carrier) and the environment
+    variable name injected into the Skill's sandbox subprocess when activated.
     """
 
     name: str
@@ -55,6 +51,7 @@ class Skill:
     # autonomous model load (skill_context), or only on explicit /slash
     # activation. Frontmatter: ``secrets-autonomous`` (default true).
     secrets_autonomous: bool = True
+    runtime_read_only: bool = False
 
     @property
     def skill_path(self) -> str:

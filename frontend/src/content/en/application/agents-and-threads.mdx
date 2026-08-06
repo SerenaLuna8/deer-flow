@@ -1,19 +1,21 @@
 ---
 title: Agents and Threads
-description: DeerFlow App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+description: ActWeave App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
 ---
 
 import { Callout, Steps } from "nextra/components";
 
 # Agents and Threads
 
-DeerFlow App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+ActWeave App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
 
 ## Agents
 
-### The default agent
+### Main and the project default
 
-The default agent is the Lead Agent with no custom configuration. It loads all globally enabled skills, has access to all configured tools, and uses the first model in `config.yaml` as its default.
+Main is the project-level orchestrator and the fallback when the project has no custom default Agent. For each Run, the server resolves all effective System assets plus all active, published Agent, Skill, and MCP assets owned by the entered project, then freezes their exact versions in the Run snapshot. Main can delegate to the other admitted Agents, but it never sees assets owned by another project. It does not require a project Agent binding, and the browser does not enable dependencies on its behalf.
+
+A project administrator may instead select an active, published project Agent as the project default. A configured default that is no longer executable fails closed; ActWeave does not silently switch it back to Main.
 
 ### Custom agents
 
@@ -21,18 +23,13 @@ Custom agents are named variants of the Lead Agent. Each one can have:
 
 - a **display name** and an auto-derived ASCII slug (the `name` used internally)
 - a specific **model** to use by default
-- a restricted set of **skills** (or all globally enabled skills if unspecified)
+- exact published **Skill and MCP versions**
 - a restricted set of **tool groups**
 - a custom **system prompt** or agent-specific instructions
 
-Custom agents are created and managed through:
+Agents are created and managed from the entered project's **Agents** page. Platform administrators manage system agents under **Admin > Assets > Agents**. The corresponding authenticated APIs are scoped to that project or to the system-admin asset surface; there is no global workspace Agent client.
 
-- **The App UI**: open the Agents section in the settings panel.
-- **The Gateway API**: `POST /api/agents` with the agent definition.
-
-The slug (`name`) is automatically derived from the `display_name` and must be unique. The system checks for conflicts and appends a suffix if needed (`/api/agents/check`).
-
-Agent configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
+The slug is derived from the display name and must be unique within its asset scope. Published versions and explicit project bindings are stored in PostgreSQL. Unlike Main, a custom Agent loads only the Skill and MCP versions referenced by that Agent version. Omitting a dependency does not inherit every project asset.
 
 ### Restricting agent capabilities
 
@@ -45,7 +42,6 @@ display_name: My Researcher
 skills:
   - deep-research
   - academic-paper-review
-# Omit skills key entirely to inherit all globally enabled skills
 # Set skills: [] to disable all skills for this agent
 ```
 
@@ -66,7 +62,7 @@ A **thread** is a persistent conversation session. Each thread has:
 - a title (auto-generated after the first exchange)
 - a reference to the agent used
 
-Threads are listed in the sidebar. Clicking a thread resumes the conversation from where it left off.
+Threads are listed under the entered project's **Chats** page. Clicking a thread resumes that owner-scoped conversation.
 
 ### Thread lifecycle
 
@@ -76,13 +72,15 @@ Threads are listed in the sidebar. Clicking a thread resumes the conversation fr
 
 A new thread is created when you start a conversation. The thread ID is generated and the initial configuration (model, agent, skills) is recorded.
 
+The composer follows that Thread's Agent: Main suggests every effective Skill in the current project, while a custom Agent suggests only the Skills referenced by its selected version. Historical `/skill` messages remain readable even if the current Agent or catalog later changes.
+
 #### Run
 
 Each user message triggers an agent run. The run streams tokens and tool calls back to the browser in real time. The thread state (messages, artifacts) is updated after each turn.
 
 #### Checkpoint
 
-The configured persistence backend stores thread state after each turn. This means the conversation survives process restarts when a persistent backend is used.
+The project-scoped PostgreSQL checkpointer stores thread state after each turn, so the conversation survives process restarts.
 
 #### Resume
 
@@ -92,28 +90,14 @@ Opening a thread from the sidebar loads its full history from persisted state. T
 
 ### Thread persistence configuration
 
-The `database` section controls the default persistence backend for thread state and application data:
+PostgreSQL is required for thread state and application data. Configure the shared connection through `database.url`:
 
 ```yaml
-# SQLite (local development and single-user deployments)
 database:
-  backend: sqlite
-  sqlite_dir: .deer-flow/data
-
-# Postgres (production and multi-user deployments)
-# database:
-#   backend: postgres
-#   postgres_url: $DATABASE_URL
-#
-# run_events:
-#   backend: db
+  url: $DATABASE_URL
 ```
 
-<Callout type="info">
-  The legacy <code>checkpointer</code> section is still accepted for LangGraph
-  state compatibility and takes precedence when configured. Prefer{" "}
-  <code>database</code> for new deployments.
-</Callout>
+PostgreSQL drivers are default dependencies. A standalone `checkpointer` configuration is not accepted.
 
 ### Thread data storage
 
@@ -125,7 +109,7 @@ backend/.deer-flow/threads/{thread_id}/user-data/
 
 This directory is mounted into the sandbox as `/mnt/user-data/` for the agent to read and write.
 
-In Docker deployments, this path is bind-mounted from the host so that thread data persists across container restarts. Set `DEER_FLOW_ROOT` to the absolute path of your deer-flow repository root to ensure the correct host path is used.
+In local and Docker development, this path may be mounted into the configured Sandbox. It contains working-file projections only; Thread metadata, messages, Run state, and asset authority remain in PostgreSQL.
 
 <Cards num={2}>
   <Cards.Card

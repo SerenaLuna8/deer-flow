@@ -1,4 +1,4 @@
-"""Built-in guardrail providers that ship with DeerFlow."""
+"""Built-in guardrail providers that ship with ActWeave."""
 
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
 
@@ -9,10 +9,6 @@ class AllowlistProvider:
     name = "allowlist"
 
     def __init__(self, *, allowed_tools: list[str] | None = None, denied_tools: list[str] | None = None):
-        # Distinguish "no allowlist configured" (None -> allow all) from an
-        # explicitly empty allowlist ([] -> allow nothing). A truthiness test
-        # would collapse [] into None and fail open, letting every tool through
-        # when the operator intended to permit none.
         self._allowed = set(allowed_tools) if allowed_tools is not None else None
         self._denied = set(denied_tools) if denied_tools else set()
 

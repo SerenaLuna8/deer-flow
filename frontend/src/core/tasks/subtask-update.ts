@@ -1,5 +1,11 @@
 import { mergeSteps } from "./steps";
-import type { Subtask } from "./types";
+import type { Subtask, SubtaskStatusSource } from "./types";
+
+const STATUS_SOURCE_RANK: Record<SubtaskStatusSource, number> = {
+  inferred: 0,
+  custom_event: 1,
+  tool_result: 2,
+};
 
 export function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
   return status === "completed" || status === "failed";
@@ -24,24 +30,43 @@ export function computeNextSubtask(
   task: Partial<Subtask> & { id: string },
 ): { next: Subtask; becameTerminal: boolean; changed: boolean } {
   const previousStatus = previous?.status;
+  const previousSource = previous?.statusSource;
+  const incomingSource = task.statusSource;
+  const hasLowerAuthority =
+    previousSource !== undefined &&
+    incomingSource !== undefined &&
+    STATUS_SOURCE_RANK[incomingSource] < STATUS_SOURCE_RANK[previousSource];
+  const preserveTerminalStatus =
+    isTerminalSubtaskStatus(previousStatus) &&
+    (task.status === "in_progress" || hasLowerAuthority);
 
   // MessageList writes the pending task tool-call state before parsing the
-  // matching ToolMessage in the same render. Keep terminal results stable
-  // across the next render so the refresh notification does not loop.
-  const next = {
+  // matching ToolMessage in the same render. Keep authoritative terminal
+  // results stable across later inferred renders so the card cannot regress
+  // from completed to the synthetic "failed" fallback.
+  const next: Subtask = {
     ...previous,
     ...task,
-    ...(task.status === "in_progress" && isTerminalSubtaskStatus(previousStatus)
-      ? { status: previousStatus }
-      : {}),
   } as Subtask;
+
+  if (preserveTerminalStatus && previous) {
+    next.status = previous.status;
+    next.statusSource = previous.statusSource;
+    next.result = previous.result;
+    next.error = previous.error;
+    next.stopReason = previous.stopReason;
+  } else if (task.status === "completed") {
+    delete next.error;
+  } else if (task.status === "failed") {
+    delete next.result;
+  }
 
   if (task.steps) {
     next.steps = mergeSteps(previous?.steps ?? [], task.steps);
   }
 
-  // Usage events are cumulative snapshots. A delayed older frame must never
-  // make the folded card appear to spend fewer tokens than it already did.
+  // Usage events are cumulative snapshots. A delayed older frame must not
+  // make the card appear to have spent fewer tokens than it already reported.
   if (
     task.usage &&
     previous?.usage &&
@@ -56,31 +81,23 @@ export function computeNextSubtask(
   return { next, becameTerminal, changed: subtaskChanged(previous, next) };
 }
 
-/**
- * Did `next` materially differ from `previous`?
- *
- * The terminal ToolMessage is re-parsed on *every* MessageList render, and
- * `parseSubtaskResult` rebuilds `modelName`/`usage` into a fresh object each
- * time. Comparing by value (not reference) is what lets the hook skip a
- * redundant `setTasks` for an idempotent re-parse — without it the new object
- * identity drives an infinite render loop once a subagent finishes.
- */
-function subtaskChanged(prev: Subtask | undefined, next: Subtask): boolean {
-  if (!prev) {
+function subtaskChanged(previous: Subtask | undefined, next: Subtask): boolean {
+  if (!previous) {
     return true;
   }
   return (
-    prev.status !== next.status ||
-    prev.modelName !== next.modelName ||
-    prev.result !== next.result ||
-    prev.error !== next.error ||
-    prev.stopReason !== next.stopReason ||
-    prev.subagent_type !== next.subagent_type ||
-    prev.description !== next.description ||
-    prev.prompt !== next.prompt ||
-    prev.latestMessage !== next.latestMessage ||
-    prev.steps !== next.steps ||
-    !usageEquals(prev.usage, next.usage)
+    previous.status !== next.status ||
+    previous.statusSource !== next.statusSource ||
+    previous.modelName !== next.modelName ||
+    previous.result !== next.result ||
+    previous.error !== next.error ||
+    previous.stopReason !== next.stopReason ||
+    previous.subagent_type !== next.subagent_type ||
+    previous.description !== next.description ||
+    previous.prompt !== next.prompt ||
+    previous.latestMessage !== next.latestMessage ||
+    previous.steps !== next.steps ||
+    !usageEquals(previous.usage, next.usage)
   );
 }
 
@@ -96,34 +113,4 @@ function usageEquals(a: Subtask["usage"], b: Subtask["usage"]): boolean {
     a.outputTokens === b.outputTokens &&
     a.totalTokens === b.totalTokens
   );
-}
-
-export type SubtaskNotification = "eager" | "deferred" | "none";
-
-/**
- * Decide how `useUpdateSubtask` should publish a computed transition.
- *
- * - `deferred`: a terminal transition. These arrive while MessageList renders
- *   (it parses the ToolMessage inline), so we must not `setTasks` mid-render;
- *   the hook flips a ref and publishes in an after-render effect instead.
- * - `eager`: a live SSE update (steps / latestMessage / model / usage) that
- *   actually changed state — publish immediately from the async callback.
- * - `none`: nothing changed. Critically, a re-parsed terminal result still
- *   carries `modelName`/`usage`, so gating on `changed` (not mere presence) is
- *   what stops the render loop.
- */
-export function subtaskNotification(
-  task: Partial<Subtask> & { id: string },
-  transition: { becameTerminal: boolean; changed: boolean },
-): SubtaskNotification {
-  if (transition.becameTerminal) {
-    return "deferred";
-  }
-  if (
-    transition.changed &&
-    (task.latestMessage || task.steps || task.modelName || task.usage)
-  ) {
-    return "eager";
-  }
-  return "none";
 }

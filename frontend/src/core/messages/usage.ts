@@ -77,16 +77,7 @@ export function accumulateUsage(messages: Message[]): TokenUsage | null {
   return hasUsage ? cumulative : null;
 }
 
-/**
- * Validate a raw `{input,output,total}_tokens` object into {@link TokenUsage}.
- *
- * The single shared validator for both sub-agent usage surfaces — the live
- * `task_running` event (`core/tasks/lifecycle.ts`) and the terminal ToolMessage
- * metadata (`core/tasks/subtask-result.ts`). Keeping one function stops the two
- * from drifting (e.g. one accepting an extra token field the other rejects).
- * Every key must be a finite, non-negative number or the whole snapshot is
- * rejected as `undefined`.
- */
+/** Validate one cumulative backend token snapshot into the UI shape. */
 export function normalizeTokenUsage(value: unknown): TokenUsage | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;

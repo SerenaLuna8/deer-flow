@@ -1,43 +1,38 @@
+import hashlib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
-from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationInfo,
+    model_validator,
+)
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
-from deerflow.config.agent_storage_config import AgentStorageConfig
-from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
-from deerflow.config.authorization_config import AuthorizationConfig, load_authorization_config_from_dict
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
-from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.config.dedupe_storage_config import DedupeStorageConfig
-from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
-from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
+from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
-from deerflow.config.run_events_config import RunEventsConfig
-from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.scheduler_config import SchedulerConfig
-from deerflow.config.skill_evolution_config import SkillEvolutionConfig
-from deerflow.config.skill_scan_config import SkillScanConfig
 from deerflow.config.skills_config import SkillsConfig
-from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
@@ -48,16 +43,121 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
-
-load_dotenv()
+from deerflow.config.worker_config import WorkerConfig
 
 logger = logging.getLogger(__name__)
 
+REPO_ROOT = Path(__file__).resolve().parents[5]
+LEGACY_CONFIG_TOMBSTONES = frozenset(
+    {
+        "agents_api",
+        "authorization",
+        "run_events",
+        "stream_bridge",
+        "extensions",
+        "extensions_config",
+        "mcp_config",
+        "mcp_config_path",
+        "legacy_run_store",
+        "legacy_event_store",
+        "recovery",
+        "skill_evolution",
+        "skill_scan",
+    }
+)
 
-CONFIG_FILE_DATABASE_DEFAULTS = {
-    "backend": "sqlite",
-    "sqlite_dir": ".deer-flow/data",
-}
+LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
+    {
+        "uploads.max_files",
+        "uploads.max_file_size",
+        "uploads.max_total_size",
+        "uploads.auto_convert_documents",
+        "scheduler.lease_seconds",
+        "worker.default_max_attempts",
+        "quotas.max_member_limit",
+        "quotas.max_storage_bytes_limit",
+        "quotas.max_concurrent_run_limit",
+        "quotas.max_mcp_calls_daily_limit",
+    }
+)
+
+YAML_CONFIG_TOMBSTONES = frozenset({"models"})
+
+DATABASE_RUNTIME_POLICY_PATHS = frozenset(
+    {
+        "input_polish.enabled",
+        "input_polish.max_chars",
+        "input_polish.model_name",
+        "loop_detection.enabled",
+        "loop_detection.hard_limit",
+        "loop_detection.max_tracked_threads",
+        "loop_detection.tool_freq_hard_limit",
+        "loop_detection.tool_freq_overrides",
+        "loop_detection.tool_freq_warn",
+        "loop_detection.warn_threshold",
+        "loop_detection.window_size",
+        "max_recursion_limit",
+        "memory.enabled",
+        "memory.dream_interval_minutes",
+        "memory.max_injection_tokens",
+        "memory.model_name",
+        "read_before_write.enabled",
+        "safety_finish_reason.enabled",
+        "subagents.max_total_per_run",
+        "suggestions.enabled",
+        "summarization.enabled",
+        "summarization.keep",
+        "summarization.model_name",
+        "summarization.skill_file_read_tool_names",
+        "summarization.trigger",
+        "summarization.trim_tokens_to_summarize",
+        "title.enabled",
+        "title.max_chars",
+        "title.max_words",
+        "title.model_name",
+        "token_budget.enabled",
+        "token_budget.hard_stop_threshold",
+        "token_budget.max_input_tokens",
+        "token_budget.max_output_tokens",
+        "token_budget.max_tokens",
+        "token_budget.warn_threshold",
+        "token_usage.enabled",
+        "tool_output.enabled",
+        "tool_output.exempt_tools",
+        "tool_output.externalize_min_chars",
+        "tool_output.fallback_head_chars",
+        "tool_output.fallback_max_chars",
+        "tool_output.fallback_tail_chars",
+        "tool_output.preview_head_chars",
+        "tool_output.preview_tail_chars",
+        "tool_output.tool_overrides",
+        "tool_search.auto_promote_top_k",
+        "tool_search.enabled",
+    }
+)
+
+# These leaves are authoritative PostgreSQL system settings. They remain valid
+# for programmatic Run-policy overlays, but accepting them from config.yaml
+# would create two competing sources of truth.
+DATABASE_RUNTIME_YAML_PATH_TOMBSTONES = DATABASE_RUNTIME_POLICY_PATHS | frozenset(
+    {
+        "auth.local.allow_registration",
+        "quotas.default_concurrent_run_limit",
+        "quotas.default_mcp_calls_daily_limit",
+        "quotas.default_member_limit",
+        "quotas.default_storage_bytes_limit",
+        "quotas.warning_threshold",
+    }
+)
+DATABASE_RUNTIME_YAML_TOP_LEVEL_TOMBSTONES = frozenset(path.split(".", 1)[0] for path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES)
+
+DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES = frozenset(
+    {
+        "agent_middlewares",
+        "configured_middlewares",
+        "trusted_middlewares",
+    }
+)
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -65,63 +165,6 @@ class CircuitBreakerConfig(BaseModel):
 
     failure_threshold: int = Field(default=5, description="Number of consecutive failures before tripping the circuit")
     recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
-
-
-class LlmCallConfig(BaseModel):
-    """Configuration for LLM call execution (concurrency / rate shaping).
-
-    Distinct from :class:`CircuitBreakerConfig` (which handles a *failing*
-    provider) and from :class:`ModelConfig` (which describes model endpoints):
-    these knobs shape how many LLM calls run at once and how the retry/backoff
-    loop behaves. Capping concurrency caps the *slope* of the request rate,
-    which is what a provider burst-rate (``limit_burst_rate``) limit fires on.
-    """
-
-    max_concurrent_calls: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Process-wide cap on concurrently in-flight LLM calls. 0 disables "
-            "the cap (default, preserving existing behavior). Set to a positive "
-            "int to smooth provider burst-rate (limit_burst_rate) spikes by "
-            "bounding the request-rate slope at the morning peak. Per-process, "
-            "not per-cluster: with GATEWAY_WORKERS > 1 the aggregate cap is "
-            "effectively max_concurrent_calls * GATEWAY_WORKERS (and a "
-            "multi-node rollout multiplies it further), so size the per-process "
-            "value accordingly and pair it with an nginx limit_req at the ingress "
-            "for a true cluster-wide slope cap. Startup-only: the cap is captured "
-            "at the first LLM run and frozen for the process lifetime, so editing "
-            "it in config.yaml takes effect only after a gateway restart (the "
-            "other llm_call.* knobs remain hot-reloadable). Freezing avoids the "
-            "downscale/config-freshness races a runtime-mutable cap would "
-            "introduce on a process-wide, cross-loop limiter."
-        ),
-    )
-    retry_max_attempts: int = Field(
-        default=3,
-        ge=1,
-        description="Max LLM call attempts (1 = no retry) for retriable transient errors.",
-    )
-    retry_base_delay_ms: int = Field(
-        default=1000,
-        ge=0,
-        description="Base (ms) for the decorrelated-jitter retry backoff; seeds the first retry delay.",
-    )
-    retry_cap_delay_ms: int = Field(
-        default=8000,
-        ge=0,
-        description="Hard cap (ms) on any single retry backoff delay.",
-    )
-    burst_retry_base_delay_ms: int = Field(
-        default=5000,
-        ge=0,
-        description=(
-            "Base (ms) for the backoff when the provider returns a burst-rate "
-            "(limit_burst_rate) 429. Higher than retry_base_delay_ms so the "
-            "single burst retry lands after the throttle window subsides. "
-            "Ignored when the provider sends Retry-After (honored verbatim)."
-        ),
-    )
 
 
 class LoggingEnhanceConfig(BaseModel):
@@ -140,24 +183,17 @@ class LoggingConfig(BaseModel):
 def is_trace_correlation_enabled(config: Any) -> bool:
     """Return ``True`` when ``logging.enhance.enabled`` is set on *config*.
 
-    Single source of truth for the request-trace-correlation gate, shared by
-    the Gateway ``TraceMiddleware`` and the embedded ``DeerFlowClient`` so
-    the two entry points cannot drift on when ``deerflow_trace_id`` is
-    emitted (Langfuse metadata) and when a request-level trace id is bound
-    at all. Accepts any object exposing ``logging.enhance.enabled`` via
-    ``getattr`` chains (``AppConfig``, ``SimpleNamespace`` fixtures, etc.);
-    missing intermediate attributes silently degrade to ``False``.
+    Single source of truth for externally observable request correlation:
+    Gateway response headers/log enrichment and Langfuse
+    ``deerflow_trace_id`` metadata. Trusted Worker ``origin_trace_id``
+    authority remains bound internally even when this returns ``False``.
+    Accepts any object exposing ``logging.enhance.enabled`` via ``getattr``
+    chains (``AppConfig``, ``SimpleNamespace`` fixtures, etc.); missing
+    intermediate attributes silently degrade to ``False``.
     """
     logging_config = getattr(config, "logging", None)
     enhance = getattr(logging_config, "enhance", None)
     return bool(getattr(enhance, "enabled", False))
-
-
-def _legacy_config_candidates() -> tuple[Path, ...]:
-    """Return source-tree config.yaml locations for monorepo compatibility."""
-    backend_dir = Path(__file__).resolve().parents[4]
-    repo_root = backend_dir.parent
-    return (backend_dir / "config.yaml", repo_root / "config.yaml")
 
 
 def logging_level_from_config(name: str | None) -> int:
@@ -185,7 +221,7 @@ def apply_logging_level(name: str | None) -> None:
 
 
 class AppConfig(BaseModel):
-    """Config for the DeerFlow application"""
+    """Config for the ActWeave application."""
 
     log_level: str = Field(
         default="info",
@@ -218,28 +254,29 @@ class AppConfig(BaseModel):
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")
     skills: SkillsConfig = Field(default_factory=SkillsConfig, description="Skills configuration")
-    skill_scan: SkillScanConfig = Field(default_factory=SkillScanConfig, description="Native deterministic skill safety scanning configuration")
-    skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
-    extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig, description="Tool output budget protection configuration")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
-    agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
+    mcp_security: McpSecurityConfig = Field(
+        default_factory=McpSecurityConfig,
+        description=format_field_description(
+            "mcp_security",
+            field_doc="Operator-owned project MCP network, egress, discovery, and tool-call policy.",
+        ),
+    )
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
-    authorization: AuthorizationConfig = Field(default_factory=AuthorizationConfig, description="Fine-grained resource authorization configuration (RBAC and beyond)")
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
-    llm_call: LlmCallConfig = Field(default_factory=LlmCallConfig, description="LLM call execution configuration (concurrency / rate shaping)")
     channel_connections: ChannelConnectionsConfig = Field(
         default_factory=ChannelConnectionsConfig,
         description=format_field_description(
             "channel_connections",
-            field_doc="User-facing IM channel connection configuration.",
+            field_doc=("Legacy deployment-config IM channel connection provider availability; does not gate database-backed project channel instances."),
         ),
     )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
@@ -252,21 +289,7 @@ class AppConfig(BaseModel):
         default_factory=DatabaseConfig,
         description=format_field_description(
             "database",
-            field_doc="Unified database backend for run/feedback metadata (memory, sqlite, or postgres).",
-        ),
-    )
-    run_events: RunEventsConfig = Field(
-        default_factory=RunEventsConfig,
-        description=format_field_description(
-            "run_events",
-            field_doc="Run-event store backend (memory for dev, db for production queries, jsonl for lightweight single-node persistence).",
-        ),
-    )
-    agent_storage: AgentStorageConfig = Field(
-        default_factory=AgentStorageConfig,
-        description=format_field_description(
-            "agent_storage",
-            field_doc="Custom agent definition storage backend ('file' for today's per-user on-disk layout, 'db' to share definitions across nodes via the SQL persistence layer).",
+            field_doc="PostgreSQL connection shared by LangGraph persistence and ActWeave application data.",
         ),
     )
     scheduler: SchedulerConfig = Field(
@@ -276,35 +299,17 @@ class AppConfig(BaseModel):
             field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
         ),
     )
-    checkpointer: CheckpointerConfig | None = Field(
-        default=None,
+    worker: WorkerConfig = Field(
+        default_factory=WorkerConfig,
         description=format_field_description(
-            "checkpointer",
-            field_doc="LangGraph state-persistence checkpointer configuration.",
+            "worker",
+            field_doc="Independent Worker process polling, leasing, concurrency, and retry configuration.",
         ),
     )
-    stream_bridge: StreamBridgeConfig | None = Field(
-        default=None,
-        description=format_field_description(
-            "stream_bridge",
-            field_doc="Stream bridge connecting agent workers to SSE endpoints.",
-        ),
+    quotas: QuotaConfig = Field(
+        default_factory=QuotaConfig,
+        description=("Compatibility shape for database-backed platform quota defaults and warning policy. Authoritative checks materialize the latest committed system quota policy inside their transaction."),
     )
-    run_ownership: RunOwnershipConfig = Field(
-        default_factory=RunOwnershipConfig,
-        description=format_field_description(
-            "run_ownership",
-            field_doc="Run ownership and lease configuration for multi-worker deployments.",
-        ),
-    )
-    dedupe_storage: DedupeStorageConfig = Field(
-        default_factory=DedupeStorageConfig,
-        description=format_field_description(
-            "dedupe_storage",
-            field_doc="Inbound webhook dedupe storage backend (memory / postgres / auto) for cross-pod redelivery dedup. See issue #4120.",
-        ),
-    )
-
     # Name -> config lookup tables, (re)built after validation by
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
     # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
@@ -315,10 +320,48 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_null_config_sections(cls, data: Any) -> Any:
+    def reject_removed_legacy_config(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if isinstance(value, Mapping):
+            unsupported_middlewares = set(DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES.intersection(value))
+            if unsupported_middlewares:
+                raise ValueError("DYNAMIC_MIDDLEWARE_CONFIG_UNSUPPORTED: " + ",".join(sorted(unsupported_middlewares)))
+            removed = set(LEGACY_CONFIG_TOMBSTONES.intersection(value))
+            if info.context and info.context.get("config_source") == "yaml":
+                removed.update(YAML_CONFIG_TOMBSTONES.intersection(value))
+            for field_path in LEGACY_CONFIG_PATH_TOMBSTONES:
+                section, key = field_path.split(".", 1)
+                section_value = value.get(section)
+                if isinstance(section_value, Mapping) and key in section_value:
+                    removed.add(field_path)
+            if info.context and info.context.get("config_source") == "yaml":
+                for field_path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES:
+                    current: object = value
+                    parts = field_path.split(".")
+                    for part in parts[:-1]:
+                        if not isinstance(current, Mapping) or part not in current:
+                            break
+                        current = current[part]
+                    else:
+                        if isinstance(current, Mapping) and parts[-1] in current:
+                            removed.add(field_path)
+            if removed:
+                raise ValueError(f"LEGACY_CONFIG_REMOVED: {','.join(sorted(removed))}")
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_null_config_sections(
+        cls,
+        data: Any,
+        info: ValidationInfo,
+    ) -> Any:
         """Treat a present-but-null config section as absent so its default applies.
 
-        Commenting out every entry under a top-level YAML key — e.g. ``models:``
+        Commenting out every entry under a top-level YAML key — e.g. ``tools:``
         (a list) or ``memory:`` (an object), with only comments beneath it as
         shipped throughout ``config.example.yaml`` — makes PyYAML parse the value
         as ``None``. Without this, the documented ``cp config.example.yaml
@@ -328,14 +371,15 @@ class AppConfig(BaseModel):
         Dropping the ``None`` lets each field fall back to its default: list
         sections become ``[]`` via ``default_factory=list`` and object sections
         get their default config. This generalizes the earlier list-only
-        handling to every section that defines a default. The ``database``
-        section is independent and still owned by ``_apply_database_defaults``
-        (in ``from_file``), which applies concrete defaults beyond null-coercion.
         Required sections without a default (``sandbox``) intentionally still
         error when null — there is nothing to fall back to.
         """
-        if isinstance(data, dict):
-            return {key: value for key, value in data.items() if value is not None}
+        if isinstance(data, Mapping):
+            copied_data = dict(data)
+            if "checkpointer" in copied_data:
+                raise ValueError("the independent checkpointer configuration has been removed; configure database.url instead")
+            yaml_source = bool(info.context and info.context.get("config_source") == "yaml")
+            return {key: value for key, value in copied_data.items() if value is not None or key in LEGACY_CONFIG_TOMBSTONES or (yaml_source and key in (YAML_CONFIG_TOMBSTONES | DATABASE_RUNTIME_YAML_TOP_LEVEL_TOMBSTONES))}
         return data
 
     @classmethod
@@ -345,8 +389,7 @@ class AppConfig(BaseModel):
         Priority:
         1. If provided `config_path` argument, use it.
         2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, search the caller project root.
-        4. Finally, search legacy backend/repository-root defaults for monorepo compatibility.
+        3. Otherwise, use ``config.yaml`` at the ActWeave repository root.
         """
         if config_path:
             path = Path(config_path)
@@ -358,15 +401,10 @@ class AppConfig(BaseModel):
             if not Path.exists(path):
                 raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
             return path
-        else:
-            project_config = existing_project_file(("config.yaml",))
-            if project_config is not None:
-                return project_config
-
-            for path in _legacy_config_candidates():
-                if path.exists():
-                    return path
-            raise FileNotFoundError("`config.yaml` file not found in the project root or legacy backend/repository root locations")
+        path = REPO_ROOT / "config.yaml"
+        if path.exists():
+            return path
+        raise FileNotFoundError(f"`config.yaml` file not found at the repository root: {path}")
 
     @classmethod
     def from_file(cls, config_path: str | None = None) -> Self:
@@ -388,30 +426,14 @@ class AppConfig(BaseModel):
         cls._check_config_version(config_data, resolved_path)
 
         config_data = cls.resolve_env_variables(config_data)
-        cls._apply_database_defaults(config_data)
-
         # Load circuit_breaker config if present
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
-        # Load extensions config separately (it's in a different file), while
-        # preserving any config.yaml-backed extension fields. config.yaml wins
-        # when it explicitly declares a field because those values are part of
-        # the main AppConfig hot-reload contract.
-        yaml_extensions = config_data.get("extensions")
-        extensions_config = ExtensionsConfig.from_file()
-        extensions_data = extensions_config.model_dump(by_alias=True)
-        if isinstance(yaml_extensions, Mapping):
-            yaml_extensions_config = ExtensionsConfig.model_validate(yaml_extensions)
-            extensions_data.update(yaml_extensions_config.model_dump(by_alias=True, exclude_unset=True))
-        config_data["extensions"] = extensions_data
-
-        result = cls.model_validate(config_data)
-        if not result.models:
-            logger.warning(
-                "No models are configured in %s. Add at least one entry under `models:` (see the commented examples in config.example.yaml) or run `make setup`.",
-                resolved_path,
-            )
+        result = cls.model_validate(
+            config_data,
+            context={"config_source": "yaml"},
+        )
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result
@@ -427,52 +449,13 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _apply_singleton_configs(cls, config: Self, acp_agents: dict[str, ACPAgentConfig]) -> None:
-        from deerflow.config.checkpointer_config import get_checkpointer_config
-
-        previous_checkpointer_config = get_checkpointer_config()
-
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
-        load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
         load_guardrails_config_from_dict(config.guardrails.model_dump())
-        load_authorization_config_from_dict(config.authorization.model_dump())
-        load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
-        load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
-
-        if previous_checkpointer_config != config.checkpointer:
-            # These runtime singletons derive their backend from checkpointer config.
-            # Keep imports local to avoid cycles: both providers import get_app_config.
-            #
-            # The unified ``database`` section is intentionally NOT handled here.
-            # ``database`` is a restart-required field (reload_boundary.STARTUP_ONLY_FIELDS):
-            # ``init_engine_from_config()`` builds the ORM engine once at startup and
-            # never rebuilds it on a config.yaml edit. Resetting only the sync
-            # checkpointer/store singletons on a live ``database``/``postgres_schema``
-            # change would half-migrate the deployment -- new checkpoint/store tables
-            # would land in the new schema while ORM rows keep landing in the old one,
-            # with no error surfaced. Requiring the documented restart keeps the
-            # deployment self-consistent.
-            from deerflow.runtime.checkpointer import reset_checkpointer
-            from deerflow.runtime.store import reset_store
-
-            reset_checkpointer()
-            reset_store()
-
-    @classmethod
-    def _apply_database_defaults(cls, config_data: dict[str, Any]) -> None:
-        """Apply config.yaml defaults for persistence when the section is absent."""
-        database_config = config_data.get("database")
-        if database_config is None:
-            database_config = {}
-            config_data["database"] = database_config
-        if not isinstance(database_config, dict):
-            return
-        for key, value in CONFIG_FILE_DATABASE_DEFAULTS.items():
-            database_config.setdefault(key, value)
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
@@ -523,7 +506,7 @@ class AppConfig(BaseModel):
     def resolve_env_variables(cls, config: Any) -> Any:
         """Recursively resolve environment variables in the config.
 
-        Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
+        Environment variables are resolved using the `os.getenv` function. Example: $DATABASE_URL
 
         Args:
             config: The config to resolve environment variables in.
@@ -580,6 +563,75 @@ class AppConfig(BaseModel):
         """
         return self._models_by_name.get(name)
 
+    def with_runtime_models(
+        self,
+        models: Sequence[ModelConfig],
+    ) -> "AppConfig":
+        """Return an isolated config carrying database-materialized models.
+
+        Model definitions are no longer accepted from ``config.yaml``. The
+        application layer resolves an exact PostgreSQL catalog version,
+        decrypts its bound Credential only at the execution boundary, and
+        injects the resulting ``ModelConfig`` objects through this helper.
+        The source infrastructure config remains secret-free and unchanged.
+        """
+
+        if any(not isinstance(model, ModelConfig) for model in models):
+            raise TypeError("runtime models must be ModelConfig instances")
+        runtime = self.model_copy(deep=True)
+        runtime.models = [model.model_copy(deep=True) for model in models]
+        runtime._build_name_indexes()
+        return runtime
+
+    def with_runtime_policy(self, policy: object) -> "AppConfig":
+        """Return an isolated config with one admitted runtime-policy overlay.
+
+        The database policy models intentionally expose only the runtime-owned
+        leaves.  A recursive merge preserves deployment-owned siblings such as
+        ``title.prompt_template`` and ``tool_output.storage_subdir`` while the
+        final ``AppConfig`` validation keeps every nested bound authoritative.
+        """
+
+        if isinstance(policy, Mapping):
+            raw_policy = dict(policy)
+        else:
+            model_dump = getattr(policy, "model_dump", None)
+            if not callable(model_dump):
+                raise TypeError("runtime policy must be a mapping or Pydantic model")
+            raw_policy = model_dump(mode="python")
+        if not isinstance(raw_policy, Mapping):
+            raise TypeError("runtime policy must materialize to a mapping")
+
+        supplied_paths: set[str] = set()
+        for section, value in raw_policy.items():
+            if isinstance(value, Mapping):
+                supplied_paths.update(f"{section}.{leaf}" for leaf in value)
+            else:
+                supplied_paths.add(str(section))
+        if supplied_paths - DATABASE_RUNTIME_POLICY_PATHS:
+            raise ValueError(
+                "runtime policy contains a deployment-owned runtime policy field",
+            )
+
+        def merge(
+            base: dict[str, object],
+            overlay: Mapping[str, object],
+        ) -> dict[str, object]:
+            merged = dict(base)
+            for key, value in overlay.items():
+                current = merged.get(key)
+                if isinstance(current, Mapping) and isinstance(value, Mapping):
+                    merged[key] = merge(dict(current), value)
+                else:
+                    merged[key] = value
+            return merged
+
+        data = merge(
+            self.model_dump(mode="python"),
+            raw_policy,
+        )
+        return type(self).model_validate(data)
+
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
 
@@ -609,6 +661,7 @@ class AppConfig(BaseModel):
 _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
+_ConfigSignature = tuple[float | None, int | None, str | None]
 _app_config_signature: _ConfigSignature | None = None
 _app_config_is_custom = False
 _current_app_config: ContextVar[AppConfig | None] = ContextVar("deerflow_current_app_config", default=None)
@@ -621,6 +674,24 @@ def _get_config_mtime(config_path: Path) -> float | None:
         return config_path.stat().st_mtime
     except OSError:
         return None
+
+
+def _get_config_signature(config_path: Path) -> _ConfigSignature | None:
+    """Get cache metadata for a config file, including a content digest."""
+    try:
+        stat_result = config_path.stat()
+    except OSError:
+        return None
+
+    digest = hashlib.sha256()
+    try:
+        with config_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return (stat_result.st_mtime, stat_result.st_size, None)
+
+    return (stat_result.st_mtime, stat_result.st_size, digest.hexdigest())
 
 
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
@@ -637,7 +708,7 @@ def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
 
 
 def get_app_config() -> AppConfig:
-    """Get the DeerFlow config instance.
+    """Get the ActWeave config instance.
 
     Returns a cached singleton instance and automatically reloads it when the
     underlying config file path or content signature changes. Use

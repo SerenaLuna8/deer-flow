@@ -21,8 +21,8 @@ export function RunActivity({ startTime }: { startTime: number | null }) {
       setElapsed(Math.max(0, Math.floor((Date.now() - startTime) / 1000)));
     };
     updateElapsed();
-    const interval = setInterval(updateElapsed, 1000);
-    return () => clearInterval(interval);
+    const interval = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(interval);
   }, [startTime]);
 
   const formatted = formatRunDuration(elapsed, t.runDuration);

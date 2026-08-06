@@ -1,167 +1,653 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with the DeerFlow frontend. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+This is the source of truth for ActWeave frontend work. The repository-level
+[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide owns the current
+project-first routes, authorization, cache isolation, and frontend gates.
 
-## Project Overview
+## Stack and commands
 
-DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It communicates with a LangGraph-based backend to provide thread-based AI conversations with streaming responses, artifacts, and a skills/tools system.
+The frontend uses Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, TanStack Query
+5, strict Zod contracts, Rstest, Playwright, Node.js 22+, and pnpm 10.26.2+.
 
-**Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
+Run from `frontend/`:
 
-### Core dependencies
-
-- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
-- **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
-
-## Commands
-
-| Command          | Purpose                                           |
-| ---------------- | ------------------------------------------------- |
-| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
-| `pnpm build`     | Production build                                  |
-| `pnpm check`     | Lint + type check (run before committing)         |
-| `pnpm lint`      | ESLint only                                       |
-| `pnpm lint:fix`  | ESLint with auto-fix                              |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply)     |
-| `pnpm test`      | Run unit tests with Rstest                        |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
-| `pnpm start`     | Start production server                           |
-
-Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
-
-Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
-
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
-
-## Architecture
-
-```
-Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
-                                              ├── Sub-Agents
-                                              └── Tools & Skills
+```bash
+pnpm dev
+pnpm test
+pnpm check
+pnpm test:e2e
+pnpm test:e2e:static
+pnpm build:production
+pnpm build:static
 ```
 
-The frontend is a stateful chat application. Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code), **todos**, and goal state updates.
+`pnpm check` runs lint and type checking. The production Playwright gate writes to
+`test-results/core-production`; the static gate builds into `.next-static` and writes to
+`test-results/core-static`, so normal and static artifacts cannot be reused accidentally.
+`pnpm test:e2e` runs the deterministic dynamic-mode Chromium suite without a live model.
 
-### Source Layout (`src/`)
+## Final route model
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace/chats/[thread_id]` (chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
-- **`components/`** — React components:
-  - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
-  - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
-  - `workspace/` — Chat page components (messages, artifacts, settings)
-  - `landing/` — Landing page sections
-  - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
-- **`hooks/`** — Shared React hooks
-- **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
-- **`content/`** — MDX content (blog posts, docs) rendered by the app
-- **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
-- **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
+- `/workspace` is the authenticated account-wide multi-project landing page. It shows
+  project cards, invitations, and recoverable projects without a project sidebar.
+- `/projects/[project_slug]` is the only live project shell. Nested pages include project
+  overview, members/settings, Chats, Memory, Connections, Automation, shared assets,
+  Usage, and Audit according to server-issued capabilities.
+- `/admin/assets/*`, `/admin/operations/*`, and `/admin/settings/*` are the platform
+  administration shells.
+  Their server layouts return not-found for an authenticated non-system-admin and retain
+  the requested destination only for an unauthenticated login redirect.
+- `BUILD_MODE=static` renders a local no-network demo at `/workspace` and returns
+  not-found for all project and admin routes. Static code must not import authenticated
+  API clients or send any `/api/` request.
 
-### Data Flow
+Project slugs are resolved only by paging the member-scoped project list and exact-matching
+the returned slug. UUID-only detail, enter, pin, and mutation APIs never receive a slug.
+`ProjectContextProvider` is the sole slug-resolution and enter owner; nested pages consume
+`useCurrentProject()` and do not repeat those requests.
 
-1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
-2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
-   File-tool artifact auto-open work must run in an effect with timer cleanup; never schedule timers while rendering streamed `write_file` or `str_replace` updates.
-   `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
-   Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
-   The detail view exposes explicit editing only for an already-opened formal UTF-8 text artifact under `/mnt/user-data/outputs`. Drafts stay in provider memory until Save so switching right-side panels cannot discard them, render in Markdown/HTML preview, and are protected from remote refreshes by the loaded SHA-256 revision. Saving is disabled during an active run; a changed revision preserves the draft and surfaces a conflict instead of overwriting agent output.
-3. `useThreadHistory` loads persisted conversation pages from `GET /api/threads/{id}/messages/page`, preserving the backend's thread-global event `seq`; rendering overlays checkpoint/live copies at their matching canonical identities (a summarized checkpoint may contain a protected early input plus a recent tail). Context-compaction rescue diffs every retained visible identity rather than slicing at the first anchor, and keeps a run-scoped ledger of committed visible messages so replacement updates and repeated rolling checkpoint windows cannot erase an already displayed step. The resolver suppresses checkpoint/transient prefixes whose canonical position is still behind an unloaded cursor page instead of collapsing that unknown gap before a recent anchor, then adds optimistic messages without timestamp re-sorting. History invalidation preserves already-loaded pages so their established ordering positions are not discarded. Dynamic context re-keys the submitted user message from `X` to `X__user`; UI identity matching normalizes that reserved suffix only for human messages so the submitted frame and checkpoint replacement remain one visible turn. A locally submitted turn also records its pre-submit identity baseline: if `messages-tuple` publishes new AI/tool steps before `values` publishes that turn's human message, render ordering moves only those non-baseline visible steps behind the new human while leaving history, hidden controls, and reconnected runs untouched. Keep that local order anchor through finish, stop, and stream error because the SDK's settled frame can retain transient event order; replace it on the next local submit and clear it on thread switch or replay-gap recovery.
-4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
-5. TanStack Query manages server state; localStorage stores user settings. The
-   Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
-   mutation, disables switches until that mutation's success refetch completes,
-   displays the backend error `detail` through a toast, and invalidates
-   `["mcpConfig"]` only after success.
-6. Components subscribe to thread state and render updates
+## Source layout
 
-The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.
-
-Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display anchored after the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time; reasoning disclosure and run activity/duration are rendered separately.
-
-The workspace-change card follows the same rule: it is resolved from `(threadId, runId)` alone, so every AI message of a run would render an identical copy. A run ends in more than one terminal assistant bubble whenever the model emits answer text that never gains a tool call, so `core/messages/workspace-change-anchor.ts` picks the run's last assistant bubble and `MessageListItem` renders the badge only for that anchor (#4555). Any future run-scoped display belongs in the same place — do not hang one off every message. The two anchor helpers deliberately differ in which group types they accept as a run's last position, because an anchor is only useful where the display is actually rendered: run duration is emitted by `MessageList` around every group, so it accepts any type, while the workspace-change card comes from `MessageListItem` and so restricts to `assistant`. Keep a new helper's candidate set matched to its own render site rather than unifying them.
-
-Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores only text plus the selected slash-skill name in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. `InputBox` waits for enabled skills before restoring a skill chip, degrades a missing/disabled skill back to editable slash text, and clears the stored draft through `SendMessageOptions.onSent` only after the send passes the in-flight guard. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
-
-Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
-
-`/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until the next stream `values` update arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
-
-Human input requests are a structured message protocol layered on normal chat history. The backend writes request payloads to `ToolMessage.artifact.human_input`, `src/core/messages/human-input.ts` owns the runtime validators/types, and `src/components/workspace/messages/human-input-card.tsx` renders the reusable card. The protocol is versioned on the request side only: v1 covers `free_text` / `choice_with_other`, and v2 adds `form` (typed fields — text/textarea/number/select/multi_select/checkbox/date — with required-field validation in the card). Replies deliberately stay on the v1 response protocol: the form card submits a `response_kind: "text"` reply whose value is the human-readable summary plus one JSON block keyed by stable field names (`buildHumanInputFormSubmissionValue` — the readable part alone is ambiguous because labels/values may contain the separators), so the model can reconstruct the submitted mapping without a structured response kind. The validators reject unknown versions/modes (and field names colliding with JS `Object.prototype` members) so future protocol bumps degrade to the plain-text ToolMessage fallback rather than rendering a broken card. Form values are read through own-property access only (`readHumanInputFormValue`); select fields stay controlled from their empty-string placeholder state through selection; checkbox fields are native `<input type="checkbox">` controls seeded to an explicit `false` (`buildInitialHumanInputFormValues`) so an untouched checkbox submits as "no" while a `required` checkbox keeps must-agree semantics (no HTML `required` attribute — native constraint validation would intercept the custom submit path), and form controls carry label/`htmlFor`, `aria-required` plus a visually-hidden localized "required" marker, and `aria-invalid`/error associations whose error node stays mounted while any field is still invalid. Composer-bypass closure: `deriveHumanInputThreadState` treats a visible plain human message as answering the latest unanswered request opened before it (only the latest — nothing guarantees a single outstanding request across runs, and closing all would silently swallow older decisions; an older request left open simply becomes the active card again). This lets current users bypass a structured form through the normal composer and preserves compatibility with old v1-only frontends that degrade a v2 request to plain text. `MessageList` owns answered/latest/pending state for visible cards, but derives answered responses from raw `thread.messages` because replies are hidden; pending cards clear when the hidden reply appears, when dispatch is dropped, or when a new `thread.error` reports an async stream failure. Page-level card submit callbacks must send a normal human message and put `hide_from_ui: true` plus the response payload in the fourth `sendMessage(..., options)` argument as `options.additionalKwargs`; the third argument remains run context such as `{ agent_name }`. Composer entry points remain enabled while a human-input request is open; a normal visible message intentionally bypasses the card and starts the next run without structured response metadata.
-
-Tool-calling AI messages can contain user-visible text as well as `tool_calls`. `core/messages/utils.ts` keeps these turns in an `assistant:processing` group, and `components/workspace/messages/message-group.tsx` must render the visible text as a processing step instead of treating the message as only tool metadata. This preserves provider text such as error explanations or "trying another approach" notes during tool-heavy runs.
-While the current turn is still loading, a content-only AI message after the latest visible human input also stays in that processing group until the turn settles: a provider may append tool-call chunks to the same message later, and classifying it as a final assistant bubble too early makes the text jump into the steps panel. `MessageGroup` therefore renders processing text even before the first tool call arrives.
-The same rule applies after an earlier tool call: a later content-only AI message remains visible after the current last tool-call step while streaming, because that message may itself gain another tool call before the turn settles.
-Because the same message is rendered by two different components over its lifetime, reasoning must sit above the answer text in both. `MessageListItem` paints the settled bubble's `<Reasoning>` disclosure above its content, so `MessageGroup` puts the trailing reasoning disclosure above the assistant text that follows it and `convertToSteps` emits a message's reasoning step before its content step — otherwise the two swap places the instant the turn settles (#4576). Assistant text emitted _before_ that reasoning keeps its earlier position; only the answer the reasoning produced moves below it.
-
-Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLatestEditableTurn()` exposes a human turn only when the transcript is idle and the most recent visible turn ends in a terminal assistant message. `core/threads/hooks.ts::editAndRegenerateMessage()` calls `POST /api/threads/{id}/runs/edit-regenerate/prepare`, submits the returned replacement message/checkpoint/metadata through the same LangGraph stream path as regenerate, optimistically hides the superseded message ids, and clears the optimistic replacement once the persisted replacement arrives.
-
-`MessageGroup` builds its tool-result and browser-preview lookups once per processing group before converting messages to steps. The lookup preserves the first non-empty result and first screenshot-bearing browser view for each tool-call ID, matching the streamed-message display semantics without repeatedly scanning the full group for every tool call.
-
-### Key Patterns
-
-- **Server Components by default**, `"use client"` only for interactive components
-- **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
-- **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
-- **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
-- **Run stream options** are sanitized by `core/api/stream-mode.ts`: the Gateway-supported set is `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom`; any request containing an unsupported mode throws before HTTP instead of being partially forwarded or silently defaulting to `values`. `streamResumable` is retained by thread hooks only for SDK-side reconnect bookkeeping but stripped before the HTTP request because the Gateway does not accept that request option; actual replay uses the SSE `Last-Event-ID` cursor. Keep this boundary aligned with the backend request schema; `messages` and `events` are not supported and must not be forwarded.
-- **SSE replay gaps** are handled in `core/api/api-client.ts`, which wraps both initial and joined run streams because the upstream SDK ignores unknown event names. An id-less backend `gap` control frame clears stale reconnect metadata, emits an internal `stream_replay_gap` custom event, reloads durable thread values, and rejoins after the server-provided retained tail, with up to five recovery rejoins after the original stream (six total stream calls on an all-gap exhaustion path). The wrapper remains a lazy async iterable because the SDK consumes it with `for await`. `core/threads/hooks.ts` clears optimistic/transient/subtask state, invalidates durable history caches, and shows the localized recovery warning; never let a gap fall through as a normal stream finish or cancel the still-running backend run.
-- **Streaming Markdown rendering** is owned by `core/streamdown`: Streamdown's `animated` / `isAnimating` API handles incremental word animation, while the shared `streamdownRenderingPlugins` config registers the named code-highlighting and Mermaid plugins required by Streamdown 2.5. Keep wrappers and derived configs wired to that shared object; do not reintroduce a rehype plugin that wraps every word, because reparsing a growing block remounts old words and replays their animation.
-- Citation links in message and artifact Markdown must derive their `citation:` label from the full `ReactNode` children tree, since Streamdown may provide element or array children during streaming rather than a plain string.
-- **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
-- **Subtask step history and runtime metadata** (`core/tasks/`) — the subtask card shows a subagent's full step timeline (#3779): its assistant reasoning turns interleaved with the tools it ran. `Subtask.steps[]` is accumulated live from `task_running` events (appended via `mergeSteps`, not overwritten) and backfilled on expand for historical runs by `fetchSubtaskSteps`, which pages the events endpoint scoped to one task (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page, so the run-wide limit can't truncate the timeline. `task_started` carries the effective `model_name`; `task_running` carries a cumulative usage snapshot after each completed LLM call. `core/tasks/lifecycle.ts` normalizes these additive events, and `computeNextSubtask` keeps the largest cumulative total so replayed or late SSE frames cannot double-count or roll the folded card backward. Terminal ToolMessage metadata (`subagent_model_name` / `subagent_token_usage`) restores the same values from normal history after reload; no per-card event fetch is needed. `core/tasks/steps.ts` is the pure step model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/context.tsx`'s `useUpdateSubtask` applies updates against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
-
-### Interaction Ownership
-
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own edit-and-rerun submission wiring because the page must preserve normal/custom-agent run context; `MessageList` only detects the latest editable user turn and renders the inline editor.
-- `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
-- `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
-- `src/components/workspace/browser-view/browser-view-panel.tsx` forwards each physical pointer click as one `click` input; do not also emit `down`/`up` for the same gesture because the remote Playwright click would run twice.
-- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
-- `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
-
-## Code Style
-
-- **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
-- **Unused variables**: Prefix with `_`.
-- **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.
-- **Path alias**: `@/*` maps to `src/*`.
-- **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
-
-## Environment
-
-Backend API URLs are optional; an nginx proxy is used by default:
-
-```
-NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001
-NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
+```text
+frontend/src/
+├── app/
+│   ├── workspace/                    # live account landing or static local demo
+│   ├── projects/[project_slug]/      # only live project shell
+│   └── admin/                        # platform administration
+├── components/
+│   ├── projects/                     # project shell and project-private pages
+│   ├── workspace/                    # reusable chat/message/artifact presentation
+│   └── ui/                           # generated UI primitives
+├── core/
+│   ├── auth/                         # authenticated account identity
+│   ├── projects/                     # strict project contracts and provider
+│   ├── private-work/                 # account+project clients and keys
+│   ├── project-automations/          # Automation API and pure schedules
+│   ├── shared-assets/                # project/system asset contracts
+│   ├── admin-operations/             # system-admin safe operations contract
+│   ├── admin-settings/               # model catalog and global policy contracts
+│   ├── threads/                      # project-injected Thread state and streaming
+│   └── messages/                     # pure message/human-input rendering model
+└── env.js                            # environment validation
 ```
 
-Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
+Generated primitives under `components/ui/` and `components/ai-elements/` should not be
+edited manually.
 
-To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
+## Project authority and client ownership
 
-## Resources
+Platform role is exactly `system_admin | user`; project membership role is a separate
+`admin | editor | runner | viewer` domain. Frontend code never derives capabilities from
+either role. It renders only capabilities returned by Gateway.
 
-- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
-- [LangChain Core Concepts](https://js.langchain.com/docs/concepts)
-- [TanStack Query Documentation](https://tanstack.com/query/latest)
-- [Next.js App Router](https://nextjs.org/docs/app)
+Authentication probes strictly validate both the User response and the exact
+`{needs_setup, registration_enabled}` setup-status response. Registration stays closed while
+that status is checking, unavailable, malformed, or explicitly disabled. Remember-me is an
+explicit backend session-lifetime input across local login, registration, OIDC, initialization,
+and forced setup; browser storage may retain only the preference and email, never a password or
+session material. Client identity and account-scoped caches are cleared only by an authoritative
+401 or explicit logout. Network errors, 5xx responses, 403, and malformed 200 responses retain the
+current identity while surfacing availability failure. `refreshUser()` returns that distinction
+as `authenticated | unauthenticated | unavailable`; OIDC callback and forced-setup callers must
+offer retry for unavailable rather than reporting an auth failure or clearing state. Protected
+redirects preserve the complete safe browser pathname and query in `next`; client-side redirects
+also retain the fragment, which is never sent to the server. All probes and submissions have
+bounded timeouts and abort on supersession or unmount.
 
-## Contributing
+Email case folding and uniqueness are Gateway/PostgreSQL responsibilities; frontend identity and
+cache keys use the returned canonical account UUID, never a user-entered email string. A checked
+remember-me control means only that the browser may retain its cookies under the server's
+transport policy. It is not proof of authentication, durable-session validity, system role,
+project membership, or capability, and the UI must never derive any of those from the preference.
 
-When adding features:
+`ProjectPrivateWorkProvider` owns the only live project client. Its scope contains exact
+authenticated account UUID plus entered project UUID. Private-work, Automation, shared
+asset, Usage, Audit, and reconnect state all derive their roots from the same pair. There
+is no module-level default client, optional unscoped client, or URL fallback.
 
-1. Follow the established `src/` structure
-2. Add TypeScript types and proper error handling
-3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
-4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` when architecture, commands, or conventions change
+On account or project transition, always:
+
+1. abort/cancel in-flight queries and mutations;
+2. invalidate the old generation so late callbacks cannot commit;
+3. remove old scoped queries, mutations, reconnect metadata, and clients;
+4. create the new scoped client only after both identities are known.
+
+Every request-capable hook must accept and forward TanStack's `AbortSignal`. A late response
+from an old account/project must never update the new scope.
+
+## Project-private data flow
+
+Project clients use `/api/projects/{project_id}/private-work` for Thread, Run, file,
+artifact, input-polish, and durable SSE operations. Project Memory uses
+`/api/projects/{project_id}/memory`; Connections use
+`/api/projects/{project_id}/connections`; Admin group binding uses
+`/api/projects/{project_id}/channel-group-bindings`; safe project provider configuration uses
+`/api/projects/{project_id}/channel-instances`; Automation uses
+`/api/projects/{project_id}/automations`.
+
+Channel instance GET state is account/project scoped and may be cached. Provider Secret writes
+must use direct imperative authenticated requests, must never enter TanStack Query/Mutation
+variables or cache, and must be cleared from the form immediately after submission. All members
+may read bounded provider status; only the server-issued `project.channels.manage` capability
+shows configuration, enable/disable, or delete controls. Personal external-account and Agent
+selection remains a separate `private_work.create` flow.
+
+The current group-binding surface is Feishu-only although the backend DTO is provider-neutral.
+Only `project.channels.manage` may see or mutate it. The Admin chooses an available Agent, receives
+one `/bind-project` command, copies it to the target Feishu group, and explicitly checks completion.
+The resulting rows show only group name, Agent, running/disabled state, and recent activity, with
+compact change-Agent, enable/disable, and delete actions. Do not fetch or render message bodies,
+Thread/Run content, raw provider identifiers, or guest identities. Group guests are not web users
+and their owner-scoped Threads must not be merged into the normal signed-in conversation menu.
+Personal `p2p /connect` UI and behavior remain independent.
+
+Chats, Memory, Connections, and Automation navigation require a non-static build, server
+readiness `ready`, and `private_work.read_own`. Create/run/upload/connect controls additionally
+require their exact server capability. Viewer can read/list/export and delete their own
+ready upload/workspace/output files, but never sees mutation controls that require
+create/manage authority.
+
+The project Memory page presents one owner-private long-term document, its current version and
+pending count, immediate Dream admission, and bounded version history with the real unified diff
+and explicit restore confirmation. The client uses only `/memory`, `/memory/dream`, and the
+`/memory/versions` family; it never sends owner or namespace. Every response is strict Zod,
+requests forward the active AbortSignal, and loading, error, empty, running, and pagination states
+remain distinct. Read, Dream, and restore controls derive only from server-issued capabilities.
+A `409` refreshes the scoped Memory root rather than applying an optimistic overwrite.
+
+`/Dream` drains the existing current Thread with the dedicated
+`keep={type: messages, value: 0}` boundary before admitting Dream with that exact `threadId`.
+It repeats whole-turn compaction until Gateway explicitly returns `not_enough_messages`; any
+other non-compacted result, missing checkpoint progress, or the bounded pass limit fails closed
+and does not admit Dream.
+`/dream-log [version]` navigates to the Memory page, and `/dream-restore <version>` requires an
+explicit confirmation before calling restore. These built-ins, like `/compact`, never enter the
+ordinary Agent message stream.
+
+Durable SSE cursor and deduplication state is keyed by account/project/thread. Event IDs are
+thread-monotonic; duplicate IDs and duplicate terminal frames are ignored. Gateway restart
+must resume from the stored `Last-Event-ID` without cross-scope replay.
+Treat the PostgreSQL cursor as a canonical signed-BIGINT decimal string, never a JavaScript
+number. Compare it by decimal length/value, reject non-canonical or overflow input, and persist
+only monotonic advances. A newly mounted Thread projection joins the current Run from cursor
+`0`; a cursor advanced by an old invisible consumer is diagnostic state and does not prove the
+new UI rendered those frames. Project clients own an AbortController and active generation:
+disposed clients may neither yield late frames nor update cursor/reconnect storage. Reconnect
+metadata deletion is compare-and-remove so an old consumer cannot erase a newer Run.
+The same no-`number` rule applies to the four non-SSE private-work feeds for per-Run messages,
+Thread messages, per-Run events, and Thread events. Their `seq`, `before_seq`, and `after_seq`
+values remain canonical decimal strings through parsing, sorting, and pagination. Thread history
+and historical Subtask-step loading compare strings by decimal length/value and fail closed on
+numeric, non-canonical, or signed-BIGINT-overflow responses. The privacy-center NDJSON attachment
+is not consumed by these Thread/task clients and remains outside this contract.
+React cleanup defers the local stream detach so a Strict Mode remount can retain it. The eventual
+detach clears only the local SDK projection and must not send backend cancellation. Project chat
+requests remain root-stream only; namespaced child custom frames cannot update root task state.
+Do not object-spread the LangGraph SDK stream handle: it exposes enumerable lazy getters, and
+`toolCalls` can traverse a transient sparse message array while `RemoveMessage(__remove_all__)`
+compaction rebuilds message-tuple indexes. Preserve the handle with property descriptors and
+override only ActWeave's normalized `messages`, scoped `values`, and local `stop` projection.
+
+Conversation history is a lead-Agent projection. Historical rows tagged with a subagent or
+middleware caller are hidden, and their tool results are filtered by the issuing AI
+`(run_id, tool_call_id)` pair; internal HumanMessages are hidden unless they are the explicit
+Run-admission row. This compatibility filter must remain until every retained Run was written by
+the lead-only journal contract. Rendering also associates tool results with the exact issuing
+AI group by `(run_id, tool_call_id)`, including late/replayed and result-before-call pagination
+order. Legacy rows without a Run ID are isolated to one Human turn. Never attach an unknown
+orphan tool result to the most recent or final assistant group, and always synthesize a stable
+non-empty group key when legacy messages have no ID.
+After checkpoint compaction, a Run-admission HumanMessage may exist only in the complete journal
+while the materialized checkpoint retains that Run's tail. History/live merging must restore the
+admission before the first message of the same Run, not append it after the Run on refresh.
+
+Thread history must enumerate the complete newest-first Run catalog before offering per-Run
+message pagination. Never rely on the LangGraph SDK's default `runs.list()` limit of 10:
+page with explicit bounded `limit/offset`, preserve the server's stable order, forward the active
+scope's abort signal, validate every public Run through a strict schema, and reject unknown
+authority/private fields. Duplicate rows caused by concurrent offset drift may be deduplicated,
+but a non-advancing full page, malformed page, maximum page count, or maximum offset must fail
+closed. Message bodies remain lazy and are loaded one Run/page at a time.
+
+Ready-file lists are also complete catalogs, not a single default page. Fetch bounded pages of
+100 with the active AbortSignal, strictly validate every file row, and accept `X-Next-Offset`
+only when it is canonical, advancing, and within the configured safety bound. Duplicate file IDs,
+unknown fields, a full page without a usable next offset, or excessive page count fail closed.
+Thread rename/delete mutations send the last server-issued `expected_version`; a 409 is an
+explicit concurrent-edit result and must never be converted into an optimistic silent overwrite.
+
+During a live project Run, successful lead-Agent `write_file` and `str_replace` tool calls select
+the written file in the artifact preview, open the right-hand file panel, and collapse the desktop
+project navigation. Trusted stream messages tagged `subagent:<name>` are internal progress and
+must be excluded from the lead conversation projection: their steps render only in the matching
+SubtaskCard, and their temporary file writes never select or open artifact preview. `present_files`
+remains the explicit publication boundary for rendering downloadable file cards inside the
+conversation. Terminal Run handling must invalidate the project Thread file list so finalized
+UUID-backed file routes are available without a reload. Once that ready-file query settles,
+replace a selected `write-file:` URL with its matching durable logical path; never perform this
+replacement while the Run or ready-file refetch is active, because an existing path may still
+point at the prior file version. The toolbar Files action is a directory action when ready files
+exist: it clears the detail selection, opens the file list, and exposes each file through a
+separate keyboard-operable open button that does not overlap download/delete controls.
+After a terminal assistant answer exists, the UI keeps the safe semantic groups unchanged but
+projects any immediately preceding processing, Subagent, and `present_files` groups into one
+result. Earlier lead-Agent reasoning, tool calls, Subagent cards, and the terminal message's own
+reasoning render in chronological order inside one compact, collapsed-by-default “Execution
+details” disclosure before the final answer.
+Every AI message keeps its own `ThinkingDisclosure`; reasoning must never be flattened into a
+generic execution step or combined with a later model call. Each disclosure reads that message's
+server-observed `additional_kwargs.reasoning_duration_ms`, floors it to whole seconds, and uses
+“under 1 second” for an observed sub-second interval. Opening the process disclosure shows the
+complete ordered history without a second “more steps” fold. In a completed turn that has this
+execution history, the terminal message's reasoning appears exactly once as its last reasoning
+disclosure; the answer and compact published-file rows remain outside and follow it. A simple
+direct answer with no preceding execution history keeps its own standalone reasoning disclosure.
+Missing or invalid legacy durations remain the neutral
+“Reasoning” label; the UI never substitutes Run duration. Exact Run duration remains a separate
+“Completed in” row after the result because it includes model latency, tools, Subagents, queues,
+and wait time. `present_files` transition prose is not repeated beside the result. During a live
+Run, every reasoning round remains represented and the current round opens automatically;
+failed-before-answer and clarification groups retain their original presentation so active work
+still has visible progress.
+
+Subtask state folds effective model and cumulative Token metadata from `task_started`,
+`task_running`, terminal custom events, and the authoritative terminal ToolMessage. Older delayed
+usage snapshots must never reduce a displayed cumulative total. The SubtaskCard resolves a known
+model to its configured display name, falls back to the model identifier, and hides per-subtask
+Token totals when global `token_usage.enabled` is false. Keep project-scoped historical step
+fetching and the `inferred < custom_event < tool_result` status authority ordering intact.
+
+The composer context-window indicator is separate from cumulative Thread/Run Token usage. It reads
+the current retained checkpoint through the strict project-scoped `context-usage` contract and
+measures progress against the current automatic-compression trigger. `tokens`, `fraction`, and
+`messages` keep their own units; multiple triggers are OR conditions and the server-selected
+primary trigger drives the compact ring. Hide the indicator for new/mock/non-runnable Threads, and
+invalidate it after terminal Runs, stop, `/compact`, and `/Dream`.
+
+Input polish is project-scoped and never runs without `private_work.create` plus
+`shared_assets.execute`. The server revalidates the current Thread Agent snapshot and
+Credential-grant closure; the browser never constructs authority fields.
+
+Composer model and thinking choices are Run preferences, not browser authority. Normal submit
+and replay derive one complete `execution_profile` from the selected active model and its
+declared thinking/reasoning capabilities. The SDK adapter promotes that profile into the strict
+top-level private-Run field and removes its reserved transport key before the request crosses the
+trust boundary; generic context/config copies of model or reasoning fields remain stripped.
+Gateway may honor a model choice only for a `default`-bound Agent, rejects a conflicting choice
+for an exact-model Agent, and returns the effective model, thinking switch, reasoning effort, and
+vision capability on the Run. The UI must use that effective profile for historical/execution
+presentation and must never imply that the local selection proves admission or provider support.
+Model and mode values each keep an explicit-selection marker per Thread. A missing/non-explicit
+Thread override inherits the current global/catalog default for display and submission, so a stale
+legacy value cannot be shown as selected while the request silently omits it.
+The main composer and Sidecar resolve the Thread Agent's current `model_ref` before submission:
+an exact-model Agent displays a locked model picker and omits `model_name`, while a `default`-
+bound Agent keeps the user's explicit thread/global choice. Locking an exact Agent must never
+overwrite or clear that persisted preference. An existing Thread fails closed when Agent or
+version resolution fails, a System binding/current published version is missing, the active model
+catalog is loading/unavailable/empty, or an exact model is absent from that catalog: submit, human
+input, edit-and-rerun, and regenerate remain disabled while an actionable retry is shown. A
+`/new` draft is not blocked merely because server-issued Thread metadata does not exist yet.
+
+Upload messages carry only ready-file metadata and opaque file IDs, never browser-created image
+data URLs. For an exact admitted vision model, Worker derives current-message images from its
+server-owned file authority and injects them ephemerally into lead model requests. Text-only Runs
+keep the same files available as ordinary uploads but receive no automatic pixel input. The
+browser must not claim that setting the catalog's vision flag alone proves provider compatibility;
+that flag gates the execution path, while a real provider vision request remains the target-
+environment smoke test.
+
+## Shared assets and credentials
+
+Project asset pages group visible system and project Agent, Skill, MCP, and Credential rows.
+Queries are keyed by account, project, and kind. UI actions use per-item capabilities and
+optimistic revisions; no role-based inference is allowed.
+
+Project Agent details expose four fixed logical Markdown entries: `AGENTS.md`, `SOUL.md`,
+`IDENTITY.md`, and `USER.md`. They are an asset-level editor over Agent-version fields, not a
+filesystem browser: do not add directory, create, rename, delete, breadcrumb, or independent
+file-version controls. New Agents open this editor even before any runtime version exists.
+The editor always uses the current published revision, otherwise the latest Draft. Agent
+revisions remain an internal Run-snapshot boundary: the detail sheet exposes no publish/version
+summary card, selector, status, history, technical metadata, or manual version action. Its header
+shows the formatted update time rather than repeating the slug. One explicit save submits all
+four values with the asset revision; dirty state blocks close, while a `409` keeps the local
+draft for retry.
+
+New project Agents are designed through `/projects/{project_slug}/agents/new` and the resumable
+`/agents/new/{session_id}` workspace. The name step creates only a private Builder session.
+The workspace keeps the page shell fixed, scrolls only its conversation region, renders bounded
+clarification cards and four fixed logical-document progress items, and allows preview/edit before
+one final confirmation. Completion creates a published version 1 but leaves the Agent suspended;
+cards and details expose the capability-checked activate action. Never fall back to the former
+generic Agent create dialog or sequence a bare Agent create before the Builder commit.
+
+Project Skill creation offers AI conversation, blank creation, and archive import from one menu.
+Conversation creation uses `/projects/{project_slug}/skills/new` and the resumable
+`/skills/new/{session_id}` workspace. The name step creates only a private Builder session.
+The workspace preserves the selected file while generated files change, selects `SKILL.md` only
+when the first candidate package appears, locks conversation while local file edits are unsaved,
+and requires an explicit checksum-bound validation before one atomic commit. Warnings require
+acknowledgement; commit publishes version 1 while leaving the Skill suspended and unbound.
+Skill Builder queries and mutations use their own account+project root and are aborted and removed
+with the active private-work scope. A message turn clears the composer and renders an optimistic
+user bubble immediately; the pending mutation's expected revision scopes that bubble so the
+canonical server message replaces it without duplication. Network or failed-session responses
+restore the submitted draft, and backend-unavailable errors use localized copy instead of exposing
+raw storage or proxy messages.
+The candidate workbench reconstructs folders from slash-separated file paths, so generated
+`scripts/`, `references/`, and `templates/` files remain independently selectable and editable.
+It does not persist empty folders or flatten nested paths. Builder currently exposes manual
+replacement of existing generated files only; creating, deleting, or renaming files is done by a
+subsequent AI candidate update even though the server draft-update contract supports those ops.
+
+Blank Project Skill creation remains one scoped backend mutation that atomically creates the
+disabled asset plus version 1 Draft containing a backend-valid root `SKILL.md`; the frontend must
+never sequence a separate asset request and version request. The template frontmatter name is the
+immutable asset slug. After the catalog refresh, the detail sheet opens the returned asset ID,
+loads its version history, and selects Draft version 1. The detail sheet has no blank-version
+action: its single “创建新版本” entry starts an editable copy of the currently selected immutable
+version, and saving persists that copy through the Skill fork API. Unsaved file-workbench changes
+block publish, version switching, and competing version creation until the user saves or
+explicitly discards them. Slash suggestions exclude assets without a published version and honor
+the server-provided execute capability and system binding. Shared-asset mutations use the active
+project scope's abort controller and are removed with their project query/mutation roots during
+scope transition.
+
+Project Skill package import accepts `.zip`, `.skill`, `.tar`, `.tar.gz`, and `.tgz` through the
+scoped multipart upload API. A successful import creates and publishes the first immutable
+version while leaving the new Skill disabled, refreshes the project Skill catalog, and opens the
+returned version. Duplicate-name, invalid-package, and size-limit responses must use safe,
+actionable messages without exposing parser or storage details.
+
+New project Skills start disabled. Project-owned Skill rows and detail sheets expose the same
+enable/disable switch: enabling requires `shared_assets.manage_bindings` plus a published version,
+while a disabled Skill remains editable and publishable. The version workbench renders archive
+paths as an expandable folder tree and opens only the selected file. New-file creation requires a
+target folder and may create a nested folder inline; empty folders are local editor state because
+immutable Skill snapshots persist files rather than directory entries.
+System Skill binding is list-only: its catalog row keeps the enable/disable switch, while its
+detail sheet never exposes enable-to-project or pinned-version switching actions.
+
+Project Skill lifecycle has no archive or pause action. A project-owned Skill with
+`shared_assets.edit` exposes permanent package deletion from its detail sheet; the confirmation
+must state that every version and file will be removed, keep the destructive button disabled for
+five seconds, and close the detail plus remove list/version/file caches only after the scoped
+DELETE succeeds. System Skills never expose deletion. Agent lifecycle exposes activate/suspend
+transitions but no archive mutation; project Agent screens label them as enable/disable. Project Agent
+cards never expose deletion. A project-owned Agent with `shared_assets.edit` exposes permanent
+deletion only from its detail sheet, using the same five-second delayed confirmation pattern and
+removing the Agent plus all of its settings only after the scoped DELETE succeeds. Referenced Agents
+remain visible and the API returns conflict rather than deleting Threads, Automations, or Run
+snapshots. Reversible Agent enable/disable actions use neutral styling; the detail action is labeled
+“删除”, and only that permanent action uses destructive styling. Project MCP details follow the
+same reversible enable/disable wording for assets with a current Published version and do not
+show archive as a primary action. A project-owned MCP with `shared_assets.edit` exposes permanent
+deletion only from the detail danger zone, using the five-second confirmation pattern; System MCP
+items never expose deletion. A conflict keeps the MCP visible when an Agent or historical Run
+snapshot still references it.
+
+Global `/admin/assets` Agent, Skill, and MCP pages render the packaged PostgreSQL catalog as
+read-only governance metadata. They must not expose definition create/edit, new-version,
+publish, approval, archive, or suspend controls or client mutations. A published packaged
+System MCP may expose only the dedicated Credential-grant configuration flow; that flow sends
+Credential version IDs plus expected active grant revisions and does not republish or alter
+the MCP definition. System Credential lifecycle controls and project-scoped asset override
+authoring are separate surfaces and remain mutable.
+Platform asset pages render only exact System-scope rows. The system-admin project-governance
+routes render only rows owned by the selected project and never expose the System catalog or its
+binding controls there; mixed-scope responses are filtered again at the presentation boundary.
+This does not change member-facing project asset pages, which still combine authorized System
+bindings with project-owned assets where runtime selection requires both.
+
+Credential create/replace is an imperative authenticated request, not a TanStack mutation.
+Secret-bearing form values must never enter QueryCache or MutationCache, must be cleared after
+submit, and must not remain in the DOM. Responses and errors may show safe status metadata but
+never plaintext, ciphertext, nonce, key ID, storage locator, secret hash, or raw provider
+payload. MCP versions with required Credential slots use submit/approve rather than direct
+publish.
+
+Credential deletion is available from the project, admin-project, and system Credential detail
+surfaces, never from list rows. It uses a five-second delayed destructive confirmation and sends
+the visible Credential revision for optimistic concurrency. Success removes the Credential from
+ordinary lists and details because deletion is logical; only the append-only audit event remains
+visible. A deleted name may be reused, and no browser cache may retain deleted Credential
+metadata, grants, or Skill bindings.
+
+The Skill detail Credential section is reference-only. It renders the selected published
+version's declared environment-variable requirements, lets an authorized member bind an eligible
+existing project Credential version, and submits the complete binding set with
+`expected_revision`. Query keys include account, project, and Skill; a `409` preserves the local
+draft and asks the user to reload. The UI never accepts or reads a secret value on this surface,
+and a Skill version with no declared requirements shows an explanatory empty state rather than a
+secret editor.
+
+Project MCP authoring exposes only `http` and `sse`. The URL is required and described as a
+Worker-reachable HTTP or HTTPS endpoint whose host is exactly `localhost` or a canonical IPv4 or
+bracketed IPv6 literal. Ordinary DNS hostnames are rejected and never resolved, avoiding a
+validation/connection DNS TOCTOU boundary. Exact `localhost` is matched case-insensitively and
+deterministically normalized to `127.0.0.1`; IPv6 loopback must be written explicitly as `[::1]`.
+Every IP must belong to an
+administrator-configured CIDR range, whose defaults cover common local and private networks.
+CIDR policy is platform configuration: the form neither asks the user to select a network nor
+tries to infer membership, and the backend remains authoritative. Embedded credentials, query
+parameters, and fragments are rejected. Header and query Credentials travel in plaintext over
+HTTP, so HTTP is only for trusted private networks and untrusted links must use HTTPS. Project `stdio` and
+`streamable_http` are never offered for new versions. Literal env/header and OAuth editors are
+not exposed; authentication is configured through encrypted Credential slots targeting either
+`headers` or `query`. New forms default to `http`, label it as Streamable HTTP, and persist only
+the secret-free base URL. Pasting a query strips it immediately and explains that query values
+belong in a Credential; create failures distinguish an operator CIDR-policy/startup-restart issue
+from approval failures where the Credential group and field names do not exactly match the slot.
+Project Credential create/replace dialogs accept `query` fields without caching or returning
+their values. Historical
+unsupported versions remain readable with an explicit blocked reason; Project MCP history
+exposes only the remote HTTP(S) origin, never a persisted path or query. Publish, binding, and
+Agent dependency selection stay disabled. The backend policy remains authoritative, and
+mutation failures stay visible in the active dialog without clearing the user's safe inputs.
+The dedicated
+`GET /api/projects/{project_id}/mcp-servers/{asset_id}/configured` authoring query is the only
+exception to origin-only presentation: it requires edit authority, returns the safe current or
+actionable pending configuration with its complete validated IP-literal path, and still never
+returns userinfo, query parameters, fragments, or Credential values. Edit UI must wait for this
+exact account/project/asset-scoped query and must not fall back to a history projection.
+Initial project MCP creation is one “添加 MCP” dialog and one configured-create mutation, never
+a bare asset create followed by a separate revision create/publish request. The base form shows
+name, slug, description, transport, and URL, followed by explicit `headers`, `query`, or no-auth
+choices. For an authenticated MCP, the form accepts field names only and shows only active project
+Credentials whose current payload schema exactly matches that group and ordered field list; an
+authorized Admin may create a fixed-schema Credential through the imperative secret-write API.
+That contextual create flow hides the generic type field and fixes `credential_type` to
+`mcp_auth`; generic Credential-management create surfaces keep the editable type field. Existing
+MCP Credential eligibility remains scope/status/current-schema based and must not filter by type.
+`mcp_auth` is display/classification metadata, not an approval or runtime authorization boundary.
+Configured create and edit still persist only the secret-free MCP definition. Editing reuses the
+same two-column form, authentication choices, compatible-Credential selector, and contextual
+Credential creation flow as initial creation. No-auth save publishes immediately. When an Admin
+with `mcp.credentials.approve` selects a matching Credential, the same save action follows the
+configured create or PUT with approval automatically; approval failure keeps the pending version
+and retries approval only, never repeats the configured mutation. An Editor without that capability
+submits the pending version for Admin handoff and cannot bypass approval. This approval state is an
+internal authorization boundary only: project MCP UI describes it as Credential binding, renders
+`pending_approval` as “凭据未绑定 · 尚未生效”, and exposes no approval prompt, status, or separate
+“批准并发布配置” action. Selection waits for the invalidated catalog to return
+the authoritative `ProjectAssetItem` before opening details and never fabricates capabilities or
+bindings from the aggregate response. The dedicated configured PUT atomically creates the next
+internal revision and advances it directly to Published or Pending Approval; it must never leave a
+user-inaccessible Draft.
+
+All MCP surfaces present one logical configuration. They render no history selector, revision
+number, rollback target, or user-facing version terminology; project, admin-project, and system
+catalog details select only the safe current or actionable pending configuration and fail closed
+when the exact pointer cannot be confirmed. System MCP binding has no revision picker: its
+`sync-current` mutation resolves and locks the current Published revision on the server while the
+persisted binding and Run snapshots continue to pin the exact internal revision. System MCP
+binding controls are list-only like System Skill: the row switch enables the server-authoritative
+current configuration or disables the existing binding, and an enabled stale binding exposes one
+compact inline update action. The detail sheet keeps “当前配置”“项目使用”“最近更新” in one
+three-column summary row but never exposes binding actions. A project-owned MCP detail header does
+not repeat a “项目自建” badge. Its summary renders current configuration, recent update, and the
+lifecycle badge in one desktop row; the action row contains only actions. The connection summary
+renders transport, timeout, and URL in one desktop row with a wider URL column. MCP details do not
+render Credential slots or grant state; Credential selection and creation remain confined to
+configured create/edit flows. System-owned MCP details retain the “系统提供” source badge. Internal
+API/type names remain version-based. JSON import is intentionally absent for now.
+This restriction is scope-specific: packaged System MCP retains the runtime-supported `stdio`,
+`sse`, and `http` transports plus their existing env/header/OAuth credential capabilities;
+only transports or definitions that the private runtime cannot execute are blocked.
+Published MCP details load the service-tool inventory through a separate project/account/asset/
+version query. The table shows original provider tool names and plain-text descriptions from the
+last Worker discovery, never endpoint, schema, routing, Credential, or raw error data. Drafts do
+not query it. The UI distinguishes initial loading, request failure with retry, never discovered,
+testing, ready empty, degraded with last-known tools, failed, and stale after version or
+Credential-grant changes. Publishing a project configuration automatically admits one Worker
+discovery, including after Credential approval. While it is queued or running, the exact inventory
+query polls every two seconds; polling stops at a terminal status. Editable and executable project
+MCP details expose “Test service/Retest”, which submits another discovery Job and refreshes only
+that exact inventory. System MCP and users missing either capability do not see the action. Opening
+the sheet only reads/polls Gateway state and never makes the browser contact MCP. The inventory
+remains display-only and cannot be used to infer runtime health or skip Worker discovery.
+Agent cards expose the project default as read-only state to project members; only a member with
+`shared_assets.manage_bindings` may set an active, published, executable project Agent as the
+default or restore Main. Ordinary new-conversation entry points and Builder continuation share
+one project-new-chat path: they omit explicit Agent fields so Gateway resolves the current
+default atomically. Agent-card chat remains an explicit override, and a configured but invalid
+default fails closed rather than silently switching to Main. Agent cards, the Agent selector,
+project-new-chat, Connections, and Automation creation/resume/manual-run use the same fail-closed
+MCP dependency assessment for project and ordinary System Agents. Main is the one exception: it is
+a project-scoped orchestrator, remains selectable without a project Agent binding, and is never
+offered through the System-Agent binding action. The browser must not read Main's static
+Skill/MCP references, enable or move bindings, or fan out dependency requests before creating a
+Thread, Connection, Automation, or group binding. Gateway resolves Main's effective current-project
+System and project-owned Agent/Skill/MCP closure and the Run freezes exact versions; assets from
+another project are never eligible. An ordinary project or System Agent continues to use only the
+exact Skill/MCP versions referenced by its selected version.
+
+Composer slash-Skill suggestions follow the Thread Agent. Main shows every effective Skill in the
+entered project. An ordinary project or System Agent shows only Skills referenced by its selected
+Agent version. This runtime catalog is account+project scoped and fails closed while the Agent
+version is unresolved. Historical human-message rendering intentionally keeps the broader visible
+project catalog so an old `/skill` message does not degrade merely because the current Agent or
+version changed.
+
+## Automation
+
+Automation definitions and occurrences are scoped by exact account, project, and owner.
+Admin, Editor, and Runner controls appear only with the matching server capability; Viewer is
+read-only. Every key begins with the authenticated account and entered project roots.
+
+Create sends a complete payload. Edit sends a sparse PATCH based on normalized semantic
+changes only. Equivalent once timestamps such as `Z` and `+00:00` do not count as a schedule
+change. Pure cron/once validation and recipes live under
+`core/project-automations/schedule/` and contain no URL, fetch, auth, or query-key behavior.
+Manual trigger uses a UUID idempotency key and the same durable admission path as Scheduler.
+Remote-data starter recipes bound their tool attempts and require an explicit partial-result
+fallback instead of retrying an unavailable provider until the Run recursion ceiling.
+
+## Project governance and system administration
+
+Usage and Audit pages mount hooks only after their exact readiness and capability gates pass.
+Usage distinguishes configured/effective limit, used/reserved amount, and one 80% warning per
+dimension. Audit accepts a closed action enum and action-specific strict metadata, and never
+renders private target digests, owner/project internals, or secret content.
+
+The project overview mounts its Token trend query only after `project.usage.read` is present.
+Its query key stays under the exact account/project governance usage root, forwards the TanStack
+abort signal, and strictly validates 24 consecutive hourly buckets plus independently summed
+input/output/total counters. Loading, unavailable, and valid all-zero states remain distinct;
+the UI must not fabricate zero usage from a failed or malformed response.
+
+Admin operation pages mount no query until the authenticated identity is confirmed as
+`system_admin`. Their strict Zod contracts reject unknown owner, Run, Thread, payload,
+exception, locator, or secret fields. Closed/degraded readiness displays unavailable state,
+not fabricated zero counts. Safe requeue is shown only when the server returns exact
+eligibility for a parentless retention-purge predecessor.
+
+The Job catalog searches by project display name or slug and renders those human fields as the
+primary project identity. Project UUID remains available only through an accessible copy action
+for support and recovery workflows; it is not a user-facing search input or row label.
+
+Platform administration uses one compact shell for operations, projects, jobs, audit, assets,
+model settings, and system settings: a persistent 64px collapsed / 240px expanded desktop rail, a page-context top
+bar, collapsed-item tooltips, a localized mobile menu, and a persistent `/workspace` escape action
+in desktop and mobile navigation. Catalog pages render dense filterable rows and mount a responsive
+detail inspector and version-history query only after explicit selection. The desktop inspector
+overlays the catalog without changing its width or table/card presentation; responsive table/card
+switching follows only the page's available width. They must not eagerly expand or fetch every
+asset. Cursor pages retain reversible local
+history, technical identifiers stay copyable, and every admin Dialog/Sheet receives a localized
+close label with an accessible hit target.
+
+System settings use strict, secret-free section contracts under the authenticated account query
+root. Each section is replaced atomically with its expected revision; conflict responses preserve
+the local draft, and the UI renders the server-confirmed effective revision, effect scope, and any
+pending runtime roles. Agent model references are limited to active system logical model names.
+
+The ordinary Settings dialog has a separate account-owned Personalization section. Its Memory
+switch and reset action use the strict account API and `preferences_version` CAS; they are not
+local settings and do not edit the platform runtime policy. Reset confirmation must state that
+chats and `/compact` summaries are preserved. Success cancels and removes every project Memory
+query for the active account while leaving Thread and other private-work caches intact.
+
+## Component ownership
+
+- `ProjectContextProvider` owns project resolution and enter.
+- `ProjectPrivateWorkProvider` owns the scoped client, reconnect state, and teardown.
+- `ScopedChatPage` owns project composer busy state, branch/edit/regenerate actions, and navigation.
+- `ProjectConversationRail` preserves the server's `updated_at DESC, thread_id DESC` pages and,
+  only on the bare project `/chats` route after a settled successful query, replaces the route with
+  the first Thread. Empty/error states remain on the landing page and direct Thread URLs never
+  redirect.
+- `MessageList` owns human-input answered/latest/pending gating, latest-turn edit eligibility,
+  and the single group-tail Run-duration display.
+- `core/threads/hooks.ts` owns pre-submit upload state, scoped prepare/submit replay, optimistic
+  replacement, and replay failure rollback.
+- `core/threads/agent-mode.ts` owns the capability-aware composer mode contract. Flash disables
+  extended thinking and explicitly requests `none` when the selected model supports effort
+  controls; Thinking, Pro, and Ultra request low, medium, and high. Mode no longer grants
+  plan or subagent behavior.
+- `core/private-work/execution-profile.ts` owns the strict requested/effective profile types and
+  removes legacy model/reasoning keys before submit. `core/api/api-client.ts` is the sole SDK
+  compatibility adapter that promotes the reserved carrier to top-level `execution_profile`.
+- Project Memory and Connection pages own their scoped queries and mutations; the Memory page owns
+  the document, Dream, version/detail, restore, and conflict-invalidation roots, while shared
+  presentation components remain pure.
+- Static demo fixtures and adapters are separate from the production client registry.
+
+Human-input replies are ordinary human messages with `hide_from_ui: true` and the structured
+response in the fourth `sendMessage(..., options)` argument under
+`options.additionalKwargs`. The normal composer remains available while a request is open; a
+visible ordinary HumanMessage closes only the latest unanswered request. An open request still
+blocks history-rewriting edit-and-rerun. Gateway treats visibility as server-owned and restores
+the hidden flag only after the response exactly matches the latest open `ask_clarification`
+request. The transcript also applies the same request/source/option/canonical-text checks when
+hiding legacy responses persisted before that server promotion existed. Answered cards are
+read-only disclosures: collapsed by default, but expandable to review the original request,
+options, and submitted value.
+
+Edit-and-rerun is limited to the latest complete user turn. Its prepare request, optimistic mask,
+query invalidation, abort handling, and stream submission stay under the active
+`accountId + projectId` private-work scope. Run duration is total wall-clock Run time, not model
+thinking time, and renders once after that Run's final visible message group. Voice dictation
+belongs to the active `InputBox`; project/thread switches, send, clear, disabled state, and
+unmount abort the recognizer before stale transcripts can cross scope.
+
+## Code style and tests
+
+- Server Components are the default; use `"use client"` only for interactive components.
+- Imports are grouped and alphabetized; use inline type imports.
+- Use `@/*` aliases and `cn()` for conditional Tailwind classes.
+- Runtime responses use strict Zod schemas and reject unknown authority/private fields,
+  including the server-only Run `origin_trace_id`; no Query cache may retain it.
+- The small unit core lives under `tests/unit/`. One deterministic project-route browser test,
+  two static-boundary tests, and one real-backend Replay test live under `tests/e2e/`,
+  `tests/e2e-static/`, and `tests/e2e-real-backend/` respectively.
+- Features and fixes follow TDD: add the failing test, observe the expected failure, implement
+  the minimal change, and rerun focused plus full affected gates.
+
+Backend base URLs may be set for split-origin development. Leave them unset for the normal
+root `make dev` or Docker flow so all browser calls use same-origin `/api/*` through Nginx.
+
+Historical pass counts do not certify the current checkout. Run `pnpm check`, `pnpm test`, and the
+affected Playwright/build gates for the current change. Browser and deployment coverage must be
+reported from the current run rather than copied from an earlier milestone.

@@ -7,11 +7,13 @@ import secrets
 from types import SimpleNamespace
 from typing import Any
 
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 INTERNAL_AUTH_HEADER_NAME = "X-DeerFlow-Internal-Token"
 INTERNAL_OWNER_USER_ID_HEADER_NAME = "X-DeerFlow-Owner-User-Id"
+INTERNAL_RUNTIME_USER_ID_HEADER_NAME = "X-DeerFlow-Runtime-User-Id"
 INTERNAL_AUTH_ENV_VAR = "DEER_FLOW_INTERNAL_AUTH_TOKEN"
 INTERNAL_SYSTEM_ROLE = "internal"
 
@@ -26,11 +28,17 @@ def _load_internal_auth_token() -> str:
 _INTERNAL_AUTH_TOKEN = _load_internal_auth_token()
 
 
-def create_internal_auth_headers(*, owner_user_id: str | None = None) -> dict[str, str]:
+def create_internal_auth_headers(
+    *,
+    owner_user_id: str | None = None,
+    runtime_user_id: str | None = None,
+) -> dict[str, str]:
     """Return headers that authenticate trusted Gateway internal calls."""
     headers = {INTERNAL_AUTH_HEADER_NAME: _INTERNAL_AUTH_TOKEN}
     if owner_user_id:
         headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] = owner_user_id
+    if runtime_user_id:
+        headers[INTERNAL_RUNTIME_USER_ID_HEADER_NAME] = runtime_user_id
     return headers
 
 
@@ -83,3 +91,28 @@ def get_trusted_internal_owner_user_id(request: Any) -> str | None:
         return None
     owner_user_id = owner_user_id.strip()
     return owner_user_id or None
+
+
+def get_trusted_internal_runtime_user_id(request: Any) -> str | None:
+    """Return a safe execution/storage identity for a trusted internal run.
+
+    This identity is intentionally separate from the owner header: it selects
+    only the runtime filesystem/memory bucket and never grants thread,
+    repository, project, or private-work authority. The header is ignored
+    unless ``AuthMiddleware`` already authenticated the process-internal token
+    and stamped the synthetic internal role on ``request.state.user``.
+    """
+    state = getattr(request, "state", None)
+    if getattr(state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
+        return None
+    user = getattr(state, "user", None)
+    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        return None
+
+    runtime_user_id = request.headers.get(INTERNAL_RUNTIME_USER_ID_HEADER_NAME)
+    if not runtime_user_id:
+        return None
+    runtime_user_id = runtime_user_id.strip()
+    if not runtime_user_id:
+        return None
+    return make_safe_user_id(runtime_user_id)

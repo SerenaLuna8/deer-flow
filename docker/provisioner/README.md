@@ -1,18 +1,18 @@
-# DeerFlow Sandbox Provisioner
+# ActWeave Sandbox Provisioner
 
-The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbox Pods in Kubernetes. It provides a REST API for the DeerFlow backend to create, monitor, and destroy isolated sandbox environments for code execution.
+The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbox Pods in Kubernetes. It provides a REST API for the ActWeave backend to create, monitor, and destroy isolated sandbox environments for code execution.
 
 ## Architecture
 
 ```
 ┌────────────┐  HTTP  ┌─────────────┐  K8s API  ┌──────────────┐
-│  Backend   │ ─────▸ │ Provisioner │ ────────▸ │  Host K8s    │
-│  (gateway/ │        │   :8002     │           │  API Server  │
-│ langgraph) │        └─────────────┘           └──────┬───────┘
+│   Worker   │ ─────▸ │ Provisioner │ ────────▸ │  Host K8s    │
+│            │        │   :8002     │           │  API Server  │
+│            │        └─────────────┘           └──────┬───────┘
 └────────────┘                                          │ creates
                                                         │
                           ┌─────────────┐         ┌────▼─────┐
-                          │   Backend   │ ──────▸ │  Sandbox │
+                          │   Worker    │ ──────▸ │  Sandbox │
                           │ (NodePort   │ or DNS  │  Pod(s)  │
                           │  /ClusterIP)│         └──────────┘
                           └─────────────┘
@@ -20,17 +20,17 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ### How It Works
 
-1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
+1. **Worker Request**: When the Worker needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
    - HostPath volumes mounted for:
-     - `/mnt/skills/{public,custom,legacy}` → Read-only enabled-only skill projections
+     - `/mnt/skills` → Read-only access to public skills
      - `/mnt/user-data` → Read-write access to thread-specific data
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
 
-3. **Service Creation**: A Service is created to expose the Pod. By default this is a NodePort Service for Docker Compose compatibility. Set `SANDBOX_SERVICE_TYPE=ClusterIP` when the backend runs inside the Kubernetes cluster.
+3. **Service Creation**: A Service is created to expose the Pod. The secure application default is `ClusterIP`. Docker Compose explicitly sets `SANDBOX_SERVICE_TYPE=NodePort` because its backend runs outside the Kubernetes cluster.
 
 4. **Access URL**: In NodePort mode, the provisioner returns `http://{NODE_HOST}:{NodePort}`. In ClusterIP mode, it returns a Kubernetes service DNS URL like `http://sandbox-{sandbox_id}-svc.{namespace}.svc.cluster.local:8080`.
 
@@ -60,6 +60,11 @@ Host machine with a running Kubernetes cluster (Docker Desktop K8s, OrbStack, mi
 
 ## API Endpoints
 
+`GET /health` is public for service health checks. Every `/api/*` endpoint
+requires an `X-API-Key` header matching `PROVISIONER_API_KEY`. Authentication
+is fail-closed: if `PROVISIONER_API_KEY` is empty or unset, all control API
+requests return `401`.
+
 ### `GET /health`
 Health check endpoint.
 
@@ -83,12 +88,6 @@ Create a new sandbox Pod + Service.
 ```
 
 `user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
-
-When the Gateway mounts that same storage at its DeerFlow home and the PVC
-subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
-`config.yaml` to skip redundant upload-time sandbox acquire/sync. Leave the
-field unset when using unrelated storage or when the mount relationship is
-uncertain.
 
 **Response**:
 ```json
@@ -151,15 +150,14 @@ The provisioner is configured via environment variables (set in [docker-compose-
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
-| `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
-| `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
+| `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
-| `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root containing global and per-user `skills_view` projections |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
-| `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
+| `PROVISIONER_API_KEY` | empty (control API disabled) | Shared service key required by every `/api/*` request. Configure the same value as `sandbox.provisioner_api_key` in `config.yaml` |
+| `SANDBOX_SERVICE_TYPE` | `ClusterIP` | Service type for sandbox access. Docker Compose explicitly selects `NodePort`; keep `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
@@ -171,50 +169,15 @@ For persistent dependencies, build an image that extends the default `all-in-one
 
 See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
 
-### Lark CLI sandbox runtime (Pattern A)
+### Project user-data PVC
 
-Agents run `lark-cli` **inside** the sandbox, so the binary must exist in the
-sandbox container. Instead of the Gateway downloading Linux binaries from GitHub
-at install time and mounting them via hostPath/PVC, the provisioner can inject
-`lark-cli` with an **init container + shared `emptyDir`**:
-
-1. Publish a lark-cli init image (see [`docker/lark-cli-init`](../lark-cli-init/README.md))
-   and set `LARK_CLI_INIT_IMAGE` on the provisioner.
-2. When a sandbox is created with `provision_lark_cli_runtime: true` (the Gateway
-   sends this automatically once the managed Lark skill pack is installed), the
-   Pod gets a `lark-cli-runtime` `emptyDir`, an `lark-cli-init` init container
-   that copies the runtime into it, and a read-only runtime mount on the sandbox
-   container at `/mnt/integrations/lark-cli/runtime`. Any hostPath/PVC extra
-   mount at that path is dropped (the init container supersedes it); the per-user
-   `config`/`data` credential mounts are unchanged.
-
-`GET /api/capabilities` returns `{"lark_cli_init_image": true|false}` so the
-Gateway can surface a sandbox-runtime readiness signal in
-`/api/integrations/lark/status` — a green UI can't then hide a chat-time
-`lark-cli: command not found`.
-
-
-### PVC User-Data Upgrade Note
-
-Older provisioner versions mounted PVC user-data from `threads/{thread_id}/user-data`. The user-scoped layout mounts from `deer-flow/users/{user_id}/threads/{thread_id}/user-data`.
-
-If an existing deployment already has PVC-backed user-data under the legacy layout, migrate the DeerFlow data directory before relying on the new PVC subPath. Mount the same PVC path that the gateway uses as its DeerFlow base directory, then run the existing user-isolation migration script:
-
-```bash
-cd backend
-PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
-PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
-```
-
-This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
-
-In hostPath mode, the gateway materializes enabled-only views under `skills_view/public` and `users/{user_id}/skills_view/{custom,legacy}` beneath `DEER_FLOW_HOST_BASE_DIR`; the provisioner mounts those stable directories. When skills are materialized per thread on the same PVC, set `SKILLS_PVC_NAME` to that PVC and configure `SKILLS_PVC_SUBPATH_TEMPLATE=deer-flow/users/{user_id}/threads/{thread_id}/skills`. Leaving the template empty preserves the legacy behavior of mounting the skills PVC root at `/mnt/skills`. The gateway does not yet populate that PVC layout dynamically, so PVC-backed skills do not receive hostPath projection updates.
-
-**hostPath skills volumes require the gateway and the K8s node to see the same `DEER_FLOW_HOST_BASE_DIR`** (single-node deployment, or NFS/shared storage mounted at that path on every node). The gateway writes the projection there before every sandbox acquire, so as long as that path is shared, the directory the provisioner mounts always exists by the time the Pod is scheduled — even a boot-time rebuild failure for one user self-heals on their next acquire, before the provisioner is called. `skills-custom` and `skills-legacy` use hostPath type `Directory` (not `DirectoryOrCreate`): if the shared-storage assumption is violated — the gateway wrote to a different node than the one the Pod lands on — Pod creation now fails visibly instead of silently mounting an empty directory. Use `SKILLS_PVC_NAME` instead of hostPath for genuinely multi-node clusters without shared storage.
+Provisioner mounts only the server-issued project/owner/thread sandbox subpath.
+Do not derive PVC paths from client input or a default user. The M7 chart requires
+a freshly initialized PostgreSQL baseline before project-scoped PVCs are enabled.
 
 ### Important: K8S_API_SERVER Override
 
-If your kubeconfig uses `localhost`, `127.0.0.1`, or `0.0.0.0` as the API server address (common with OrbStack, minikube, kind), the provisioner **cannot** reach it from inside the Docker container. 
+If your kubeconfig uses `localhost`, `127.0.0.1`, or `0.0.0.0` as the API server address (common with OrbStack, minikube, kind), the provisioner **cannot** reach it from inside the Docker container.
 
 **Solution**: Set `K8S_API_SERVER` to use `host.docker.internal`:
 
@@ -234,7 +197,7 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
 
 ### Host Machine Requirements
 
-1. **Kubernetes Cluster**: 
+1. **Kubernetes Cluster**:
    - Docker Desktop with Kubernetes enabled, or
    - OrbStack (built-in K8s), or
    - minikube, kind, k3s, etc.
@@ -250,7 +213,7 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
      - Read Namespaces (to create `deer-flow` if missing)
 
 4. **Host Paths**:
-   - `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
+   - The `SKILLS_HOST_PATH` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
    - These paths are mounted into sandbox Pods via K8s HostPath volumes
    - The paths must exist and be readable by the K8s node
 
@@ -281,32 +244,41 @@ curl http://localhost:8002/health
 
 # Create a sandbox (via provisioner container for internal DNS)
 docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"sandbox_id":"test-001","thread_id":"thread-001","user_id":"user-001"}'
 
 # Check sandbox status
-docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
+docker exec deer-flow-provisioner curl \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes/test-001
 
 # List all sandboxes
-docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes
+docker exec deer-flow-provisioner curl \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes
 
 # Verify Pod and Service in K8s
 kubectl get pod,svc -n deer-flow -l sandbox-id=test-001
 
 # Delete sandbox
-docker exec deer-flow-provisioner curl -X DELETE http://localhost:8002/api/sandboxes/test-001
+docker exec deer-flow-provisioner curl -X DELETE \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes/test-001
 ```
 
-### Verify from Backend Containers
+### Verify from the Worker Container
 
-Once a sandbox is created, the backend containers (gateway, langgraph) can access it:
+Once a sandbox is created, the Worker can access it:
 
 ```bash
 # Get sandbox URL from provisioner
-SANDBOX_URL=$(docker exec deer-flow-provisioner curl -s http://localhost:8002/api/sandboxes/test-001 | jq -r .sandbox_url)
+SANDBOX_URL=$(docker exec deer-flow-provisioner curl -s \
+  -H "X-API-Key: ${PROVISIONER_API_KEY}" \
+  http://localhost:8002/api/sandboxes/test-001 | jq -r .sandbox_url)
 
-# Test from gateway container
-docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
+# Test from Worker container
+docker exec deer-flow-worker curl -s $SANDBOX_URL/v1/sandbox
 ```
 
 ## Troubleshooting
@@ -315,7 +287,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 **Cause**: The kubeconfig file doesn't exist at the mounted path.
 
-**Solution**: 
+**Solution**:
 - Ensure `~/.kube/config` exists on your host machine
 - Run `kubectl config view` to verify
 - Check the volume mount in docker-compose-dev.yaml
@@ -351,8 +323,8 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 **Cause**: HostPath volumes contain invalid paths (e.g., relative paths with `..`).
 
-**Solution**: 
-- Use absolute paths for `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH`
+**Solution**:
+- Use absolute paths for `SKILLS_HOST_PATH` and `THREADS_HOST_PATH`
 - Verify the paths exist on your host machine:
   ```bash
   ls -la /path/to/skills

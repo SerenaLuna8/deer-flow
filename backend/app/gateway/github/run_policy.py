@@ -110,14 +110,6 @@ def register_policy() -> None:
         # win (read in ChannelManager._resolve_run_params from msg.metadata).
         default_recursion_limit=250,
         credentials_provider=inject_github_credentials,
-        # GitHub deliveries are HMAC-authenticated at the webhook route,
-        # and the binding from "sender" to DeerFlow user is encoded in
-        # the agent's config.yaml ownership (not in the channel-connections
-        # table). There is no per-sender /connect handshake — opting out
-        # of the bound-identity gate is what lets webhook events reach
-        # the agent even when channel_connections.enabled=True for
-        # interactive IM channels in the same deployment.
-        requires_bound_identity=False,
         # GitHub agents post their own outbound to the issue/PR via the
         # ``gh`` CLI in the sandbox; the channel's ``send`` is log-only
         # by design. We don't need to keep an HTTP stream open on
@@ -129,15 +121,6 @@ def register_policy() -> None:
         # still raised synchronously by ``start_run`` before the run is
         # accepted, so the busy-thread path is preserved.
         fire_and_forget=True,
-        # GitHub's ``send`` is log-only (agents post via ``gh`` themselves),
-        # so a busy-thread ``THREAD_BUSY_MESSAGE`` is otherwise invisible to
-        # the commenter — a concurrent comment is silently dropped from
-        # their point of view (issue #4121). Buffering + draining follow-ups
-        # once the busy run ends directly fixes that for the one channel
-        # where it is a real, routinely-triggered problem; other
-        # fire_and_forget channels keep the dataclass default (False) until
-        # they have the same log-only-send shape and opt in explicitly.
-        buffer_followups_on_busy=True,
     )
 
 

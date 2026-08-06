@@ -10,6 +10,7 @@ from typing import Any, cast
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import (
     InboundMessage,
     InboundMessageType,
@@ -17,6 +18,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ class WeComChannel(Channel):
         ws_manager = getattr(self._ws_client, "_ws_manager", None)
         send_reply = getattr(ws_manager, "send_reply", None)
         if not callable(send_reply):
-            raise RuntimeError("Installed wecom-aibot-python-sdk does not expose the WebSocket media upload API expected by DeerFlow. Use wecom-aibot-python-sdk==0.1.6 or update the adapter.")
+            raise RuntimeError("Installed wecom-aibot-python-sdk does not expose the WebSocket media upload API expected by ActWeave. Use wecom-aibot-python-sdk==0.1.6 or update the adapter.")
 
         send_reply_async = cast(Callable[[str, dict[str, Any], str], Awaitable[dict[str, Any]]], send_reply)
         return await send_reply_async(req_id, body, cmd)
@@ -134,7 +136,9 @@ class WeComChannel(Channel):
         logger.warning("[WeCom] send called but WebSocket client is not available")
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
-        if msg.channel_name != self.name:
+        if msg.channel_name != self.name or msg.channel_instance_id != self.channel_instance_id:
+            return
+        if not await self._has_instance_authority():
             return
 
         try:
@@ -146,6 +150,8 @@ class WeComChannel(Channel):
             return
 
         for attachment in msg.attachments:
+            if not await self._has_instance_authority():
+                return
             try:
                 success = await self.send_file(msg, attachment)
                 if not success:
@@ -282,6 +288,8 @@ class WeComChannel(Channel):
     ) -> None:
         if not self._ws_client:
             return
+        if not await self._has_instance_authority():
+            return
         try:
             from aibot import generate_req_id
         except Exception:
@@ -311,6 +319,7 @@ class WeComChannel(Channel):
             text=text,
             msg_type=inbound_type,
             thread_ts=msg_id,
+            provider_delivery_id=str(msg_id),
             files=files or [],
             metadata={
                 "aibotid": body.get("aibotid"),
@@ -338,17 +347,14 @@ class WeComChannel(Channel):
             repo=self._connection_repo,
             provider="wecom",
             workspace_id=str(inbound.metadata.get("aibotid") or "") or None,
-            fallback_without_workspace=True,
         )
 
     async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
-            return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
-        if state is None:
-            await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+        if not await self._has_instance_authority():
             return True
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
+            return False
 
         if not user_id:
             await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
@@ -356,18 +362,41 @@ class WeComChannel(Channel):
 
         body = frame.get("body", {}) or {}
         workspace_id = str(body.get("aibotid") or "") or None
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="wecom",
-            external_account_id=user_id,
-            workspace_id=workspace_id,
-            metadata={
-                "aibotid": workspace_id,
-                "chattype": body.get("chattype"),
-            },
-            status="connected",
-        )
-        await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")
+        metadata = {"aibotid": workspace_id, "chattype": body.get("chattype")}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "wecom",
+                    code,
+                    user_id,
+                    workspace_id,
+                    channel_instance_id=self.channel_instance_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+                return True
+        else:
+            instance_id = persisted_channel_instance_id("wecom", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="wecom",
+                channel_instance_id=instance_id,
+                state=code,
+            )
+            if state is None:
+                await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="wecom",
+                channel_instance_id=instance_id,
+                external_account_id=user_id,
+                workspace_id=workspace_id,
+                metadata=metadata,
+                status="connected",
+            )
+        await self._send_connection_reply(frame, "WeCom connected to ActWeave.")
         return True
 
     async def _send_connection_reply(self, frame: dict[str, Any], text: str) -> None:

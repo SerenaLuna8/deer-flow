@@ -55,14 +55,15 @@ Fixes #
 ## Validation
 
 <!-- What you actually ran. Run at least the checks for the area you changed:
-       Backend:   cd backend  && make lint && make test
-       Frontend:  cd frontend && pnpm format && pnpm lint && pnpm typecheck && BETTER_AUTH_SECRET=local-dev-secret pnpm build && make test
-       Frontend E2E (if you touched frontend/): cd frontend && make test-e2e -->
+       Backend lint: cd backend && make lint
+       Backend core: POSTGRES_TEST_URL=... make test  (from repository root)
+       Frontend: cd frontend && pnpm format && pnpm check && pnpm test
+       Frontend E2E: cd frontend && pnpm test:e2e && pnpm test:e2e:static -->
 
 
 ## AI assistance
 
-<!-- DeerFlow is an AI project — most PRs here use AI coding tools, and that's
+<!-- ActWeave is an AI project — most PRs here use AI coding tools, and that's
      welcome. Disclosing it just helps reviewers calibrate how closely to read the
      diff. Please fill all three; don't delete the section. -->
 
@@ -72,4 +73,3 @@ Fixes #
      "AI wrote tests, I wrote the impl". A prompt or conversation link is great too. -->
 
 - [ ] I've read and understand every line of this change and take responsibility for it — it's not unreviewed AI output.
-

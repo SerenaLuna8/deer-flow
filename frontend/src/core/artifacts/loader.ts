@@ -1,43 +1,29 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
+import { throwGatewayApiError } from "@/core/api/errors";
+import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
-import { urlOfArtifact } from "./utils";
-
-async function sha256OfText(content: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(content),
-  );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-}
-
 export async function loadArtifactContent({
-  filepath,
-  threadId,
-  isMock,
+  url,
+  signal,
 }: {
   filepath: string;
-  threadId: string;
-  isMock?: boolean;
+  url: string;
+  signal?: AbortSignal;
 }) {
-  let enhancedFilepath = filepath;
-  if (filepath.endsWith(".skill")) {
-    enhancedFilepath = filepath + "/SKILL.md";
-  }
-  const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
-  const response = await fetch(url, { cache: "no-store" });
+  // Project file URLs are authority-bearing UUID endpoints. Fetch the exact
+  // URL; packaged `.skill` archives are download-only and have no member route.
+  const response = signal
+    ? await fetchWithAuth(url, { signal })
+    : await fetchWithAuth(url);
   if (!response.ok) {
-    throw new Error(`Failed to load artifact: HTTP ${response.status}`);
+    await throwGatewayApiError(response, "Failed to load artifact content");
   }
   const text = await response.text();
-  const etag = response.headers.get("etag");
-  const sha256 =
-    etag?.match(/^"([0-9a-f]{64})"$/)?.[1] ?? (await sha256OfText(text));
-  return { content: text, url, sha256 };
+  return { content: text, url };
 }
 
 export function loadArtifactContentFromToolCall({

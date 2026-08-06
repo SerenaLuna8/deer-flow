@@ -6,12 +6,9 @@ Pure data classes and decorators — no I/O, no side effects.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from langchain.agents.middleware import AgentMiddleware
-
-if TYPE_CHECKING:
-    from deerflow.config.memory_config import MemoryConfig
 
 
 @dataclass
@@ -23,15 +20,12 @@ class RuntimeFeatures:
     - ``False``: disable
     - An ``AgentMiddleware`` instance: use this custom implementation instead
 
-    ``summarization`` and ``guardrail`` have no built-in default — they only
+    ``memory``, ``summarization``, and ``guardrail`` have no built-in default — they only
     accept ``False`` (disable) or an ``AgentMiddleware`` instance (custom).
     """
 
     sandbox: bool | AgentMiddleware = True
-    memory: bool | AgentMiddleware = False
-    # Explicit memory config for direct create_deerflow_agent(features=...) callers.
-    # The lead-agent AppConfig path passes resolved_app_config.memory directly.
-    memory_config: MemoryConfig | None = None
+    memory: Literal[False] | AgentMiddleware = False
     summarization: Literal[False] | AgentMiddleware = False
     subagent: bool | AgentMiddleware = False
     vision: bool | AgentMiddleware = False

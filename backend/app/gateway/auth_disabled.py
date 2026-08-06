@@ -50,7 +50,7 @@ def get_auth_disabled_user():
         id=AUTH_DISABLED_USER_ID,
         email=AUTH_DISABLED_USER_EMAIL,
         password_hash=None,
-        system_role="admin",
+        system_role="system_admin",
         needs_setup=False,
         token_version=0,
         oauth_provider=None,

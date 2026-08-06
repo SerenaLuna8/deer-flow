@@ -13,15 +13,21 @@ export interface Translations {
     delete: string;
     edit: string;
     rename: string;
-    renameFailed: string;
     share: string;
     openInNewWindow: string;
     close: string;
     more: string;
     search: string;
     loadMore: string;
+    reload: string;
+    retry: string;
+    historyLoadFailed: string;
     download: string;
+    file: string;
     thinking: string;
+    thinkingProcess: string;
+    thinkingInProgress: (seconds?: number) => string;
+    thoughtFor: (seconds?: number) => string;
     artifacts: string;
     public: string;
     custom: string;
@@ -40,19 +46,18 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
-    exportFailed: string;
     regenerate: string;
     editAndRerun: string;
     updateAndRerun: string;
     editRerunWarning: string;
     branch: string;
     showArtifacts: string;
-    browser: string;
-    showBrowser: string;
+    feedbackHelpful: string;
+    feedbackNotHelpful: string;
+    feedbackSaveFailed: string;
   };
 
   runDuration: {
-    reasoning: string;
     working: string;
     completedIn: (duration: string) => string;
     description: string;
@@ -84,19 +89,6 @@ export interface Translations {
     linkCopied: string;
   };
 
-  artifactEditing: {
-    unsaved: string;
-    saving: string;
-    saved: string;
-    exit: string;
-    discard: string;
-    discardChanges: string;
-    conflict: string;
-    conflictShort: string;
-    runInProgress: string;
-    saveFailed: string;
-  };
-
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;
@@ -122,14 +114,12 @@ export interface Translations {
     largeUnavailable: string;
     sensitiveUnavailable: string;
     truncatedUnavailable: string;
-    symlinkUnavailable: string;
     truncatedSummary: string;
   };
 
   // Input Box
   inputBox: {
     placeholder: string;
-    disclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
     inputPolish: string;
@@ -141,7 +131,6 @@ export interface Translations {
     voiceInputStartLabel: string;
     voiceInputStopLabel: string;
     voiceInputStart: string;
-    voiceInputStop: string;
     voiceInputListening: string;
     voiceInputUnsupported: string;
     voiceInputPermissionDenied: string;
@@ -150,6 +139,8 @@ export interface Translations {
     voiceInputNetworkError: string;
     voiceInputNoSpeech: string;
     voiceInputFailed: string;
+    model: string;
+    agentModelLocked: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -159,15 +150,6 @@ export interface Translations {
     proModeDescription: string;
     ultraMode: string;
     ultraModeDescription: string;
-    reasoningEffort: string;
-    reasoningEffortMinimal: string;
-    reasoningEffortMinimalDescription: string;
-    reasoningEffortLow: string;
-    reasoningEffortLowDescription: string;
-    reasoningEffortMedium: string;
-    reasoningEffortMediumDescription: string;
-    reasoningEffortHigh: string;
-    reasoningEffortHighDescription: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
@@ -179,6 +161,9 @@ export interface Translations {
     suggestionPlaceholderRequired: string;
     goalCommandDescription: string;
     compactCommandDescription: string;
+    dreamCommandDescription: string;
+    dreamLogCommandDescription: string;
+    dreamRestoreCommandDescription: string;
     goalLabel: string;
     goalContinuing: string;
     goalContinuationTooltip: string;
@@ -187,11 +172,24 @@ export interface Translations {
     goalNone: string;
     goalActive: string;
     goalFailed: string;
-    goalTooLong: string;
-    goalLengthCounter: string;
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
+    dreamQueued: string;
+    dreamAlreadyRunning: string;
+    dreamNothingPending: string;
+    dreamInvalidArguments: string;
+    dreamLogInvalidArguments: string;
+    dreamRestoreInvalidArguments: string;
+    dreamAttachmentsUnsupported: string;
+    dreamFailed: string;
+    dreamRequiresThread: string;
+    dreamRouteUnavailable: string;
+    dreamRestoreSuccess: string;
+    dreamRestoreFailed: string;
+    dreamRestoreConfirmTitle: string;
+    dreamRestoreConfirmDescription: string;
+    dreamRestoreConfirmAction: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -222,8 +220,985 @@ export interface Translations {
     channels: string;
   };
 
+  project: {
+    audit: string;
+    automations: string;
+    usage: string;
+    governance: {
+      retry: string;
+      tokenSeries: {
+        title: string;
+        description: string;
+        loading: string;
+        unavailableTitle: string;
+        unavailableDescription: string;
+        emptyTitle: string;
+        emptyDescription: string;
+        window: string;
+        settlementNote: string;
+        interactionHint: string;
+        chartLabel: string;
+        tableCaption: string;
+        bucket: string;
+      };
+      usage: {
+        title: string;
+        description: string;
+        loading: string;
+        unavailableTitle: string;
+        unavailableDescription: string;
+        thresholdReached: string;
+        used: string;
+        reserved: string;
+        limit: string;
+        tightenTitle: string;
+        updateError: string;
+        saving: string;
+        save: string;
+        dimensions: {
+          members: string;
+          storage_bytes: string;
+          concurrent_runs: string;
+          mcp_calls_daily: string;
+        };
+      };
+      audit: {
+        title: string;
+        description: string;
+        loading: string;
+        unavailableTitle: string;
+        unavailableDescription: string;
+        emptyTitle: string;
+        emptyDescription: string;
+        olderEvents: string;
+      };
+    };
+  };
+
+  adminOperations: {
+    shellTitle: string;
+    shellDescription: string;
+    signOut: string;
+    retry: string;
+    gatewayUnavailable: {
+      title: string;
+      description: string;
+      reload: string;
+    };
+    ui: {
+      navigationGroups: {
+        operations: string;
+        governance: string;
+      };
+      skipToContent: string;
+      close: string;
+      backToWorkspace: string;
+      expandNavigation: string;
+      collapseNavigation: string;
+      previousPage: string;
+      page: (page: number) => string;
+      copy: string;
+      copied: string;
+      platformHealthy: string;
+      publicErrorCode: string;
+      eventId: string;
+      jobId: string;
+      clearFilters: string;
+    };
+    navigation: {
+      label: string;
+      overview: string;
+      projects: string;
+      jobs: string;
+      audit: string;
+      assets: string;
+      systemSettings: string;
+      settings: string;
+    };
+    overview: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      readiness: {
+        title: string;
+        workerCount: string;
+        workerCapacity: string;
+        oldestHeartbeat: string;
+        schedulerOwnership: string;
+        secondsAgo: string;
+        notReported: string;
+        states: {
+          ready: string;
+          degraded: string;
+          closed: string;
+          unavailable: string;
+          disabled: string;
+          polling: string;
+          owned: string;
+          unowned: string;
+          ownership_lost: string;
+          unknown: string;
+        };
+        components: {
+          database: string;
+          schema: string;
+          worker_fleet: string;
+          scheduler: string;
+          stream: string;
+          quota: string;
+          audit: string;
+        };
+      };
+      channels: {
+        title: string;
+        emptyTitle: string;
+        empty: string;
+        checkedAt: string;
+      };
+      counts: {
+        projects: string;
+        suspendedProjects: string;
+        queuedJobs: string;
+        runningJobs: string;
+        deadJobs: string;
+      };
+      usage: {
+        title: string;
+        members: string;
+        storage_bytes: string;
+        concurrent_runs: string;
+        mcp_calls_daily: string;
+        used: string;
+        reserved: string;
+      };
+    };
+    projects: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      older: string;
+      suspended: string;
+      active: string;
+      pendingDeletion: string;
+      details: string;
+      fields: {
+        projectId: string;
+        slug: string;
+        createdAt: string;
+        updatedAt: string;
+        deletionAt: string;
+      };
+      filters: {
+        query: string;
+        queryPlaceholder: string;
+        status: string;
+        suspension: string;
+        notSuspended: string;
+        all: string;
+        apply: string;
+        clear: string;
+        invalid: string;
+      };
+      actions: {
+        governAssets: string;
+        suspend: string;
+        resume: string;
+        pending: string;
+        error: string;
+        confirmSuspendTitle: string;
+        confirmSuspendDescription: string;
+        confirmResumeTitle: string;
+        confirmResumeDescription: string;
+        cancel: string;
+        confirm: string;
+      };
+    };
+    jobs: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      older: string;
+      requeue: string;
+      requeueing: string;
+      requeueError: string;
+      copyProjectId: string;
+      projectIdCopied: string;
+      statuses: {
+        queued: string;
+        leased: string;
+        running: string;
+        retry_wait: string;
+        succeeded: string;
+        failed: string;
+        cancelled: string;
+        dead: string;
+      };
+      types: {
+        private_run: string;
+        automation_run: string;
+        retention_purge: string;
+        mcp_discovery: string;
+        memory_dream: string;
+      };
+      retrySafety: {
+        safe: string;
+        unsafe: string;
+        unknown: string;
+      };
+      filters: {
+        label: string;
+        project: string;
+        projectQuery: string;
+        projectQueryPlaceholder: string;
+        status: string;
+        type: string;
+        allStatuses: string;
+        allTypes: string;
+        apply: string;
+        clear: string;
+        invalidQuery: string;
+      };
+    };
+    audit: {
+      title: string;
+      description: string;
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      older: string;
+    };
+  };
+
+  adminAssets: {
+    navigation: {
+      platformLabel: string;
+      projectLabel: string;
+      agent: string;
+      skill: string;
+      mcp: string;
+      credential: string;
+    };
+    shell: {
+      platformAria: string;
+      systemCatalog: string;
+      systemCatalogDescription: string;
+      adminScope: string;
+      projectAria: string;
+      backToProjects: string;
+      projectGovernance: string;
+      projectBoundary: string;
+      projectId: string;
+    };
+    common: {
+      assetVersion: string;
+      versionId: string;
+      mcpConfigurationId: string;
+      currentPublishedVersion: string;
+      currentPublishedMcpConfiguration: string;
+      updatedAt: string;
+      versionHistory: string;
+      mcpConfigurationHistory: string;
+      versionCount: (count: number) => string;
+      mcpConfigurationCount: (count: number) => string;
+      credentialMetadata: string;
+      details: string;
+      dangerZone: string;
+      type: string;
+      credentialTypes: {
+        modelApiKey: string;
+        apiKey: string;
+        token: string;
+        mcpAuth: string;
+        oauth: string;
+        database: string;
+      };
+      transportTypes: {
+        stdio: string;
+        sse: string;
+        http: string;
+      };
+      credentialPayloadGroups: {
+        env: string;
+        headers: string;
+        query: string;
+        oauth: string;
+      };
+      metadataVersion: string;
+      replaceCredential: string;
+      migrateReferences: string;
+      revokeCredential: string;
+      delete: string;
+      createCredential: string;
+      createProjectCredential: string;
+      createProjectAsset: string;
+      retry: string;
+      retrying: string;
+      create: string;
+      creating: string;
+      createVersion: string;
+      creatingVersion: string;
+      reload: string;
+      systemProvided: string;
+      projectOwned: string;
+      active: string;
+      revoked: string;
+      loading: string;
+      migrationSuccess: string;
+      credentialRotationNote: string;
+      historySchemaUnavailable: string;
+    };
+    status: {
+      active: string;
+      archived: string;
+      suspended: string;
+      draft: string;
+      pending_approval: string;
+      published: string;
+      rejected: string;
+      retired: string;
+      revoked: string;
+    };
+    mcpToolInventory: {
+      title: string;
+      description: string;
+      toolCount: (count: number) => string;
+      loading: string;
+      unpublished: string;
+      neverDiscovered: string;
+      testing: string;
+      catalogInvalid: string;
+      discoveryUnavailable: string;
+      stale: string;
+      refreshFailed: string;
+      degradedSuffix: string;
+      empty: string;
+      lastSuccess: string;
+      noDescription: string;
+      testService: string;
+      retestService: string;
+      testingAction: string;
+      testFailurePrefix: string;
+      loadErrors: {
+        notFound: string;
+        forbidden: string;
+        authRequired: string;
+        responseInvalid: string;
+        network: string;
+        generic: string;
+      };
+      testErrors: {
+        notFound: string;
+        forbidden: string;
+        authRequired: string;
+        conflict: string;
+        network: string;
+        generic: string;
+      };
+    };
+    pages: {
+      systemEyebrow: string;
+      databaseCatalog: string;
+      runtimeReadOnly: string;
+      controlledWrite: string;
+      loading: string;
+      loadFailed: string;
+      systemCount: (count: number) => string;
+      credentialCount: (count: number) => string;
+      systemNote: (kind: string) => string;
+      emptySystem: (kind: string) => string;
+      emptyCreate: string;
+      system: {
+        agentsTitle: string;
+        agentsDescription: string;
+        skillsTitle: string;
+        skillsDescription: string;
+        mcpTitle: string;
+        mcpDescription: string;
+        credentialsTitle: string;
+        credentialsDescription: string;
+      };
+      projectEyebrow: string;
+      projectDatabaseCatalog: string;
+      sharedOnly: string;
+      projectLoadFailed: string;
+      sourceCounts: (systemCount: number, projectCount: number) => string;
+      project: {
+        agentsTitle: string;
+        agentsDescription: string;
+        skillsTitle: string;
+        skillsDescription: string;
+        mcpTitle: string;
+        mcpDescription: string;
+        credentialsTitle: string;
+        credentialsDescription: string;
+      };
+    };
+    catalog: {
+      systemAssets: string;
+      systemAssetsDescription: string;
+      searchPlaceholder: string;
+      filterAll: string;
+      catalogReady: string;
+      catalogReadyDetail: string;
+      totalAssets: string;
+      activeAssets: string;
+      unpublishedAssets: string;
+      latestUpdate: string;
+      noUpdate: string;
+      publicationFilter: string;
+      publicationAll: string;
+      publishedOnly: string;
+      unpublishedOnly: string;
+      updatedSort: string;
+      newestFirst: string;
+      oldestFirst: string;
+      identifier: string;
+      source: string;
+      systemCatalogSource: string;
+      lifecycleStatus: string;
+      publicationStatus: string;
+      published: string;
+      assetRevision: string;
+      actions: string;
+      viewDetails: string;
+      refresh: string;
+      refreshing: string;
+      resultRange: (from: number, to: number, total: number) => string;
+      page: (page: number, totalPages: number) => string;
+      previousPage: string;
+      nextPage: string;
+      noResults: string;
+      noSystemAssets: string;
+      system: string;
+      systemPublishStatus: string;
+      pinnedVersion: string;
+      bindingStatus: string;
+      bindingRevision: string;
+      publishedAvailable: string;
+      unpublished: string;
+      enabledAndPinned: string;
+      closed: string;
+      notBound: string;
+      enabled: string;
+      none: string;
+      manageBinding: string;
+      projectAssets: string;
+      projectAgentDescription: string;
+      projectVersionedDescription: string;
+      noProjectAssets: string;
+      project: string;
+      publishStatus: string;
+      createNewVersion: string;
+      credentialSource: string;
+      systemCredentials: string;
+      projectCredentials: string;
+      emptyCredentials: (title: string) => string;
+      waitingForAdmin: string;
+      archive: string;
+      activate: string;
+      disable: string;
+      suspend: string;
+    };
+    version: {
+      none: string;
+      mcpNone: string;
+      selectHint: string;
+      number: (number: number) => string;
+      mcpNumber: (number: number) => string;
+      publish: string;
+      publishMcp: string;
+      submit: string;
+      approve: string;
+      approveMcp: string;
+      configureGrants: string;
+    };
+    diff: {
+      payloadChecksum: string;
+      description: string;
+      model: string;
+      toolGroups: string;
+      skillVersions: string;
+      mcpVersions: string;
+      compatibility: string;
+      scanDecision: string;
+      scanAllow: string;
+      scanWarn: string;
+      scanBlock: string;
+      scanRules: string;
+      files: string;
+      credentialRequirements: string;
+      transport: string;
+      command: string;
+      url: string;
+      arguments: string;
+      timeout: string;
+      credentialSlots: string;
+      status: string;
+      payloadSchemaVersion: string;
+      payloadFields: string;
+      optional: string;
+      required: string;
+      noDescription: string;
+      seconds: (seconds: number) => string;
+      noChanges: string;
+      field: string;
+      previous: string;
+      current: string;
+      previousMcpConfiguration: string;
+      currentMcpConfiguration: string;
+    };
+    runtime: {
+      unsupportedProjectTransport: string;
+      unsupportedSystemTransport: string;
+      missingProjectUrl: string;
+      invalidProjectUrl: string;
+      projectOAuth: string;
+      projectHeadersOnly: string;
+      missingSystemCommand: string;
+      missingSystemUrl: string;
+      systemEnvOnly: string;
+      systemRemoteCredentialsOnly: string;
+    };
+    dialogs: {
+      createAssetTitle: (kind: string) => string;
+      skillCreationDescription: string;
+      assetCreationDescription: (scope: "system" | "project") => string;
+      addMcpTitle: string;
+      addMcpDescription: string;
+      addMcpSubmit: string;
+      addAndPublish: string;
+      addAndApprove: string;
+      addAndSubmitApproval: string;
+      retryMcpApproval: string;
+      mcpSavedApprovalFailed: string;
+      mcpSavedRetryApprovalOnly: string;
+      addingMcp: string;
+      editMcpConfigTitle: string;
+      saveMcpConfig: string;
+      saveAndPublishMcpConfig: string;
+      saveAndApproveMcpConfig: string;
+      saveAndSubmitMcpConfig: string;
+      savingMcpConfig: string;
+      name: string;
+      assetSlug: string;
+      slugTitle: string;
+      slugHelp: string;
+      filePath: string;
+      mediaType: string;
+      fileContent: string;
+      skillTemplateDescription: string;
+      skillTemplateInstructions: string;
+      description: string;
+      transport: string;
+      sseTransport: string;
+      httpTransport: string;
+      mcpServiceUrl: string;
+      urlQueryRemoved: string;
+      authentication: string;
+      headerAuthentication: string;
+      queryAuthentication: string;
+      noAuthentication: string;
+      noAuthenticationHelp: string;
+      connectionAndAuthentication: string;
+      needsProjectCredential: string;
+      slotName: string;
+      slotNameTitle: string;
+      slotNameHelp: string;
+      purpose: string;
+      credentialFieldGroup: string;
+      requiredFields: string;
+      requiredFieldsHelp: string;
+      requestHeaderName: string;
+      queryParameterName: string;
+      credentialFieldNameTitle: string;
+      credentialFieldNameHelp: string;
+      queryGroup: string;
+      unsupportedMcpTransport: string;
+      missingMcpUrl: string;
+      invalidMcpUrl: string;
+      mcpUrlQuery: string;
+      unsupportedMcpCredentialGroup: string;
+      missingMcpCredentialSlotName: string;
+      missingMcpCredentialFields: string;
+      missingMcpHeaderName: string;
+      missingMcpQueryName: string;
+      invalidMcpCredentialFieldName: string;
+      projectCredential: string;
+      createProjectCredential: string;
+      credentialSelectedByAdmin: string;
+      noCompatibleCredential: string;
+      compatibleCredentialsOnly: string;
+      credentialFieldsMatch: string;
+      adminCompletesApproval: string;
+      safetyPreview: string;
+      configurationPreviewReadonly: string;
+      serviceAddress: string;
+      waitingForServiceAddress: string;
+      pendingCredentialSelection: string;
+      encryptedRead: string;
+      secretNeverDisplayed: string;
+      credentialSource: string;
+      encryptedProjectCredential: string;
+      publicationStatus: string;
+      publishOnSave: string;
+      publishAfterApproval: string;
+      publicationFlow: string;
+      saveMcpStep: string;
+      saveMcpStepDetail: string;
+      selectCredentialStep: string;
+      selectCredentialStepDetail: string;
+      approvePublishStep: string;
+      approvePublishStepDetail: string;
+      approvalRunsAfterSave: string;
+      createVersionTitle: (kind: string) => string;
+      secretCreateTitle: string;
+      secretReplaceTitle: string;
+      secretDescription: string;
+      credentialSlug: string;
+      credentialFields: string;
+      credentialFieldsHelp: string;
+      fixedCredentialFieldsHelp: string;
+      addField: string;
+      group: string;
+      envGroup: string;
+      headersGroup: string;
+      fieldName: string;
+      credentialValue: string;
+      removeField: (index: number) => string;
+      remove: string;
+      writing: string;
+      encryptWrite: string;
+      validation: {
+        emptyFields: string;
+        unsupportedGroup: string;
+        emptyField: string;
+        fieldTooLong: string;
+        duplicateField: string;
+        emptyValue: string;
+      };
+      revokeTitle: string;
+      revokeDescription: (name: string) => string;
+      cancel: string;
+      revoking: string;
+      confirmRevoke: string;
+      migrateTitle: string;
+      migrateDescription: (name: string) => string;
+      migrating: string;
+      confirmMigrate: string;
+      deleteTitle: string;
+      deleteDescription: (name: string) => string;
+      deleting: string;
+      confirmDeleteCountdown: (seconds: number) => string;
+      confirmDelete: string;
+      binding: {
+        switchTitle: string;
+        enableTitle: string;
+        description: (name: string) => string;
+        selectPublished: string;
+        selectPublishedAria: string;
+        selectPlaceholder: string;
+        unavailableSuffix: string;
+        noBindableVersions: string;
+        currentProject: (version: string) => string;
+        notEnabled: string;
+        disable: string;
+        enable: string;
+        rollback: string;
+        switchVersion: string;
+      };
+      approval: {
+        configureTitle: string;
+        configureDescription: string;
+        saveGrants: string;
+        configureEmptyOptional: string;
+        clearOptionalGrant: string;
+        publishTitle: string;
+        publishDescription: string;
+        approve: string;
+        publishEmptyOptional: string;
+        selectCredential: string;
+        currentVersion: string;
+        loadingCredentials: string;
+        credentialsFailed: string;
+        requiredUnavailable: string;
+      };
+    };
+    rotation: {
+      title: string;
+      summary: (current: number, total: number) => string;
+      current: string;
+      pending: (count: number) => string;
+    };
+    errors: {
+      notFound: string;
+      forbidden: string;
+      conflict: string;
+      validationFailed: string;
+      mcpVersionValidation: string;
+      mcpCredentialMismatch: string;
+      storageQuota: string;
+      storageUnavailable: string;
+      authRequired: string;
+      network: string;
+      invalidResponse: string;
+      invalidErrorResponse: string;
+      fallback: string;
+    };
+  };
+
+  adminModelSettings: {
+    header: {
+      eyebrow: string;
+      title: string;
+      description: string;
+      create: string;
+    };
+    overview: {
+      label: string;
+      configured: string;
+      configuredDetail: string;
+      active: string;
+      activeDetail: string;
+      defaultModel: string;
+      defaultDetail: string;
+      notSet: string;
+      revision: string;
+      revisionDetail: string;
+    };
+    states: {
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      retry: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      catalogLabel: string;
+      catalogDescription: string;
+      modelCount: (count: number) => string;
+    };
+    card: {
+      defaultModel: string;
+      active: string;
+      suspended: string;
+      updatedAt: (formattedDate: string) => string;
+      updatedAtColumn: string;
+      providerModel: string;
+      credential: string;
+      environmentKey: string;
+      status: string;
+      version: string;
+      versionMeta: (
+        versionNumber: number,
+        revision: number,
+        sortOrder: number,
+      ) => string;
+      capabilities: string;
+      noCapabilities: string;
+      thinking: string;
+      reasoningEffort: string;
+      vision: string;
+      edit: string;
+      pause: string;
+      enable: string;
+      currentDefault: string;
+      setDefault: string;
+      actions: string;
+      actionFor: (action: string, name: string) => string;
+      defaultCannotPause: string;
+      credentialUnbound: string;
+      credentialUnavailable: string;
+      credentialHistorical: string;
+    };
+    adapters: {
+      patchedOpenAI: string;
+      patchedDeepSeek: string;
+      patchedMiMo: string;
+      patchedMiniMax: string;
+      patchedStepFun: string;
+    };
+    editor: {
+      editTitle: string;
+      createTitle: string;
+      description: string;
+      basicInformation: string;
+      basicDescription: string;
+      logicalName: string;
+      displayName: string;
+      displayNamePlaceholder: string;
+      providerAdapter: string;
+      providerModel: string;
+      status: string;
+      active: string;
+      suspended: string;
+      modelDescription: string;
+      modelDescriptionPlaceholder: string;
+      sortOrder: string;
+      sortOrderHint: string;
+      capabilities: string;
+      capabilitiesAndRuntime: string;
+      capabilitiesDescription: string;
+      supportsThinking: string;
+      supportsReasoningEffort: string;
+      supportsVision: string;
+      commonProviderSettings: string;
+      commonProviderSettingsDescription: string;
+      baseUrl: string;
+      baseUrlHint: string;
+      temperature: string;
+      maxTokens: string;
+      requestTimeout: string;
+      maxRetries: string;
+      credentialBinding: string;
+      credentialBindingDescription: string;
+      systemCredential: string;
+      credentialsUnavailableHint: string;
+      credentialSelectionHint: string;
+      selectCredential: string;
+      providerDoesNotUseCredential: string;
+      environmentKey: string;
+      environmentKeyHint: string;
+      testConnection: string;
+      testingConnection: string;
+      testConnectionDescription: string;
+      connectionSucceeded: string;
+      connectionFailed: string;
+      advancedJson: string;
+      advancedJsonHint: string;
+      cancel: string;
+      saving: string;
+      saveChanges: string;
+      createModel: string;
+    };
+    validation: {
+      invalidNumber: (label: string) => string;
+      temperature: string;
+      maxTokens: string;
+      requestTimeout: string;
+      maxRetries: string;
+      sortOrder: string;
+      advancedJsonInvalid: string;
+      advancedJsonObject: string;
+      advancedJsonUnsafe: string;
+      invalidForm: string;
+      invalidConfiguration: string;
+    };
+    actionErrors: {
+      authRequired: string;
+      conflict: string;
+      invalid: string;
+      generic: string;
+    };
+    success: {
+      updated: (name: string) => string;
+      created: (name: string) => string;
+      enabled: (name: string) => string;
+      suspended: (name: string) => string;
+      defaultSet: (name: string) => string;
+    };
+  };
+
+  adminSystemSettings: {
+    header: {
+      eyebrow: string;
+      title: string;
+      description: string;
+      refresh: string;
+      refreshing: string;
+    };
+    states: {
+      loading: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      retry: string;
+    };
+    sections: {
+      auth: { title: string; description: string };
+      quotas: { title: string; description: string };
+      agentRuntime: { title: string; description: string };
+    };
+    groups: {
+      runLimits: string;
+      assistantExperience: string;
+      summarization: string;
+      memory: string;
+      tools: string;
+      safeguards: string;
+    };
+    fields: {
+      allowRegistration: string;
+      defaultMemberLimit: string;
+      defaultStorageLimit: string;
+      defaultConcurrentRuns: string;
+      defaultDailyMcpCalls: string;
+      quotaWarningThreshold: string;
+      defaultModel: string;
+      unavailableModel: string;
+      addRow: string;
+      removeRow: string;
+      listHint: string;
+    };
+    common: {
+      save: string;
+      saving: string;
+      reset: string;
+      revision: (revision: number) => string;
+      effectiveRevision: (revision: number) => string;
+      updatedAt: (value: string) => string;
+      storedRevision: (revision: number) => string;
+      pendingRoles: (roles: string) => string;
+      noPendingRoles: string;
+    };
+    effects: {
+      newRequests: string;
+      newRuns: string;
+      newRequestsAndRuns: string;
+      nextAuthoritativeCheck: string;
+      restartRequired: string;
+    };
+    feedback: {
+      saved: string;
+      registrationConfirmation: string;
+      conflict: string;
+      invalid: string;
+      inactiveModel: string;
+      authRequired: string;
+      generic: string;
+    };
+  };
+
+  automation: {
+    create: string;
+    runNow: string;
+    schedulerDisabled: string;
+    migrationRequired: string;
+    retry: string;
+    history: string;
+    fields: {
+      title: string;
+      prompt: string;
+      schedule: string;
+    };
+  };
+
   // Scheduled tasks
   scheduledTasks: {
+    description: string;
+    migrationComplete: {
+      title: string;
+      description: string;
+    };
     scheduleType: { cron: string; once: string };
     preset: {
       label: string;
@@ -267,6 +1242,9 @@ export interface Translations {
       threadIdPlaceholder: string;
     };
     filters: {
+      status: string;
+      type: string;
+      all: string;
       allStatuses: string;
       enabled: string;
       paused: string;
@@ -275,6 +1253,14 @@ export interface Translations {
       allTypes: string;
       cron: string;
       once: string;
+    };
+    empty: {
+      title: string;
+      description: string;
+      action: string;
+      filteredTitle: string;
+      filteredDescription: string;
+      clearFilters: string;
     };
     detail: {
       contextMode: string;
@@ -285,6 +1271,7 @@ export interface Translations {
       lastRun: string;
       lastRunId: string;
       lastError: string;
+      runCount: string;
       runsCount: string;
       runsCountOne: string;
       noRuns: string;
@@ -371,29 +1358,11 @@ export interface Translations {
     saving: string;
     saveRequested: string;
     saveHint: string;
-    saveCommandMessage: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;
     startChatting: string;
     backToGallery: string;
-    settings: string;
-    settingsTitle: string;
-    settingsDescription: string;
-    settingsModel: string;
-    settingsModelDefault: string;
-    settingsTemperature: string;
-    settingsTemperatureHint: string;
-    settingsMaxTokens: string;
-    settingsMaxTokensPlaceholder: string;
-    settingsThinking: string;
-    settingsThinkingOn: string;
-    settingsThinkingOff: string;
-    settingsReasoningEffort: string;
-    settingsInherit: string;
-    settingsSaved: string;
-    settingsInvalidTemperature: string;
-    settingsInvalidMaxTokens: string;
   };
 
   // Breadcrumb
@@ -422,7 +1391,15 @@ export interface Translations {
     startConversation: string;
     branchCreated: string;
     branchFailed: string;
-    streamReplayGap: string;
+    runFailedTitle: string;
+    runFailedDescription: string;
+    agentModelUnavailableTitle: string;
+    agentModelUnavailableDescription: string;
+    runExecutionProfile: (
+      modelName: string,
+      modeName: string,
+      supportsVision: boolean,
+    ) => string;
   };
 
   // Chats
@@ -431,9 +1408,6 @@ export interface Translations {
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
-    pinChat: string;
-    unpinChat: string;
-    pinChatFailed: string;
   };
 
   // Sidecar
@@ -497,6 +1471,8 @@ export interface Translations {
   toolCalls: {
     moreSteps: (count: number) => string;
     lessSteps: string;
+    executionDetails: string;
+    stepCount: (count: number) => string;
     executeCommand: string;
     presentFiles: string;
     needYourHelp: string;
@@ -513,21 +1489,14 @@ export interface Translations {
     clickToViewContent: string;
     writeTodos: string;
     skillInstallTooltip: string;
-    browserNavigate: (url: string) => string;
-    browserNavigateGeneric: string;
-    browserClick: string;
-    browserType: string;
-    browserSnapshot: string;
-    browserGetText: string;
-    browserBack: string;
-    browserScreenshot: string;
-    browserClose: string;
   };
 
   humanInput: {
     answered: string;
     pending: string;
     readOnly: string;
+    attentionCount: (count: number) => string;
+    changeBeforeSubmit: string;
     otherLabel: string;
     otherPlaceholder: string;
     submit: string;
@@ -535,6 +1504,10 @@ export interface Translations {
     requiredError: string;
     requiredA11yLabel: string;
     selectPlaceholder: string;
+    availableOptions: string;
+    requestedInformation: string;
+    selected: string;
+    yourAnswer: string;
     answeredValue: (value: string) => string;
   };
 
@@ -550,6 +1523,11 @@ export interface Translations {
     filesTooLarge: (files: string, maxFileSize: string) => string;
     tooManyFiles: (count: number, maxFiles: number) => string;
     totalSizeTooLarge: (count: number, maxTotalSize: string) => string;
+    projectStorageTooSmall: (count: number, remainingSize: string) => string;
+    serverTooLarge: string;
+    storageQuotaExceeded: string;
+    preflightRejected: string;
+    uploadFailed: string;
   };
 
   // Subtasks
@@ -571,7 +1549,6 @@ export interface Translations {
     view: string;
     unavailable: string;
     unavailableShort: string;
-    collecting: string;
     note: string;
     presets: {
       off: string;
@@ -595,10 +1572,31 @@ export interface Translations {
     removeTodo: (content: string) => string;
   };
 
-  contextUsage: {
-    label: string;
+  // Context Window
+  contextWindow: {
     title: string;
-    badgeAriaLabel: (percentage: string) => string;
+    automaticCompression: string;
+    loading: string;
+    unavailable: string;
+    disabled: string;
+    progressLabel: (percent: string) => string;
+    current: string;
+    triggerAt: string;
+    remaining: string;
+    estimatedContext: string;
+    tokenThreshold: string;
+    summaryPresent: string;
+    allConditions: string;
+    anyCondition: string;
+    primary: string;
+    triggerTypes: {
+      tokens: string;
+      fraction: string;
+      messages: string;
+    };
+    tokens: (value: string) => string;
+    tokenPair: (current: string, total: string) => string;
+    messages: (count: number) => string;
   };
 
   // Shortcuts
@@ -618,87 +1616,43 @@ export interface Translations {
     description: string;
     sections: {
       account: string;
+      personalization: string;
       appearance: string;
       channels: string;
-      integrations: string;
       memory: string;
       tools: string;
       skills: string;
       notification: string;
-      about: string;
     };
     memory: {
       title: string;
+    };
+    personalization: {
+      title: string;
       description: string;
-      empty: string;
-      rawJson: string;
-      exportButton: string;
-      exportSuccess: string;
-      importButton: string;
-      importConfirmTitle: string;
-      importConfirmDescription: string;
-      importFileLabel: string;
-      importInvalidFile: string;
-      importSuccess: string;
-      manualFactSource: string;
-      addFact: string;
-      addFactTitle: string;
-      editFactTitle: string;
-      addFactSuccess: string;
-      editFactSuccess: string;
-      clearAll: string;
-      clearAllConfirmTitle: string;
-      clearAllConfirmDescription: string;
-      clearAllSuccess: string;
-      factDeleteConfirmTitle: string;
-      factDeleteConfirmDescription: string;
-      factDeleteSuccess: string;
-      factContentLabel: string;
-      factCategoryLabel: string;
-      factConfidenceLabel: string;
-      factContentPlaceholder: string;
-      factCategoryPlaceholder: string;
-      factConfidenceHint: string;
-      factSave: string;
-      factValidationContent: string;
-      factValidationConfidence: string;
-      noFacts: string;
-      summaryReadOnly: string;
-      memoryFullyEmpty: string;
-      factPreviewLabel: string;
-      searchPlaceholder: string;
-      filterAll: string;
-      filterFacts: string;
-      filterSummaries: string;
-      noMatches: string;
-      markdown: {
-        overview: string;
-        userContext: string;
-        work: string;
-        personal: string;
-        topOfMind: string;
-        historyBackground: string;
-        recentMonths: string;
-        earlierContext: string;
-        longTermBackground: string;
-        updatedAt: string;
-        facts: string;
-        empty: string;
-        table: {
-          category: string;
-          confidence: string;
-          confidenceLevel: {
-            veryHigh: string;
-            high: string;
-            normal: string;
-            unknown: string;
-          };
-          content: string;
-          source: string;
-          createdAt: string;
-          view: string;
-        };
-      };
+      loading: string;
+      loadError: string;
+      loadErrorDescription: string;
+      retry: string;
+      enableTitle: string;
+      enableDescription: string;
+      platformUnavailable: string;
+      saving: string;
+      enableSuccess: string;
+      disableSuccess: string;
+      updateError: string;
+      conflict: string;
+      resetTitle: string;
+      resetDescription: string;
+      resetButton: string;
+      resetDialogTitle: string;
+      resetDialogDescription: string;
+      resetChatNotice: string;
+      cancel: string;
+      confirmReset: string;
+      resetting: string;
+      resetSuccess: string;
+      resetError: string;
     };
     appearance: {
       themeTitle: string;
@@ -709,6 +1663,12 @@ export interface Translations {
       systemDescription: string;
       lightDescription: string;
       darkDescription: string;
+      chatWidthTitle: string;
+      chatWidthDescription: string;
+      chatWidthNarrow: string;
+      chatWidthStandard: string;
+      chatWidthWide: string;
+      chatWidthFull: string;
       languageTitle: string;
       languageDescription: string;
     };
@@ -723,106 +1683,6 @@ export interface Translations {
       description: string;
       disabled: string;
     };
-    integrations: {
-      title: string;
-      description: string;
-      refresh: string;
-      install: string;
-      reinstall: string;
-      installing: string;
-      ready: string;
-      pending: string;
-      available: string;
-      unavailable: string;
-      connected: string;
-      loadFailed: string;
-      adminRequired: string;
-      lark: {
-        title: string;
-        description: string;
-        skillPack: string;
-        gatewayCli: string;
-        auth: string;
-        sandboxRuntime: string;
-        sandboxRuntimeInitContainer: string;
-        sandboxRuntimeBroker: string;
-        sandboxRuntimeGatewayDownload: string;
-        sandboxRuntimeNotReady: string;
-        notInstalled: string;
-        skillsInstalled: (installed: number, expected: number) => string;
-        installedVersion: (version: string) => string;
-        updateAvailable: (version: string) => string;
-        runtimeVersionMismatch: string;
-        authNotConfigured: string;
-        authConfigured: string;
-        authConfiguredFor: (user: string) => string;
-        connect: string;
-        authStarting: string;
-        checkingConnection: string;
-        connectedAction: string;
-        requestPermissions: string;
-        alreadyConnected: string;
-        connectionStarted: string;
-        connectionReady: string;
-        authStarted: string;
-        authorizationStillPending: string;
-        permissionTitle: string;
-        permissionDescription: string;
-        authDomains: Record<
-          | "approval"
-          | "apps"
-          | "attendance"
-          | "base"
-          | "calendar"
-          | "contact"
-          | "docs"
-          | "drive"
-          | "event"
-          | "im"
-          | "mail"
-          | "markdown"
-          | "mindnotes"
-          | "minutes"
-          | "note"
-          | "okr"
-          | "sheets"
-          | "slides"
-          | "task"
-          | "vc"
-          | "wiki"
-          | "all",
-          { label: string; description: string }
-        >;
-        customScopeLabel: string;
-        customScopePlaceholder: string;
-        customScopeDescription: string;
-        openConnectionLinkTitle: string;
-        openConnectionLinkDescription: string;
-        openAuthLinkTitle: string;
-        openAuthLinkDescription: string;
-        waitingAuthTitle: string;
-        waitingAuthDescription: string;
-        openAuthLink: string;
-        copyAuthLink: string;
-        completeAuth: string;
-        continueAuth: string;
-        preparingAuthorization: string;
-        completingAuth: string;
-        authExpiresIn: (seconds: number) => string;
-        installingTitle: string;
-        installingDescription: string;
-        installNextTitle: string;
-        installNextDescription: string;
-        cliNextTitle: string;
-        cliNextDescription: string;
-        configuredTitle: string;
-        configuredDescription: string;
-        connectedTitle: string;
-        connectedDescription: string;
-        authNextTitle: string;
-        authNextDescription: string;
-      };
-    };
     skills: {
       title: string;
       description: string;
@@ -832,6 +1692,20 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      viewSkill: (name: string) => string;
+      toggleSkill: (name: string) => string;
+      fileLabel: string;
+      renderedDescription: string;
+      enabled: string;
+      disabled: string;
+      categories: { public: string; custom: string; legacy: string };
+      adminRequiredPreview: string;
+      contentUnavailable: string;
+      loadError: string;
+      emptyContent: string;
+      licenseLabel: string;
+      loading: string;
+      retry: string;
     };
     notification: {
       title: string;
@@ -879,7 +1753,10 @@ export interface Translations {
     password: string;
     passwordPlaceholder: string;
     rememberMe: string;
-    rememberMeDescription: string;
+    checkingRegistration: string;
+    registrationUnavailable: string;
+    registrationDisabled: string;
+    retry: string;
     pleaseWait: string;
     signIn: string;
     createAccount: string;
@@ -893,9 +1770,6 @@ export interface Translations {
     haveAccountSignIn: string;
     backToHome: string;
     networkError: string;
-    serviceUnavailableTitle: string;
-    serviceUnavailableDescription: string;
-    retry: string;
     authFailed: string;
     errors: {
       sso_failed: string;
@@ -903,5 +1777,31 @@ export interface Translations {
       sso_account_exists: string;
       sso_not_allowed: string;
     };
+  };
+
+  // Administrator setup
+  setup: {
+    loading: string;
+    initAdminTitle: string;
+    initAdminDescription: string;
+    email: string;
+    emailPlaceholder: string;
+    password: string;
+    passwordPlaceholder: string;
+    confirmPassword: string;
+    confirmPasswordPlaceholder: string;
+    passwordMismatch: string;
+    passwordTooShort: string;
+    networkError: string;
+    creatingAccount: string;
+    createAdminAccount: string;
+    completeAdminTitle: string;
+    completeAdminDescription: string;
+    yourEmailPlaceholder: string;
+    currentPassword: string;
+    newPassword: string;
+    confirmNewPassword: string;
+    settingUp: string;
+    completeSetup: string;
   };
 }

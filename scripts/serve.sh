@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# serve.sh — Unified DeerFlow service launcher
+# serve.sh — Unified ActWeave service launcher
 #
 # Usage:
 #   ./scripts/serve.sh [--dev|--prod] [--daemon] [--stop|--restart]
@@ -16,9 +16,9 @@
 #   --restart   Stop all services, then start with the given mode flags
 #
 # Examples:
-#   ./scripts/serve.sh --dev                 # Gateway dev, hot reload
-#   ./scripts/serve.sh --prod                # Gateway prod
-#   ./scripts/serve.sh --dev --daemon        # Gateway dev, background
+#   ./scripts/serve.sh --dev                 # Full stack, hot reload
+#   ./scripts/serve.sh --prod                # Full stack, production mode
+#   ./scripts/serve.sh --dev --daemon        # Full stack, background
 #   ./scripts/serve.sh --stop                # Stop all services
 #   ./scripts/serve.sh --restart --dev       # Restart dev services
 #
@@ -36,6 +36,25 @@ if [ -f "$REPO_ROOT/.env" ]; then
     source "$REPO_ROOT/.env"
     set +a
 fi
+
+# Model API keys are PostgreSQL-backed System Credentials. Keep common legacy
+# provider variables out of Gateway, Worker, and Scheduler process environments
+# so a provider cannot silently bypass the exact admitted Credential version.
+# Tool/process credentials remain available through their own distinct names.
+# The opt-in Claude Code/Codex CLI handoff variables are intentionally separate.
+unset "ANTHROPIC_API_KEY"
+unset "DEEPSEEK_API_KEY"
+unset "GEMINI_API_KEY"
+unset "MIMO_API_KEY"
+unset "MINIMAX_API_KEY"
+unset "MOONSHOT_API_KEY"
+unset "NOVITA_API_KEY"
+unset "OPENCODE_API_KEY"
+unset "OPENAI_API_KEY"
+unset "OPENROUTER_API_KEY"
+unset "STEPFUN_API_KEY"
+unset "VLLM_API_KEY"
+unset "VOLCENGINE_API_KEY"
 
 _pick_python() {
     local candidate
@@ -115,8 +134,8 @@ _is_deerflow_pid() {
     return 1
 }
 
-# Report ports about to be reclaimed from a *different* worktree, so stopping
-# (or starting, which stops first) isn't silently killing someone else's run.
+# Report ports about to be reclaimed from a *different* worktree, so explicit
+# stop/restart actions do not silently kill someone else's run.
 _report_reclaimed_ports() {
     local port pid files root owner
     for port in 8001 3000 2026; do
@@ -174,24 +193,33 @@ _kill_repo_port() {
 }
 
 _is_port_listening() {
-    local port=$1
+    local port=$1 status
 
     if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        # All local ActWeave services bind an IPv4 socket. An unrelated
+        # IPv6-only listener (for example [::1]:8001) does not conflict with
+        # that socket and must not block startup.
+        if lsof -nP -a -i4TCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
+        else
+            status=$?
         fi
+        [ "$status" -eq 1 ] && return 1
+        return 0
     fi
 
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$port )" 2>/dev/null | tail -n +2 | grep -q .; then
             return 0
         fi
+        return 1
     fi
 
     if command -v netstat >/dev/null 2>&1; then
         if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[.:])${port}$"; then
             return 0
         fi
+        return 1
     fi
 
     return 1
@@ -251,6 +279,8 @@ stop_all() {
     echo "Stopping all services..."
     _report_reclaimed_ports
     _kill_repo_processes "uvicorn app.gateway.app:app"
+    _kill_repo_processes "python -m app.worker.app"
+    _kill_repo_processes "python -m app.scheduler.app"
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
@@ -275,34 +305,31 @@ if [ "$ACTION" = "stop" ]; then
     exit 0
 fi
 
-ALREADY_STOPPED=false
 if [ "$ACTION" = "restart" ]; then
     stop_all
     sleep 1
-    ALREADY_STOPPED=true
 fi
 
 # Mode label for banner
 if $DEV_MODE; then
-    MODE_LABEL="DEV (Gateway runtime, hot-reload enabled)"
+    MODE_LABEL="DEV (hot-reload enabled)"
 else
-    MODE_LABEL="PROD (Gateway runtime, optimized)"
+    MODE_LABEL="PROD (optimized)"
 fi
 
 if $DAEMON_MODE; then
     MODE_LABEL="$MODE_LABEL [daemon]"
 fi
 
-# Resolve pnpm through the same runner used by make check/install. Exporting
-# these values keeps paths with spaces intact when run_service invokes sh -c.
+# Resolve pnpm through the same runner used by check/install/doctor. Exporting
+# both paths preserves whitespace when run_service invokes a child shell.
 if ! DEERFLOW_PNPM_PYTHON="$(_pick_python)"; then
-    echo "Python 3 is required to run pnpm."
+    echo "Python 3 is required to locate pnpm or its Corepack fallback."
     exit 1
 fi
 DEERFLOW_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"
 export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
 
-# Frontend command
 if $DEV_MODE; then
     FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
 else
@@ -310,7 +337,7 @@ else
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
-# so pin DeerFlow-owned state to the expected backend runtime directory and
+# so pin ActWeave-owned state to the expected backend runtime directory and
 # create it before uvicorn builds its reload exclude filter.
 if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
     export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
@@ -333,40 +360,51 @@ export DEER_FLOW_HOME
 
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
+    GATEWAY_WORKERS=1
     GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
 else
-    GATEWAY_EXTRA_FLAGS=""
+    GATEWAY_WORKERS="${GATEWAY_WORKERS:-1}"
+    case "$GATEWAY_WORKERS" in
+        0 | *[!0-9]*)
+            echo "✗ GATEWAY_WORKERS must be a positive integer."
+            exit 1
+            ;;
+    esac
+    GATEWAY_EXTRA_FLAGS="--workers $GATEWAY_WORKERS"
 fi
-
-# ── Stop existing services (skip if restart already did it) ──────────────────
-
-if ! $ALREADY_STOPPED; then
-    stop_all
-    sleep 1
-fi
+export GATEWAY_WORKERS
 
 # ── Config check ─────────────────────────────────────────────────────────────
 
-if ! { \
-        [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ] || \
-        [ -f backend/config.yaml ] || \
-        [ -f config.yaml ]; \
-    }; then
-    echo "✗ No DeerFlow config file found."
+if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
+    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+        exit 1
+    fi
+    CONFIG_DIR="$(builtin cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" >/dev/null 2>&1 && pwd -P)"
+    export DEER_FLOW_CONFIG_PATH="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
+else
+    export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
+fi
+
+RUNTIME_ROOT="$REPO_ROOT"
+LOG_ROOT="$RUNTIME_ROOT/logs"
+
+if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+    echo "✗ No ActWeave config file found."
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
 fi
-
-"$REPO_ROOT/scripts/config-upgrade.sh"
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
 # Pick a runnable Python for the extras detector. On Windows/Git Bash,
 # `python3` can resolve to the Microsoft Store alias in WindowsApps, which is
 # present on PATH but not executable from Bash.
-DETECT_PYTHON="$(_pick_python || true)"
+DETECT_PYTHON="$DEERFLOW_PNPM_PYTHON"
 
-# Resolve uv extras (postgres, etc.) from UV_EXTRAS or config.yaml so that
+# Resolve existing optional extras (for example ollama or discord) from
+# UV_EXTRAS or config.yaml so that
 # `uv sync` does not wipe out optional dependencies on every restart. See
 # scripts/detect_uv_extras.py and Issue #2754 for context. The detector
 # whitelists extra names against `^[A-Za-z][A-Za-z0-9_-]*$`, so the unquoted
@@ -387,38 +425,78 @@ if ! $SKIP_INSTALL; then
     if [ -n "$UV_EXTRAS_FLAGS" ]; then
         echo "  • uv extras: $UV_EXTRAS_FLAGS"
     fi
-    # `--all-packages` propagates extras into workspace members (deerflow-harness
-    # in particular). Required for postgres extras — see PR #2584.
+    # `--all-packages` propagates selected extras into workspace members.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    (cd frontend && "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
+SCHEDULER_ENABLED="$(
+    cd backend && PYTHONPATH=. uv run python -c \
+        "from deerflow.config import get_app_config; print('true' if get_app_config().scheduler.enabled else 'false')"
+)" || {
+    echo "✗ Unable to resolve scheduler.enabled from ActWeave config."
+    exit 1
+}
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""
 echo "=========================================="
-echo "  Starting DeerFlow"
+echo "  Starting ActWeave"
 echo "=========================================="
 echo ""
 echo "  Mode: $MODE_LABEL"
 echo ""
 echo "  Services:"
-echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
+echo "    Gateway     → localhost:8001  (admission/query/SSE)"
+echo "    Worker      → background      (Agent graph execution)"
+if [ "$SCHEDULER_ENABLED" = "true" ]; then
+    echo "    Scheduler   → background      (Automation polling)"
+fi
 echo "    Frontend    → localhost:3000  (Next.js)"
 echo "    Nginx       → localhost:2026  (reverse proxy)"
 echo ""
 
 # ── Cleanup handler ──────────────────────────────────────────────────────────
 
+STARTED_PIDS=""
+
+remember_started_pid() {
+    STARTED_PIDS="$STARTED_PIDS $1"
+}
+
+stop_started() {
+    local pid
+    for pid in $STARTED_PIDS; do
+        kill_process_tree "$pid"
+    done
+    STARTED_PIDS=""
+}
+
+kill_process_tree() {
+    local pid="$1" child
+    while IFS= read -r child; do
+        [ -n "$child" ] && kill_process_tree "$child"
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+    kill "$pid" 2>/dev/null || true
+}
+
+startup_failure() {
+    local status="${1:-1}"
+    trap - INT TERM
+    stop_started
+    exit "$status"
+}
+
 cleanup() {
     local status="${1:-0}"
     trap - INT TERM
     echo ""
-    stop_all
+    stop_started
     exit "$status"
 }
 
@@ -435,7 +513,7 @@ run_service() {
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
         echo "  If it belongs to this worktree, run 'make stop'; otherwise free the port manually."
-        cleanup 1
+        startup_failure 1
     fi
 
     echo "Starting $name..."
@@ -447,50 +525,88 @@ run_service() {
     else
         sh -c "$cmd" &
     fi
+    remember_started_pid "$!"
 
     ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
-        local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
+        local logfile="$LOG_ROOT/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
-        cleanup 1
+        startup_failure 1
     }
     echo "✓ $name started on localhost:$port"
 }
 
+# run_process NAME COMMAND LOGFILE
+# Background roles have no public port. They must remain alive through their
+# startup window; Gateway health later reports their durable DB registration.
+run_process() {
+    local name="$1" cmd="$2" logfile="$3" pid attempt
+    echo "Starting $name..."
+    if $DAEMON_MODE; then
+        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
+    else
+        sh -c "$cmd" &
+    fi
+    pid=$!
+    remember_started_pid "$pid"
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || {
+            echo "✗ $name failed to start."
+            [ -f "$logfile" ] && tail -20 "$logfile"
+            startup_failure 1
+        }
+        sleep 0.2
+    done
+    echo "✓ $name started"
+}
+
 # ── Start services ───────────────────────────────────────────────────────────
 
-mkdir -p logs
-mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
+mkdir -p "$LOG_ROOT"
+mkdir -p "$RUNTIME_ROOT/temp/client_body_temp" "$RUNTIME_ROOT/temp/proxy_temp" "$RUNTIME_ROOT/temp/fastcgi_temp" "$RUNTIME_ROOT/temp/uwsgi_temp" "$RUNTIME_ROOT/temp/scgi_temp"
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && exec env PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > '$LOG_ROOT/gateway.log' 2>&1" \
     8001 30
 
-# 2. Frontend
+# 2. Required durable Worker
+run_process "Worker" \
+    "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app > '$LOG_ROOT/worker.log' 2>&1" \
+    "$LOG_ROOT/worker.log"
+
+# 3. Optional independent Scheduler. The application config property is
+# scheduler.enabled; disabled mode is legal and intentionally starts no owner.
+if [ "$SCHEDULER_ENABLED" = "true" ]; then
+    run_process "Scheduler" \
+        "cd backend && exec env PYTHONPATH=. uv run python -m app.scheduler.app > '$LOG_ROOT/scheduler.log' 2>&1" \
+        "$LOG_ROOT/scheduler.log"
+fi
+
+# 4. Frontend
 run_service "Frontend" \
-    "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
+    "cd frontend && exec $FRONTEND_CMD > '$LOG_ROOT/frontend.log' 2>&1" \
     3000 120
 
-# 3. Nginx
+# 5. Nginx
 run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    "exec nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$RUNTIME_ROOT' > '$LOG_ROOT/nginx.log' 2>&1" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
 echo ""
 echo "=========================================="
-echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
+echo "  ✓ ActWeave is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
 echo "  🌐 http://localhost:2026"
 echo ""
 echo "  Routing: Frontend → Nginx → Gateway"
-echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
-echo "           /api/*              →  Gateway REST API (8001)"
+echo "  API:       /api/*  →  Gateway admission/query/SSE (8001)"
+echo "  Execution: durable jobs → Worker Agent graph execution"
 echo ""
-echo "  📋 Logs: logs/{gateway,frontend,nginx}.log"
+echo "  📋 Logs: $LOG_ROOT/{gateway,worker,scheduler,frontend,nginx}.log"
 echo ""
 
 if $DAEMON_MODE; then

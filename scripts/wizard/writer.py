@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from deerflow.config.app_config import DATABASE_RUNTIME_YAML_PATH_TOMBSTONES
+
 CHANNEL_CONNECTION_PROVIDERS: tuple[str, ...] = (
     "telegram",
     "slack",
@@ -27,7 +29,30 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _remove_path_and_empty(data: dict[str, Any], field_path: str) -> None:
+    """Remove one retired leaf and any mapping made empty by that removal."""
+
+    current: object = data
+    ancestors: list[tuple[dict[str, Any], str]] = []
+    parts = field_path.split(".")
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        ancestors.append((current, part))
+        current = current[part]
+    if not isinstance(current, dict) or parts[-1] not in current:
+        return
+    current.pop(parts[-1])
+    for parent, key in reversed(ancestors):
+        child = parent.get(key)
+        if isinstance(child, dict) and not child:
+            parent.pop(key)
+        else:
+            break
+
+
 # ── .env helpers ──────────────────────────────────────────────────────────────
+
 
 def read_env_file(env_path: Path) -> dict[str, str]:
     """Parse a .env file into a dict (ignores comments and blank lines)."""
@@ -75,6 +100,7 @@ def write_env_file(env_path: Path, pairs: dict[str, str]) -> None:
 
 # ── config.yaml helpers ───────────────────────────────────────────────────────
 
+
 def _yaml_dump(data: Any) -> str:
     return yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
@@ -105,11 +131,7 @@ def _build_tools(
     include_write_tools: bool,
 ) -> list[dict[str, Any]]:
     tools = deepcopy(base_tools if base_tools is not None else _default_tools())
-    tools = [
-        tool
-        for tool in tools
-        if tool.get("name") not in {search_tool_name, web_fetch_tool_name, "write_file", "str_replace", "bash"}
-    ]
+    tools = [tool for tool in tools if tool.get("name") not in {search_tool_name, web_fetch_tool_name, "write_file", "str_replace", "bash"}]
 
     web_group = "web"
 
@@ -148,19 +170,6 @@ def _build_tools(
     return tools
 
 
-def _make_model_config_name(model_name: str) -> str:
-    """Derive a meaningful config model name from the provider model identifier.
-
-    Replaces path separators and dots with hyphens so the result is a clean
-    YAML-friendly identifier (e.g. "google/gemini-2.5-pro" → "gemini-2-5-pro",
-    "gpt-5.4" → "gpt-5-4", "deepseek-v4-pro" → "deepseek-v4-pro").
-    """
-    # Take only the last path component for namespaced models (e.g. "org/model-name")
-    base = model_name.split("/")[-1]
-    # Replace dots with hyphens so "gpt-5.4" → "gpt-5-4"
-    return base.replace(".", "-")
-
-
 def _build_channel_connections_config(enabled_providers: list[str]) -> dict[str, Any]:
     selected = set(enabled_providers)
     unknown = selected.difference(CHANNEL_CONNECTION_PROVIDERS)
@@ -175,13 +184,6 @@ def _build_channel_connections_config(enabled_providers: list[str]) -> dict[str,
 
 def build_minimal_config(
     *,
-    provider_use: str,
-    model_name: str,
-    display_name: str,
-    api_key_field: str,
-    env_var: str | None,
-    extra_model_config: dict | None = None,
-    base_url: str | None = None,
     search_use: str | None = None,
     search_tool_name: str = "web_search",
     search_extra_config: dict | None = None,
@@ -193,33 +195,26 @@ def build_minimal_config(
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
     channel_connection_providers: list[str] | None = None,
-    config_version: int = 5,
+    config_version: int = 35,
     base_config: dict[str, Any] | None = None,
 ) -> str:
-    """Build the content of a minimal config.yaml."""
+    """Build model-free infrastructure configuration.
+
+    Model definitions and their Credentials are PostgreSQL system settings.
+    They must never be copied from provider input into ``config.yaml``.
+    """
     from datetime import date
 
     today = date.today().isoformat()
 
-    model_entry: dict[str, Any] = {
-        "name": _make_model_config_name(model_name),
-        "display_name": display_name,
-        "use": provider_use,
-        "model": model_name,
-    }
-    if env_var:
-        model_entry[api_key_field] = f"${env_var}"
-    extra_model_fields = dict(extra_model_config or {})
-    if "base_url" in extra_model_fields and not base_url:
-        base_url = extra_model_fields.pop("base_url")
-    if base_url:
-        model_entry["base_url"] = base_url
-    if extra_model_fields:
-        model_entry.update(extra_model_fields)
-
     data: dict[str, Any] = deepcopy(base_config or {})
+    # Defensive tombstone: callers may pass defaults from an older checkout.
+    # Never carry the retired YAML model catalog or its secret references into
+    # a newly generated v35 configuration.
+    data.pop("models", None)
+    for field_path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES:
+        _remove_path_and_empty(data, field_path)
     data["config_version"] = config_version
-    data["models"] = [model_entry]
     base_tools = data.get("tools")
     if not isinstance(base_tools, list):
         base_tools = None
@@ -246,9 +241,10 @@ def build_minimal_config(
         data["channel_connections"] = _build_channel_connections_config(channel_connection_providers)
 
     header = (
-        f"# DeerFlow Configuration\n"
+        f"# ActWeave Configuration\n"
         f"# Generated by 'make setup' on {today}\n"
         f"# Run 'make setup' to reconfigure, or edit this file for advanced options.\n"
+        f"# Configure models and provider Credentials at /admin/settings/models.\n"
         f"# Full reference: config.example.yaml\n\n"
     )
 
@@ -258,13 +254,6 @@ def build_minimal_config(
 def write_config_yaml(
     config_path: Path,
     *,
-    provider_use: str,
-    model_name: str,
-    display_name: str,
-    api_key_field: str,
-    env_var: str | None,
-    extra_model_config: dict | None = None,
-    base_url: str | None = None,
     search_use: str | None = None,
     search_tool_name: str = "web_search",
     search_extra_config: dict | None = None,
@@ -279,13 +268,14 @@ def write_config_yaml(
 ) -> None:
     """Write (or overwrite) config.yaml with a minimal working configuration."""
     # Read config_version from config.example.yaml if present
-    config_version = 5
+    config_version = 35
     example_path = config_path.parent / "config.example.yaml"
     if example_path.exists():
         try:
             import yaml as _yaml
+
             raw = _yaml.safe_load(example_path.read_text(encoding="utf-8")) or {}
-            config_version = int(raw.get("config_version", 5))
+            config_version = int(raw.get("config_version", 35))
             example_defaults = raw
         except Exception:
             example_defaults = None
@@ -293,13 +283,6 @@ def write_config_yaml(
         example_defaults = None
 
     content = build_minimal_config(
-        provider_use=provider_use,
-        model_name=model_name,
-        display_name=display_name,
-        api_key_field=api_key_field,
-        env_var=env_var,
-        extra_model_config=extra_model_config,
-        base_url=base_url,
         search_use=search_use,
         search_tool_name=search_tool_name,
         search_extra_config=search_extra_config,

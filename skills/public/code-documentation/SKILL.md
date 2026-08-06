@@ -150,7 +150,7 @@ Every project needs a README. Follow this structure:
 
 ## Contributing
 
-[Contribution guidelines or link to CONTRIBUTING.md]
+[Contribution guidelines or a link to the project's contribution guide]
 
 ## License
 

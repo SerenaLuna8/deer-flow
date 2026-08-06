@@ -2,24 +2,35 @@
 
 import asyncio
 import logging
-import os
 import re
 import secrets
 import time
 import urllib.parse
-from ipaddress import ip_address, ip_network
+from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from starlette.responses import RedirectResponse
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+from starlette.responses import JSONResponse, RedirectResponse
 
 from app.gateway.auth import (
     UserResponse,
-    create_access_token,
+    decode_token,
 )
 from app.gateway.auth.config import get_auth_config
-from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
 from app.gateway.auth.oidc import OIDCError, OIDCService
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
@@ -31,16 +42,133 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
-from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
-from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
+from app.gateway.auth.proxy_identity import resolve_rate_limit_client_ip
+from app.gateway.auth.rate_limit import (
+    AUTH_RATE_LIMIT_WINDOW,
+    AuthenticationRateLimitAction,
+    AuthenticationRateLimitAdmission,
+    AuthenticationRateLimitRepository,
+)
+from app.gateway.auth.session_cookie import (
+    ACCESS_TOKEN_COOKIE_NAME,
+    SESSION_PERSISTENCE_COOKIE_NAME,
+    set_session_cookie,
+)
+from app.gateway.auth.session_cookie_state import (
+    SKIP_AUTH_CSRF_COOKIE_STATE_ATTR,
+)
+from app.gateway.auth.sessions import (
+    AuthSessionUnavailable,
+    issue_access_session,
+    revoke_access_session,
+    revoke_all_access_sessions,
+)
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
-from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
-from app.gateway.deps import get_current_user_from_request, get_local_provider
+from app.gateway.csrf_middleware import (
+    CSRF_COOKIE_NAME,
+    _request_origin,
+    auth_csrf_cookie_settings,
+    generate_csrf_token,
+    is_secure_request,
+)
+from app.gateway.deps import (
+    get_current_user_from_request,
+    get_local_provider,
+    get_project_quota_enforcer,
+)
+from app.projects.errors import ProjectBootstrapFailed, ProjectDatabaseUnavailable
+from app.system_runtime_settings import (
+    AuthPolicyValue,
+    RuntimePolicySection,
+)
+from deerflow.config import get_app_config
 from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.persistence.engine import get_engine, get_session_factory
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+_INITIALIZE_ADMIN_LOCK_KEY = 0x0DEE_12F1_494E_4954
+
+
+@asynccontextmanager
+async def _initialize_admin_lock():
+    """Serialize first-admin creation across gateway processes.
+
+    The short-lived NullPool engine gives this session-level lock a dedicated
+    physical PostgreSQL connection. Explicit unlock is the normal path; close
+    and dispose are the fail-safe, so a failed unlock can never return a
+    lock-bearing connection to the runtime pool.
+    """
+    runtime_engine = get_engine()
+    if runtime_engine is None:
+        raise ProjectDatabaseUnavailable()
+    lock_engine = create_async_engine(
+        runtime_engine.url,
+        poolclass=NullPool,
+        isolation_level="AUTOCOMMIT",
+    )
+    primary_error: BaseException | None = None
+    flow_primary: BaseException | None = None
+    try:
+        try:
+            async with lock_engine.connect() as connection:
+                idle_session_timeout = await connection.scalar(text("SELECT current_setting('idle_session_timeout', true)"))
+                if idle_session_timeout is not None:
+                    await connection.execute(text("SET idle_session_timeout = 0"))
+                await connection.execute(text("SET statement_timeout = 0"))
+                await connection.execute(
+                    text("SELECT pg_advisory_lock(:lock_key)"),
+                    {"lock_key": _INITIALIZE_ADMIN_LOCK_KEY},
+                )
+                try:
+                    yield
+                except BaseException as exc:
+                    flow_primary = exc
+                    raise
+                finally:
+                    unlock_failure: BaseException | None = None
+                    try:
+                        unlocked = await connection.scalar(
+                            text("SELECT pg_advisory_unlock(:lock_key)"),
+                            {"lock_key": _INITIALIZE_ADMIN_LOCK_KEY},
+                        )
+                        if unlocked is not True:
+                            unlock_failure = ProjectDatabaseUnavailable()
+                    except asyncio.CancelledError as exc:
+                        unlock_failure = exc
+                    except DBAPIError:
+                        unlock_failure = ProjectDatabaseUnavailable()
+                    except Exception as exc:  # noqa: BLE001 - programming errors remain visible
+                        unlock_failure = exc
+                    if unlock_failure is not None:
+                        try:
+                            await connection.invalidate()
+                        except Exception:  # noqa: BLE001 - physical close remains the fail-safe
+                            pass
+                        if flow_primary is None:
+                            flow_primary = unlock_failure
+                            raise unlock_failure
+        except DBAPIError as exc:
+            if flow_primary is not None and exc is not flow_primary:
+                raise flow_primary
+            raise ProjectDatabaseUnavailable() from None
+        except BaseException as exc:
+            if flow_primary is not None and exc is not flow_primary:
+                raise flow_primary
+            raise
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            await lock_engine.dispose()
+        except Exception as exc:  # noqa: BLE001 - preserve the request's primary failure
+            if primary_error is None:
+                if isinstance(exc, DBAPIError):
+                    raise ProjectDatabaseUnavailable() from None
+                raise
+            logger.warning("Failed to dispose initialize lock engine after request failure")
 
 
 # ── Request/Response Models ──────────────────────────────────────────────
@@ -150,136 +278,155 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class SetupStatusResponse(BaseModel):
+    """Public first-boot and self-registration status."""
+
+    needs_setup: bool
+    registration_enabled: bool
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _set_session_cookie(response: Response, token: str, request: Request, *, remember_me: bool | None = None) -> None:
+def _set_session_cookie(
+    response: Response,
+    token: str,
+    request: Request,
+    *,
+    remember_me: bool | None = None,
+) -> None:
     """Set the access_token HttpOnly cookie on the response."""
-    set_session_cookie(response, request, token, remember_me=remember_me)
+    set_session_cookie(
+        response,
+        request,
+        token,
+        remember_me=remember_me,
+    )
+
+
+def _delete_browser_session_cookies(
+    response: Response,
+    request: Request,
+) -> None:
+    """Clear every browser cookie that belongs to the current auth session."""
+
+    secure = is_secure_request(request)
+    response.delete_cookie(
+        key=ACCESS_TOKEN_COOKIE_NAME,
+        secure=secure,
+        samesite="lax",
+    )
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        secure=secure,
+        samesite="strict",
+    )
+    response.delete_cookie(
+        key=SESSION_PERSISTENCE_COOKIE_NAME,
+        secure=secure,
+        samesite="lax",
+    )
+    setattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, True)
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
-# In-process dict — not shared across workers.
-#
-# **Limitation**: with multi-worker deployments (e.g., gunicorn -w N), each
-# worker maintains its own lockout table, so an attacker effectively gets
-# N × _MAX_LOGIN_ATTEMPTS guesses before being locked out everywhere. For
-# production multi-worker setups, replace this with a shared store (Redis,
-# database-backed counter) to enforce a true per-IP limit.
 
-_MAX_LOGIN_ATTEMPTS = 5
-_LOCKOUT_SECONDS = 300  # 5 minutes
-
-# ip → (fail_count, lock_until_timestamp)
-_login_attempts: dict[str, tuple[int, float]] = {}
-
-
-def _trusted_proxies() -> list:
-    """Parse ``AUTH_TRUSTED_PROXIES`` env var into a list of ip_network objects.
-
-    Comma-separated CIDR or single-IP entries. Empty / unset = no proxy is
-    trusted (direct mode). Invalid entries are skipped with a logger warning.
-    Read live so env-var overrides take effect immediately and tests can
-    ``monkeypatch.setenv`` without poking a module-level cache.
-    """
-    raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
-    if not raw:
-        return []
-    nets = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            nets.append(ip_network(entry, strict=False))
-        except ValueError:
-            logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
-    return nets
+_AUTH_RATE_LIMIT_RETRY_AFTER_SECONDS = int(AUTH_RATE_LIMIT_WINDOW.total_seconds())
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract the real client IP for rate limiting.
+    """Return one canonical client IP from an authenticated proxy boundary."""
 
-    Trust model:
-
-    - The TCP peer (``request.client.host``) is always the baseline. It is
-      whatever the kernel reports as the connecting socket — unforgeable
-      by the client itself.
-    - ``X-Real-IP`` is **only** honored if the TCP peer is in the
-      ``AUTH_TRUSTED_PROXIES`` allowlist (set via env var, comma-separated
-      CIDR or single IPs). When set, the gateway is assumed to be behind a
-      reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
-      ``X-Real-IP`` with the original client address.
-    - With no ``AUTH_TRUSTED_PROXIES`` set, ``X-Real-IP`` is silently
-      ignored — closing the bypass where any client could rotate the
-      header to dodge per-IP rate limits in dev / direct-gateway mode.
-
-    ``X-Forwarded-For`` is intentionally NOT used because it is naturally
-    client-controlled at the *first* hop and the trust chain is harder to
-    audit per-request.
-    """
-    peer_host = request.client.host if request.client else None
-
-    trusted = _trusted_proxies()
-    if trusted and peer_host:
-        try:
-            peer_ip = ip_address(peer_host)
-            if any(peer_ip in net for net in trusted):
-                real_ip = request.headers.get("x-real-ip", "").strip()
-                if real_ip:
-                    return real_ip
-        except ValueError:
-            # peer_host wasn't a parseable IP (e.g. "unknown") — fall through
-            pass
-
-    return peer_host or "unknown"
+    return resolve_rate_limit_client_ip(request, get_app_config().auth)
 
 
-def _check_rate_limit(ip: str) -> None:
-    """Raise 429 if the IP is currently locked out."""
-    record = _login_attempts.get(ip)
-    if record is None:
-        return
-    fail_count, lock_until = record
-    if fail_count >= _MAX_LOGIN_ATTEMPTS:
-        if time.time() < lock_until:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many login attempts. Try again later.",
+def _database_unavailable_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "DATABASE_UNAVAILABLE",
+            "message": "Project storage unavailable",
+        },
+    )
+
+
+def _auth_session_unavailable_detail() -> dict[str, str]:
+    return {
+        "code": "DATABASE_UNAVAILABLE",
+        "message": "Authentication storage unavailable",
+    }
+
+
+def _auth_session_unavailable_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=_auth_session_unavailable_detail(),
+    )
+
+
+async def _issue_session(user) -> str:
+    try:
+        return await issue_access_session(
+            user_id=str(user.id),
+            token_version=user.token_version,
+        )
+    except AuthSessionUnavailable:
+        raise _auth_session_unavailable_error() from None
+
+
+def _rate_limited_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=AuthErrorResponse(
+            code=AuthErrorCode.RATE_LIMITED,
+            message="Too many authentication attempts. Try again later.",
+        ).model_dump(),
+        headers={
+            "Retry-After": str(_AUTH_RATE_LIMIT_RETRY_AFTER_SECONDS),
+        },
+    )
+
+
+async def _admit_auth_attempt(
+    action: AuthenticationRateLimitAction,
+    request: Request,
+) -> AuthenticationRateLimitAdmission:
+    """Atomically admit one public-auth attempt in shared PostgreSQL state."""
+
+    client_ip = _get_client_ip(request)
+    try:
+        factory = get_session_factory()
+    except RuntimeError:
+        raise _database_unavailable_error() from None
+    try:
+        async with factory() as session:
+            admission = await AuthenticationRateLimitRepository(session).admit_attempt(
+                action,
+                client_ip,
             )
-        del _login_attempts[ip]
+    except ProjectDatabaseUnavailable:
+        raise _database_unavailable_error() from None
+    if not admission.admitted:
+        raise _rate_limited_error()
+    return admission
 
 
-_MAX_TRACKED_IPS = 10000
+async def _clear_auth_attempts(
+    admission: AuthenticationRateLimitAdmission,
+) -> None:
+    """Clear a successful login's counter without affecting other actions."""
 
-
-def _record_login_failure(ip: str) -> None:
-    """Record a failed login attempt for the given IP."""
-    # Evict expired lockouts when dict grows too large
-    if len(_login_attempts) >= _MAX_TRACKED_IPS:
-        now = time.time()
-        expired = [k for k, (c, t) in _login_attempts.items() if c >= _MAX_LOGIN_ATTEMPTS and now >= t]
-        for k in expired:
-            del _login_attempts[k]
-        # If still too large, evict cheapest-to-lose half: below-threshold
-        # IPs (lock_until=0.0) sort first, then earliest-expiring lockouts.
-        if len(_login_attempts) >= _MAX_TRACKED_IPS:
-            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])
-            for k, _ in by_time[: len(by_time) // 2]:
-                del _login_attempts[k]
-
-    record = _login_attempts.get(ip)
-    if record is None:
-        _login_attempts[ip] = (1, 0.0)
-    else:
-        new_count = record[0] + 1
-        lock_until = time.time() + _LOCKOUT_SECONDS if new_count >= _MAX_LOGIN_ATTEMPTS else 0.0
-        _login_attempts[ip] = (new_count, lock_until)
-
-
-def _record_login_success(ip: str) -> None:
-    """Clear failure counter for the given IP on successful login."""
-    _login_attempts.pop(ip, None)
+    try:
+        factory = get_session_factory()
+    except RuntimeError:
+        raise _database_unavailable_error() from None
+    try:
+        async with factory() as session:
+            await AuthenticationRateLimitRepository(session).clear(
+                admission,
+            )
+    except ProjectDatabaseUnavailable:
+        raise _database_unavailable_error() from None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -293,51 +440,34 @@ async def login_local(
     remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
-    client_ip = _get_client_ip(request)
-    _check_rate_limit(client_ip)
+    admission = await _admit_auth_attempt(
+        AuthenticationRateLimitAction.LOGIN,
+        request,
+    )
 
     user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
 
     if user is None:
-        _record_login_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
         )
 
-    _record_login_success(client_ip)
-    token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request, remember_me=remember_me)
+    await _clear_auth_attempts(
+        admission,
+    )
+    token = await _issue_session(user)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=remember_me,
+    )
 
     return LoginResponse(
         expires_in=get_auth_config().token_expiry_days * 24 * 3600,
         needs_setup=user.needs_setup,
     )
-
-
-def _local_registration_enabled() -> bool:
-    """Whether visitors may self-register a local account.
-
-    Local registration bypasses the OIDC provisioning policy entirely
-    (allowed_email_domains, require_verified_email, auto_create_users are only
-    enforced in the SSO callback), so SSO-provisioned deployments need a way to
-    close this path.
-
-    ``config.yaml`` is absent in bare-app contexts that never load it (tests build the
-    gateway without one). Registration was unconditionally open before this gate existed,
-    so an absent config file falls back to that same default rather than turning these two
-    endpoints into a hard dependency on the file. Only ``FileNotFoundError`` is caught:
-    a malformed config must not silently re-open a closed deployment, so it propagates.
-
-    ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
-    change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
-    """
-    from deerflow.config.app_config import get_app_config
-
-    try:
-        return get_app_config().auth.local.allow_registration
-    except FileNotFoundError:
-        return True
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -346,15 +476,19 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
-
-    Returns 403 when ``auth.local.allow_registration`` is false.
     """
-    if not _local_registration_enabled():
+    if not await _local_registration_enabled(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=AuthErrorResponse(code=AuthErrorCode.REGISTRATION_DISABLED, message="Self-registration is disabled on this deployment").model_dump(),
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.REGISTRATION_DISABLED,
+                message="Self-registration is disabled on this deployment",
+            ).model_dump(),
         )
-
+    await _admit_auth_attempt(
+        AuthenticationRateLimitAction.REGISTER,
+        request,
+    )
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:
@@ -363,20 +497,39 @@ async def register(request: Request, response: Response, body: RegisterRequest):
             detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
 
-    token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request, remember_me=body.remember_me)
+    token = await _issue_session(user)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=body.remember_me,
+    )
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
-    """Logout current user by clearing the cookie."""
-    is_https = is_secure_request(request)
-    response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, secure=is_https, samesite="lax")
-    response.delete_cookie(key=CSRF_COOKIE_NAME, secure=is_https, samesite="strict")
-    response.delete_cookie(key=SESSION_PERSISTENCE_COOKIE_NAME, secure=is_https, samesite="lax")
-    setattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, True)
+    """Revoke the current durable session, then clear the cookie."""
+
+    access_token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+    if access_token:
+        payload = decode_token(access_token)
+        if not isinstance(payload, TokenError):
+            try:
+                await revoke_access_session(payload)
+            except AuthSessionUnavailable:
+                # Do not trap the browser in a local session when the durable
+                # authority is unavailable. The 503 truthfully reports that a
+                # copied token may not yet be revoked, while Max-Age=0 removes
+                # this browser's cookie immediately.
+                failure = JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"detail": _auth_session_unavailable_detail()},
+                )
+                _delete_browser_session_cookies(failure, request)
+                return failure
+    _delete_browser_session_cookies(response, request)
     return MessageResponse(message="Successfully logged out")
 
 
@@ -427,12 +580,30 @@ async def change_password(request: Request, response: Response, body: ChangePass
     if user.needs_setup and body.new_email is not None:
         user.needs_setup = False
 
-    await provider.update_user(user)
+    try:
+        await provider.update_user(user)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.EMAIL_ALREADY_EXISTS,
+                message="Email already in use",
+            ).model_dump(),
+        ) from None
 
-    # Re-issue cookie with new token_version
-    token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request, remember_me=body.remember_me)
-    _set_csrf_cookie(response, request)
+    # The token_version update already invalidates every old JWT. Persist the
+    # corresponding session revocations before admitting one fresh session.
+    try:
+        await revoke_all_access_sessions(str(user.id))
+    except AuthSessionUnavailable:
+        raise _auth_session_unavailable_error() from None
+    token = await _issue_session(user)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=body.remember_me,
+    )
 
     return MessageResponse(message="Password changed successfully")
 
@@ -450,18 +621,59 @@ async def get_me(request: Request):
     )
 
 
-# Per-IP cache: ip → (timestamp, result_dict).
+# Per-IP cache: ip → (timestamp, needs_setup).
 # Returns the cached result within the TTL instead of 429, because
 # the answer (whether an admin exists) rarely changes and returning
 # 429 breaks multi-tab / post-restart reconnection storms.
-_SETUP_STATUS_CACHE: dict[str, tuple[float, dict]] = {}
+_SETUP_STATUS_CACHE: dict[str, tuple[float, bool]] = {}
 _SETUP_STATUS_CACHE_TTL_SECONDS = 60
 _MAX_TRACKED_SETUP_STATUS_IPS = 10000
-_SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[dict]] = {}
+_SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[bool]] = {}
 _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
 
 
-@router.get("/setup-status")
+async def _local_registration_enabled(request: Request) -> bool:
+    """Read the current database-owned local registration policy."""
+
+    materializer = getattr(
+        request.app.state,
+        "system_runtime_policy_materializer",
+        None,
+    )
+    try:
+        if materializer is None:
+            raise RuntimeError
+        policy = await materializer.materialize_current(
+            RuntimePolicySection.AUTH,
+        )
+        if type(policy) is not AuthPolicyValue:
+            raise RuntimeError
+        return policy.allow_registration
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "AUTH_POLICY_UNAVAILABLE",
+                "message": "Authentication policy unavailable",
+            },
+        ) from None
+
+
+async def _setup_status_response(
+    request: Request,
+    needs_setup: bool,
+) -> dict[str, bool]:
+    """Combine cached initialization state with the live registration policy."""
+
+    return {
+        "needs_setup": needs_setup,
+        "registration_enabled": await _local_registration_enabled(request),
+    }
+
+
+@router.get("/setup-status", response_model=SetupStatusResponse)
 async def setup_status(request: Request):
     """Check if an admin account exists. Returns needs_setup=True when no admin exists."""
     client_ip = _get_client_ip(request)
@@ -470,18 +682,21 @@ async def setup_status(request: Request):
     # Return cached result when within TTL — avoids 429 on multi-tab reconnection.
     cached = _SETUP_STATUS_CACHE.get(client_ip)
     if cached is not None:
-        cached_time, cached_result = cached
+        cached_time, cached_needs_setup = cached
         if now - cached_time < _SETUP_STATUS_CACHE_TTL_SECONDS:
-            return cached_result
+            return await _setup_status_response(request, cached_needs_setup)
 
     async with _SETUP_STATUS_INFLIGHT_GUARD:
         # Recheck cache after waiting for the inflight guard.
         now = time.time()
         cached = _SETUP_STATUS_CACHE.get(client_ip)
         if cached is not None:
-            cached_time, cached_result = cached
+            cached_time, cached_needs_setup = cached
             if now - cached_time < _SETUP_STATUS_CACHE_TTL_SECONDS:
-                return cached_result
+                return await _setup_status_response(
+                    request,
+                    cached_needs_setup,
+                )
 
         task = _SETUP_STATUS_INFLIGHT.get(client_ip)
         if task is None:
@@ -496,11 +711,11 @@ async def setup_status(request: Request):
                     for k, _ in by_time[: len(by_time) // 2]:
                         del _SETUP_STATUS_CACHE[k]
 
-            async def _compute_setup_status() -> dict:
+            async def _compute_needs_setup() -> bool:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled()}
+                return admin_count == 0
 
-            task = asyncio.create_task(_compute_setup_status())
+            task = asyncio.create_task(_compute_needs_setup())
             _SETUP_STATUS_INFLIGHT[client_ip] = task
 
     try:
@@ -511,11 +726,11 @@ async def setup_status(request: Request):
                 del _SETUP_STATUS_INFLIGHT[client_ip]
 
     # Cache only the stable "initialized" result to avoid stale setup redirects.
-    if result["needs_setup"] is False:
+    if result is False:
         _SETUP_STATUS_CACHE[client_ip] = (time.time(), result)
     else:
         _SETUP_STATUS_CACHE.pop(client_ip, None)
-    return result
+    return await _setup_status_response(request, result)
 
 
 class InitializeAdminRequest(BaseModel):
@@ -538,29 +753,60 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
     """
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
-
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
-    except ValueError:
-        admin_count = await get_local_provider().count_admin_users()
-        if admin_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+        async with _initialize_admin_lock():
+            admin_count = await get_local_provider().count_admin_users()
+            if admin_count > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+                )
 
-    token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request, remember_me=body.remember_me)
+            try:
+                user = await get_local_provider().create_user(
+                    email=body.email,
+                    password=body.password,
+                    system_role="system_admin",
+                    needs_setup=False,
+                )
+            except ValueError:
+                admin_count = await get_local_provider().count_admin_users()
+                if admin_count == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+                )
+
+            try:
+                factory = get_session_factory()
+            except RuntimeError:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"},
+                ) from None
+            from app.projects.bootstrap import bootstrap_default_project
+
+            async with factory() as session:
+                await bootstrap_default_project(
+                    session,
+                    quota=get_project_quota_enforcer(request),
+                )
+    except ProjectBootstrapFailed as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": "Project bootstrap failed"}) from None
+    except ProjectDatabaseUnavailable:
+        raise HTTPException(status_code=503, detail={"code": "DATABASE_UNAVAILABLE", "message": "Project storage unavailable"}) from None
+
+    token = await _issue_session(user)
+    _set_session_cookie(
+        response,
+        token,
+        request,
+        remember_me=body.remember_me,
+    )
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -739,7 +985,7 @@ async def oauth_callback(
 
     Handles the OIDC provider's redirect after user authorization.
     Validates the state cookie, exchanges the code for tokens, validates
-    the ID token, provisions/links the DeerFlow user, and sets the
+    the ID token, provisions/links the ActWeave user, and sets the
     session cookie.
     """
     from deerflow.config.app_config import get_app_config
@@ -824,18 +1070,22 @@ async def oauth_callback(
 
     user = result["user"]
 
-    # ── Issue DeerFlow session ───────────────────────────────────────
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    # ── Issue ActWeave session ───────────────────────────────────────
+    token = await _issue_session(user)
 
-    # Revalidate as defense-in-depth if future state writers populate this target.
-    redirect_target = validate_next_param(state_payload.next_path) or "/workspace"
+    redirect_target = state_payload.next_path or "/workspace"
     frontend_base = oidc_config.frontend_base_url or ""
     callback_redirect = f"{frontend_base}/auth/callback?next={urllib.parse.quote(redirect_target)}"
 
     redirect_response = RedirectResponse(url=callback_redirect, status_code=status.HTTP_302_FOUND)
 
     # Set session cookie (reuse existing helper)
-    _set_session_cookie(redirect_response, token, request, remember_me=state_payload.remember_me)
+    _set_session_cookie(
+        redirect_response,
+        token,
+        request,
+        remember_me=state_payload.remember_me,
+    )
 
     # Set CSRF cookie (callback is a GET, so CSRF middleware won't set it)
     _set_csrf_cookie(redirect_response, request)
@@ -856,16 +1106,13 @@ def validate_next_param(next_param: str | None) -> str | None:
     """Validate and sanitize the ``next`` redirect parameter.
 
     Only allows relative paths starting with ``/``. Rejects protocol-relative
-    URLs (``//``), absolute URLs, URLs with embedded protocols, and backslashes
-    that URL parsers may reinterpret as forward slashes.
+    URLs (``//``), absolute URLs, and URLs with embedded protocols.
     """
     if not next_param:
         return None
     if not next_param.startswith("/"):
         return None
     if next_param.startswith("//") or next_param.startswith("http://") or next_param.startswith("https://"):
-        return None
-    if "\\" in next_param:
         return None
     if ":" in next_param:
         return None

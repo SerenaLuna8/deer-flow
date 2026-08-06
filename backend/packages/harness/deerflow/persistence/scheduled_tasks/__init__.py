@@ -1,4 +1,15 @@
 from .model import ScheduledTaskRow
-from .sql import ScheduledTaskRepository
+from .sql import (
+    ScheduledTaskCreate,
+    ScheduledTaskPatch,
+    ScheduledTaskRecord,
+    ScheduledTaskRepository,
+)
 
-__all__ = ["ScheduledTaskRow", "ScheduledTaskRepository"]
+__all__ = [
+    "ScheduledTaskCreate",
+    "ScheduledTaskPatch",
+    "ScheduledTaskRecord",
+    "ScheduledTaskRepository",
+    "ScheduledTaskRow",
+]

@@ -1,11 +1,24 @@
+import hashlib
 import logging
 import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.private_scope import PrivateResourceScope
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.local.local_sandbox import (
+    LocalSandbox,
+    PathMapping,
+    reset_private_projection_root,
+)
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import (
+    PrivateSandboxLease,
+    RunScopedReadOnlyMount,
+    SandboxProvider,
+    private_sandbox_relative_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +89,9 @@ class LocalSandboxProvider(SandboxProvider):
         self._path_mappings = self._setup_path_mappings()
         self._generic_sandbox: LocalSandbox | None = None
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
+        self._run_sandboxes: OrderedDict[tuple[str, str, str], LocalSandbox] = OrderedDict()
+        self._run_sandbox_ids: dict[str, tuple[str, str, str]] = {}
+        self._active_private_runs: dict[tuple[str, str], str] = {}
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -83,60 +99,23 @@ class LocalSandboxProvider(SandboxProvider):
         """
         Setup static path mappings shared by every sandbox this provider yields.
 
-        Static mappings cover the **public** skills directory and any custom
-        mounts from ``config.yaml`` — both are process-wide and identical for
-        every thread.  Per-thread ``/mnt/user-data/...``, ``/mnt/acp-workspace``
-        and ``/mnt/skills/custom`` mappings are appended inside
-        :meth:`_build_thread_path_mappings` because they depend on
-        ``thread_id`` and the effective ``user_id``.
+        Static mappings cover only operator-configured custom mounts. Skill
+        files enter a sandbox through run-scoped read-only mounts.
 
         Returns:
             List of static path mappings
         """
         mappings: list[PathMapping] = []
 
-        # Map skills: split mount for public + legacy + custom
         try:
             from deerflow.config import get_app_config
 
             config = get_app_config()
             container_path = config.skills.container_path
-            projection = self._ensure_skills_projection()
-
-            # Public skills: global, read-only — static, shared by all threads
-            public_skills_path = projection.public
-            if public_skills_path.exists():
-                mappings.append(
-                    PathMapping(
-                        container_path=f"{container_path}/public",
-                        local_path=str(public_skills_path),
-                        read_only=True,
-                    )
-                )
-
-            # NOTE: Legacy skills mount is NOT included here because it must
-            # only be exposed to users who have no per-user custom skills yet
-            # (mirroring ``UserScopedSkillStorage._iter_skill_files`` which only
-            # surfaces SkillCategory.LEGACY to such users). Including it for
-            # every user would let users with per-user custom skills still
-            # ``read_file("/mnt/skills/legacy/<name>/SKILL.md")`` and read
-            # content the listing layer told them doesn't exist. See review
-            # feedback on PR #3889 — the legacy mount is now built in
-            # ``_build_thread_path_mappings`` after we know the user_id.
-
-            # NOTE: Custom skills mount is NOT included here because it is
-            # per-user and must be built dynamically per-thread inside
-            # ``_build_thread_path_mappings``.  The static mount that previously
-            # bound ``get_effective_user_id()`` at init time was incorrect:
-            # every subsequent user's sandbox would resolve
-            # ``/mnt/skills/custom`` to the init-time user's directory.
 
             # Map custom mounts from sandbox config
             _RESERVED_CONTAINER_PREFIXES = [
-                f"{container_path}/public",
-                f"{container_path}/custom",
-                f"{container_path}/integrations",
-                f"{container_path}/legacy",
+                container_path,
                 _ACP_WORKSPACE_VIRTUAL_PREFIX,
                 _USER_DATA_VIRTUAL_PREFIX,
             ]
@@ -217,52 +196,6 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _ensure_skills_projection(user_id: str | None = None):
-        """Best-effort: a projection failure must not fail sandbox acquire.
-
-        Mirrors the surrounding skill-mount setup, which has always logged
-        and continued rather than failing the whole acquire (e.g. missing
-        config.yaml in a test double). Callers see ``None`` and skip the
-        skill mounts for this acquire; the projection self-heals on a later
-        acquire once the underlying condition clears.
-        """
-        from deerflow.config import get_app_config
-        from deerflow.skills.projection import ensure_skill_projections
-        from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
-
-        try:
-            config = get_app_config()
-            if user_id is None:
-                storage = get_or_new_skill_storage(app_config=config)
-            else:
-                storage = get_or_new_user_skill_storage(user_id, app_config=config)
-            return ensure_skill_projections(storage)
-        except Exception as exc:
-            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
-            return None
-
-    @staticmethod
-    def _append_public_skill_mapping(mappings: list[PathMapping], projection) -> None:
-        if projection is None:
-            return
-        try:
-            from deerflow.config import get_app_config
-
-            container_path = get_app_config().skills.container_path.rstrip("/")
-            public_container_path = f"{container_path}/public"
-            if any(mapping.container_path.rstrip("/") == public_container_path for mapping in mappings):
-                return
-            mappings.append(
-                PathMapping(
-                    container_path=public_container_path,
-                    local_path=str(projection.public),
-                    read_only=True,
-                )
-            )
-        except Exception as exc:
-            logger.warning("Could not append public skill mapping: %s", exc, exc_info=True)
-
-    @staticmethod
     def _sandbox_id_for_thread(thread_id: str, user_id: str) -> str:
         return f"local:{user_id}:{thread_id}"
 
@@ -277,16 +210,8 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None, skill_projection=None) -> list[PathMapping]:
-        """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
-        and /mnt/skills/custom.
-
-        Uses the explicitly resolved user id when provided, falling back to
-        :func:`get_effective_user_id` for legacy callers.  Custom skills are
-        mounted per-user (read-only) because agent writes custom skills via
-        ``skill_manage_tool`` on the host filesystem, not inside the sandbox.
-        """
-        from deerflow.config import get_app_config
+    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None) -> list[PathMapping]:
+        """Build per-thread data mappings; run mounts own Skill access."""
         from deerflow.config.paths import get_paths
 
         paths = get_paths()
@@ -326,37 +251,98 @@ class LocalSandboxProvider(SandboxProvider):
             ),
         ]
 
-        # Per-user category mounts stay present for the sandbox lifetime. Their
-        # enabled-only contents change beneath these stable roots.
+        return mappings
+
+    @staticmethod
+    def _build_private_path_mappings(
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+    ) -> list[PathMapping]:
+        from deerflow.config import get_app_config
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        relative_root = private_sandbox_relative_root(scope, thread_id)
+        thread_root = paths.base_dir / relative_root
+        user_data = thread_root / "user-data"
+        mappings = [
+            PathMapping(_USER_DATA_VIRTUAL_PREFIX, str(user_data), False),
+            PathMapping(f"{_USER_DATA_VIRTUAL_PREFIX}/workspace", str(user_data / "workspace"), False),
+            PathMapping(f"{_USER_DATA_VIRTUAL_PREFIX}/uploads", str(user_data / "uploads"), False),
+            PathMapping(f"{_USER_DATA_VIRTUAL_PREFIX}/outputs", str(user_data / "outputs"), False),
+            PathMapping(_ACP_WORKSPACE_VIRTUAL_PREFIX, str(thread_root / "acp-workspace"), False),
+        ]
         try:
             config = get_app_config()
-            skills_container_path = config.skills.container_path
-            projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
-
-            if projection is not None:
-                mappings.extend(
-                    [
-                        PathMapping(
-                            container_path=f"{skills_container_path}/custom",
-                            local_path=str(projection.custom),
-                            read_only=True,
-                        ),
-                        PathMapping(
-                            container_path=f"{skills_container_path}/legacy",
-                            local_path=str(projection.legacy),
-                            read_only=True,
-                        ),
-                        PathMapping(
-                            container_path=f"{skills_container_path}/integrations",
-                            local_path=str(projection.integrations),
-                            read_only=True,
-                        ),
-                    ]
-                )
+            custom = paths.user_custom_skills_dir(scope.owner_user_id)
+            custom.mkdir(parents=True, exist_ok=True)
+            mappings.append(PathMapping(f"{config.skills.container_path}/custom", str(custom), True))
         except Exception as exc:
-            logger.warning("Could not setup per-thread skills projection mounts: %s", exc, exc_info=True)
-
+            logger.warning("Could not setup private custom skills mount: %s", exc)
         return mappings
+
+    def acquire_private(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        user_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> PrivateSandboxLease:
+        if user_id != scope.owner_user_id or not run_id:
+            raise SandboxRuntimeError("Invalid private sandbox authority")
+        relative_root = private_sandbox_relative_root(scope, thread_id)
+        scope_key = hashlib.sha256(relative_root.encode()).hexdigest()[:24]
+        key = (scope_key, thread_id, run_id)
+        active_key = (scope_key, thread_id)
+        with self._lock:
+            cached = self._run_sandboxes.get(key)
+            if cached is not None:
+                self._run_sandboxes.move_to_end(key)
+                return PrivateSandboxLease(cached.id, run_id, relative_root)
+            active_run_id = self._active_private_runs.get(active_key)
+            if active_run_id is not None:
+                raise SandboxRuntimeError("Private sandbox already has an active run for this thread")
+            self._active_private_runs[active_key] = run_id
+
+        try:
+            from deerflow.config.paths import get_paths
+
+            reset_private_projection_root(get_paths().base_dir, relative_root)
+            mappings = list(self._path_mappings) + self._build_private_path_mappings(
+                thread_id,
+                scope=scope,
+            )
+            if mounts:
+                self.validate_run_scoped_mounts(
+                    thread_id,
+                    user_id=user_id,
+                    mounts=mounts,
+                )
+                mount = mounts[0]
+                skills_prefix = mount.container_path.rstrip("/")
+                mappings = [mapping for mapping in mappings if not (mapping.container_path == skills_prefix or mapping.container_path.startswith(f"{skills_prefix}/"))]
+                mappings.append(
+                    PathMapping(
+                        skills_prefix,
+                        mount.host_path,
+                        True,
+                    )
+                )
+            sandbox_id = f"local-run:{scope_key}:{thread_id}:{run_id}"
+            candidate = LocalSandbox(sandbox_id, path_mappings=mappings)
+            candidate.anchor_private_mappings()
+            with self._lock:
+                self._run_sandboxes[key] = candidate
+                self._run_sandbox_ids[candidate.id] = key
+            return PrivateSandboxLease(candidate.id, run_id, relative_root)
+        except BaseException:
+            with self._lock:
+                if self._active_private_runs.get(active_key) == run_id:
+                    self._active_private_runs.pop(active_key, None)
+            raise
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
@@ -374,23 +360,13 @@ class LocalSandboxProvider(SandboxProvider):
         global _singleton
 
         if thread_id is None:
-            skill_projection = self._ensure_skills_projection()
             with self._lock:
                 if self._generic_sandbox is None:
-                    mappings = list(self._path_mappings)
-                    self._append_public_skill_mapping(mappings, skill_projection)
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings)
+                    self._generic_sandbox = LocalSandbox("local", path_mappings=list(self._path_mappings))
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
         effective_user_id = self._effective_acquire_user_id(user_id)
-        # Runs on every acquire, including cache hits, to self-heal drift —
-        # cheap (~3-4 ms metadata walk) when the manifest is fresh. If another
-        # worker mutated this user's skills since the last check, this
-        # triggers a full rebuild (~400 ms measured locally) under the
-        # cross-process projection lock, serializing concurrent acquires and
-        # mutations for that user. Acceptable for an editing-frequency event.
-        skill_projection = self._ensure_skills_projection(effective_user_id)
         key = self._thread_key(thread_id, effective_user_id)
 
         # Fast path under lock.
@@ -400,18 +376,11 @@ class LocalSandboxProvider(SandboxProvider):
                 # Mark as most-recently used so frequently-touched threads
                 # survive eviction.
                 self._thread_sandboxes.move_to_end(key)
-        if cached is not None:
-            return cached.id
+                return cached.id
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings)
-        self._append_public_skill_mapping(new_mappings, skill_projection)
-        new_mappings += self._build_thread_path_mappings(
-            thread_id,
-            user_id=effective_user_id,
-            skill_projection=skill_projection,
-        )
+        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id, user_id=effective_user_id)
 
         with self._lock:
             # Re-check after the lock-free I/O: another caller may have
@@ -424,6 +393,104 @@ class LocalSandboxProvider(SandboxProvider):
             else:
                 self._thread_sandboxes.move_to_end(key)
             return cached.id
+
+    def acquire_with_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Acquire a run-specific sandbox whose skills view is exact-only."""
+
+        self.validate_run_scoped_mounts(
+            thread_id,
+            user_id=user_id,
+            mounts=mounts,
+        )
+        mount = mounts[0]
+        skills_prefix = mount.container_path.rstrip("/")
+        host_root = Path(mount.host_path).resolve()
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        key = (effective_user_id, thread_id, mount.run_id)
+        with self._lock:
+            cached = self._run_sandboxes.get(key)
+            if cached is not None:
+                self._run_sandboxes.move_to_end(key)
+                return cached.id
+
+        base_mappings = list(self._path_mappings) + self._build_thread_path_mappings(
+            thread_id,
+            user_id=effective_user_id,
+        )
+        exact_mappings = [mapping for mapping in base_mappings if not (mapping.container_path == skills_prefix or mapping.container_path.startswith(f"{skills_prefix}/"))]
+        exact_mappings.append(
+            PathMapping(
+                container_path=skills_prefix,
+                local_path=str(host_root),
+                read_only=True,
+            )
+        )
+        sandbox_id = f"local-run:{effective_user_id}:{thread_id}:{mount.run_id}"
+        candidate = LocalSandbox(sandbox_id, path_mappings=exact_mappings)
+        with self._lock:
+            cached = self._run_sandboxes.get(key)
+            if cached is None:
+                cached = candidate
+                self._run_sandboxes[key] = cached
+                self._run_sandbox_ids[cached.id] = key
+            else:
+                self._run_sandboxes.move_to_end(key)
+            return cached.id
+
+    def validate_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        del thread_id, user_id
+        if len(mounts) != 1:
+            raise ValueError("Local private runtime requires exactly one skills mount")
+        mount = mounts[0]
+        skills_prefix = mount.container_path.rstrip("/")
+        try:
+            from deerflow.config import get_app_config
+
+            app_config = get_app_config()
+            configured_prefix = app_config.skills.container_path.rstrip("/")
+            allow_host_bash = bool(getattr(getattr(app_config, "sandbox", None), "allow_host_bash", False))
+        except Exception:
+            configured_prefix = skills_prefix
+            allow_host_bash = False
+        if allow_host_bash:
+            raise PublicRunError(PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED)
+        if skills_prefix != configured_prefix:
+            raise ValueError("Run-scoped skills must replace the configured skills root")
+        host_root = Path(mount.host_path).resolve()
+        if not host_root.is_dir():
+            raise ValueError("Run-scoped skills host tree is unavailable")
+
+    def release_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        run_ids = {mount.run_id for mount in mounts}
+        released: list[LocalSandbox] = []
+        with self._lock:
+            for run_id in run_ids:
+                key = (effective_user_id, thread_id, run_id)
+                sandbox = self._run_sandboxes.pop(key, None)
+                if sandbox is not None:
+                    self._run_sandbox_ids.pop(sandbox.id, None)
+                    released.append(sandbox)
+        for sandbox in released:
+            sandbox.close_private_file_authority()
 
     def _evict_until_within_cap_locked(self) -> None:
         """LRU-evict cached thread sandboxes once the cap is exceeded.
@@ -440,6 +507,15 @@ class LocalSandboxProvider(SandboxProvider):
             )
 
     def get(self, sandbox_id: str) -> Sandbox | None:
+        if isinstance(sandbox_id, str) and sandbox_id.startswith("local-run:"):
+            with self._lock:
+                key = self._run_sandbox_ids.get(sandbox_id)
+                if key is None:
+                    return None
+                cached = self._run_sandboxes.get(key)
+                if cached is not None:
+                    self._run_sandboxes.move_to_end(key)
+                return cached
         if sandbox_id == "local":
             with self._lock:
                 generic = self._generic_sandbox
@@ -471,7 +547,17 @@ class LocalSandboxProvider(SandboxProvider):
         #
         # Note: This method is intentionally not called by SandboxMiddleware
         # to allow sandbox reuse across multiple turns in a thread.
-        pass
+        if isinstance(sandbox_id, str) and sandbox_id.startswith("local-run:"):
+            sandbox = None
+            with self._lock:
+                key = self._run_sandbox_ids.pop(sandbox_id, None)
+                if key is not None:
+                    sandbox = self._run_sandboxes.pop(key, None)
+                    active_key = (key[0], key[1])
+                    if self._active_private_runs.get(active_key) == key[2]:
+                        self._active_private_runs.pop(active_key, None)
+            if sandbox is not None:
+                sandbox.close_private_file_authority()
 
     def reset(self) -> None:
         """Drop all cached LocalSandbox instances.
@@ -482,10 +568,17 @@ class LocalSandboxProvider(SandboxProvider):
         # into it see a fresh state.
         """
         global _singleton
+        run_sandboxes: tuple[LocalSandbox, ...]
         with self._lock:
             self._generic_sandbox = None
             self._thread_sandboxes.clear()
+            run_sandboxes = tuple(dict.fromkeys(self._run_sandboxes.values()))
+            self._run_sandboxes.clear()
+            self._run_sandbox_ids.clear()
+            self._active_private_runs.clear()
             _singleton = None
+        for sandbox in run_sandboxes:
+            sandbox.close_private_file_authority()
 
     def shutdown(self) -> None:
         # LocalSandboxProvider has no extra resources beyond the cached

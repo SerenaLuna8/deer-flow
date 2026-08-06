@@ -4,14 +4,23 @@ import type { TokenUsage } from "../messages/usage";
 
 import type { SubtaskStep } from "./steps";
 
+export type SubtaskStatusSource = "inferred" | "custom_event" | "tool_result";
+
 export interface Subtask {
   id: string;
   status: "in_progress" | "completed" | "failed";
+  /**
+   * Where the current status came from. Pending card inference is weaker than
+   * the streamed lifecycle event, while the structured ToolMessage remains the
+   * final authority. The rank prevents a later render of the original task
+   * tool call from overwriting a terminal result.
+   */
+  statusSource?: SubtaskStatusSource;
   subagent_type: string;
   description: string;
-  /** Effective DeerFlow model selected for this subagent run. */
+  /** Effective ActWeave model selected for this delegated run. */
   modelName?: string;
-  /** Latest cumulative token snapshot reported while the subagent runs. */
+  /** Latest cumulative token snapshot reported by the delegated run. */
   usage?: TokenUsage;
   latestMessage?: AIMessage;
   /**

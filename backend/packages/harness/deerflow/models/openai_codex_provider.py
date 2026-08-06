@@ -61,11 +61,9 @@ MAX_RETRIES = 3
 class CodexChatModel(BaseChatModel):
     """LangChain chat model using ChatGPT Codex Responses API.
 
-    Config example:
-        - name: gpt-5.4
-          use: deerflow.models.openai_codex_provider:CodexChatModel
-          model: gpt-5.4
-          reasoning_effort: medium
+    Configure this class through the allowlisted ``codex_cli`` System Settings
+    adapter. The database version stores the provider model and secret-free
+    options such as ``reasoning_effort``.
     """
 
     model: str = "gpt-5.4"

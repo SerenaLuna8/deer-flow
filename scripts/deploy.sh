@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deploy.sh - Build, start, or stop DeerFlow production services
+# deploy.sh - Build, start, or stop ActWeave production services
 #
 # Commands:
 #   deploy.sh                    — build + start
@@ -73,37 +73,6 @@ load_uv_extras_from_dotenv() {
 
 load_uv_extras_from_dotenv
 
-# Read one key from $ENV_FILE the way compose --env-file interpolates it, so the
-# final summary reports the values the stack actually came up with. The shell
-# does not source $ENV_FILE, so reading these from the environment alone would
-# report "loopback only" for a stack that .env exposed to the network.
-read_dotenv_value() {
-    local key="$1"
-    local line=""
-    local value=""
-
-    # An exported shell variable wins, matching compose precedence.
-    if [ -n "${!key+x}" ]; then
-        printf '%s' "${!key}"
-        return 0
-    fi
-
-    [ -f "$ENV_FILE" ] || return 0
-
-    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$ENV_FILE" | tail -n 1 || true)"
-    [ -n "$line" ] || return 0
-
-    value="${line#*=}"
-    value="${value%$'\r'}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    case "$value" in
-        \"*\") value="${value#\"}"; value="${value%\"}" ;;
-        \'*\') value="${value#\'}"; value="${value%\'}" ;;
-    esac
-    printf '%s' "$value"
-}
-
 # ── Colors ────────────────────────────────────────────────────────────────────
 
 GREEN='\033[0;32m'
@@ -140,32 +109,13 @@ if  [ "$CMD" != "down" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     else
         echo -e "${RED}✗ No config.yaml found.${NC}"
         echo "  Run 'make setup' from the repo root (recommended),"
-        echo "  or 'make config' for the full template, then set the required model API keys."
+        echo "  or 'make config' for the full process template. After startup, configure"
+        echo "  models and encrypted Credentials at /admin/settings/models."
         exit 1
     fi
 else
     echo -e "${GREEN}✓ config.yaml: $DEER_FLOW_CONFIG_PATH${NC}"
 fi
-
-# ── extensions_config.json ───────────────────────────────────────────────────
-
-if [ -z "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then
-    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="$REPO_ROOT/extensions_config.json"
-fi
-
-if [ ! -f "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then
-    if [ -f "$REPO_ROOT/extensions_config.json" ]; then
-        cp "$REPO_ROOT/extensions_config.json" "$DEER_FLOW_EXTENSIONS_CONFIG_PATH"
-        echo -e "${GREEN}✓ Seeded extensions_config.json → $DEER_FLOW_EXTENSIONS_CONFIG_PATH${NC}"
-    else
-        # Create a minimal empty config so the gateway doesn't fail on startup
-        echo '{"mcpServers":{},"skills":{}}' > "$DEER_FLOW_EXTENSIONS_CONFIG_PATH"
-        echo -e "${YELLOW}⚠ extensions_config.json not found, created empty config at $DEER_FLOW_EXTENSIONS_CONFIG_PATH${NC}"
-    fi
-else
-    echo -e "${GREEN}✓ extensions_config.json: $DEER_FLOW_EXTENSIONS_CONFIG_PATH${NC}"
-fi
-
 
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
 # Required by Next.js in production. Generated once and persisted so auth
@@ -231,10 +181,46 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     fi
 fi
 
+# ── DEER_FLOW_PROXY_AUTH_TOKEN ──────────────────────────────────────────────
+# Dedicated nginx-to-Gateway attestation. This is deliberately independent of
+# the internal channel token so a proxy compromise cannot mint internal users.
+
+_proxy_auth_token_file="$DEER_FLOW_HOME/.proxy-auth-token"
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_PROXY_AUTH_TOKEN" ]; then
+    if [ -f "$_proxy_auth_token_file" ]; then
+        export DEER_FLOW_PROXY_AUTH_TOKEN
+        DEER_FLOW_PROXY_AUTH_TOKEN="$(cat "$_proxy_auth_token_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_PROXY_AUTH_TOKEN loaded from $_proxy_auth_token_file${NC}"
+    else
+        export DEER_FLOW_PROXY_AUTH_TOKEN
+        if command -v python3 > /dev/null 2>&1 && \
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_PROXY_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_PROXY_AUTH_TOKEN manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        echo "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$_proxy_auth_token_file"
+        chmod 600 "$_proxy_auth_token_file"
+        echo -e "${GREEN}✓ DEER_FLOW_PROXY_AUTH_TOKEN generated → $_proxy_auth_token_file${NC}"
+    fi
+fi
+if [ "$CMD" != "down" ] && [ "${#DEER_FLOW_PROXY_AUTH_TOKEN}" -lt 32 ]; then
+    echo -e "${RED}✗ DEER_FLOW_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
+    exit 1
+fi
+
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
 # The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
 # adds the --extra prefix itself. Convert the detector's uv flag string
-# ("--extra postgres --extra discord") to a comma-joined name token.
+# ("--extra ollama --extra discord") to a comma-joined name token.
 
 if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ]; then
     _detect_python=""
@@ -304,6 +290,20 @@ detect_sandbox_mode() {
     fi
 }
 
+detect_scheduler_enabled() {
+    [ -f "$DEER_FLOW_CONFIG_PATH" ] || { echo "false"; return; }
+    awk '
+        /^[[:space:]]*scheduler:[[:space:]]*$/ { in_scheduler=1; next }
+        in_scheduler && /^[^[:space:]#]/ { in_scheduler=0 }
+        in_scheduler && /^[[:space:]]*enabled:[[:space:]]*/ {
+            line=$0; sub(/^[[:space:]]*enabled:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*/, "", line); gsub(/["\047[:space:]]/, "", line)
+            print (tolower(line)=="true" ? "true" : "false"); exit
+        }
+        END { if (!in_scheduler) {} }
+    ' "$DEER_FLOW_CONFIG_PATH" | head -n 1 | grep -E '^(true|false)$' || echo "false"
+}
+
 # ── down ──────────────────────────────────────────────────────────────────────
 
 if [ "$CMD" = "down" ]; then
@@ -311,10 +311,10 @@ if [ "$CMD" = "down" ]; then
     # warning about unset variables that appear in volume specs.
     export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
     export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
-    export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
     export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
+    export DEER_FLOW_PROXY_AUTH_TOKEN="${DEER_FLOW_PROXY_AUTH_TOKEN:-placeholder-placeholder-placeholder-00}"
     "${COMPOSE_CMD[@]}" down
     exit 0
 fi
@@ -324,7 +324,7 @@ fi
 
 if [ "$CMD" = "build" ]; then
     echo "=========================================="
-    echo "  DeerFlow — Building Images"
+    echo "  ActWeave — Building Images"
     echo "=========================================="
     echo ""
 
@@ -343,7 +343,7 @@ fi
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 echo "=========================================="
-echo "  DeerFlow Production Deployment"
+echo "  ActWeave Production Deployment"
 echo "=========================================="
 echo ""
 
@@ -353,9 +353,18 @@ echo ""
 sandbox_mode="$(detect_sandbox_mode)"
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
-echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
+echo -e "${BLUE}Runtime: Gateway admission API + independent Worker execution${NC}"
 
-services="redis frontend gateway nginx"
+services="frontend gateway worker nginx"
+
+scheduler_enabled="$(detect_scheduler_enabled)"
+if [ "$scheduler_enabled" = "true" ]; then
+    COMPOSE_CMD+=(--profile scheduler)
+    services="$services scheduler"
+    echo -e "${BLUE}Scheduler enabled${NC}"
+else
+    echo -e "${BLUE}Scheduler disabled${NC}"
+fi
 
 if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"
@@ -365,7 +374,7 @@ fi
 # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
 # Docker socket. It is mounted via the opt-in docker-compose.dood.yaml overlay,
 # appended here, so the default (local) and provisioner modes never expose the
-# host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
+# host daemon. Mounting the socket grants root-equivalent host control.
 
 if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
     export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
@@ -378,7 +387,7 @@ if [ "$sandbox_mode" = "aio" ]; then
         exit 1
     fi
     echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
-    echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+    echo -e "${YELLOW}  Mounting host Docker socket into Worker (DooD = host root-equivalent).${NC}"
     COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi
 
@@ -401,28 +410,12 @@ fi
 
 echo ""
 echo "=========================================="
-echo "  DeerFlow is running!"
+echo "  ActWeave is running!"
 echo "=========================================="
 echo ""
-RESOLVED_PORT="$(read_dotenv_value PORT)"
-RESOLVED_PORT="${RESOLVED_PORT:-2026}"
-RESOLVED_BIND_HOST="$(read_dotenv_value BIND_HOST)"
-RESOLVED_BIND_HOST="${RESOLVED_BIND_HOST:-127.0.0.1}"
-
-echo "  🌐 Application: http://localhost:${RESOLVED_PORT}"
-echo "  📡 API Gateway: http://localhost:${RESOLVED_PORT}/api/*"
-echo "  🤖 Runtime:     Gateway embedded"
-echo "  API:            /api/langgraph/* → Gateway"
-echo ""
-if [ "$RESOLVED_BIND_HOST" = "127.0.0.1" ] || [ "$RESOLVED_BIND_HOST" = "::1" ] || [ "$RESOLVED_BIND_HOST" = "localhost" ]; then
-    echo "  🔒 Bound to ${RESOLVED_BIND_HOST} — reachable from this machine only."
-    echo "     To expose it, set BIND_HOST in .env, put TLS/auth in front, and"
-    echo "     create the admin account before the host becomes reachable."
-else
-    echo "  ⚠️  Bound to ${RESOLVED_BIND_HOST} — reachable from the network."
-    echo "     Open http://localhost:${RESOLVED_PORT} and complete first-run"
-    echo "     setup now, before anyone else reaches this host."
-fi
+echo "  🌐 Application: http://localhost:${PORT:-2026}"
+echo "  📡 API Gateway: http://localhost:${PORT:-2026}/api/*"
+echo "  🤖 Runtime:     Independent Worker"
 echo ""
 echo "  Manage:"
 echo "    make down        — stop and remove containers"

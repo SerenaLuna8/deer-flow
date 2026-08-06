@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
+import { AUTH_PROBE_TIMEOUT_MS, fetchAuth } from "@/core/auth/request";
 import { userSchema, type User } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -29,6 +30,7 @@ export function GatewayOfflineBanner({
   const { user, applyUser, refreshUser, logout } = useAuth();
   // Guard against piling up probe calls while the gateway is still slow.
   const inFlightRef = useRef(false);
+  const probeControllerRef = useRef<AbortController | null>(null);
   // Count consecutive 401s so we can distinguish "transient warm-up 401"
   // from "session actually expired" and avoid lying with the banner.
   const authFailuresRef = useRef(0);
@@ -47,11 +49,17 @@ export function GatewayOfflineBanner({
       let res: Response | null = null;
       let errored = false;
       let parsedUser: User | null = null;
+      const controller = new AbortController();
+      probeControllerRef.current = controller;
       try {
-        res = await fetch("/api/v1/auth/me", {
-          credentials: "include",
-          cache: "no-store",
-        });
+        res = await fetchAuth(
+          "/api/v1/auth/me",
+          {
+            cache: "no-store",
+            signal: controller.signal,
+          },
+          AUTH_PROBE_TIMEOUT_MS,
+        );
         // Reuse the probe's own response body instead of triggering a
         // second /auth/me request via refreshUser() — halves the recovery
         // burst against an already-struggling gateway.
@@ -72,8 +80,12 @@ export function GatewayOfflineBanner({
         errored = true;
       } finally {
         inFlightRef.current = false;
+        if (probeControllerRef.current === controller) {
+          probeControllerRef.current = null;
+        }
       }
 
+      if (controller.signal.aborted) return;
       const action = decideProbeAction(
         authFailuresRef.current,
         classifyProbe(res, errored, parsedUser),
@@ -81,7 +93,7 @@ export function GatewayOfflineBanner({
 
       if (action.type === "apply-user") {
         authFailuresRef.current = 0;
-        applyUser(action.user);
+        void applyUser(action.user);
         return;
       }
       if (action.type === "delegate-refresh") {
@@ -99,6 +111,7 @@ export function GatewayOfflineBanner({
     }, OFFLINE_BANNER_RETRY_INTERVAL_MS);
     return () => {
       window.clearInterval(handle);
+      probeControllerRef.current?.abort();
     };
   }, [gatewayUnavailable, user, applyUser, refreshUser]);
 

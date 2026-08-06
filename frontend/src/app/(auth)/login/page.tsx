@@ -3,18 +3,33 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { RememberSessionOption } from "@/components/auth/remember-session-option";
+import { RememberLoginField } from "@/components/auth/remember-login-field";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { resolveAuthNextPath } from "@/core/auth/next-path";
+import { safeInternalNextPath } from "@/core/auth/next-path";
+import { restoreSessionThenNavigate } from "@/core/auth/post-auth-navigation";
+import {
+  fetchAuthProviders,
+  type AuthProviderSummary,
+} from "@/core/auth/providers";
 import {
   loadRememberLoginPreference,
   saveRememberLoginPreference,
 } from "@/core/auth/remember-login";
+import {
+  buildLocalLoginBody,
+  buildOidcLoginUrl,
+  buildRememberingCredentialPayload,
+} from "@/core/auth/remember-payloads";
+import {
+  AUTH_SUBMIT_TIMEOUT_MS,
+  fetchAuth,
+  isAbortError,
+} from "@/core/auth/request";
 import {
   canCreateRegularAccount,
   fetchSetupStatus,
@@ -23,10 +38,12 @@ import {
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
+type SetupStatusPhase = "checking" | "ready" | "unavailable";
+
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, refreshUser } = useAuth();
   const { theme, resolvedTheme } = useTheme();
   const { t } = useI18n();
 
@@ -34,16 +51,12 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(true);
   const [isLogin, setIsLogin] = useState(true);
-  const [ssoProviders, setSsoProviders] = useState<
-    { id: string; display_name: string; type: string }[]
-  >([]);
+  const [ssoProviders, setSsoProviders] = useState<AuthProviderSummary[]>([]);
   const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(
     null,
   );
-  const [setupStatusPhase, setSetupStatusPhase] = useState<
-    "checking" | "ready" | "unavailable"
-  >("checking");
-  const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
+  const [setupStatusPhase, setSetupStatusPhase] =
+    useState<SetupStatusPhase>("checking");
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
@@ -59,24 +72,22 @@ export default function LoginPage() {
   // Nudge the user toward the SSO buttons without confirming the account exists.
   const [showSsoHint, setShowSsoHint] = useState(false);
   const [loading, setLoading] = useState(false);
+  const localAuthNavigationRef = useRef(false);
+  const setupControllerRef = useRef<AbortController | null>(null);
+  const submitControllerRef = useRef<AbortController | null>(null);
 
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
-  const redirectPath = resolveAuthNextPath(nextParam);
+  const redirectPath = safeInternalNextPath(nextParam);
   const regularSignupAllowed = canCreateRegularAccount({
-    // A failed probe must not expose registration while the system's setup
-    // state is unknown. Existing users can still sign in normally.
     checked: setupStatusPhase === "ready",
     status: setupStatus,
   });
   const systemNeedsAdminSetup = setupStatus?.needs_setup === true;
-  const showSetupStatusUnavailable =
-    setupStatusPhase === "unavailable" ||
-    (setupStatusAttempt > 0 && setupStatusPhase === "checking");
 
   // Redirect if already authenticated (client-side, post-login)
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && !localAuthNavigationRef.current) {
       router.push(redirectPath);
     }
   }, [isAuthenticated, redirectPath, router]);
@@ -84,62 +95,49 @@ export default function LoginPage() {
   useEffect(() => {
     const preference = loadRememberLoginPreference();
     setRememberMe(preference.rememberMe);
-    if (preference.email) {
-      setEmail(preference.email);
+    setEmail(preference.email);
+  }, []);
+
+  const checkSetupStatus = useCallback(async () => {
+    setupControllerRef.current?.abort();
+    const controller = new AbortController();
+    setupControllerRef.current = controller;
+    setSetupStatusPhase("checking");
+    setSetupStatus(null);
+
+    try {
+      const data = await fetchSetupStatus(controller.signal);
+      if (controller.signal.aborted) return;
+      setSetupStatus(data);
+      setSetupStatusPhase("ready");
+      if (data.needs_setup || !data.registration_enabled) setIsLogin(true);
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return;
+      setSetupStatus(null);
+      setSetupStatusPhase("unavailable");
     }
   }, []);
 
-  // Fetch setup state independently so retrying a slow Gateway does not also
-  // refetch unrelated auth-provider configuration.
+  // Fetch setup state and SSO providers with independent bounded requests.
   useEffect(() => {
-    let cancelled = false;
-    setSetupStatusPhase("checking");
-
-    void fetchSetupStatus()
-      .then((data) => {
-        if (cancelled) return;
-        setSetupStatus(data);
-        setSetupStatusPhase("ready");
-        if (data.needs_setup) {
-          setIsLogin(true);
-        }
+    void checkSetupStatus();
+    const providersController = new AbortController();
+    void fetchAuthProviders(providersController.signal)
+      .then((providers) => {
+        if (!providersController.signal.aborted) setSsoProviders(providers);
       })
-      .catch(() => {
-        if (!cancelled) {
-          setSetupStatus(null);
-          setSetupStatusPhase("unavailable");
+      .catch((error: unknown) => {
+        if (!providersController.signal.aborted && !isAbortError(error)) {
+          setSsoProviders([]);
         }
       });
 
     return () => {
-      cancelled = true;
+      setupControllerRef.current?.abort();
+      providersController.abort();
+      submitControllerRef.current?.abort();
     };
-  }, [setupStatusAttempt]);
-
-  // SSO providers are static for the page lifetime and should not be coupled to
-  // setup-status retries.
-  useEffect(() => {
-    let cancelled = false;
-
-    void fetch("/api/v1/auth/providers")
-      .then((r) => r.json())
-      .then(
-        (data: {
-          providers: { id: string; display_name: string; type: string }[];
-        }) => {
-          if (!cancelled) {
-            setSsoProviders(data.providers ?? []);
-          }
-        },
-      )
-      .catch(() => {
-        // Ignore errors; no SSO providers shown
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [checkSetupStatus]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,36 +146,52 @@ export default function LoginPage() {
     setLoading(true);
 
     if (!isLogin && !regularSignupAllowed) {
-      setError(t.login.adminSetupRequiredDescription);
+      setError(
+        setupStatusPhase === "unavailable"
+          ? t.login.registrationUnavailable
+          : setupStatus?.needs_setup
+            ? t.login.adminSetupRequiredDescription
+            : t.login.registrationDisabled,
+      );
       setLoading(false);
       return;
     }
+
+    submitControllerRef.current?.abort();
+    const controller = new AbortController();
+    submitControllerRef.current = controller;
 
     try {
       const endpoint = isLogin
         ? "/api/v1/auth/login/local"
         : "/api/v1/auth/register";
       const body = isLogin
-        ? new URLSearchParams({
-            password,
-            remember_me: String(rememberMe),
-            username: email,
-          })
-        : JSON.stringify({ email, password, remember_me: rememberMe });
+        ? buildLocalLoginBody({ email, password, rememberMe })
+        : JSON.stringify(
+            buildRememberingCredentialPayload({
+              email,
+              password,
+              rememberMe,
+            }),
+          );
 
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
         : { "Content-Type": "application/json" };
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body,
-        credentials: "include", // Important: include HttpOnly cookie
-      });
+      const res = await fetchAuth(
+        endpoint,
+        {
+          method: "POST",
+          headers,
+          body,
+          signal: controller.signal,
+        },
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
 
       if (!res.ok) {
-        const data = await res.json();
+        const data: unknown = await res.json();
         const authError = parseAuthError(data);
         setError(authError.message);
         // On a failed login with SSO configured, surface a hint pointing at the
@@ -190,12 +204,27 @@ export default function LoginPage() {
 
       saveRememberLoginPreference({ email, rememberMe });
 
-      // Both login and register set a cookie — redirect to workspace
-      router.push(redirectPath);
-    } catch {
+      // Both login and register set an HttpOnly cookie. Restore that identity
+      // in the currently mounted provider, then cross the auth boundary with a
+      // document navigation. App Router can otherwise retain an anonymous
+      // layout while returning to /invite, preventing redemption until reload.
+      localAuthNavigationRef.current = true;
+      const navigated = await restoreSessionThenNavigate(refreshUser, () =>
+        window.location.replace(redirectPath),
+      );
+      if (!navigated) {
+        localAuthNavigationRef.current = false;
+        setError(t.login.networkError);
+      }
+    } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) return;
+      localAuthNavigationRef.current = false;
       setError(t.login.networkError);
     } finally {
-      setLoading(false);
+      if (submitControllerRef.current === controller) {
+        submitControllerRef.current = null;
+        setLoading(false);
+      }
     }
   };
 
@@ -213,39 +242,14 @@ export default function LoginPage() {
       />
       <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
         <div className="text-center">
-          <h1 className="text-foreground font-serif text-3xl">DeerFlow</h1>
-          <p className="text-muted-foreground mt-2">
+          <h1 className="text-foreground font-serif text-3xl">ActWeave</h1>
+          <p className="text-muted-foreground mt-1 text-sm">
+            Weave intelligence into action.
+          </p>
+          <p className="text-muted-foreground mt-3">
             {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
           </p>
         </div>
-
-        {showSetupStatusUnavailable && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="border-l-2 border-amber-500 ps-3 text-sm"
-          >
-            <p className="font-medium">{t.login.serviceUnavailableTitle}</p>
-            <p className="text-muted-foreground mt-1">
-              {t.login.serviceUnavailableDescription}
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              disabled={setupStatusPhase === "checking"}
-              onClick={() => {
-                setSetupStatusPhase("checking");
-                setSetupStatusAttempt((attempt) => attempt + 1);
-              }}
-            >
-              {setupStatusPhase === "checking"
-                ? t.login.pleaseWait
-                : t.login.retry}
-            </Button>
-          </div>
-        )}
 
         {systemNeedsAdminSetup && (
           <div className="border-l-2 border-blue-500 ps-3 text-sm">
@@ -259,6 +263,31 @@ export default function LoginPage() {
             >
               {t.login.createAdminAccount}
             </Link>
+          </div>
+        )}
+
+        {setupStatusPhase === "checking" && (
+          <p className="text-muted-foreground text-center text-sm">
+            {t.login.checkingRegistration}
+          </p>
+        )}
+
+        {setupStatusPhase === "unavailable" && (
+          <div
+            role="status"
+            className="border-border bg-background/70 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm"
+          >
+            <span className="text-muted-foreground">
+              {t.login.registrationUnavailable}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void checkSetupStatus()}
+            >
+              {t.login.retry}
+            </Button>
           </div>
         )}
 
@@ -291,8 +320,10 @@ export default function LoginPage() {
             />
           </div>
 
-          <RememberSessionOption
+          <RememberLoginField
             checked={rememberMe}
+            disabled={loading}
+            label={t.login.rememberMe}
             onCheckedChange={setRememberMe}
           />
 
@@ -334,7 +365,12 @@ export default function LoginPage() {
                 className="w-full"
                 disabled={loading}
                 onClick={() => {
-                  window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}&remember_me=${String(rememberMe)}`;
+                  saveRememberLoginPreference({ email, rememberMe });
+                  window.location.href = buildOidcLoginUrl({
+                    next: redirectPath,
+                    providerId: provider.id,
+                    rememberMe,
+                  });
                 }}
               >
                 {t.login.continueWith(provider.display_name)}
@@ -359,11 +395,13 @@ export default function LoginPage() {
           </div>
         )}
 
-        <div className="text-muted-foreground text-center text-xs">
-          <Link href="/" className="hover:underline">
-            {t.login.backToHome}
-          </Link>
-        </div>
+        {setupStatusPhase === "ready" &&
+          setupStatus?.needs_setup === false &&
+          !setupStatus.registration_enabled && (
+            <p className="text-muted-foreground text-center text-xs">
+              {t.login.registrationDisabled}
+            </p>
+          )}
       </div>
     </div>
   );

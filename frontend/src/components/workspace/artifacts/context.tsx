@@ -1,21 +1,16 @@
-import { usePathname } from "next/navigation";
 import {
   createContext,
-  type Dispatch,
   useCallback,
   useContext,
-  useEffect,
-  useRef,
   useState,
   type ReactNode,
-  type SetStateAction,
 } from "react";
 
 import { useSidebar } from "@/components/ui/sidebar";
-import type { ArtifactDraftState } from "@/core/artifacts/editing";
-import { env } from "@/env";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 export interface ArtifactsContextType {
+  enabled: boolean;
   artifacts: string[];
   setArtifacts: (artifacts: string[]) => void;
 
@@ -23,150 +18,85 @@ export interface ArtifactsContextType {
   autoSelect: boolean;
   select: (artifact: string, autoSelect?: boolean) => void;
   deselect: () => void;
+  showList: () => void;
 
   open: boolean;
   autoOpen: boolean;
   setOpen: (open: boolean) => void;
-
-  drafts: Record<string, ArtifactDraftState>;
-  setDrafts: Dispatch<SetStateAction<Record<string, ArtifactDraftState>>>;
-  editingPath: string | null;
-  setEditingPath: Dispatch<SetStateAction<string | null>>;
 }
 
 const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
   undefined,
 );
 
-const ARTIFACTS_STORAGE_PREFIX = "deerflow:artifacts:v1";
-
-type PersistedArtifactsState = {
-  artifacts: string[];
-  selectedArtifact: string | null;
-  open: boolean;
-};
-
-function storageKey(pathname: string) {
-  return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(pathname)}`;
-}
-
-function readPersistedState(pathname: string): PersistedArtifactsState | null {
-  try {
-    const raw = window.sessionStorage.getItem(storageKey(pathname));
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw) as Partial<PersistedArtifactsState>;
-    if (
-      !Array.isArray(parsed.artifacts) ||
-      !parsed.artifacts.every((artifact) => typeof artifact === "string") ||
-      !(
-        parsed.selectedArtifact === null ||
-        typeof parsed.selectedArtifact === "string"
-      ) ||
-      typeof parsed.open !== "boolean"
-    ) {
-      return null;
-    }
-    return {
-      artifacts: parsed.artifacts,
-      selectedArtifact: parsed.selectedArtifact,
-      open: parsed.open,
-    };
-  } catch {
-    return null;
-  }
-}
-
 interface ArtifactsProviderProps {
   children: ReactNode;
+  enabled?: boolean;
+  onNavigationOpenChange?: (open: boolean) => void;
 }
 
-export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
+function ArtifactsStateProvider({
+  children,
+  enabled = true,
+  setSidebarOpen,
+}: ArtifactsProviderProps & {
+  setSidebarOpen: (open: boolean) => void;
+}) {
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [autoSelect, setAutoSelect] = useState(true);
-  const [open, setOpen] = useState(
-    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
-  );
+  const [open, setOpen] = useState(isStaticWebsiteOnly());
   const [autoOpen, setAutoOpen] = useState(true);
-  const [drafts, setDrafts] = useState<Record<string, ArtifactDraftState>>({});
-  const [editingPath, setEditingPath] = useState<string | null>(null);
-  const { setOpen: setSidebarOpen } = useSidebar();
-  const pathname = usePathname();
-  const hydratedPathRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!pathname) {
-      return;
-    }
-
-    const persisted = readPersistedState(pathname);
-    setArtifacts(persisted?.artifacts ?? []);
-    setSelectedArtifact(persisted?.selectedArtifact ?? null);
-    setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
-    setAutoOpen(true);
-    setAutoSelect(!persisted?.selectedArtifact);
-    setDrafts({});
-    setEditingPath(null);
-    hydratedPathRef.current = pathname;
-  }, [pathname]);
-
-  useEffect(() => {
-    const hasUnsavedDrafts = Object.values(drafts).some(
-      (draft) => draft.draftContent !== draft.baselineContent,
-    );
-    if (!hasUnsavedDrafts) {
-      return;
-    }
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [drafts]);
-
-  useEffect(() => {
-    if (!pathname || hydratedPathRef.current !== pathname) {
-      return;
-    }
-    try {
-      window.sessionStorage.setItem(
-        storageKey(pathname),
-        JSON.stringify({ artifacts, selectedArtifact, open }),
-      );
-    } catch {
-      // Browser storage can be disabled or full; panel state must keep working.
-    }
-  }, [artifacts, open, pathname, selectedArtifact]);
+  const updateArtifacts = useCallback(
+    (nextArtifacts: string[]) => {
+      if (enabled) setArtifacts(nextArtifacts);
+    },
+    [enabled],
+  );
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
+      if (!enabled) return;
       setSelectedArtifact(artifact);
-      if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true") {
+      if (!isStaticWebsiteOnly()) {
         setSidebarOpen(false);
       }
       if (!autoSelect) {
         setAutoSelect(false);
       }
     },
-    [setSidebarOpen, setSelectedArtifact, setAutoSelect],
+    [enabled, setSidebarOpen, setSelectedArtifact, setAutoSelect],
   );
 
   const deselect = useCallback(() => {
+    if (!enabled) return;
     setSelectedArtifact(null);
     setAutoSelect(true);
     setOpen(false);
-  }, []);
+  }, [enabled]);
+
+  const showList = useCallback(() => {
+    if (!enabled) return;
+    setSelectedArtifact(null);
+    setAutoSelect(false);
+    setAutoOpen(false);
+    setOpen(true);
+    if (!isStaticWebsiteOnly()) {
+      setSidebarOpen(false);
+    }
+  }, [enabled, setSidebarOpen]);
 
   const value: ArtifactsContextType = {
-    artifacts,
-    setArtifacts,
+    enabled,
+    artifacts: enabled ? artifacts : [],
+    setArtifacts: updateArtifacts,
 
-    open,
-    autoOpen,
-    autoSelect,
+    open: enabled && open,
+    autoOpen: enabled && autoOpen,
+    autoSelect: enabled && autoSelect,
     setOpen: (isOpen: boolean) => {
+      if (!enabled) return;
       if (!isOpen && autoOpen) {
         setAutoOpen(false);
         setAutoSelect(false);
@@ -174,20 +104,43 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
       setOpen(isOpen);
     },
 
-    selectedArtifact,
+    selectedArtifact: enabled ? selectedArtifact : null,
     select,
     deselect,
-
-    drafts,
-    setDrafts,
-    editingPath,
-    setEditingPath,
+    showList,
   };
 
   return (
     <ArtifactsContext.Provider value={value}>
       {children}
     </ArtifactsContext.Provider>
+  );
+}
+
+export function ArtifactsProvider({
+  children,
+  enabled = true,
+}: ArtifactsProviderProps) {
+  const { setOpen: setSidebarOpen } = useSidebar();
+  return (
+    <ArtifactsStateProvider enabled={enabled} setSidebarOpen={setSidebarOpen}>
+      {children}
+    </ArtifactsStateProvider>
+  );
+}
+
+export function StandaloneArtifactsProvider({
+  children,
+  enabled = true,
+  onNavigationOpenChange,
+}: ArtifactsProviderProps) {
+  return (
+    <ArtifactsStateProvider
+      enabled={enabled}
+      setSidebarOpen={onNavigationOpenChange ?? (() => undefined)}
+    >
+      {children}
+    </ArtifactsStateProvider>
   );
 }
 

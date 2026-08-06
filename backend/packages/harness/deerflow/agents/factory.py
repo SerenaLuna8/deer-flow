@@ -1,4 +1,4 @@
-"""Pure-argument factory for DeerFlow agents.
+"""Pure-argument factory for ActWeave agents.
 
 ``create_deerflow_agent`` accepts plain Python arguments — no YAML files, no
 global singletons.  It is the SDK-level entry point sitting between the raw
@@ -22,7 +22,11 @@ from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
-from deerflow.agents.thread_state import adapt_state_schema_for_mode, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import (
+    adapt_state_schema_for_mode,
+    get_thread_state_schema,
+    normalize_middleware_state_schemas,
+)
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.tools.builtins import ask_clarification_tool
 
@@ -31,8 +35,6 @@ if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
-
-    from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ def create_deerflow_agent(
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
 ) -> CompiledStateGraph:
-    """Create a DeerFlow agent from plain Python arguments.
+    """Create an ActWeave agent from plain Python arguments.
 
     The factory assembly itself reads no config files.  Some injected runtime
     components (e.g. ``task_tool``) may still depend on global config at
@@ -103,19 +105,13 @@ def create_deerflow_agent(
     state_schema:
         LangGraph state type.  Defaults to ``ThreadState``.
     checkpoint_channel_mode:
-        Checkpoint representation for accumulating channels.  Defaults to the
-        full-state compatibility schema.  ``"delta"`` requires the guarded
-        persistence paths (mode markers + compatibility gate) and is therefore
-        rejected when combined with *checkpointer* in this factory; without a
-        checkpointer the graph is ephemeral and delta is allowed.
+        Full-state compatibility or incremental messages checkpoints.
     checkpoint_snapshot_frequency:
-        DeltaChannel snapshot cadence for ``"delta"`` mode.  ``None`` uses the
-        process-frozen value, falling back to the config default.  Ignored in
-        ``"full"`` mode.
+        Full snapshot cadence for delta messages checkpoints.
     checkpointer:
         Optional persistence backend.
     name:
-        Agent name (passed to middleware that cares, e.g. ``MemoryMiddleware``).
+        Agent name passed to middleware that uses an agent namespace.
 
     Raises
     ------
@@ -125,13 +121,7 @@ def create_deerflow_agent(
     if middleware is not None and features is not None:
         raise ValueError("Cannot specify both 'middleware' and 'features'.  Use one or the other.")
     if checkpoint_channel_mode == "delta" and checkpointer is not None:
-        raise ValueError(
-            "create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: "
-            "persisted graphs built here bypass checkpoint mode marker injection and the fail-closed "
-            "compatibility gate (see deerflow.runtime.checkpoint_mode), so a mixed-mode store would "
-            "silently corrupt thread state.  Use the guarded application paths (make_lead_agent or "
-            "DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed."
-        )
+        raise ValueError("create_deerflow_agent does not support delta persistence because this SDK factory bypasses the application mode marker and compatibility gate; use make_lead_agent for persisted delta mode")
     if middleware is not None and extra_middleware:
         raise ValueError("Cannot use 'extra_middleware' with 'middleware' (full takeover).")
     if extra_middleware:
@@ -140,7 +130,18 @@ def create_deerflow_agent(
                 raise TypeError(f"extra_middleware items must be AgentMiddleware instances, got {type(mw).__name__}")
 
     effective_tools: list[BaseTool] = list(tools or [])
-    effective_state = get_thread_state_schema(checkpoint_channel_mode, checkpoint_snapshot_frequency) if state_schema is None else adapt_state_schema_for_mode(state_schema, checkpoint_channel_mode, checkpoint_snapshot_frequency)
+    effective_state = (
+        get_thread_state_schema(
+            checkpoint_channel_mode,
+            checkpoint_snapshot_frequency,
+        )
+        if state_schema is None
+        else adapt_state_schema_for_mode(
+            state_schema,
+            checkpoint_channel_mode,
+            checkpoint_snapshot_frequency,
+        )
+    )
 
     if middleware is not None:
         effective_middleware = list(middleware)
@@ -199,7 +200,7 @@ def _assemble_from_features(
       6.   SummarizationMiddleware (summarization feature)
       7.   TodoMiddleware (plan_mode parameter)
       8.   TitleMiddleware (auto_title feature)
-      9.   MemoryMiddleware (memory feature)
+      9.   Custom memory middleware (memory feature)
       10.  ViewImageMiddleware (vision feature)
       11.  SubagentLimitMiddleware (subagent feature)
       12.  LoopDetectionMiddleware (loop_detection feature)
@@ -212,7 +213,7 @@ def _assemble_from_features(
     Each feature value is handled as:
       - ``False``: skip
       - ``True``: create the built-in default middleware (not available for
-        ``summarization`` and ``guardrail`` — these require a custom instance)
+        ``memory``, ``summarization``, and ``guardrail`` — these require a custom instance)
       - ``AgentMiddleware`` instance: use directly (custom replacement)
     """
     chain: list[AgentMiddleware] = []
@@ -271,32 +272,9 @@ def _assemble_from_features(
         if isinstance(feat.memory, AgentMiddleware):
             chain.append(feat.memory)
         else:
-            from deerflow.config.memory_config import get_memory_config, should_use_memory_tools
+            raise ValueError("memory=True requires a custom AgentMiddleware instance (no built-in memory middleware)")
 
-            memory_cfg: MemoryConfig = feat.memory_config or get_memory_config()
-            if should_use_memory_tools(memory_cfg):
-                from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
-                from deerflow.agents.memory.tools import get_memory_tools
-
-                existing_names = {tool.name for tool in extra_tools}
-                for memory_tool in get_memory_tools():
-                    if memory_tool.name in existing_names:
-                        logger.warning("Memory tool name %r already exists and was skipped.", memory_tool.name)
-                        continue
-                    extra_tools.append(memory_tool)
-                    existing_names.add(memory_tool.name)
-                if backend_requires_passive_writes_in_tool_mode(memory_cfg.manager_class):
-                    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
-
-                    chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
-            else:
-                if memory_cfg.mode == "tool" and not memory_cfg.enabled:
-                    logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
-                from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
-
-                chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
-
-    # --- [10] Vision ---
+    # --- [10] Image checkpoint cleanup / optional vision injection ---
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):
             chain.append(feat.vision)
@@ -309,6 +287,12 @@ def _assemble_from_features(
             from deerflow.tools.builtins import view_image_tool
 
             extra_tools.append(view_image_tool)
+    else:
+        # Legacy image bytes must be removed even after switching to a
+        # text-only model. Injection and the view tool remain disabled.
+        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+
+        chain.append(ViewImageMiddleware(enable_injection=False))
 
     # --- [11] Subagent ---
     if feat.subagent is not False:

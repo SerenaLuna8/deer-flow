@@ -1,10 +1,63 @@
 import asyncio
+import hashlib
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from deerflow.config import get_app_config
+from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.reflection import resolve_class
+from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
+
+
+async def _await_joined_thread(task: asyncio.Task) -> tuple[object, bool]:
+    """Join a blocking provider call even when its async caller is cancelled."""
+
+    cancellation_pending = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancellation_pending = True
+    return task.result(), cancellation_pending
+
+
+@dataclass(frozen=True, slots=True)
+class RunScopedReadOnlyMount:
+    """Trusted run-owned host tree exposed at one read-only sandbox path."""
+
+    run_id: str
+    container_path: str
+    host_path: str
+
+    def __post_init__(self) -> None:
+        normalized_container = PurePosixPath(self.container_path).as_posix()
+        if not self.run_id or not self.container_path.startswith("/") or ".." in PurePosixPath(self.container_path).parts or normalized_container != self.container_path.rstrip("/") or not Path(self.host_path).is_absolute():
+            raise ValueError("Invalid run-scoped read-only mount")
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateSandboxLease:
+    sandbox_id: str
+    run_id: str
+    relative_root: str
+
+
+def private_sandbox_relative_root(
+    scope: PrivateResourceScope,
+    thread_id: str,
+) -> str:
+    if type(scope) is not PrivateResourceScope:
+        raise SandboxRuntimeError("Invalid private sandbox scope")
+    if not thread_id or "/" in thread_id or "\\" in thread_id or thread_id in {".", ".."}:
+        raise SandboxRuntimeError("Invalid private sandbox thread")
+    return f"projects/{scope.project_id}/users/{scope.owner_user_id}/threads/{thread_id}"
 
 
 class SandboxProvider(ABC):
@@ -12,6 +65,188 @@ class SandboxProvider(ABC):
 
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
+    _supports_isolated_private_file_authority: bool = False
+
+    @staticmethod
+    def _private_storage_key(scope: PrivateResourceScope) -> str:
+        relative = private_sandbox_relative_root(scope, "scope")
+        return f"private-{hashlib.sha256(relative.encode()).hexdigest()[:24]}"
+
+    def acquire_private(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        user_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> PrivateSandboxLease:
+        """Acquire one fresh, scope-bound private lease or fail closed.
+
+        A private authority requires bounded, no-link-following secure file
+        primitives in addition to allocation isolation. Providers must opt in
+        by overriding this method; reusing legacy acquire is not sufficient.
+        """
+
+        if not self._supports_isolated_private_file_authority:
+            raise SandboxRuntimeError("Private file authority is unsupported by this sandbox provider")
+        if type(scope) is not PrivateResourceScope:
+            raise SandboxRuntimeError("Invalid private sandbox scope")
+        if user_id != scope.owner_user_id:
+            raise SandboxRuntimeError("Private sandbox owner mismatch")
+        if not run_id or "/" in run_id or "\\" in run_id:
+            raise SandboxRuntimeError("Invalid private sandbox run")
+        relative_root = private_sandbox_relative_root(scope, thread_id)
+        for mount in mounts:
+            if type(mount) is not RunScopedReadOnlyMount or mount.run_id != run_id:
+                raise SandboxRuntimeError("Invalid private sandbox mount")
+
+        sandbox_id: str | None = None
+        try:
+            sandbox_id = self._acquire_private_fresh(
+                scope=scope,
+                thread_id=thread_id,
+                run_id=run_id,
+                mounts=mounts,
+            )
+            if not isinstance(sandbox_id, str) or not sandbox_id:
+                raise SandboxRuntimeError("Invalid private sandbox identifier")
+            sandbox = self.get(sandbox_id)
+            if sandbox is None:
+                raise SandboxRuntimeError("Private sandbox was not registered")
+            # Exercise the real secure metadata boundary before returning a
+            # lease.  Merely allocating a fresh VM is not enough.
+            tuple(
+                sandbox.list_secure_files(
+                    "/mnt/user-data/workspace",
+                    max_entries=1,
+                )
+            )
+            lock, leases = self._private_lease_state()
+            with lock:
+                if sandbox_id in leases or any(registered.run_id == run_id for registered in leases.values()):
+                    raise SandboxRuntimeError("Private sandbox lease already active")
+                lease = PrivateSandboxLease(
+                    sandbox_id=sandbox_id,
+                    run_id=run_id,
+                    relative_root=relative_root,
+                )
+                leases[sandbox_id] = lease
+            return lease
+        except BaseException:
+            if sandbox_id:
+                try:
+                    self._destroy_private_sandbox(sandbox_id)
+                except Exception:
+                    pass
+            raise
+
+    def _acquire_private_fresh(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        del scope, thread_id, run_id, mounts
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox provider")
+
+    def _destroy_private_sandbox(self, sandbox_id: str) -> None:
+        self.release(sandbox_id)
+
+    def _private_lease_state(
+        self,
+    ) -> tuple[threading.RLock, dict[str, PrivateSandboxLease]]:
+        lock = getattr(self, "_private_lease_lock", None)
+        leases = getattr(self, "_private_leases", None)
+        if lock is None or leases is None:
+            provider_lock = getattr(self, "_lock", None)
+            if provider_lock is None:
+                lock = lock or threading.RLock()
+                leases = leases or {}
+                self._private_lease_lock = lock
+                self._private_leases = leases
+            else:
+                with provider_lock:
+                    lock = getattr(self, "_private_lease_lock", None)
+                    if lock is None:
+                        lock = threading.RLock()
+                        self._private_lease_lock = lock
+                    leases = getattr(self, "_private_leases", None)
+                    if leases is None:
+                        leases = {}
+                        self._private_leases = leases
+        return lock, leases
+
+    def release_private(self, lease: PrivateSandboxLease) -> None:
+        """Destroy exactly one private run sandbox; never park it warm."""
+
+        if type(lease) is not PrivateSandboxLease:
+            raise SandboxRuntimeError("Invalid private sandbox lease")
+        if not self._supports_isolated_private_file_authority:
+            # LocalSandboxProvider owns its own private reservation contract and
+            # predates the remote registry in this base class.
+            self.release(lease.sandbox_id)
+            return
+        lock, leases = self._private_lease_state()
+        with lock:
+            registered = leases.get(lease.sandbox_id)
+            if registered != lease:
+                raise SandboxRuntimeError("Invalid or inactive private sandbox lease")
+            releasing = getattr(self, "_private_releasing", None)
+            if releasing is None:
+                releasing = set()
+                self._private_releasing = releasing
+            if lease.sandbox_id in releasing:
+                raise SandboxRuntimeError("Private sandbox lease is already releasing")
+            releasing.add(lease.sandbox_id)
+        try:
+            self._destroy_private_sandbox(lease.sandbox_id)
+        except BaseException:
+            with lock:
+                releasing.discard(lease.sandbox_id)
+            raise
+        with lock:
+            releasing.discard(lease.sandbox_id)
+            leases.pop(lease.sandbox_id, None)
+
+    async def acquire_private_async(
+        self,
+        thread_id: str,
+        *,
+        scope: PrivateResourceScope,
+        user_id: str,
+        run_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...] = (),
+    ) -> PrivateSandboxLease:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.acquire_private,
+                thread_id,
+                scope=scope,
+                user_id=user_id,
+                run_id=run_id,
+                mounts=mounts,
+            )
+        )
+        result, cancellation_pending = await _await_joined_thread(task)
+        lease = result
+        if type(lease) is not PrivateSandboxLease:
+            raise SandboxRuntimeError("Invalid private sandbox lease")
+        if cancellation_pending:
+            cleanup_task = asyncio.create_task(asyncio.to_thread(self.release_private, lease))
+            await _await_joined_thread(cleanup_task)
+            raise asyncio.CancelledError
+        return lease
+
+    async def release_private_async(self, lease: PrivateSandboxLease) -> None:
+        if type(lease) is not PrivateSandboxLease:
+            raise SandboxRuntimeError("Invalid private sandbox lease")
+        task = asyncio.create_task(asyncio.to_thread(self.release_private, lease))
+        _, cancellation_pending = await _await_joined_thread(task)
+        if cancellation_pending:
+            raise asyncio.CancelledError
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
@@ -32,6 +267,71 @@ class SandboxProvider(ABC):
         """
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
 
+    def acquire_with_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        """Acquire a run-isolated sandbox or fail closed when unsupported."""
+
+        if mounts:
+            raise PublicRunError(PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED)
+        return self.acquire(thread_id, user_id=user_id)
+
+    async def acquire_with_mounts_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> str:
+        return await asyncio.to_thread(
+            self.acquire_with_mounts,
+            thread_id,
+            user_id=user_id,
+            mounts=mounts,
+        )
+
+    def validate_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        """Side-effect-free capability preflight before any model invocation."""
+
+        del thread_id, user_id
+        if mounts:
+            raise PublicRunError(PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED)
+
+    def release_run_scoped_mounts(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        """Drop provider state owned by one run-specific mount set."""
+
+        del thread_id, user_id, mounts
+
+    async def release_run_scoped_mounts_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        mounts: tuple[RunScopedReadOnlyMount, ...],
+    ) -> None:
+        await asyncio.to_thread(
+            self.release_run_scoped_mounts,
+            thread_id,
+            user_id=user_id,
+            mounts=mounts,
+        )
+
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox environment by ID.
@@ -51,10 +351,7 @@ class SandboxProvider(ABC):
         pass
 
     def reset(self) -> None:
-        """Clear cached state that survives provider instance replacement.
-
-        Provider overrides can release resources and make the instance unusable.
-        """
+        """Clear cached state that survives provider instance replacement."""
         pass
 
 
@@ -118,7 +415,7 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
 def reset_sandbox_provider() -> None:
     """Reset the sandbox provider singleton.
 
-    This clears the cached instance without calling shutdown directly.
+    This clears the cached instance without calling shutdown.
     The next call to `get_sandbox_provider()` will create a new instance.
     Useful for testing or when switching configurations.
 
@@ -127,9 +424,7 @@ def reset_sandbox_provider() -> None:
     `LocalSandbox` singleton). Without it, config/mount changes would not take
     effect on the next acquire().
 
-    A provider override can release active sandboxes during reset.
-    Otherwise, active sandboxes become orphaned.
-    Do not reuse the detached provider after reset.
+    Note: If the provider has active sandboxes, they will be orphaned.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider

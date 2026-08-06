@@ -5,15 +5,25 @@ import shlex
 import threading
 import uuid
 
-import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
+from deerflow.community.remote_file_authority import (
+    PRIVATE_GUEST_REQUEST_ENV,
+    PRIVATE_GUEST_SCRIPT,
+    RemotePrivateFileAuthority,
+    decode_guest_response,
+    encode_guest_request,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.sandbox import (
+    Sandbox,
+    SandboxAtomicWriter,
+    SandboxBinaryReader,
+    _validate_extra_env,
+)
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
-
-from .backend import sandbox_http_trust_env
 
 logger = logging.getLogger(__name__)
 
@@ -53,21 +63,17 @@ class AioSandbox(Sandbox):
         """
         super().__init__(id)
         self._base_url = base_url
-        if sandbox_http_trust_env(base_url):
-            self._client = AioSandboxClient(base_url=base_url, timeout=600)
-        else:
-            direct_client = httpx.Client(timeout=600, follow_redirects=True, trust_env=False)
-            self._client = AioSandboxClient(
-                base_url=base_url,
-                timeout=600,
-                httpx_client=direct_client,
-            )
+        self._client = AioSandboxClient(base_url=base_url, timeout=600)
         self._home_dir = home_dir
         self._lock = threading.Lock()
         self._closed = False
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
         self._bash_exec_unsupported = False
+        self._private_files = RemotePrivateFileAuthority(
+            execute=self._execute_private_guest,
+            resolve_path=lambda path: path,
+        )
 
     @property
     def base_url(self) -> str:
@@ -174,7 +180,7 @@ class AioSandbox(Sandbox):
                 unchanged.
             timeout: Optional per-call timeout. The current sandbox SDK does not
                 expose a command-level timeout distinct from its client/request
-                timeout, so DeerFlow keeps using the backend's default here.
+                timeout, so ActWeave keeps using the backend's default here.
 
         Returns:
             The output of the command.
@@ -281,12 +287,7 @@ class AioSandbox(Sandbox):
                 logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                 return f"Error: {e}"
 
-    def read_file(
-        self,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> str:
+    def read_file(self, path: str) -> str:
         """Read the content of a file in the sandbox.
 
         Args:
@@ -296,16 +297,67 @@ class AioSandbox(Sandbox):
             The content of the file.
         """
         try:
-            kwargs = {}
-            if start_line is not None:
-                kwargs["start_line"] = max(start_line - 1, 0)
-            if end_line is not None:
-                kwargs["end_line"] = max(end_line, 0)
-            result = self._client.file.read_file(file=path, **kwargs)
+            result = self._client.file.read_file(file=path)
             return result.data.content if result.data else ""
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
+
+    def _execute_private_guest(
+        self,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        """Run the fixed secure-I/O helper with separately encoded input."""
+
+        command = f"python3 -c {shlex.quote(PRIVATE_GUEST_SCRIPT)}"
+        encoded = encode_guest_request(request)
+        with self._lock:
+            client = self._client
+            if client is None:
+                raise OSError("Sandbox client has been closed")
+            try:
+                result = client.bash.exec(
+                    command=command,
+                    env={PRIVATE_GUEST_REQUEST_ENV: encoded},
+                    hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                )
+            except Exception as exc:
+                raise OSError("AIO private file helper failed") from exc
+        data = result.data if result else None
+        stdout = (data.stdout or "") if data else ""
+        stderr = (data.stderr or "") if data else ""
+        if stderr and not stdout:
+            raise OSError("AIO private file helper returned no result")
+        return decode_guest_response(stdout)
+
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+    ):
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.list_secure_files(root, max_entries=max_entries)
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_regular_reader(path)
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_atomic_writer(path)
+
+    def remove_path(self, path: str) -> None:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        boundary.remove_path(path)
 
     def download_file(self, path: str) -> bytes:
         """Download file bytes from the sandbox.
@@ -432,47 +484,61 @@ class AioSandbox(Sandbox):
         # (caught by grep_tool's except re.error handler) rather than a
         # generic remote API error.
         _re.compile(regex_source, 0 if case_sensitive else _re.IGNORECASE)
-        total_cap = max(max_results * 4, max_results + 50)
-        result = self._client.file.grep_files(
-            path=path,
-            pattern=pattern,
-            case_insensitive=not case_sensitive,
-            fixed_strings=literal,
-            max_results=total_cap,
-            max_file_size="1M",
-            recursive=True,
-        )
-        data = result.data
-        provider_matches = data.matches if data and data.matches else []
+        page_size = min(max(max_results * 2, 100), 500)
+        max_pages = 20
         root = path.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-
         matches: list[GrepMatch] = []
-        truncated = bool(data and data.truncated)
-        for match in provider_matches:
-            file_path = match.file
-            if should_ignore_path(file_path):
-                continue
-            if file_path == root:
-                rel_path = file_path.rsplit("/", 1)[-1]
-            elif file_path.startswith(root_prefix):
-                rel_path = file_path[len(root_prefix) :]
-            else:
-                continue
-            if glob is not None and not path_matches(glob, rel_path):
-                continue
-            matches.append(
-                GrepMatch(
-                    path=file_path,
-                    line_number=match.line_number,
-                    line=truncate_line(match.line_content),
-                )
+        offset = 0
+        truncated = False
+
+        for _ in range(max_pages):
+            result = self._client.file.grep_files(
+                path=path,
+                pattern=pattern,
+                case_insensitive=not case_sensitive,
+                fixed_strings=literal,
+                max_results=page_size,
+                max_file_size="1M",
+                offset=offset,
+                recursive=True,
             )
-            if len(matches) >= max_results:
+            data = result.data
+            provider_matches = data.matches if data and data.matches else []
+            provider_truncated = bool(data and data.truncated)
+
+            for match in provider_matches:
+                file_path = match.file
+                if should_ignore_path(file_path):
+                    continue
+                if file_path == root:
+                    rel_path = file_path.rsplit("/", 1)[-1]
+                elif file_path.startswith(root_prefix):
+                    rel_path = file_path[len(root_prefix) :]
+                else:
+                    continue
+                if glob is not None and not path_matches(glob, rel_path):
+                    continue
+                matches.append(
+                    GrepMatch(
+                        path=file_path,
+                        line_number=match.line_number,
+                        line=truncate_line(match.line_content),
+                    )
+                )
+                if len(matches) > max_results:
+                    return matches[:max_results], True
+
+            if not provider_truncated:
+                break
+            if not provider_matches:
                 truncated = True
                 break
+            offset += len(provider_matches)
+        else:
+            truncated = True
 
-        return matches, truncated
+        return matches[:max_results], truncated
 
     def update_file(self, path: str, content: bytes) -> None:
         """Update a file with binary content in the sandbox.

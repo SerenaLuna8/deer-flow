@@ -13,9 +13,6 @@ const meta: MetaRecord = {
   "work-with-memory": {
     title: "Work with Memory",
   },
-  "deploy-your-own-deerflow": {
-    title: "Deploy Your Own DeerFlow",
-  },
 };
 
 export default meta;

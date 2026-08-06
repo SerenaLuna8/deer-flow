@@ -1,11 +1,10 @@
 import asyncio
-import json
 import logging
 import os
 import posixpath
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,7 +14,15 @@ from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.runtime.secret_context import read_active_secrets
+from deerflow.file_authority import require_private_file_authority
+from deerflow.runtime.secret_context import (
+    ACTIVE_SECRETS_CONTEXT_KEY,
+    SKILL_SECRET_EXEC_READY_CONTEXT_KEY,
+    SKILL_SECRET_PROVIDER_CONTEXT_KEY,
+    active_provider_secret_request,
+    read_active_secrets,
+    resolve_provider_active_secrets,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -26,7 +33,10 @@ from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    RunScopedReadOnlyMount,
+    get_sandbox_provider,
+)
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -128,27 +138,7 @@ def _get_skills_container_path() -> str:
 
 
 def _get_skills_host_path() -> str | None:
-    """Get the skills host filesystem path from config.
-
-    Returns None if the skills directory does not exist or config cannot be
-    loaded.  Only successful lookups are cached; failures are retried on the
-    next call so that a transiently unavailable skills directory does not
-    permanently disable skills access.
-    """
-    cached = getattr(_get_skills_host_path, "_cached", None)
-    if cached is not None:
-        return cached
-    try:
-        from deerflow.config import get_app_config
-
-        config = get_app_config()
-        skills_path = config.skills.get_skills_path()
-        if skills_path.exists():
-            value = str(skills_path)
-            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
-            return value
-    except Exception:
-        pass
+    """Global host Skill roots are not runtime authority."""
     return None
 
 
@@ -161,11 +151,10 @@ def _is_skills_path(path: str) -> bool:
 def _extract_skill_name_from_skills_path(path: str) -> str | None:
     """Extract a skill name from a virtual skills path.
 
-    /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
+    /mnt/skills/public/data-analysis/SKILL.md → "data-analysis"
     /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
     /mnt/skills/legacy/my-skill/references/... → "my-skill"
-    /mnt/skills/integrations/lark-cli/lark-doc/SKILL.md → "lark-doc"
-    /mnt/skills/public/bootstrap/ → "bootstrap"
+    /mnt/skills/public/data-analysis/ → "data-analysis"
     Returns None if the path doesn't contain a recognizable skill name pattern.
     """
     skills_prefix = _get_skills_container_path()
@@ -175,21 +164,13 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     relative = path[len(skills_prefix) :].lstrip("/")
     if not relative:
         return None
-    # Expected patterns: "public/<name>/...", "custom/<name>/...",
-    # "legacy/<name>/...", "integrations/<provider>/<name>/..."
-    # or "<name>/..." (direct skill access). Empty segments are dropped so a
-    # directory entry ("public/", as `ls` emits for dirs) is still recognized as
-    # a category root rather than yielding an empty skill name.
-    parts = [part for part in relative.split("/") if part]
+    # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
+    # or "<name>/..." (direct skill access)
+    parts = relative.split("/")
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
-    if len(parts) >= 3 and parts[0] == "integrations":
-        return parts[2]
-    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy", "integrations"):
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
         # Category root like /mnt/skills/custom — not a skill path.
-        return None
-    if len(parts) == 2 and parts[0] == "integrations":
-        # Provider root like /mnt/skills/integrations/lark-cli.
         return None
     if len(parts) >= 1:
         # Direct path like /mnt/skills/my-skill/SKILL.md
@@ -198,162 +179,32 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
 
 
 def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
-    """Check if a path belongs to a disabled skill.
+    """Deny every Skill path not covered by a server-issued run mount."""
+    return _is_skills_path(path)
 
-    PUBLIC skill enabled state is read from the global
-    ``extensions_config.json``.  CUSTOM / LEGACY skill enabled state is
-    read from the per-user ``_skill_states.json`` so that two users with
-    same-named custom skills can toggle independently.
 
-    Returns False for non-skills paths or paths whose skill is enabled.
-    """
-    skill_name = _extract_skill_name_from_skills_path(path)
-    if skill_name is None:
+def _is_trusted_run_scoped_skill_path(runtime: Runtime | None, path: str) -> bool:
+    """Return whether ``path`` belongs to the server-issued exact Skill mount."""
+
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, Mapping):
         return False
-    try:
-        from deerflow.runtime.user_context import get_effective_user_id
-        from deerflow.skills.storage import get_or_new_user_skill_storage
-
-        # Determine the category from the path
-        skills_prefix = _get_skills_container_path()
-        relative = path[len(skills_prefix) :].lstrip("/")
-        if relative.startswith("public/"):
-            category = "public"
-        elif relative.startswith("custom/"):
-            category = "custom"
-        elif relative.startswith("legacy/"):
-            category = "legacy"
-        elif relative.startswith("integrations/"):
-            category = "integrations"
-        else:
-            # Try to infer from storage
-            effective_uid = user_id or get_effective_user_id()
-            storage = get_or_new_user_skill_storage(effective_uid)
-            all_skills = storage.load_skills(enabled_only=False)
-            matching = next((s for s in all_skills if s.name == skill_name), None)
-            if matching is None:
-                return False  # Skill doesn't exist, not a disabled skill path
-            category = matching.category.value
-
-        if category == "public":
-            from deerflow.config.extensions_config import ExtensionsConfig
-
-            ext_config = ExtensionsConfig.from_file()
-            return not ext_config.is_skill_enabled(skill_name, category)
-        else:
-            # CUSTOM / LEGACY: use per-user state
-            effective_uid = user_id or get_effective_user_id()
-            storage = get_or_new_user_skill_storage(effective_uid)
-            return not storage.get_skill_enabled_state(skill_name)
-    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        # Access-control check must fail closed: when we can't determine the
-        # enabled state (corrupt _skill_states.json, mid-write race, missing
-        # config), refuse access rather than silently serving a disabled
-        # skill's files. See review feedback on PR #3889.
-        logger.warning("Failed to determine enabled state, denying access: %s", exc)
-        return True
-
-
-def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None) -> list[str]:
-    """Filter out paths that belong to a disabled skill.
-
-    ``_is_disabled_skill_path`` gates the *requested* path, which is enough for
-    ``read_file`` but not for the tools that descend: ``ls``, ``glob`` and
-    ``grep`` return paths other than the one they were given, so a root anywhere
-    above a disabled skill still surfaces its files.  This applies the same check
-    to the results.
-
-    The enabled-state lookup re-reads ``extensions_config.json`` (or the per-user
-    skill state) on every call, so the verdict is memoized per skill — a 100-match
-    grep must not become 100 config reads.
-    """
-    skills_prefix = _get_skills_container_path()
-    verdicts: dict[tuple[str, str], bool] = {}
-    kept: list[str] = []
-    for path in paths:
-        skill_name = _extract_skill_name_from_skills_path(path)
-        if skill_name is None:
-            kept.append(path)
+    run_id = context.get("run_id")
+    mounts = context.get("__run_read_only_mounts")
+    if not isinstance(run_id, str) or not isinstance(mounts, tuple):
+        return False
+    for mount in mounts:
+        if not isinstance(mount, RunScopedReadOnlyMount) or mount.run_id != run_id:
             continue
-        # Leading segment (the category, or the skill itself in the direct
-        # layout) plus the name identifies the skill the same way
-        # _is_disabled_skill_path does, so paths sharing a key share a verdict.
-        category = path[len(skills_prefix) :].lstrip("/").split("/")[0]
-        key = (category, skill_name)
-        if key not in verdicts:
-            verdicts[key] = _is_disabled_skill_path(path, user_id=user_id)
-        if not verdicts[key]:
-            kept.append(path)
-    return kept
+        prefix = mount.container_path.rstrip("/") or "/"
+        if path == prefix or path.startswith(f"{prefix}/"):
+            return True
+    return False
 
 
 def _resolve_skills_path(path: str) -> str:
-    """Resolve a virtual skills path to a host filesystem path.
-
-    WARNING: For per-user custom skills (``/mnt/skills/custom/...``), this
-    function uses ``get_effective_user_id()`` from the contextvar, which may
-    differ from the sandbox PathMapping's user_id (set during acquire via
-    ``resolve_runtime_user_id``). In local sandbox mode, skills paths should
-    be resolved by the sandbox's PathMapping instead of this function. This
-    function is retained for output masking (``mask_local_paths_in_output``)
-    and non-sandbox code paths.
-
-    Args:
-        path: Virtual skills path (e.g. /mnt/skills/public/bootstrap/SKILL.md)
-
-    Returns:
-        Resolved host path.
-
-    Raises:
-        FileNotFoundError: If skills directory is not configured or doesn't exist.
-    """
-    skills_container = _get_skills_container_path()
-    skills_host = _get_skills_host_path()
-    if skills_host is None:
-        raise FileNotFoundError(f"Skills directory not available for path: {path}")
-
-    if path == skills_container:
-        return skills_host
-
-    relative = path[len(skills_container) :].lstrip("/")
-
-    # Per-user custom and globally managed integration skills.
-    # ``skill_manage_tool`` writes custom skills to the per-user directory,
-    # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
-    # ``/mnt/skills/custom`` to that same per-user dir.  Without this
-    # branch, ``_resolve_skills_path("/mnt/skills/custom")`` would map to
-    # the global ``{skills_host}/custom/`` which is the repository-level
-    # ``skills/custom/`` — an entirely different directory that may be
-    # empty or contain legacy skills only.
-    if relative == "custom" or relative.startswith("custom/"):
-        from deerflow.config.paths import get_paths
-        from deerflow.runtime.user_context import get_effective_user_id
-
-        user_id = get_effective_user_id()
-        paths = get_paths()
-        user_custom_dir = paths.user_custom_skills_dir(user_id)
-        custom_relative = relative[len("custom") :].lstrip("/")
-        if custom_relative:
-            return str(user_custom_dir / custom_relative)
-        return str(user_custom_dir)
-
-    if relative == "integrations" or relative.startswith("integrations/"):
-        from deerflow.config.paths import get_paths
-
-        paths = get_paths()
-        integrations_dir = paths.integration_skills_dir()
-        integrations_relative = relative[len("integrations") :].lstrip("/")
-        if not integrations_relative:
-            return str(integrations_dir)
-        # Defense-in-depth: even though _reject_path_traversal runs upstream for
-        # sandbox callers, confirm the resolved path stays within the global
-        # integration dir so a lexical ``../`` cannot escape it here.
-        resolved = (integrations_dir / integrations_relative).resolve()
-        if not resolved.is_relative_to(integrations_dir.resolve()):
-            raise PermissionError("Access denied: path traversal detected")
-        return str(integrations_dir / integrations_relative)
-
-    return _join_path_preserving_style(skills_host, relative)
+    """Reject attempts to resolve a global Skill root."""
+    raise PermissionError(f"Skill path is not authorized by this run: {path}")
 
 
 def _is_acp_workspace_path(path: str) -> bool:
@@ -514,32 +365,12 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
 
 
 def _get_mcp_allowed_paths() -> list[str]:
-    """Get the list of allowed paths from MCP config for file system server."""
-    allowed_paths = []
-    try:
-        from deerflow.config.extensions_config import get_extensions_config
+    """Reject legacy filesystem allowances from extensions configuration.
 
-        extensions_config = get_extensions_config()
-
-        for _, server in extensions_config.mcp_servers.items():
-            if not server.enabled:
-                continue
-
-            # Only check the filesystem server
-            args = server.args or []
-            # Check if args has server-filesystem package
-            has_filesystem = any("server-filesystem" in arg for arg in args)
-            if not has_filesystem:
-                continue
-            # Unpack the allowed file system paths in config
-            for arg in args:
-                if not arg.startswith("-") and arg.startswith("/"):
-                    allowed_paths.append(arg.rstrip("/") + "/")
-
-    except Exception:
-        pass
-
-    return allowed_paths
+    M7 runtime access is derived from the immutable admitted-run snapshot. A
+    process-local extensions file is not an authorization source.
+    """
+    return []
 
 
 def _get_tool_config_int(name: str, key: str, default: int) -> int:
@@ -597,6 +428,8 @@ def _format_glob_results(root_path: str, matches: list[str], truncated: bool) ->
 
 def _format_grep_results(root_path: str, matches: list[GrepMatch], truncated: bool) -> str:
     if not matches:
+        if truncated:
+            return f"Results truncated while searching under {root_path}; matches may exist beyond the provider scan budget. Narrow the path or add a glob filter."
         return f"No matches found under {root_path}"
 
     lines = [f"Found {len(matches)} matches under {root_path}"]
@@ -754,16 +587,6 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     glob/grep match, so without this the same patterns are recompiled per
     match.
     """
-    # The segment boundary and path tail are shared with
-    # ``LocalSandbox._reverse_output_patterns`` — see
-    # ``deerflow.sandbox.path_patterns``, which owns that rule so the two copies
-    # cannot drift again (#4035 fixed one and missed the other; #4053 fixed the
-    # other).
-    #
-    # ``separator_agnostic=True`` is the one thing this site does differently:
-    # its bases come from ``_path_variants``, which yields Windows-style
-    # spellings, and they are matched against output whose separators this layer
-    # does not control.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
@@ -776,7 +599,16 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
                 if variant in seen:
                     continue
                 seen.add(variant)
-                compiled.append((build_output_mask_pattern(variant, separator_agnostic=True), variant, virtual_base))
+                compiled.append(
+                    (
+                        build_output_mask_pattern(
+                            variant,
+                            separator_agnostic=True,
+                        ),
+                        variant,
+                        virtual_base,
+                    )
+                )
     return tuple(compiled)
 
 
@@ -784,11 +616,11 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths (global + per-user
-    custom + managed integrations), and ACP workspace paths (per-thread).
+    custom), and ACP workspace paths (per-thread).
     """
     # Build the ordered (host_base, virtual_base) source list. Order is
     # preserved from the original implementation: skills, then per-user
-    # custom/integration skills, then ACP workspace, then user-data mappings (longest
+    # custom skills, then ACP workspace, then user-data mappings (longest
     # host path first). Custom mount host paths are masked by
     # LocalSandbox._reverse_resolve_paths_in_output().
     sources: list[tuple[str, str]] = []
@@ -808,13 +640,9 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
         user_id = get_effective_user_id()
         user_custom_dir = get_paths().user_custom_skills_dir(user_id)
-        integrations_dir = get_paths().integration_skills_dir()
         if user_custom_dir.exists():
             skills_container = _get_skills_container_path()
             sources.append((str(user_custom_dir), f"{skills_container}/custom"))
-        if integrations_dir.exists():
-            skills_container = _get_skills_container_path()
-            sources.append((str(integrations_dir), f"{skills_container}/integrations"))
     except Exception:
         pass
 
@@ -1270,21 +1098,11 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
-        # The segment-boundary lookahead is what keeps the virtual root from
-        # matching inside a sibling that merely shares its prefix
-        # (``/mnt/user-data`` inside ``/mnt/user-data-backup``). The trailing
-        # group needs a ``/`` to consume anything, so without the lookahead the
-        # bare root still matches and the sibling is rewritten into the thread's
-        # host directory — a real path outside the mount contract. Same defect as
-        # #4035 (reverse patterns) and #4053 (masking patterns), mirrored into
-        # this direction.
-        #
-        # The class mirrors ``LocalSandbox._content_pattern``'s rather than
-        # ``_command_pattern``'s: a virtual root can legitimately be followed by
-        # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
-        # class rejects — narrowing to it would stop translating paths that
-        # translate today. ``$`` covers a command ending exactly at the root.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
+        pattern = re.compile(
+            rf"{re.escape(VIRTUAL_PATH_PREFIX)}"
+            r"(?=/|$|[^\w./-])"
+            r"(/[^\s\"';&|<>()]*)?"
+        )
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -1322,30 +1140,36 @@ def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
 def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Accepts both the generic id ``"local"`` (acquire with no thread context)
-    and the per-thread id format ``"local:{user_id}:{thread_id}"`` produced
-    by :meth:`LocalSandboxProvider.acquire` once a thread is known.
+    Accepts the generic id ``"local"`` (acquire with no thread context), the
+    per-thread ``"local:{user_id}:{thread_id}"`` format, and the trusted
+    per-run ``"local-run:{user_id}:{thread_id}:{run_id}"`` format.
     """
     if runtime is None:
         return False
     if runtime.state is None:
         return False
-    # Read-only classification: the id is only matched, so a fork-restored
-    # wrapper is safe to discard here (nothing gets released on this path).
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         return False
     sandbox_id = sandbox_state.get("sandbox_id")
     if not isinstance(sandbox_id, str):
         return False
-    return sandbox_id == "local" or sandbox_id.startswith("local:")
+    return sandbox_id == "local" or sandbox_id.startswith("local:") or sandbox_id.startswith("local-run:")
 
 
-def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
+def sandbox_from_runtime(
+    runtime: Runtime | None = None,
+    *,
+    state: Mapping[str, object] | None = None,
+) -> Sandbox:
     """Extract sandbox instance from tool runtime.
 
     DEPRECATED: Use ensure_sandbox_initialized() for lazy initialization support.
     This function assumes sandbox is already initialized and will raise error if not.
+    Model-call middleware receives a plain ``langgraph.runtime.Runtime``, which
+    intentionally has no ``state`` attribute, so those callers must pass their
+    explicit ``ModelRequest.state`` through ``state``. Tool callers continue to
+    use ``ToolRuntime.state`` when the explicit argument is absent.
 
     Raises:
         SandboxRuntimeError: If runtime is not available or sandbox state is missing.
@@ -1353,11 +1177,12 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     """
     if runtime is None:
         raise SandboxRuntimeError("Tool runtime not available")
-    if runtime.state is None:
+    runtime_state = state
+    if runtime_state is None:
+        runtime_state = getattr(runtime, "state", None)
+    if runtime_state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    # Read-only lookup: this only resolves the provider entry, and ownership
-    # (release) stays with after_agent's short-circuit on the wrapped state.
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    sandbox_state, _ = unwrap_sandbox(runtime_state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1396,12 +1221,13 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    # Check if sandbox already exists in state
-    # Discarding fork_restored is safe: after_agent short-circuits on the
-    # still-wrapped state before the context-based release branch, so this
-    # reuse path never releases the parent sandbox.
+    raw_mounts = (runtime.context or {}).get("__run_read_only_mounts", ())
+    mounts = raw_mounts if isinstance(raw_mounts, tuple) and all(type(item) is RunScopedReadOnlyMount for item in raw_mounts) else ()
+
+    # A checkpointed legacy sandbox is never authoritative for a private run.
+    # Exact mounts force a fresh run-scoped acquisition and overwrite state.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
-    if sandbox_state is not None:
+    if not mounts and sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
@@ -1419,7 +1245,15 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = (
+        provider.acquire_with_mounts(
+            thread_id,
+            user_id=resolve_runtime_user_id(runtime),
+            mounts=mounts,
+        )
+        if mounts
+        else provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    )
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1447,10 +1281,11 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    # Same discard as the sync path above: the reuse path never releases,
-    # because after_agent short-circuits on the still-wrapped state first.
+    raw_mounts = (runtime.context or {}).get("__run_read_only_mounts", ())
+    mounts = raw_mounts if isinstance(raw_mounts, tuple) and all(type(item) is RunScopedReadOnlyMount for item in raw_mounts) else ()
+
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
-    if sandbox_state is not None:
+    if not mounts and sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
@@ -1466,7 +1301,18 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = (
+        await provider.acquire_with_mounts_async(
+            thread_id,
+            user_id=resolve_runtime_user_id(runtime),
+            mounts=mounts,
+        )
+        if mounts
+        else await provider.acquire_async(
+            thread_id,
+            user_id=resolve_runtime_user_id(runtime),
+        )
+    )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
@@ -1483,6 +1329,7 @@ async def _run_sync_tool_after_async_sandbox_init(
     func: Callable[..., str] | None,
     runtime: Runtime,
     *args: object,
+    authorization_operation: str | None = None,
 ) -> str:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
@@ -1495,7 +1342,60 @@ async def _run_sync_tool_after_async_sandbox_init(
     if func is None:
         return "Error: Tool implementation not available"
 
-    return await asyncio.to_thread(func, runtime, *args)
+    if authorization_operation is not None:
+        from deerflow.sandbox.sandbox import check_authorization_boundary
+
+        await check_authorization_boundary(
+            getattr(runtime, "context", None),
+            authorization_operation,
+        )
+
+    context = getattr(runtime, "context", None)
+    private_skill_provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if (authorization_operation == "before_sandbox_exec" and isinstance(context, dict) and "private_scope" in context) else None
+    call_runtime = runtime
+    call_context: dict | None = None
+    if callable(private_skill_provider):
+        # Each command gets an isolated context overlay. Parallel bash calls
+        # must never clear or replace one another's ready marker or carrier.
+        call_context = dict(context)
+        call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+        requested = active_provider_secret_request(call_context)
+        fresh_scoped = await private_skill_provider(requested) if requested else {}
+        try:
+            active = resolve_provider_active_secrets(
+                call_context,
+                fresh_scoped,
+            )
+        finally:
+            if isinstance(fresh_scoped, dict):
+                for values in fresh_scoped.values():
+                    if isinstance(values, dict):
+                        values.clear()
+                fresh_scoped.clear()
+        if active:
+            call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
+        call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
+        call_runtime = _RuntimeContextOverlay(runtime, call_context)
+
+    try:
+        return await asyncio.to_thread(func, call_runtime, *args)
+    finally:
+        if call_context is not None:
+            call_context.pop(SKILL_SECRET_EXEC_READY_CONTEXT_KEY, None)
+            active = call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+            if isinstance(active, dict):
+                active.clear()
+
+
+class _RuntimeContextOverlay:
+    """Delegate Runtime state/config while replacing only per-call context."""
+
+    def __init__(self, target: Runtime, context: dict) -> None:
+        self._target = target
+        self.context = context
+
+    def __getattr__(self, name: str):
+        return getattr(self._target, name)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
@@ -1509,6 +1409,15 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
         runtime: Tool runtime containing state and context.
     """
     if runtime is None:
+        return
+
+    # Project-private runs restore their sandbox projection before the agent
+    # starts.  Their thread-data paths intentionally remain container paths
+    # (``/mnt/user-data/...``), even for LocalSandboxProvider, because the
+    # provider owns the host mapping.  Creating those paths on the gateway
+    # host would bypass that mapping and fails on hosts where ``/mnt`` is
+    # read-only (for example macOS).
+    if require_private_file_authority(runtime.context or {}) is not None:
         return
 
     # Only create directories for local sandbox
@@ -1537,14 +1446,6 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
 
 _SECRET_REDACTION = "[redacted]"
 
-# Values shorter than this are not redacted from bash output. A short secret
-# value (a 2-char region code, a numeric id, a PIN) would otherwise shred
-# unrelated bytes of tool output — exit codes, timestamps, sizes, paths —
-# corrupting the result the model reads back. The redaction of a value this
-# short is more likely noise than genuine leak protection; the secret is still
-# injected into the subprocess, only the output mask skips it.
-_MIN_MASK_LENGTH = 8
-
 
 def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     """Redact injected secret values from bash output before it re-enters context.
@@ -1552,16 +1453,21 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     Skill scripts receive request-scoped secrets as env vars (#3861). If a script
     echoes one (debugging, ``set -x``, an error dump), the value would otherwise
     flow into the tool result — and thus into the prompt and the trace. This is
-    the skill-specific fifth leak surface (the bash tool returns subprocess stdout,
-    unlike MCP tools). Replace each non-empty secret value with a redaction marker.
-    Longest values first so a value that is a substring of another is not partially
-    revealed. Values shorter than ``_MIN_MASK_LENGTH`` are skipped — a redacted
-    3-char token is more likely to corrupt unrelated output than to protect a
-    real secret.
+    the skill-specific fifth leak surface (the bash tool returns subprocess
+    stdout, unlike MCP tools). Replace every non-empty secret value with a
+    redaction marker, including short PINs. A short value can cause false-positive
+    masking in otherwise benign output, but confidentiality takes precedence:
+    once a value has been admitted as a Credential there is no reliable way to
+    distinguish an echoed secret from an identical ordinary token. Longest
+    values are replaced first so overlapping values are never partially exposed.
     """
     if not injected_env or not output:
         return output
-    for value in sorted((v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH), key=len, reverse=True):
+    for value in sorted(
+        {value for value in injected_env.values() if value},
+        key=len,
+        reverse=True,
+    ):
         output = output.replace(value, _SECRET_REDACTION)
     return output
 
@@ -1649,10 +1555,9 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# Gateway accepts this identity only from internally authenticated channel
-# requests, but embedded runtimes can still construct context directly. Bound
-# the value defensively: real platform ids are tens of chars; anything past
-# this is corrupt and must not bloat every sandbox command string.
+# body.context is client-writable on web requests, so bound the value: real
+# platform ids are tens of chars; anything past this is hostile or corrupt and
+# must not bloat every command string sent to the sandbox.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
 
@@ -1736,35 +1641,6 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
     return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
-_LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
-
-
-def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
-    """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
-
-    Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
-    config/data directories. Agent conversations invoke ``lark-cli`` through the
-    sandbox, so lark commands must receive those same directories or they see an
-    unrelated unauthenticated profile. Keep this scoped to commands that
-    actually call ``lark-cli`` so ordinary bash calls do not switch AIO into the
-    env-bearing execution path.
-
-    In broker mode (Pattern B, issue #4338) a sidecar owns the credentials, so
-    the overlay carries only the broker URL + runtime PATH — the config/data
-    directories are never injected into the sandbox.
-    """
-    if not _LARK_CLI_COMMAND_RE.search(command):
-        return None
-    try:
-        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
-
-        broker = sandbox_paths and sandbox_lark_broker_active()
-        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
-    except Exception:
-        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
-        return None
-
-
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1782,20 +1658,24 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         command: The bash command to execute. Always use absolute paths for files and directories.
     """
+    # Resolve the request-scoped carrier before sandbox initialization so even
+    # initialization/permission failures can be scrubbed with the same values.
+    # Never return an exception-derived string without passing this redactor.
+    runtime_context = getattr(runtime, "context", None)
+    private_skill_provider = runtime_context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if isinstance(runtime_context, dict) and "private_scope" in runtime_context else None
+    if callable(private_skill_provider) and runtime_context.get(SKILL_SECRET_EXEC_READY_CONTEXT_KEY) is not True:
+        return "Error: Skill credential material is unavailable"
+    injected_env = read_active_secrets(runtime_context) or None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
         # short-lived GitHub App installation token threaded through by the
         # GitHub channel. Both are injected as per-call env into the subprocess,
         # never placed in the command string.
-        injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
-        if lark_cli_env:
-            injected_env = {**(injected_env or {}), **lark_cli_env}
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1823,7 +1703,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
-        command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
+        command = f"cd -- {shlex.quote(f'{VIRTUAL_PATH_PREFIX}/workspace')} && {command}"
         if identity_prefix:
             command = identity_prefix + command
         try:
@@ -1835,15 +1715,27 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             max_chars = 20000
         return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", injected_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", injected_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(
+            f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}",
+            injected_env,
+        )
+    finally:
+        if injected_env and callable(private_skill_provider):
+            injected_env.clear()
 
 
 async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+    return await _run_sync_tool_after_async_sandbox_init(
+        bash_tool.func,
+        runtime,
+        description,
+        command,
+        authorization_operation="before_sandbox_exec",
+    )
 
 
 bash_tool.coroutine = _bash_tool_async
@@ -1858,9 +1750,8 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         path: The **absolute** path to the directory to list.
     """
     try:
-        user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
-        if _is_disabled_skill_path(path, user_id=user_id):
+        if not _is_trusted_run_scoped_skill_path(runtime, path) and _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1886,12 +1777,6 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         output = "\n".join(children)
         if thread_data is not None:
             output = mask_local_paths_in_output(output, thread_data)
-        # The gate above only covers `path` itself; the listing descends into
-        # children, so a root above a disabled skill still exposes its files.
-        entries = _drop_disabled_skill_paths(output.splitlines(), user_id=user_id)
-        if not entries:
-            return "(empty)"
-        output = "\n".join(entries)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -1936,11 +1821,6 @@ def glob_tool(
         max_results: Maximum number of paths to return. Default is 200.
     """
     try:
-        user_id = resolve_runtime_user_id(runtime)
-        # Block access to disabled skill directories
-        if _is_disabled_skill_path(path, user_id=user_id):
-            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
-            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1959,9 +1839,6 @@ def glob_tool(
         matches, truncated = sandbox.glob(path, pattern, include_dirs=include_dirs, max_results=effective_max_results)
         if thread_data is not None:
             matches = [mask_local_paths_in_output(match, thread_data) for match in matches]
-        # The gate above only covers `path` itself; the search descends into it,
-        # so a root above a disabled skill still surfaces its files.
-        matches = _drop_disabled_skill_paths(matches, user_id=user_id)
         return _format_glob_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
@@ -2008,7 +1885,7 @@ def grep_tool(
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
 ) -> str:
-    """Search for matching lines inside a text file or files under a root directory.
+    """Search for matching lines inside a text file or files under a directory.
 
     Args:
         description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -2020,11 +1897,6 @@ def grep_tool(
         max_results: Maximum number of matching lines to return. Default is 100.
     """
     try:
-        user_id = resolve_runtime_user_id(runtime)
-        # Block access to disabled skill directories
-        if _is_disabled_skill_path(path, user_id=user_id):
-            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
-            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -2057,17 +1929,13 @@ def grep_tool(
                 )
                 for match in matches
             ]
-        # The gate above only covers `path` itself; the search descends into it,
-        # so a root above a disabled skill still surfaces its file contents.
-        allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
-        matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
-        return f"Error: Directory not found: {requested_path}"
+        return f"Error: Path not found: {requested_path}"
     except NotADirectoryError:
-        return f"Error: Path is not a directory: {requested_path}"
+        return f"Error: Invalid search path: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
     except PermissionError:
@@ -2116,7 +1984,8 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
         thread_data = get_thread_data(runtime)
         validate_local_tool_path(path, thread_data, read_only=True)
         if _is_skills_path(path):
-            path = _resolve_skills_path(path)
+            if not _is_trusted_run_scoped_skill_path(runtime, path):
+                path = _resolve_skills_path(path)
         elif _is_acp_workspace_path(path):
             path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
         elif not _is_custom_mount_path(path):
@@ -2138,44 +2007,29 @@ def read_file_tool(
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to read.
-        start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
-        end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
+        start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
+        end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
         # Block access to disabled skill files
-        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+        if not _is_trusted_run_scoped_skill_path(runtime, path) and _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
-        if start_line is not None and start_line < 1:
-            return "(start_line must be >= 1)"
-        effective_start = start_line or 1
-        if end_line is not None and end_line < 1:
-            return "(end_line must be >= 1)"
-        if end_line is not None and effective_start > end_line:
-            return "(start_line > end_line — no lines in range)"
-
         requested_path = path
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
-        use_line_range = start_line is not None or end_line is not None
-        if use_line_range:
-            if is_local_sandbox(runtime):
-                thread_data = get_thread_data(runtime)
-                validate_local_tool_path(path, thread_data, read_only=True)
-                if _is_skills_path(path):
-                    path = _resolve_skills_path(path)
-                elif _is_acp_workspace_path(path):
-                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-                elif not _is_custom_mount_path(path):
-                    path = _resolve_and_validate_user_data_path(path, thread_data)
-                # Custom mount paths are resolved by LocalSandbox._resolve_path()
-            content = sandbox.read_file(path, start_line=start_line, end_line=end_line)
-        else:
-            content = read_current_file_content(runtime, path)
+        content = read_current_file_content(runtime, path)
         if not content:
-            if start_line is not None and start_line > 1:
-                return "(start_line exceeds file length)"
             return "(empty)"
+        if start_line is not None or end_line is not None:
+            lines = content.splitlines()
+            start = max(start_line, 1) if start_line is not None else 1
+            end = end_line if end_line is not None else len(lines)
+            if end < 1:
+                return "(end_line must be >= 1)"
+            if start > len(lines):
+                return "(start_line exceeds file length)"
+            if start > end:
+                return "(start_line > end_line — no lines in range)"
+            content = "\n".join(lines[start - 1 : end])
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -2247,6 +2101,12 @@ def write_file_tool(
     Any write invalidates earlier reads, so re-read between consecutive
     modifications — a ranged read of the relevant section is enough. Writes
     that fail this check are rejected with an error.
+
+    FINAL DELIVERABLES:
+    If the user asks you to create or write a file, including a source-code file,
+    script, configuration, or document, write the completed file under
+    `/mnt/user-data/outputs` and call `present_files` before the final response.
+    Use `/mnt/user-data/workspace` only for temporary or intermediate files.
 
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
@@ -2325,7 +2185,15 @@ async def _write_file_tool_async(
     content: str,
     append: bool = False,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+    return await _run_sync_tool_after_async_sandbox_init(
+        write_file_tool.func,
+        runtime,
+        description,
+        path,
+        content,
+        append,
+        authorization_operation="before_sandbox_write",
+    )
 
 
 write_file_tool.coroutine = _write_file_tool_async
@@ -2366,8 +2234,6 @@ def str_replace_tool(
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
             if not old_str:
-                # A no-op edit. str.replace("", new_str) would insert new_str at
-                # every character boundary, so this cannot fall through.
                 return "OK"
             if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
@@ -2403,6 +2269,7 @@ async def _str_replace_tool_async(
         old_str,
         new_str,
         replace_all,
+        authorization_operation="before_sandbox_write",
     )
 
 

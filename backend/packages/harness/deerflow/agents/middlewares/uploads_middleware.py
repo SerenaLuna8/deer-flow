@@ -1,10 +1,7 @@
-"""Middleware to inject current-run uploaded files into the agent context.
-
-Historical uploads are no longer injected every turn — the agent discovers them
-on demand via the ``list_uploaded_files`` tool.
-"""
+"""Middleware to inject uploaded files information into agent context."""
 
 import logging
+import re
 from collections import Counter
 from pathlib import Path
 from typing import NotRequired, override
@@ -15,16 +12,22 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    neutralize_untrusted_tags,
+)
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.file_authority import require_private_file_authority
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.file_conversion import extract_outline
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_content_to_text
 
 logger = logging.getLogger(__name__)
 
+
+_OUTLINE_PREVIEW_LINES = 5
 _MAX_FILES_PER_CONTEXT_SECTION = 10
+_QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _extension_label(file: dict) -> str:
@@ -38,6 +41,91 @@ def _format_omitted_file_types(files: list[dict]) -> str:
     return neutralize_untrusted_tags(", ".join(parts))
 
 
+def _query_match_strength(file: dict, query_text: str) -> int:
+    query = query_text.lower()
+    if not query:
+        return 0
+
+    filename = str(file.get("filename") or "").lower()
+    stem = Path(filename).stem
+    extension_label = _extension_label(file)
+    extension = extension_label[1:] if extension_label.startswith(".") else ""
+
+    if filename and filename in query:
+        return 3
+    if len(stem) >= 3 and stem in query:
+        return 3
+
+    token_match = False
+    for token in _QUERY_TOKEN_RE.findall(stem):
+        if len(token) >= 3 and token in query:
+            token_match = True
+            break
+    if token_match:
+        return 2
+
+    if extension and re.search(rf"\b{re.escape(extension)}s?\b", query):
+        return 1
+    return 0
+
+
+def _original_user_text_for_upload_injection(
+    content: object,
+    additional_kwargs: dict,
+) -> str:
+    """Recover a prior server marker only from an existing upload wrapper.
+
+    ``before_agent`` can run again against state already annotated by this
+    middleware. Preserve that server-issued suffix marker for idempotence.
+    Otherwise derive the marker from the actual incoming content, replacing
+    any client-supplied value. Private HTTP ingress also strips this field
+    before graph admission, so clients cannot create a trusted prefix.
+    """
+    text = message_content_to_text(content)
+    marker = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+    if isinstance(marker, str) and text.lstrip().startswith("<uploaded_files>") and text.endswith(marker):
+        return marker
+    return text
+
+
+def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
+    """Return the document outline and fallback preview for *file_path*.
+
+    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
+    pipeline.
+
+    Returns:
+        (outline, preview) where:
+        - outline: list of ``{title, line}`` dicts (plus optional sentinel).
+          Empty when no headings are found or no .md exists.
+        - preview: first few non-empty lines of the .md, used as a content
+          anchor when outline is empty so the agent has some context.
+          Empty when outline is non-empty (no fallback needed).
+    """
+    md_path = file_path.with_suffix(".md")
+    if not md_path.is_file():
+        return [], []
+
+    outline = extract_outline(md_path)
+    if outline:
+        logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
+        return outline, []
+
+    # outline is empty — read the first few non-empty lines as a content preview
+    preview: list[str] = []
+    try:
+        with md_path.open(encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    preview.append(stripped)
+                if len(preview) >= _OUTLINE_PREVIEW_LINES:
+                    break
+    except Exception:
+        logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
+    return [], preview
+
+
 class UploadsMiddlewareState(AgentState):
     """State schema for uploads middleware."""
 
@@ -45,14 +133,11 @@ class UploadsMiddlewareState(AgentState):
 
 
 class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
-    """Middleware to inject current-run uploaded files into the agent context.
+    """Middleware to inject uploaded files information into the agent context.
 
     Reads file metadata from the current message's additional_kwargs.files
-    (set by the frontend after upload) and prepends a <current_uploads> block
-    to the last human message so the model knows which files were just uploaded.
-
-    Historical uploads are NOT injected — the agent discovers them on demand
-    via the ``list_uploaded_files`` tool.
+    (set by the frontend after upload) and prepends an <uploaded_files> block
+    to the last human message so the model knows which files are available.
     """
 
     state_schema = UploadsMiddlewareState
@@ -77,17 +162,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         self._max_files_per_context_section = max_files_per_context_section
 
     def _format_file_entry(self, file: dict, lines: list[str]) -> None:
-        """Append a single file entry (name, size, path, optional outline) to lines.
-
-        User-derived values (filename, path, outline titles, preview text) are
-        neutralized via ``neutralize_untrusted_tags`` so a crafted filename or
-        document cannot embed blocked authority tags inside the trusted
-        ``<current_uploads>`` wrapper.
-        """
+        """Append one file entry with every untrusted field neutralized."""
         size_kb = file["size"] / 1024
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-        lines.append(f"- {neutralize_untrusted_tags(file['filename'])} ({size_str})")
-        lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
+        lines.append(f"- {neutralize_untrusted_tags(str(file['filename']))} ({size_str})")
+        lines.append(f"  Path: {neutralize_untrusted_tags(str(file['path']))}")
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
@@ -96,7 +175,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             visible = [e for e in outline if not e.get("truncated")]
             lines.append("  Document outline (use `read_file` with line ranges to read sections):")
             for entry in visible:
-                lines.append(f"    L{entry['line']}: {neutralize_untrusted_tags(entry['title'])}")
+                line = neutralize_untrusted_tags(str(entry["line"]))
+                title = neutralize_untrusted_tags(str(entry["title"]))
+                lines.append(f"    L{line}: {title}")
             if truncated:
                 lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
         else:
@@ -104,50 +185,86 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if preview:
                 lines.append("  No structural headings detected. Document begins with:")
                 for text in preview:
-                    lines.append(f"    > {neutralize_untrusted_tags(text)}")
+                    lines.append(f"    > {neutralize_untrusted_tags(str(text))}")
             lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
         lines.append("")
 
     def _select_files_for_context(
         self,
         files: list[dict],
+        query_text: str,
+        *,
+        recency_key: str | None = None,
     ) -> tuple[list[dict], list[dict]]:
-        """Return bounded context files in upload order."""
-        selected = [dict(f) for f in files[: self._max_files_per_context_section]]
-        omitted = [dict(f) for f in files[self._max_files_per_context_section :]]
+        """Return bounded context files, prioritizing current-query matches."""
+        ranked: list[tuple[tuple, dict]] = []
+        for index, file in enumerate(files):
+            selected_file = dict(file)
+            match_strength = _query_match_strength(selected_file, query_text)
+            query_match = match_strength > 0
+            if query_match:
+                selected_file["selection_reason"] = "query_match"
+
+            if recency_key:
+                sort_key = (-match_strength, -float(selected_file.get(recency_key) or 0), selected_file["filename"])
+            else:
+                sort_key = (-match_strength, index)
+            ranked.append((sort_key, selected_file))
+
+        ranked.sort(key=lambda item: item[0])
+        selected = [file for _, file in ranked[: self._max_files_per_context_section]]
+        omitted = [file for _, file in ranked[self._max_files_per_context_section :]]
         return selected, omitted
 
     def _create_files_message(
         self,
-        files: list[dict],
+        new_files: list[dict],
+        historical_files: list[dict],
         *,
-        omitted_files: list[dict] | None = None,
+        omitted_new_files: list[dict] | None = None,
+        omitted_historical_files: list[dict] | None = None,
     ) -> str:
-        """Create a formatted message listing current-run uploaded files.
+        """Create a formatted message listing uploaded files.
 
         Args:
-            files: Files uploaded in the current message.
-            omitted_files: Files omitted from the prompt context (over cap).
+            new_files: Files uploaded in the current message.
+            historical_files: Files uploaded in previous messages.
+                Each file dict may contain an optional ``outline`` key — a list of
+                ``{title, line}`` dicts extracted from the converted Markdown file.
+            omitted_new_files: Current-message files omitted from the prompt context.
+            omitted_historical_files: Older historical files omitted from the prompt context.
 
         Returns:
-            Formatted string inside <current_uploads> tags.
+            Formatted string inside <uploaded_files> tags.
         """
-        lines = ["<current_uploads>"]
+        lines = ["<uploaded_files>"]
 
         lines.append("The following files were uploaded in this message:")
         lines.append("")
-        if files:
-            for file in files:
+        if new_files:
+            for file in new_files:
                 self._format_file_entry(file, lines)
-            if omitted_files:
-                lines.append(f"... ({len(omitted_files)} more file(s) from this message omitted from this context.)")
-                lines.append(f"  Omitted file types: {_format_omitted_file_types(omitted_files)}")
+            if omitted_new_files:
+                lines.append(f"... ({len(omitted_new_files)} more file(s) from this message omitted from this context.)")
+                lines.append(f"  Omitted file types: {_format_omitted_file_types(omitted_new_files)}")
                 lines.append("  Use `glob(pattern='**/*', path='/mnt/user-data/uploads/')` to list all uploads.")
                 lines.append("  Use `grep(pattern='keyword', path='/mnt/user-data/uploads/')` to search across uploads.")
                 lines.append("")
         else:
             lines.append("(empty)")
             lines.append("")
+
+        if historical_files:
+            lines.append("The following files were uploaded in previous messages and are still available:")
+            lines.append("")
+            for file in historical_files:
+                self._format_file_entry(file, lines)
+            if omitted_historical_files:
+                lines.append(f"... ({len(omitted_historical_files)} more historical file(s) omitted from this context.)")
+                lines.append(f"  Omitted file types: {_format_omitted_file_types(omitted_historical_files)}")
+                lines.append("  Use `glob(pattern='**/*', path='/mnt/user-data/uploads/')` to list all uploads.")
+                lines.append("  Use `grep(pattern='keyword', path='/mnt/user-data/uploads/')` to search across uploads.")
+                lines.append("")
 
         lines.append("To work with these files:")
         lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
@@ -156,7 +273,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append("- Use `glob` to find files by name pattern")
         lines.append("  (e.g. `glob(pattern='**/*.md', path='/mnt/user-data/uploads/')`).")
         lines.append("- Only fall back to web search if the file content is clearly insufficient to answer the question.")
-        lines.append("</current_uploads>")
+        lines.append("</uploaded_files>")
 
         return "\n".join(lines)
 
@@ -198,24 +315,134 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             )
         return files if files else None
 
+    def _private_before_agent(
+        self,
+        messages: list,
+        last_message_index: int,
+        last_message: HumanMessage,
+        authority: object,
+    ) -> dict | None:
+        visible_uploads = authority.visible_uploads()
+        if type(visible_uploads) is not tuple:
+            raise RuntimeError("Private file authority is unavailable")
+        authorized: list[dict] = []
+        for raw in visible_uploads:
+            if type(raw) is not dict:
+                raise RuntimeError("Private file authority is unavailable")
+            file = dict(raw)
+            file_id = file.get("file_id")
+            filename = file.get("filename")
+            size = file.get("size")
+            path = file.get("path")
+            if type(file_id) is not str or type(filename) is not str or not filename or Path(filename).name != filename or type(size) is not int or size < 0 or path != f"/mnt/user-data/uploads/{filename}":
+                raise RuntimeError("Private file authority is unavailable")
+            file["extension"] = Path(filename).suffix
+            authorized.append(file)
+
+        requested: list[str] = []
+        raw_requested = (last_message.additional_kwargs or {}).get("files")
+        if isinstance(raw_requested, list):
+            for raw in raw_requested:
+                if not isinstance(raw, dict):
+                    continue
+                file_id = raw.get("file_id")
+                if type(file_id) is str and file_id not in requested:
+                    requested.append(file_id)
+        by_id = {file["file_id"]: file for file in authorized}
+        new_files = [dict(by_id[file_id]) for file_id in requested if file_id in by_id]
+        record_current_upload_ids = getattr(
+            authority,
+            "record_current_upload_ids",
+            None,
+        )
+        if not callable(record_current_upload_ids):
+            raise RuntimeError("Private file authority is unavailable")
+        record_current_upload_ids(tuple(file["file_id"] for file in new_files))
+        requested_set = set(requested)
+        historical_candidates = [dict(file) for file in authorized if file["file_id"] not in requested_set]
+        query_text = get_original_user_content_text(
+            last_message.content,
+            last_message.additional_kwargs,
+        )
+        context_new_files, omitted_new_files = self._select_files_for_context(
+            new_files,
+            query_text,
+        )
+        historical_files, omitted_historical_files = self._select_files_for_context(
+            historical_candidates,
+            query_text,
+        )
+        if not context_new_files and not historical_files:
+            return None
+        files_message = self._create_files_message(
+            context_new_files,
+            historical_files,
+            omitted_new_files=omitted_new_files,
+            omitted_historical_files=omitted_historical_files,
+        )
+        original_content = last_message.content
+        additional_kwargs = dict(last_message.additional_kwargs or {})
+        additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = _original_user_text_for_upload_injection(
+            original_content,
+            additional_kwargs,
+        )
+        if isinstance(original_content, str):
+            updated_content = f"{files_message}\n\n{original_content}"
+        elif isinstance(original_content, list):
+            updated_content = [
+                {"type": "text", "text": f"{files_message}\n\n"},
+                *original_content,
+            ]
+        else:
+            updated_content = original_content
+        messages[last_message_index] = HumanMessage(
+            content=updated_content,
+            id=last_message.id,
+            name=last_message.name,
+            additional_kwargs=additional_kwargs,
+        )
+        return {"uploaded_files": new_files, "messages": messages}
+
     @override
     def before_agent(self, state: UploadsMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject current-run uploads before agent execution.
+        """Inject uploaded files information before agent execution.
 
-        Only files from the current message's additional_kwargs.files are listed.
-        Historical uploads are discovered on demand via ``list_uploaded_files``.
+        New files come from the current message's additional_kwargs.files.
+        Historical files are scanned from the thread's uploads directory,
+        excluding the new ones.
 
-        Prepends <current_uploads> context to the last human message content.
+        Prepends <uploaded_files> context to the last human message content.
+        The original additional_kwargs (including files metadata) is preserved
+        on the updated message so the frontend can read it from the stream.
+
+        Args:
+            state: Current agent state.
+            runtime: Runtime context containing thread_id.
+
+        Returns:
+            State updates including uploaded files list.
         """
         messages = list(state.get("messages", []))
         if not messages:
-            return {"uploaded_files": []}
+            return None
 
         last_message_index = len(messages) - 1
         last_message = messages[last_message_index]
 
         if not isinstance(last_message, HumanMessage):
-            return {"uploaded_files": []}
+            return None
+
+        authority = require_private_file_authority(
+            runtime.context or {},
+            method="visible_uploads",
+        )
+        if authority is not None:
+            return self._private_before_agent(
+                messages,
+                last_message_index,
+                last_message,
+                authority,
+            )
 
         # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")
@@ -225,59 +452,95 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
-                pass
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
+                pass  # get_config() raises outside a runnable context (e.g. unit tests)
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
+
+        query_text = get_original_user_content_text(last_message.content, last_message.additional_kwargs)
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
-        if not new_files:
-            if (last_message.additional_kwargs or {}).get("files"):
-                logger.info(
-                    "UploadsMiddleware: files metadata was present but no files were found on disk (thread_id=%s, uploads_dir=%s)",
-                    thread_id,
-                    uploads_dir,
-                )
-            # Clear stale uploaded_files so list_uploaded_files doesn't
-            # exclude files that became historical after the previous turn.
-            return {"uploaded_files": []}
+        context_new_files, omitted_new_files = self._select_files_for_context(new_files, query_text)
 
-        context_files, omitted_files = self._select_files_for_context(new_files)
+        # Collect historical files from the uploads directory (all except the new ones)
+        new_filenames = {f["filename"] for f in new_files}
+        historical_candidates: list[dict] = []
+        if uploads_dir and uploads_dir.exists():
+            for file_path in sorted(uploads_dir.iterdir()):
+                if is_upload_staging_file(file_path.name):
+                    continue
+                if file_path.is_file() and file_path.name not in new_filenames:
+                    stat = file_path.stat()
+                    historical_candidates.append(
+                        {
+                            "filename": file_path.name,
+                            "size": stat.st_size,
+                            "path": f"/mnt/user-data/uploads/{file_path.name}",
+                            "extension": file_path.suffix,
+                            "_mtime": stat.st_mtime,
+                            "_host_path": file_path,
+                        }
+                    )
 
-        # Attach outlines to context files
+        historical_files, omitted_historical_files = self._select_files_for_context(
+            historical_candidates,
+            query_text,
+            recency_key="_mtime",
+        )
+        for file in historical_files:
+            file_path = file.pop("_host_path")
+            file.pop("_mtime", None)
+            outline, preview = _extract_outline_for_file(file_path)
+            file["outline"] = outline
+            file["outline_preview"] = preview
+
+        # Attach outlines to new files as well
         if uploads_dir:
-            for file in context_files:
+            new_files_by_name = {file["filename"]: file for file in new_files}
+            for file in context_new_files:
                 phys_path = uploads_dir / file["filename"]
-                outline, preview = extract_outline_for_file(phys_path)
+                outline, preview = _extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview
+                if original_file := new_files_by_name.get(file["filename"]):
+                    original_file["outline"] = outline
+                    original_file["outline_preview"] = preview
 
-        logger.debug(f"Current uploads: {[f['filename'] for f in new_files]}")
+        if not context_new_files and not historical_files:
+            return None
+
+        logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
 
         # Create files message and prepend to the last human message content
         files_message = self._create_files_message(
-            context_files,
-            omitted_files=omitted_files if omitted_files else None,
+            context_new_files,
+            historical_files,
+            omitted_new_files=omitted_new_files,
+            omitted_historical_files=omitted_historical_files,
         )
 
+        # Extract original content - handle both string and list formats
         original_content = last_message.content
         additional_kwargs = dict(last_message.additional_kwargs or {})
-        original_user_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
-        if not isinstance(original_user_content, str):
-            if ORIGINAL_USER_CONTENT_KEY in additional_kwargs:
-                logger.warning(
-                    "UploadsMiddleware replaced non-string %s metadata: type=%s",
-                    ORIGINAL_USER_CONTENT_KEY,
-                    type(original_user_content).__name__,
-                )
-            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(original_content)
+        additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = _original_user_text_for_upload_injection(
+            original_content,
+            additional_kwargs,
+        )
         if isinstance(original_content, str):
+            # Simple case: string content, just prepend files message
             updated_content = f"{files_message}\n\n{original_content}"
         elif isinstance(original_content, list):
+            # Complex case: list content (multimodal), preserve all blocks
+            # Prepend files message as the first text block
             files_block = {"type": "text", "text": f"{files_message}\n\n"}
+            # Keep all original blocks (including images)
             updated_content = [files_block, *original_content]
         else:
+            # Other types, preserve as-is
             updated_content = original_content
 
+        # Create new message with combined content.
+        # Preserve additional_kwargs (including files metadata) so the frontend
+        # can read structured file info from the streamed message.
         updated_message = HumanMessage(
             content=updated_content,
             id=last_message.id,
@@ -300,9 +563,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         ``stat``, reading sibling ``.md`` outlines). When the graph runs async,
         langgraph would otherwise execute the sync hook directly on the event
         loop, so it is dispatched to a worker thread via ``run_in_executor``.
-        ``run_in_executor`` copies the current context, preserving both
-        LangGraph's runnable config and DeerFlow's request ContextVar fallback.
-        The runtime itself is also passed explicitly for the authoritative
-        ``runtime.context["user_id"]`` channel.
+        ``run_in_executor`` copies the current context, so the ``user_id``
+        contextvar read by ``get_effective_user_id()`` is preserved.
         """
         return await run_in_executor(None, self.before_agent, state, runtime)

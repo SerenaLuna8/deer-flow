@@ -6,7 +6,13 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import ask_clarification_tool, list_uploaded_files, present_file_tool, review_skill_package, task_tool, view_image_tool
+from deerflow.tools.builtins import (
+    ask_clarification_tool,
+    list_uploaded_files_tool,
+    present_file_tool,
+    task_tool,
+    view_image_tool,
+)
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
@@ -15,7 +21,7 @@ logger = logging.getLogger(__name__)
 BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
-    review_skill_package,
+    list_uploaded_files_tool,
 ]
 
 SUBAGENT_TOOLS = [
@@ -48,8 +54,9 @@ def get_available_tools(
     model_name: str | None = None,
     subagent_enabled: bool = False,
     *,
-    include_upload_tool: bool = True,
     app_config: AppConfig | None = None,
+    asset_context: object | None = None,
+    include_acp: bool = True,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -61,9 +68,8 @@ def get_available_tools(
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
-        include_upload_tool: Whether to include ``list_uploaded_files`` (default: True).
-            Set to False for subagent tool assembly — subagents have independent
-            ThreadState and cannot exclude current-run files.
+        include_acp: Whether global ACP configuration may add its delegation
+            tool. Defaults to True for legacy/system runtimes.
 
     Returns:
         List of available tools.
@@ -94,14 +100,6 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
-    if include_upload_tool:
-        builtin_tools.append(list_uploaded_files)
-    skill_evolution_config = getattr(config, "skill_evolution", None)
-    if getattr(skill_evolution_config, "enabled", False):
-        from deerflow.tools.skill_manage_tool import skill_manage_tool
-
-        builtin_tools.append(skill_manage_tool)
-
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
@@ -117,30 +115,22 @@ def get_available_tools(
         builtin_tools.append(view_image_tool)
         logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
 
-    # Get cached MCP tools if enabled
-    # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when loading MCP tools.
+    # The MCP runtime loader owns pre-cutover file behavior. This layer must
+    # not probe ExtensionsConfig because cutover is provider-only.
     mcp_tools = []
     if include_mcp:
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.assets.catalog import AssetCatalogUnavailable
             from deerflow.mcp.cache import get_cached_mcp_tools
 
-            extensions_config = ExtensionsConfig.from_file()
-            if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
-                if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+            mcp_tools = get_cached_mcp_tools(asset_context=asset_context)
+            if mcp_tools:
+                logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # Tag MCP-sourced tools so deferred-tool assembly at each
-                    # agent construction site can identify them. Lead agents
-                    # assemble their full configured MCP catalog and apply active
-                    # skill policy at runtime; subagents may pass an already
-                    # policy-filtered list because their skills load at startup.
-                    for t in mcp_tools:
-                        tag_mcp_tool(t)
+                for t in mcp_tools:
+                    tag_mcp_tool(t)
+        except AssetCatalogUnavailable:
+            raise
         except ImportError:
             logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
         except Exception as e:
@@ -148,20 +138,21 @@ def get_available_tools(
 
     # Add invoke_acp_agent tool if any ACP agents are configured
     acp_tools: list[BaseTool] = []
-    try:
-        from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
+    if include_acp:
+        try:
+            from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
 
-        if app_config is None:
-            from deerflow.config.acp_config import get_acp_agents
+            if app_config is None:
+                from deerflow.config.acp_config import get_acp_agents
 
-            acp_agents = get_acp_agents()
-        else:
-            acp_agents = getattr(config, "acp_agents", {}) or {}
-        if acp_agents:
-            acp_tools.append(build_invoke_acp_agent_tool(acp_agents))
-            logger.info(f"Including invoke_acp_agent tool ({len(acp_agents)} agent(s): {list(acp_agents.keys())})")
-    except Exception as e:
-        logger.warning(f"Failed to load ACP tool: {e}")
+                acp_agents = get_acp_agents()
+            else:
+                acp_agents = getattr(config, "acp_agents", {}) or {}
+            if acp_agents:
+                acp_tools.append(build_invoke_acp_agent_tool(acp_agents))
+                logger.info(f"Including invoke_acp_agent tool ({len(acp_agents)} agent(s): {list(acp_agents.keys())})")
+        except Exception as e:
+            logger.warning(f"Failed to load ACP tool: {e}")
 
     logger.info(f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}, ACP tools: {len(acp_tools)}")
 

@@ -1,12 +1,7 @@
 name: Replay E2E (front-back contract)
 
-# Guards the front-back contract via record/replay (no API key in CI):
-#   Layer 1 — backend golden: replay a recorded trace through the real gateway,
-#             assert the SSE event sequence matches the committed golden.
-#   Layer 2 — full-stack render: real Next.js frontend + real gateway (replay
-#             model) + Chromium; assert the replayed turns render in the browser.
-# Triggered by changes on EITHER side of the contract so a backend change can no
-# longer pass without the frontend-facing checks running.
+# One key-free full-stack check: real Next.js + Gateway + Worker/replay model +
+# Chromium. It protects the highest-value browser-facing front/back contract.
 
 on:
   push:
@@ -18,8 +13,8 @@ on:
       - "backend/tests/fixtures/replay/**"
       - "backend/tests/replay_provider.py"
       - "backend/tests/_replay_fixture.py"
-      - "backend/tests/seed_runs_router.py"
-      - "backend/tests/test_replay_golden.py"
+      - "backend/tests/replay_agent_router.py"
+      - "backend/tests/replay_worker_process.py"
       - "backend/scripts/run_replay_gateway.py"
       - ".github/workflows/replay-e2e.yml"
   pull_request:
@@ -31,8 +26,8 @@ on:
       - "backend/tests/fixtures/replay/**"
       - "backend/tests/replay_provider.py"
       - "backend/tests/_replay_fixture.py"
-      - "backend/tests/seed_runs_router.py"
-      - "backend/tests/test_replay_golden.py"
+      - "backend/tests/replay_agent_router.py"
+      - "backend/tests/replay_worker_process.py"
       - "backend/scripts/run_replay_gateway.py"
       - ".github/workflows/replay-e2e.yml"
 
@@ -44,31 +39,29 @@ permissions:
   contents: read
 
 jobs:
-  backend-replay-golden:
-    name: Layer 1 — backend golden (no API key)
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - name: Install backend dependencies
-        working-directory: backend
-        run: uv sync --group dev
-      - name: Replay golden (backend SSE contract)
-        working-directory: backend
-        run: PYTHONPATH=. uv run pytest tests/test_replay_golden.py -v
-
   fullstack-replay-render:
-    name: Layer 2 — full-stack render (no API key)
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: Full-stack replay render (no API key)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: deerflow_test_replay_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d deerflow_test_replay_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres@127.0.0.1:5432/deerflow_test_replay_ci
+      DEERFLOW_REPLAY_BOOTSTRAP_SCHEMA: "1"
+      DEER_FLOW_AUDIT_ACTIVE_KEY_ID: replay-audit-v1
+      DEER_FLOW_AUDIT_KEYRING_JSON: '{"replay-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}'
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python
@@ -96,7 +89,10 @@ jobs:
         run: npx playwright install chromium --with-deps
       - name: Full-stack replay render (DOM assertions are the gate)
         working-directory: frontend
-        run: pnpm exec playwright test -c playwright.real-backend.config.ts
+        run: >-
+          pnpm exec playwright test
+          tests/e2e-real-backend/real-backend-render.spec.ts
+          -c playwright.real-backend.config.ts
       - name: Upload report + render artifact
         uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

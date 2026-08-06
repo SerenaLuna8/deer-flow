@@ -4,7 +4,7 @@ Lives in the harness persistence package so it is picked up by
 ``Base.metadata.create_all()`` alongside ``threads_meta``, ``runs``,
 ``run_events``, and ``feedback``. Using the shared engine means:
 
-- One SQLite/Postgres database, one connection pool
+- One PostgreSQL database and connection pool
 - One schema initialisation codepath
 - Consistent async sessions across auth and persistence reads
 """
@@ -13,7 +13,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -22,13 +32,22 @@ from deerflow.persistence.base import Base
 class UserRow(Base):
     __tablename__ = "users"
 
-    # UUIDs are stored as 36-char strings for cross-backend portability.
+    # Preserve the existing UUID-string storage used by persisted data and APIs.
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
 
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    # Channel guests are deliberately non-login principals and therefore have
+    # no email identity.  Every public/authenticated account remains ``human``
+    # and keeps the canonical non-null email contract.
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    principal_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="human",
+        server_default=text("'human'"),
+    )
 
-    # "admin" | "user" — kept as plain string to avoid ALTER TABLE pain
+    # "system_admin" | "user" — kept as plain string to avoid enum migrations
     # when new roles are introduced.
     system_role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
 
@@ -48,12 +67,58 @@ class UserRow(Base):
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
+    # Account-owned Memory preference. The version is the optimistic
+    # concurrency token for both toggle and reset operations.
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    preferences_version: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+
     __table_args__ = (
+        CheckConstraint("system_role IN ('system_admin', 'user')", name="ck_users_system_role"),
+        CheckConstraint(
+            "principal_type IN ('human', 'channel_guest')",
+            name="ck_users_principal_type",
+        ),
+        CheckConstraint(
+            "(oauth_provider IS NULL AND oauth_id IS NULL) OR (oauth_provider IS NOT NULL AND oauth_id IS NOT NULL)",
+            name="ck_users_oauth_identity_shape",
+        ),
+        CheckConstraint(
+            "(principal_type = 'human' AND email IS NOT NULL) OR "
+            "(principal_type = 'channel_guest' AND email IS NULL AND password_hash IS NULL "
+            "AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' "
+            "AND needs_setup IS FALSE AND token_version = 0)",
+            name="ck_users_channel_guest_identity",
+        ),
+        CheckConstraint(
+            "preferences_version >= 1",
+            name="ck_users_preferences_version",
+        ),
+        UniqueConstraint(
+            "id",
+            "principal_type",
+            name="uq_users_id_principal_type",
+        ),
+        Index(
+            "ix_users_email",
+            func.lower(email),
+            unique=True,
+            postgresql_where=text("email IS NOT NULL"),
+        ),
         Index(
             "idx_users_oauth_identity",
             "oauth_provider",
             "oauth_id",
             unique=True,
-            sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+            postgresql_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
         ),
     )

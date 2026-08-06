@@ -1,11 +1,14 @@
 import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
-import { getBackendBaseURL } from "@/core/config";
+import {
+  projectClientScopeSchema,
+  type ProjectPrivateWorkScope,
+} from "@/core/private-work/types";
 
 export type InputPolishRequest = {
   text: string;
   locale?: string;
-  thread_id?: string;
+  thread_id: string;
 };
 
 export type InputPolishResponse = {
@@ -14,10 +17,16 @@ export type InputPolishResponse = {
 };
 
 export async function polishInputDraft(
+  access: Pick<ProjectPrivateWorkScope, "apiBaseURL" | "scope">,
   request: InputPolishRequest,
   options?: { signal?: AbortSignal },
 ): Promise<InputPolishResponse> {
-  const response = await fetch(`${getBackendBaseURL()}/api/input-polish`, {
+  const scope = projectClientScopeSchema.parse(access.scope);
+  const suffix = `/projects/${scope.projectId}/private-work`;
+  if (!access.apiBaseURL.endsWith(suffix)) {
+    throw new Error("Input polish requires a project-scoped private-work URL");
+  }
+  const response = await fetch(`${access.apiBaseURL}/input-polish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),

@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 
-import { computeNextSubtask, subtaskNotification } from "./subtask-update";
+import { computeNextSubtask } from "./subtask-update";
 import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
@@ -79,19 +79,22 @@ export function useUpdateSubtask() {
         task,
       );
 
+      if (!changed) {
+        return;
+      }
       current[task.id] = next;
 
-      // Gate on an actual state change, not mere field presence. The terminal
-      // ToolMessage is re-parsed on every MessageList render and always carries
-      // modelName/usage, so a presence check would setTasks({...}) with a fresh
-      // reference each render — an infinite loop. `subtaskNotification` routes a
-      // terminal transition through the deferred (after-render) path and skips
-      // no-op re-parses entirely.
-      const notify = subtaskNotification(task, { becameTerminal, changed });
-      if (notify === "eager") {
-        setTasks({ ...current });
-      } else if (notify === "deferred") {
+      if (becameTerminal || task.statusSource === "tool_result") {
+        // Defer the render to the after-render effect so a terminal-only update
+        // does not loop with MessageList's same-render pending write.
         shouldNotifyAfterRenderRef.current = true;
+      } else if (
+        task.latestMessage ||
+        task.steps ||
+        task.modelName ||
+        task.usage
+      ) {
+        setTasks({ ...current });
       }
     },
     [tasksRef, setTasks],

@@ -1,67 +1,34 @@
-"""Shared config + gateway-drive helpers for the record/replay e2e.
-
-Record (``scripts/record_gateway.py`` + ``scripts/build_fixture_from_jsonl.py``)
-and replay (``tests/test_replay_golden.py``)
-MUST drive the gateway through an identical, prompt-affecting config — otherwise
-the system prompt differs and the recorded input hashes never match on replay.
-Centralising the config builder + drive loop here makes that identity hold by
-construction; only the ``models[].use`` block differs (real model vs
-``ReplayChatModel``).
-"""
+"""Shared process helpers for the deterministic replay browser test."""
 
 from __future__ import annotations
 
-import json
+import os
+import subprocess
+import sys
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
-# mode -> (thinking_enabled, is_plan_mode, subagent_enabled). Mirrors the
-# frontend mapping in core/threads/hooks.ts.
-MODE_CONTEXT: dict[str, tuple[bool, bool, bool]] = {
-    "flash": (False, False, False),
-    "thinking": (True, False, False),
-    "pro": (True, True, False),
-    # thinking_enabled mirrors the frontend `context.mode !== "flash"` (hooks.ts),
-    # so ultra is thinking-enabled too.
-    "ultra": (True, True, True),
-}
-
-# The replay model block: same model NAME as recording (so nothing in the prompt
-# shifts), only ``use`` swapped to the deterministic replay provider.
-REPLAY_MODEL_BLOCK = """\
-  - name: scenario-model
-    display_name: Scenario Model
-    use: replay_provider:ReplayChatModel
-    model: replay
-    supports_thinking: true"""
+_REPLAY_ADMIN_ID = uuid.UUID("5fb66f7d-5655-54df-a7da-66066c114f17")
 
 
-def real_model_block(model: str) -> str:
-    return f"""\
-  - name: scenario-model
-    display_name: Scenario Model
-    use: langchain_openai:ChatOpenAI
-    model: {model}
-    api_key: $OPENAI_API_KEY
-    base_url: $OPENAI_API_BASE"""
-
-
-def build_config_yaml(*, model_block: str, home: Path) -> str:
-    """Full gateway config. Only ``model_block`` varies between record/replay.
+def build_config_yaml(*, home: Path) -> str:
+    """Build the current, non-database process config for record/replay.
 
     Everything that shapes the system prompt is pinned so record, replay, and CI
     produce byte-identical prompts regardless of the machine:
     - sandbox / tool_groups / tools — fixed here
     - skills — pointed at an empty ``<home>/skills`` so filesystem skills (incl.
       gitignored custom skills present only on a dev box) never leak into the
-      prompt. Pair with an empty ``extensions_config.json`` (no MCP) via
-      :func:`prepare_hermetic_extras`.
-    - memory / summarization — disabled (background, non-deterministic timing)
+      prompt. Project MCP assets are absent from the admitted test Run.
+    - model catalog / memory / summarization — PostgreSQL-owned and prepared by
+      ``prepare_replay_runtime_catalog`` for replay.
     """
     return f"""\
 log_level: warning
-models:
-{model_block}
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
 skills:
@@ -80,89 +47,269 @@ tools:
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool
-# Memory + summarization make background / debounced model calls whose timing is
-# non-deterministic; disable them so record and replay see the same model-call
-# set. Title stays enabled, but the default title.model_name: null path is a
-# local state update rather than a recorded model call.
-memory:
-  enabled: false
-  injection_enabled: false
-summarization:
-  enabled: false
-agents_api:
-  enabled: true
 database:
-  backend: sqlite
-  sqlite_dir: {home / "db"}
+  url: $DATABASE_URL
 """
 
 
-def prepare_hermetic_extras(home: Path) -> Path:
-    """Create the empty skills tree + an empty extensions_config.json so the
-    system prompt has no environment-dependent skills/MCP content.
+def _validated_replay_database_url(
+    database_url: str | None,
+    *,
+    required_prefix: str = "deerflow_test_",
+) -> str:
+    """Resolve one disposable PostgreSQL URL before any replay mutation."""
+    from sqlalchemy.engine import make_url
 
-    Returns the extensions-config path; the caller must point
-    ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` at it. Call before starting the gateway.
+    resolved_url = database_url or os.environ.get("DATABASE_URL")
+    if not resolved_url:
+        raise RuntimeError("DATABASE_URL is required for replay database setup")
+    try:
+        parsed = make_url(resolved_url)
+    except Exception:
+        raise RuntimeError("replay database setup requires a valid PostgreSQL URL") from None
+    if parsed.get_backend_name() != "postgresql" or not parsed.database or not parsed.database.startswith(required_prefix):
+        raise RuntimeError(f"replay database setup requires {required_prefix}* PostgreSQL database")
+    if resolved_url.startswith("postgresql://"):
+        return resolved_url.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+    return resolved_url
+
+
+def install_replay_model_adapter() -> None:
+    """Point the credential-free ``codex_cli`` test model at ReplayChatModel.
+
+    The override lives only in replay Gateway/Worker processes. The database
+    still contains a supported, credential-free provider adapter, so the test
+    harness does not add a test implementation to the production allowlist.
     """
+    from app.system_settings import validation
+
+    validation.PROVIDER_ADAPTERS["codex_cli"] = validation.ProviderAdapterSpec(
+        "replay_provider:ReplayChatModel",
+        False,
+    )
+
+
+async def prepare_replay_runtime_catalog(
+    database_url: str | None = None,
+) -> None:
+    """Idempotently seed the PostgreSQL authorities needed by replay.
+
+    The caller must point at a disposable, fully initialized ActWeave database.
+    ``scenario-model`` becomes the default model, while memory and summarization
+    are disabled to remove background/debounced model calls from the fixture.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.audit.models import resolve_system_audit_context
+    from app.audit.service import AuditService
+    from app.reliability.owner_refs import AuditHmacKeyring
+    from app.system_runtime_settings.bootstrap import (
+        bootstrap_system_runtime_policies,
+    )
+    from app.system_runtime_settings.models import (
+        AgentRuntimePolicyValue,
+        RuntimePolicySection,
+    )
+    from app.system_runtime_settings.service import SystemRuntimePolicyService
+    from app.system_settings.models import CreateSystemModel
+    from app.system_settings.service import SystemModelCatalogService
+    from deerflow.persistence.user.model import UserRow
+
+    resolved_url = _validated_replay_database_url(database_url)
+
+    engine = create_async_engine(resolved_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        await bootstrap_system_runtime_policies(session_factory)
+        async with session_factory() as session, session.begin():
+            admin = await session.get(
+                UserRow,
+                str(_REPLAY_ADMIN_ID),
+                with_for_update=True,
+            )
+            if admin is None:
+                session.add(
+                    UserRow(
+                        id=str(_REPLAY_ADMIN_ID),
+                        email="replay-runtime-admin@example.invalid",
+                        password_hash=None,
+                        system_role="system_admin",
+                        oauth_provider=None,
+                        oauth_id=None,
+                        needs_setup=False,
+                        token_version=0,
+                    )
+                )
+                await session.flush()
+            elif admin.system_role != "system_admin":
+                raise RuntimeError("replay runtime principal is not a system admin")
+
+        audit_context = resolve_system_audit_context(
+            SimpleNamespace(
+                id=_REPLAY_ADMIN_ID,
+                system_role="system_admin",
+            ),
+            request_id="replay-runtime-catalog",
+        )
+        model_catalog = SystemModelCatalogService(session_factory)
+        catalog = await model_catalog.list_models(audit_context)
+        matches = tuple(item for item in catalog.items if item.logical_name == "scenario-model")
+        if len(matches) > 1:
+            raise RuntimeError("replay scenario model catalog is ambiguous")
+        if matches:
+            model = matches[0]
+            version = model.current_version
+            if model.status != "active" or version.provider_adapter != "codex_cli" or version.provider_model != "replay" or version.settings or not version.supports_thinking or version.credential_id is not None:
+                raise RuntimeError("existing scenario-model is not replay-compatible")
+        else:
+            model = await model_catalog.create_model(
+                audit_context,
+                CreateSystemModel(
+                    logical_name="scenario-model",
+                    display_name="Scenario Model",
+                    description="Deterministic record/replay test model",
+                    status="active",
+                    provider_adapter="codex_cli",
+                    provider_model="replay",
+                    settings={},
+                    supports_thinking=True,
+                    supports_reasoning_effort=False,
+                    supports_vision=False,
+                    credential_id=None,
+                    credential_version_id=None,
+                    credential_env_key=None,
+                ),
+            )
+            catalog = await model_catalog.list_models(audit_context)
+
+        if catalog.default_model_config_id != model.id:
+            await model_catalog.set_default(
+                audit_context,
+                model.id,
+                expected_catalog_revision=catalog.catalog_revision,
+            )
+
+        runtime_policy = SystemRuntimePolicyService(
+            session_factory,
+            AuditService(
+                session_factory,
+                AuditHmacKeyring.from_environment(),
+            ),
+        )
+        policies = await runtime_policy.list_policies(audit_context)
+        current = policies.sections[RuntimePolicySection.AGENT_RUNTIME]
+        value = current.value
+        if not isinstance(value, AgentRuntimePolicyValue):
+            raise RuntimeError("agent runtime policy is unavailable for replay")
+        desired = value.model_copy(
+            update={
+                "summarization": value.summarization.model_copy(
+                    update={"enabled": False},
+                ),
+                "memory": value.memory.model_copy(
+                    update={"enabled": False},
+                ),
+            },
+        )
+        if desired != value:
+            await runtime_policy.update_policy(
+                audit_context,
+                RuntimePolicySection.AGENT_RUNTIME,
+                expected_revision=current.revision,
+                value=desired,
+            )
+    finally:
+        await engine.dispose()
+
+
+async def bootstrap_replay_test_database(
+    database_url: str | None = None,
+) -> None:
+    """Install the test schema only into an explicitly named replay database."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from deerflow.persistence.bootstrap import bootstrap_schema
+
+    resolved_url = _validated_replay_database_url(
+        database_url,
+        required_prefix="deerflow_test_replay_",
+    )
+    engine = create_async_engine(resolved_url)
+    try:
+        await bootstrap_schema(engine)
+    finally:
+        await engine.dispose()
+
+
+def prepare_hermetic_skills(home: Path) -> None:
+    """Create an empty skills tree so the prompt has no host-dependent skills."""
     (home / "skills" / "public").mkdir(parents=True, exist_ok=True)
     (home / "skills" / "custom").mkdir(parents=True, exist_ok=True)
-    extensions = home / "extensions_config.json"
-    extensions.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
-    return extensions
 
 
-def sse_event_shapes(resp) -> list[dict]:
-    """Reduce an SSE stream to (event name, sorted top-level data keys).
-
-    Snapshots the *shape* of the stream, not volatile values, so the golden is
-    stable across runs while still catching event-sequence / payload-shape drift.
-    """
-    events: list[dict] = []
-    current: str | None = None
-    for line in resp.iter_lines():
-        if line.startswith("event:"):
-            current = line[len("event:") :].strip()
-        elif line.startswith("data:"):
-            raw = line[len("data:") :].strip()
-            try:
-                data = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                data = {"_raw": raw[:200]}
-            events.append({"event": current, "keys": sorted(data.keys()) if isinstance(data, dict) else None})
-    return events
-
-
-def drive_gateway(app, *, prompt: str, context: dict) -> list[dict]:
-    """Register -> create thread -> POST /runs/stream; return SSE event shapes.
-
-    This is the exact wire path the React frontend uses (LangGraph SDK), driven
-    in-process via Starlette's TestClient with the real auth flow.
-    """
-    from starlette.testclient import TestClient
-
-    with TestClient(app) as client:
-        reg = client.post(
-            "/api/v1/auth/register",
-            json={"email": f"e2e-{uuid.uuid4().hex[:8]}@example.com", "password": "very-strong-password-123"},
+@contextmanager
+def replay_worker() -> Iterator[None]:
+    """Run the real independent Worker and wait for durable readiness."""
+    backend_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    python_paths = (
+        str(backend_root),
+        str(backend_root / "tests"),
+        str(backend_root / "packages" / "harness"),
+        environment.get("PYTHONPATH", ""),
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(path for path in python_paths if path)
+    command = [
+        sys.executable,
+        str(backend_root / "tests" / "replay_worker_process.py"),
+    ]
+    process = subprocess.Popen(
+        command,
+        cwd=backend_root,
+        env=environment,
+        stdout=None,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        database_url = environment["DATABASE_URL"].replace(
+            "postgresql+asyncpg://",
+            "postgresql://",
+            1,
         )
-        assert reg.status_code == 201, reg.text
-        csrf = client.cookies.get("csrf_token")
-        assert csrf, "register must set csrf_token cookie"
+        import psycopg
 
-        thread_id = str(uuid.uuid4())
-        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}}, headers={"X-CSRF-Token": csrf})
-        assert created.status_code == 200, created.text
-
-        body = {
-            "assistant_id": "lead_agent",
-            "input": {"messages": [{"role": "user", "content": prompt}]},
-            # Keep replay close to the Gateway default. A tighter limit can
-            # produce false golden drift when protocol-neutral middleware adds
-            # graph steps without changing the streamed SSE contract.
-            "config": {"recursion_limit": 100},
-            "context": context,
-            "stream_mode": ["values"],
-        }
-        with client.stream("POST", f"/api/threads/{thread_id}/runs/stream", json=body, headers={"X-CSRF-Token": csrf}) as resp:
-            assert resp.status_code == 200, resp.read().decode()
-            return sse_event_shapes(resp)
+        deadline = time.monotonic() + 20
+        while True:
+            if process.poll() is not None:
+                raise RuntimeError(f"replay Worker exited before readiness: status={process.returncode}")
+            with psycopg.connect(database_url) as connection:
+                ready = connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM worker_nodes
+                        WHERE draining IS FALSE
+                          AND heartbeat_at >= now() - interval '10 seconds'
+                          AND capabilities_json::jsonb @> '["private_run"]'::jsonb
+                    )
+                    """
+                ).fetchone()[0]
+            if ready:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("replay Worker did not publish readiness")
+            time.sleep(0.05)
+        yield
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)

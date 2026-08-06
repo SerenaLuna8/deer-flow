@@ -1,12 +1,12 @@
 """Tool error handling middleware and shared runtime middleware builders."""
 
 import logging
-import secrets
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -24,10 +24,16 @@ from deerflow.agents.middlewares.tool_result_meta import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
+from deerflow.sandbox.sandbox import (
+    AuthorizationRevoked,
+    check_authorization_boundary,
+)
 from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.tools.mcp_metadata import is_private_mcp_tool
 
 if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
@@ -37,6 +43,17 @@ logger = logging.getLogger(__name__)
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
+
+
+def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
+    """Recognize only canonical code-registered read-only tool objects."""
+
+    from deerflow.tools.builtins.list_uploaded_files_tool import (
+        list_uploaded_files_tool,
+    )
+
+    tool = getattr(request, "tool", None)
+    return tool is list_uploaded_files_tool
 
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
@@ -67,25 +84,32 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._skills_root = app_config.skills.container_path
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
+        del exc
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
         tool_call_id = str(request.tool_call.get("id") or _MISSING_TOOL_CALL_ID)
-        detail = str(exc).strip() or exc.__class__.__name__
-        if len(detail) > 500:
-            detail = detail[:497] + "..."
 
-        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
+        content = f"Error: Tool '{tool_name}' failed ({TOOL_EXECUTION_FAILED_ERROR_CODE}). {_RECOVERY_HINT}"
         message = ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
             name=tool_name,
             status="error",
+            additional_kwargs={
+                "error_code": TOOL_EXECUTION_FAILED_ERROR_CODE,
+            },
         )
         # This middleware is the producer for exception wrappers, so task
         # failures raised before task_tool can build its own Command still
         # carry the same structured metadata.
-        structured_error = f"{exc.__class__.__name__}: {detail}"
-        message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
-        return stamp_exception_meta(message, structured_error)
+        message = _stamp_task_exception_status(
+            message,
+            tool_name=tool_name,
+            error=TOOL_EXECUTION_FAILED_ERROR_CODE,
+        )
+        return stamp_exception_meta(
+            message,
+            TOOL_EXECUTION_FAILED_ERROR_CODE,
+        )
 
     def _stamp_skill_read_metadata(
         self,
@@ -119,19 +143,46 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         tool_name = str(request.tool_call.get("name") or "")
         return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
 
+    @staticmethod
+    def _runtime_context(request: object) -> object | None:
+        runtime = getattr(request, "runtime", None)
+        return getattr(runtime, "context", None)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        # This middleware is inside the retry wrapper, so every retry reaches
+        # the database-backed authorization check before invoking the model.
+        await check_authorization_boundary(
+            self._runtime_context(request),
+            "before_model_call",
+        )
+        return await handler(request)
+
     @override
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
+        runtime_context = self._runtime_context(request)
+        if isinstance(runtime_context, dict) and "private_scope" in runtime_context:
+            raise AuthorizationRevoked
         try:
             result = handler(request)
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
-            logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
+            logger.error(
+                "Tool execution failed (sync): error_code=%s name=%s id=%s",
+                TOOL_EXECUTION_FAILED_ERROR_CODE,
+                request.tool_call.get("name"),
+                request.tool_call.get("id"),
+            )
             return self._build_error_message(request, exc)
         return normalize_tool_result(self._maybe_stamp(result, request))
 
@@ -142,12 +193,27 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         try:
+            runtime_context = self._runtime_context(request)
+            await check_authorization_boundary(
+                runtime_context,
+                ("before_read_only_tool_call" if _is_trusted_read_only_tool(request) else "before_tool_call"),
+            )
+            if is_private_mcp_tool(getattr(request, "tool", None)):
+                await check_authorization_boundary(
+                    runtime_context,
+                    "before_mcp_call",
+                )
             result = await handler(request)
         except GraphBubbleUp:
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
-            logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
+            logger.error(
+                "Tool execution failed (async): error_code=%s name=%s id=%s",
+                TOOL_EXECUTION_FAILED_ERROR_CODE,
+                request.tool_call.get("name"),
+                request.tool_call.get("id"),
+            )
             return self._build_error_message(request, exc)
         return normalize_tool_result(self._maybe_stamp(result, request))
 
@@ -158,8 +224,6 @@ def _build_runtime_middlewares(
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
-    authorization_provider=None,
-    authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -202,33 +266,12 @@ def _build_runtime_middlewares(
         tail.append(DanglingToolCallMiddleware())
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
-    # Authorization uses the existing GuardrailMiddleware so execution-time
-    # deny, audit, and fail-closed handling stay in one proven implementation.
-    # It is appended before an explicit guardrail provider, making authorization
-    # the outer guard and avoiding an unnecessary external policy call for an
-    # already-denied tool.
-    authorization_config = app_config.authorization
-    if authorization_config.enabled is True:
-        if authorization_provider is None:
-            from deerflow.authz.runtime import resolve_authorization_provider
-
-            authorization_provider = resolve_authorization_provider(authorization_config)
-        if authorization_provider is not None:
-            from deerflow.authz.adapter import GuardrailAuthorizationAdapter
-            from deerflow.guardrails.middleware import GuardrailMiddleware
-
-            tail.append(
-                GuardrailMiddleware(
-                    GuardrailAuthorizationAdapter(
-                        authorization_provider,
-                        default_role=authorization_config.default_role,
-                        infrastructure_tool_names=authorization_infrastructure_tool_names,
-                    ),
-                    fail_closed=authorization_config.fail_closed,
-                )
-            )
-
-    # Explicit guardrail middleware remains independently active when configured.
+    # Build the optional operator Guardrail now, but register it only after the
+    # private authorization middleware below. The first registered middleware
+    # is outermost, so ToolErrorHandlingMiddleware must execute its
+    # database-backed boundary before an external provider can inspect tool
+    # names or arguments.
+    guardrail_middleware: AgentMiddleware | None = None
     guardrails_config = app_config.guardrails
     if guardrails_config.enabled and guardrails_config.provider:
         import inspect
@@ -249,7 +292,11 @@ def _build_runtime_middlewares(
             except (ValueError, TypeError):
                 pass
         provider = provider_cls(**provider_kwargs)
-        tail.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
+        guardrail_middleware = GuardrailMiddleware(
+            provider,
+            fail_closed=guardrails_config.fail_closed,
+            passport=guardrails_config.passport,
+        )
 
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
@@ -276,6 +323,8 @@ def _build_runtime_middlewares(
 
         tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
 
+    if guardrail_middleware is not None:
+        tail.append(guardrail_middleware)
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
@@ -290,24 +339,25 @@ def _build_runtime_middlewares(
         if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
             raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
 
+    if guardrail_middleware is not None:
+        _error_idx = next(
+            (i for i, middleware in enumerate(middlewares) if isinstance(middleware, ToolErrorHandlingMiddleware)),
+            None,
+        )
+        _guardrail_idx = middlewares.index(guardrail_middleware)
+        if _error_idx is not None and _guardrail_idx > _error_idx:
+            raise RuntimeError("GuardrailMiddleware must be outer of ToolErrorHandlingMiddleware so a denial happens before the side-effect fence")
+
     return middlewares
 
 
-def build_lead_runtime_middlewares(
-    *,
-    app_config: AppConfig,
-    lazy_init: bool = True,
-    authorization_provider=None,
-    deferred_setup: "DeferredToolSetup | None" = None,
-) -> list[AgentMiddleware]:
+def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=True,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
-        authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
 
@@ -319,9 +369,6 @@ def build_subagent_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
-    available_skills: set[str] | None = None,
-    user_id: str | None = None,
-    authorization_provider=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -334,43 +381,15 @@ def build_subagent_runtime_middlewares(
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
-        authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
-    )
-
-    # Enabled/configured skills are discoverable metadata, not automatically
-    # active authority. Mirror the lead agent's activation + policy pair so a
-    # subagent keeps its ordinary tool set until a slash command or a completed
-    # SKILL.md read activates the corresponding allowed-tools declaration.
-    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
-
-    slash_source_owner_token = secrets.token_urlsafe(24)
-    middlewares.append(
-        SkillActivationMiddleware(
-            available_skills=available_skills,
-            app_config=app_config,
-            user_id=user_id,
-            slash_source_owner_token=slash_source_owner_token,
-        )
-    )
-    middlewares.append(
-        SkillToolPolicyMiddleware(
-            available_skills=available_skills,
-            app_config=app_config,
-            user_id=user_id,
-            slash_source_owner_token=slash_source_owner_token,
-        )
     )
 
     if model_name is None and app_config.models:
         model_name = app_config.models[0].name
 
     model_config = app_config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
-        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+    from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
-        middlewares.append(ViewImageMiddleware())
+    middlewares.append(ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)))
 
     if mcp_routing_middleware is not None:
         middlewares.append(mcp_routing_middleware)
@@ -420,25 +439,11 @@ def build_subagent_runtime_middlewares(
     # builds a fresh middleware instance (see ``executor._create_agent``), so
     # parallel subagents cannot cross-contaminate even though they share the
     # parent thread_id/run_id in context.
-    #
-    # Default-ceiling coupling (#3875 Phase 3 review): the default ``max_tokens``
-    # is re-coupled to ``summarization.enabled`` — 1M when compaction is on, 2M
-    # when off. This ONLY applies to the default; a user-set budget (global or
-    # per-agent) always wins, so a deployment that pinned a value is never
-    # silently changed by flipping the summarization switch.
-    summarization_enabled = app_config.summarization.enabled
-    if agent_name is not None:
-        token_budget_config = app_config.subagents.get_token_budget_for(agent_name, summarization_enabled=summarization_enabled)
-    else:
-        token_budget_config = app_config.subagents.token_budget
+    token_budget_config = app_config.subagents.get_token_budget_for(agent_name) if agent_name is not None else app_config.subagents.token_budget
     if token_budget_config.enabled:
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
         middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
-
-    from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
-
-    middlewares.extend(load_configured_extension_middlewares(app_config))
 
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with
@@ -449,83 +454,5 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
-
-    # DurableContextMiddleware (#4039) — summarization stores compacted history in the
-    # ``summary_text`` state channel instead of writing a summary message back
-    # into ``messages``. Mirror the lead chain so subagents project that summary
-    # into subsequent model requests; otherwise a message-count keep policy can
-    # leave an assistant tool-call + tool-result tail with no leading user
-    # context, which strict providers reject. The same middleware also keeps
-    # skill references durable when their original read results are compacted.
-    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
-
-    middlewares.append(
-        DurableContextMiddleware(
-            skills_container_path=app_config.skills.container_path,
-            skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
-        )
-    )
-
-    # DeerFlowSummarizationMiddleware — subagents inherit none of the lead's
-    # context compaction today (#3875 Phase 3): a deep-research subagent
-    # (``max_turns`` up to 150) can accumulate >1M cumulative input before
-    # max_turns/timeout/token_budget engage, even though Phase 2's budget now
-    # caps the pathological tail. Gated on the SAME
-    # ``app_config.summarization.enabled`` switch the lead reads (per
-    # maintainer guidance in #3875) so a single config covers both chains —
-    # no separate ``subagents.summarization`` field. The shared factory
-    # returns ``None`` when summarization is disabled, so this is a pure
-    # no-op when the switch is off. Trigger/keep/model/prompt all come from
-    # the same ``summarization`` config the lead reads, so the two chains
-    # cannot drift.
-    #
-    # Placement differs from the lead chain: the lead appends summarization
-    # BEFORE the guard trio (loop/token/safety), here it is appended AFTER.
-    # This is benign — compaction runs in ``before_model`` regardless of
-    # relative position, and the guard middlewares account in ``after_model``
-    # — but noted because the relative order is not an exact mirror.
-    #
-    # ``skip_memory_flush=True``: the factory otherwise attaches
-    # ``memory_flush_hook`` (when ``memory.enabled``), which flushes
-    # pre-compaction messages into the durable memory queue keyed by
-    # ``thread_id``. Subagents share the parent's ``thread_id`` in context, so
-    # without skipping the hook a subagent's internal turns would be written
-    # into the PARENT thread's durable memory (#3875 Phase 3 review).
-    #
-    # The middleware rewrites history via ``RemoveMessage(id=REMOVE_ALL_MESSAGES)``,
-    # which shrinks the messages channel mid-run;
-    # ``capture_new_step_messages`` must tolerate that contraction (see
-    # ``step_events.py``) or it drops steps captured after the compaction
-    # point. It does not implement ``consume_stop_reason``, so it does not
-    # interfere with the Phase 2 guard-cap stop-reason channel.
-    from deerflow.agents.middlewares.summarization_middleware import create_summarization_middleware
-
-    summarization_middleware = create_summarization_middleware(
-        app_config=app_config,
-        skip_memory_flush=True,
-        # The subagent's resolved model is the source of truth for null-model
-        # summarization: the subagent context/configurable does not carry the child
-        # model (it inherits the parent's), so passing it directly is what makes a
-        # distinct-model subagent summarize with its own model, not the parent's.
-        run_model_name=model_name,
-    )
-    if summarization_middleware is not None:
-        middlewares.append(summarization_middleware)
-
-    # SystemMessageCoalescingMiddleware (#4040) — DurableContextMiddleware above
-    # inserts a second ``SystemMessage(authority_contract)`` after the leading
-    # system prompt (subagents carry their prompt as a leading ``SystemMessage``
-    # in ``messages``, not via ``create_agent(system_prompt=...)``). Two system
-    # messages — or a non-leading one — are exactly what the strict backends this
-    # targets (vLLM/SGLang/Qwen/Anthropic) reject, so the durable fix would trade
-    # #4039's assistant-first 400 for a duplicate-system 400. Mirror the lead
-    # chain: append the coalescer innermost so it merges every SystemMessage into
-    # one leading ``system_message`` on the outgoing request. It only rewrites the
-    # per-request payload (no ``after_model``/``consume_stop_reason``), so it is
-    # inert to the Phase 2 guard-cap channel, and must sit inner of
-    # DurableContextMiddleware to observe the injected system message.
-    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
-
-    middlewares.append(SystemMessageCoalescingMiddleware())
 
     return middlewares

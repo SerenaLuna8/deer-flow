@@ -104,9 +104,6 @@ function isHumanInputMode(value: unknown): value is HumanInputMode {
   );
 }
 
-// Field names that collide with JavaScript Object.prototype members. Form
-// values live in a plain object keyed by field name, so these would resolve
-// to inherited properties instead of user input.
 const RESERVED_FIELD_NAMES = new Set([
   "__proto__",
   "constructor",
@@ -135,9 +132,6 @@ export function readHumanInputFormValue(
 export function buildInitialHumanInputFormValues(
   fields: HumanInputField[],
 ): Record<string, HumanInputFormValue> {
-  // Checkboxes are booleans that default to an explicit "no" — without the
-  // seed an untouched checkbox would be indistinguishable from an unanswered
-  // field and silently vanish from the submitted summary.
   const values: Record<string, HumanInputFormValue> = {};
   for (const field of fields) {
     if (field.type === "checkbox") {
@@ -184,8 +178,6 @@ function parseOptions(value: unknown): HumanInputOption[] | undefined {
     if (
       !isNonEmptyString(id) ||
       !isNonEmptyString(label) ||
-      // An empty option value crashes Radix <SelectItem value="">; a
-      // malformed/replayed artifact must fall back to plain text instead.
       !isNonEmptyString(optionValue) ||
       seenIds.has(id) ||
       seenValues.has(optionValue)
@@ -272,16 +264,7 @@ export function parseHumanInputRequest(
   ) {
     return null;
   }
-
-  const options = parseOptions(value.options);
-  if (value.options !== undefined && options === undefined) {
-    return null;
-  }
-  if (
-    (value.input_mode === "single_choice" ||
-      value.input_mode === "choice_with_other") &&
-    (!options || options.length === 0)
-  ) {
+  if (value.version === 1 && value.fields !== undefined) {
     return null;
   }
 
@@ -292,9 +275,19 @@ export function parseHumanInputRequest(
   if (value.input_mode === "form" && (!fields || fields.length === 0)) {
     return null;
   }
-  // Version/mode binding: `form` is a v2 construct and v2 defines nothing
-  // else — a mismatched pair is a malformed payload, not a variant.
   if ((value.input_mode === "form") !== (value.version === 2)) {
+    return null;
+  }
+
+  const options = parseOptions(value.options);
+  if (value.options !== undefined && options === undefined) {
+    return null;
+  }
+  if (
+    (value.input_mode === "single_choice" ||
+      value.input_mode === "choice_with_other") &&
+    (!options || options.length === 0)
+  ) {
     return null;
   }
 
@@ -418,6 +411,129 @@ function extractPlainMessageText(message: Message): string {
   return "";
 }
 
+function isAskClarificationRequestMessage(
+  message: Message,
+  request: HumanInputRequest,
+) {
+  if (
+    message.type !== "tool" ||
+    message.name !== "ask_clarification" ||
+    request.source !== "ask_clarification"
+  ) {
+    return false;
+  }
+  return (
+    request.tool_call_id === undefined ||
+    request.tool_call_id === message.tool_call_id
+  );
+}
+
+function isResponseValidForRequest(
+  request: HumanInputRequest,
+  response: HumanInputResponse,
+) {
+  if (
+    response.source !== request.source ||
+    response.request_id !== request.request_id
+  ) {
+    return false;
+  }
+  if (response.response_kind === "option") {
+    if (
+      request.input_mode !== "single_choice" &&
+      request.input_mode !== "choice_with_other"
+    ) {
+      return false;
+    }
+    return Boolean(
+      request.options?.some(
+        (option) =>
+          option.id === response.option_id && option.value === response.value,
+      ),
+    );
+  }
+  return (
+    request.input_mode === "free_text" ||
+    request.input_mode === "choice_with_other" ||
+    request.input_mode === "form"
+  );
+}
+
+/**
+ * Finds control replies written before Gateway preserved `hide_from_ui`.
+ *
+ * Structured metadata alone is not trusted. A legacy reply is hidden only
+ * when it is the first, in-order answer to the latest visible
+ * `ask_clarification` request, its source and selected option match that
+ * request, and its generated control text is intact. This keeps arbitrary
+ * user messages carrying forged or stale metadata visible.
+ */
+export function inferLegacyHumanInputControlMessageIndexes(
+  messages: Message[],
+): ReadonlySet<number> {
+  const inferredIndexes = new Set<number>();
+  const seenRequests = new Map<string, HumanInputRequest>();
+  const requestOrder: string[] = [];
+  const answeredRequestIds = new Set<string>();
+
+  const latestUnansweredRequestId = () =>
+    [...requestOrder]
+      .reverse()
+      .find((requestId) => !answeredRequestIds.has(requestId));
+
+  for (const [messageIndex, message] of messages.entries()) {
+    const explicitlyHidden = message.additional_kwargs?.hide_from_ui === true;
+    const request = extractHumanInputRequest(message);
+    if (
+      !explicitlyHidden &&
+      request &&
+      isAskClarificationRequestMessage(message, request) &&
+      !seenRequests.has(request.request_id)
+    ) {
+      seenRequests.set(request.request_id, request);
+      requestOrder.push(request.request_id);
+      continue;
+    }
+
+    const response = extractHumanInputResponse(message);
+    if (response) {
+      const matchingRequest = seenRequests.get(response.request_id);
+      const isValidResponse =
+        matchingRequest !== undefined &&
+        isResponseValidForRequest(matchingRequest, response) &&
+        !answeredRequestIds.has(response.request_id);
+
+      if (explicitlyHidden) {
+        if (isValidResponse) {
+          answeredRequestIds.add(response.request_id);
+        }
+        continue;
+      }
+
+      if (
+        isValidResponse &&
+        matchingRequest !== undefined &&
+        latestUnansweredRequestId() === response.request_id &&
+        extractPlainMessageText(message) ===
+          buildHumanInputResponseText(matchingRequest, response)
+      ) {
+        inferredIndexes.add(messageIndex);
+        answeredRequestIds.add(response.request_id);
+      }
+      continue;
+    }
+
+    if (message.type === "human" && !explicitlyHidden) {
+      const latestRequestId = latestUnansweredRequestId();
+      if (latestRequestId !== undefined) {
+        answeredRequestIds.add(latestRequestId);
+      }
+    }
+  }
+
+  return inferredIndexes;
+}
+
 export function deriveHumanInputThreadState(
   messages: Message[],
   isVisibleMessage: (message: Message) => boolean = (message) =>
@@ -446,14 +562,6 @@ export function deriveHumanInputThreadState(
       continue;
     }
 
-    // Legacy-frontend fallback: a v1-only frontend renders a v2 request as
-    // plain text and the user answers through the normal composer, so the
-    // reply carries no human_input_response metadata. The reply closes only
-    // the LATEST unanswered request — the one the user was presumably
-    // answering. Nothing guarantees at most one outstanding request across
-    // runs, and closing them all would silently swallow older decisions with
-    // the same text; an older request left open simply becomes the active
-    // card again.
     if (message.type === "human" && isVisibleMessage(message) && !response) {
       const latestUnansweredId = [...requestOrder]
         .reverse()
@@ -535,9 +643,8 @@ export function buildHumanInputFormSummary(
   request: HumanInputRequest,
   values: Record<string, HumanInputFormValue>,
 ) {
-  const fields = request.fields ?? [];
   const parts: string[] = [];
-  for (const field of fields) {
+  for (const field of request.fields ?? []) {
     const value = readHumanInputFormValue(values, field.name);
     if (isEmptyFormValue(value)) {
       continue;
@@ -551,10 +658,6 @@ export function buildHumanInputFormSubmissionValue(
   request: HumanInputRequest,
   values: Record<string, HumanInputFormValue>,
 ) {
-  // The readable summary alone is ambiguous ("a: x; B: y" could come from
-  // several field mappings), so the submitted value appends the full record
-  // as one JSON block keyed by stable field names — labels/names may contain
-  // the separators themselves, so only whole-record JSON is collision-free.
   const record: Record<string, HumanInputFormValue> = {};
   for (const field of request.fields ?? []) {
     const value = readHumanInputFormValue(values, field.name);

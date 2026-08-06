@@ -1,0 +1,756 @@
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import pytest
+from langchain_core.messages import HumanMessage
+from pydantic import SecretStr, ValidationError
+from sqlalchemy import text
+from support.private_thread_seed import seed_private_thread_database
+
+from app.gateway.private_work_schemas import PrivateRunCreateRequest
+from app.gateway.routers.private_work import _run_response
+from app.private_work.context import PrivateWorkContext
+from app.private_work.errors import PrivateWorkRunExecutionProfileUnsupported
+from app.private_work.execution_profile import (
+    RUN_EXECUTION_PROFILE_KWARG,
+    EffectiveRunExecutionProfile,
+    RequestedRunExecutionProfile,
+    RunExecutionProfileUnsupported,
+    RunModelSelectionLocked,
+    parse_persisted_run_execution_profile,
+    persisted_run_execution_profile,
+    resolve_admitted_run_execution_profile,
+    selected_run_model_ref,
+)
+from app.private_work.http_runtime import start_private_run
+from app.private_work.run_admission import (
+    PersistedRunSnapshot,
+    PrivateRunAdmissionService,
+)
+from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord
+from app.private_work.sandbox_files import (
+    RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG,
+    required_current_upload_snapshot_from_run_kwargs,
+)
+from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
+from app.reliability.execution import (
+    PermanentExecutionError,
+    PrivateRunExecution,
+    RunAgentPrivateExecutor,
+)
+from app.shared_assets.models import (
+    AgentPayload,
+    AssetKind,
+    AssetScope,
+    ResolvedAgentSnapshot,
+)
+from app.system_settings import SystemModelCatalogService
+from app.worker.service import JobLeaseAuthority
+from deerflow.agents.memory.snip import SnipArchiveContext
+from deerflow.config.agents_config import AgentModelSettings
+from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.models.factory import create_chat_model
+from deerflow.persistence.jobs.sql import JobClaim, JobScope
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+
+def test_private_run_execution_profile_is_strict_and_separate_from_generic_context() -> None:
+    request = PrivateRunCreateRequest.model_validate(
+        {
+            "execution_profile": {
+                "model_name": "gpt-5.6-luna",
+                "thinking_enabled": True,
+                "reasoning_effort": "high",
+            },
+            "config": {
+                "context": {
+                    "model_name": "forged-config-model",
+                    "thinking_enabled": False,
+                    "reasoning_effort": "minimal",
+                    "safe": "value",
+                }
+            },
+            "context": {
+                "model_name": "forged-context-model",
+                "thinking_enabled": False,
+                "reasoning_effort": "minimal",
+            },
+        }
+    )
+
+    assert request.execution_profile.model_dump() == {
+        "model_name": "gpt-5.6-luna",
+        "thinking_enabled": True,
+        "reasoning_effort": "high",
+    }
+    assert request.config == {"context": {"safe": "value"}}
+    assert request.context == {}
+
+    with pytest.raises(ValidationError):
+        PrivateRunCreateRequest.model_validate({"execution_profile": {"model_name": "gpt-5.6-luna", "unknown": True}})
+
+
+def test_default_agent_selection_and_effective_profile_are_fail_closed() -> None:
+    requested = RequestedRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+    )
+    assert selected_run_model_ref("default", requested) == "gpt-5.6-luna"
+
+    effective = resolve_admitted_run_execution_profile(
+        requested=requested,
+        logical_name="gpt-5.6-luna",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=True,
+        agent_thinking_enabled=None,
+        agent_reasoning_effort=None,
+    )
+    assert effective == EffectiveRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+        supports_vision=True,
+    )
+
+    with pytest.raises(RunModelSelectionLocked):
+        selected_run_model_ref("deepseek-v4-flash", requested)
+
+    with pytest.raises(RunExecutionProfileUnsupported):
+        resolve_admitted_run_execution_profile(
+            requested=requested,
+            logical_name="text-only",
+            supports_thinking=False,
+            supports_reasoning_effort=False,
+            supports_vision=False,
+            agent_thinking_enabled=None,
+            agent_reasoning_effort=None,
+        )
+
+
+def test_disabled_thinking_freezes_none_effort_for_reasoning_models() -> None:
+    effective = resolve_admitted_run_execution_profile(
+        requested=RequestedRunExecutionProfile(
+            thinking_enabled=False,
+            reasoning_effort="none",
+        ),
+        logical_name="gpt-5.6-luna",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=True,
+        agent_thinking_enabled=None,
+        agent_reasoning_effort=None,
+    )
+
+    assert effective.thinking_enabled is False
+    assert effective.reasoning_effort == "none"
+
+    with pytest.raises(RunExecutionProfileUnsupported):
+        resolve_admitted_run_execution_profile(
+            requested=RequestedRunExecutionProfile(
+                thinking_enabled=False,
+                reasoning_effort="minimal",
+            ),
+            logical_name="gpt-5.6-luna",
+            supports_thinking=True,
+            supports_reasoning_effort=True,
+            supports_vision=True,
+            agent_thinking_enabled=None,
+            agent_reasoning_effort=None,
+        )
+
+
+def test_flash_and_image_profile_reach_openai_responses_payload() -> None:
+    model = ModelConfig(
+        name="gpt-5.6-luna",
+        display_name="GPT 5.6 Luna",
+        description="",
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-5.6-luna",
+        api_key=SecretStr("unit-test-key"),
+        base_url="https://opencode.ai/zen/v1",
+        use_responses_api=True,
+        output_version="responses/v1",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=True,
+    )
+    chat_model = create_chat_model(
+        name=model.name,
+        thinking_enabled=False,
+        reasoning_effort="none",
+        app_config=AppConfig(
+            models=[model],
+            sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        ),
+        attach_tracing=False,
+    )
+
+    payload = chat_model._get_request_payload(  # pyright: ignore[reportPrivateUsage]
+        [
+            HumanMessage(
+                content=[
+                    {"type": "text", "text": "describe"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgo=",
+                        },
+                    },
+                ]
+            )
+        ],
+    )
+
+    assert payload["model"] == "gpt-5.6-luna"
+    assert payload["reasoning"] == {"effort": "none"}
+    assert payload["input"][0]["content"] == [
+        {"type": "input_text", "text": "describe"},
+        {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,iVBORw0KGgo=",
+        },
+    ]
+
+
+def _run_record(
+    *,
+    requested: RequestedRunExecutionProfile,
+    effective: EffectiveRunExecutionProfile,
+) -> PrivateRunRecord:
+    now = datetime.now(UTC)
+    return PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id=str(uuid.uuid4()),
+        project_id=uuid.uuid4(),
+        owner_user_id=str(uuid.uuid4()),
+        assistant_id=str(uuid.uuid4()),
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={
+            "input": {"messages": []},
+            RUN_EXECUTION_PROFILE_KWARG: persisted_run_execution_profile(
+                requested,
+                effective,
+            ),
+        },
+        origin_trace_id="a" * 32,
+        error=None,
+        model_name=effective.model_name,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_run_idempotency_includes_the_requested_execution_profile() -> None:
+    requested = RequestedRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+    )
+    effective = EffectiveRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+        supports_vision=True,
+    )
+    record = _run_record(requested=requested, effective=effective)
+    base = PrivateRunCreate(
+        run_id=record.run_id,
+        kwargs={"input": {"messages": []}},
+        execution_profile=requested,
+    )
+
+    assert PrivateRunAdmissionService._is_same_request(
+        record,
+        thread_id=record.thread_id,
+        request=base,
+    )
+    assert not PrivateRunAdmissionService._is_same_request(
+        record,
+        thread_id=record.thread_id,
+        request=PrivateRunCreate(
+            run_id=record.run_id,
+            kwargs={"input": {"messages": []}},
+            execution_profile=RequestedRunExecutionProfile(
+                model_name="gpt-5.6-luna",
+                thinking_enabled=True,
+                reasoning_effort="low",
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_run_launcher_passes_only_the_typed_profile_to_admission() -> None:
+    requested = RequestedRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+    )
+    effective = EffectiveRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+        supports_vision=True,
+    )
+    record = _run_record(requested=requested, effective=effective)
+    captured: dict[str, object] = {}
+
+    class Admission:
+        async def admit(
+            self,
+            context,
+            thread_id,
+            request,
+            *,
+            server_context,
+        ):
+            captured.update(
+                context=context,
+                thread_id=thread_id,
+                request=request,
+                server_context=server_context,
+            )
+            return SimpleNamespace(
+                run=record,
+                thread_id=thread_id,
+                opaque_runtime_scope=object(),
+                inbound_delivery_replay=False,
+            )
+
+    body = PrivateRunCreateRequest.model_validate(
+        {
+            "input": {"messages": [{"role": "user", "content": "hello"}]},
+            "execution_profile": requested.as_dict(),
+            "context": {
+                "model_name": "forged",
+                "thinking_enabled": False,
+                "reasoning_effort": "minimal",
+            },
+        }
+    )
+    context = SimpleNamespace(
+        request_id="profile-launch",
+        resource_scope=object(),
+    )
+
+    launched = await start_private_run(
+        body,
+        record.thread_id,
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        context,
+        admission_service=Admission(),
+    )
+
+    admitted_request = captured["request"]
+    assert admitted_request.execution_profile == requested
+    assert admitted_request.kwargs["config"]["context"] == {
+        "thread_id": record.thread_id,
+    }
+    assert launched.model_name == effective.model_name
+
+
+def test_worker_consumes_only_the_persisted_effective_profile() -> None:
+    requested = RequestedRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+    )
+    effective = EffectiveRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="high",
+        supports_vision=True,
+    )
+    execution = SimpleNamespace(
+        config={
+            "configurable": {
+                "thinking_enabled": False,
+                "reasoning_effort": "minimal",
+            },
+            "context": {
+                "thinking_enabled": False,
+                "reasoning_effort": "minimal",
+            },
+        },
+        run=SimpleNamespace(
+            kwargs={
+                RUN_EXECUTION_PROFILE_KWARG: persisted_run_execution_profile(
+                    requested,
+                    effective,
+                )
+            }
+        ),
+    )
+
+    config = RunAgentPrivateExecutor._runner_config(execution, object())
+
+    assert config["configurable"]["thinking_enabled"] is True
+    assert config["configurable"]["reasoning_effort"] == "high"
+    assert config["context"]["thinking_enabled"] is True
+    assert config["context"]["reasoning_effort"] == "high"
+
+    execution.run.kwargs[RUN_EXECUTION_PROFILE_KWARG] = {"requested": {}, "effective": {}}
+    with pytest.raises(PermanentExecutionError, match="RUN_EXECUTION_PROFILE_STALE"):
+        RunAgentPrivateExecutor._runner_config(execution, object())
+
+
+@pytest.mark.asyncio
+async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = RequestedRunExecutionProfile(model_name="codex-test")
+    effective = EffectiveRunExecutionProfile(
+        model_name="codex-test",
+        thinking_enabled=False,
+        reasoning_effort="none",
+        supports_vision=False,
+    )
+    run = _run_record(requested=requested, effective=effective)
+    project = ProjectContext(
+        user_id=uuid.UUID(run.owner_user_id),
+        project_id=run.project_id,
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.ADMIN,
+        capabilities=capabilities_for(ProjectRole.ADMIN),
+        membership_version=1,
+        request_id="sampling-worker",
+    )
+    context = PrivateWorkContext.from_project(project)
+    model = ModelConfig(
+        name="codex-test",
+        display_name="Codex test",
+        description="",
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        model="codex-test",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+    )
+
+    class Models:
+        async def materialize_snapshot(self, **_kwargs):
+            return model
+
+    class Checkpointer:
+        def for_context(self, _context):
+            return SimpleNamespace()
+
+    app_config = AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+    class Assets:
+        async def materialize(self, *_args, **_kwargs):
+            create_chat_model(
+                model.name,
+                app_config=app_config,
+                attach_tracing=False,
+                model_overrides={"max_tokens": 64},
+            )
+
+    executor = RunAgentPrivateExecutor(
+        lambda: None,
+        app_config=app_config,
+        bridge=SimpleNamespace(),
+        project_checkpointer=Checkpointer(),
+        store=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        asset_runtime=Assets(),
+        model_materializer=Models(),
+        agent_factory=object(),
+        runner=object(),
+    )
+    archive_context = SnipArchiveContext(
+        enabled=False,
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        namespace="default",
+        preference_version=1,
+        summary_model_ref=None,
+    )
+
+    async def memory_archive_context(*_args, **_kwargs):
+        return archive_context
+
+    monkeypatch.setattr(
+        executor,
+        "_memory_archive_context",
+        memory_archive_context,
+    )
+    execution = PrivateRunExecution(
+        context=context,
+        run=run,
+        snapshot=PersistedRunSnapshot(
+            assets=(),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+        checkpoint_namespace="",
+        graph_input={"messages": []},
+        command=None,
+        config={},
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=["values"],
+        stream_subgraphs=False,
+    )
+    claim = JobClaim(
+        job_id=uuid.uuid4(),
+        attempt_id=uuid.uuid4(),
+        lease_token="lease",
+        job_type="private_run",
+        scope=JobScope(context.project_id, str(context.user_id)),
+        run_id=run.run_id,
+        occurrence_id=None,
+        retry_safety="safe",
+        cancel_requested=False,
+        origin_trace_id=run.origin_trace_id,
+    )
+    authority = JobLeaseAuthority(
+        lambda: None,
+        claim,
+        lease_seconds=30,
+    )
+
+    with pytest.raises(
+        PermanentExecutionError,
+        match="RUN_EXECUTION_PROFILE_UNSUPPORTED",
+    ):
+        await executor.execute(execution, authority)
+
+
+def test_run_response_echoes_the_effective_execution_profile() -> None:
+    requested = RequestedRunExecutionProfile(model_name="gpt-5.6-luna")
+    effective = EffectiveRunExecutionProfile(
+        model_name="gpt-5.6-luna",
+        thinking_enabled=True,
+        reasoning_effort="medium",
+        supports_vision=True,
+    )
+
+    response = _run_response(_run_record(requested=requested, effective=effective))
+
+    assert response.execution_profile is not None
+    assert response.execution_profile.model_dump() == {
+        "model_name": "gpt-5.6-luna",
+        "thinking_enabled": True,
+        "reasoning_effort": "medium",
+        "supports_vision": True,
+    }
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profile(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    default_model_id = uuid.uuid4()
+    default_version_id = uuid.uuid4()
+    selected_model_id = uuid.uuid4()
+    selected_version_id = uuid.uuid4()
+    selected_name = f"luna-{selected_model_id.hex}"
+    try:
+        async with seed.factory() as session, session.begin():
+            agent_version = (
+                await session.execute(
+                    text(
+                        """SELECT id,payload_checksum
+                        FROM agent_versions
+                        WHERE agent_id=:agent_id"""
+                    ),
+                    {"agent_id": seed.project_agent_id},
+                )
+            ).one()
+            session.add(
+                ThreadMetaRow(
+                    thread_id=thread_id,
+                    assistant_id=str(seed.project_agent_id),
+                    owner_user_id=str(seed.owner_a.user_id),
+                    display_name="Execution profile",
+                    status="idle",
+                    metadata_json={},
+                    project_id=seed.owner_a.project_id,
+                    agent_asset_id=seed.project_agent_id,
+                    agent_scope="project",
+                )
+            )
+            for model_id, version_id, name, supports in (
+                (
+                    default_model_id,
+                    default_version_id,
+                    f"default-{default_model_id.hex}",
+                    False,
+                ),
+                (
+                    selected_model_id,
+                    selected_version_id,
+                    selected_name,
+                    True,
+                ),
+            ):
+                await session.execute(
+                    text(
+                        """INSERT INTO system_model_configs
+                        (id,logical_name,display_name,description,status,
+                         current_version_id,revision,sort_order,
+                         created_by_user_id,updated_by_user_id)
+                        VALUES (:id,:name,:name,'profile test','active',NULL,1,0,
+                                :owner,:owner)"""
+                    ),
+                    {
+                        "id": model_id,
+                        "name": name,
+                        "owner": str(seed.owner_a.user_id),
+                    },
+                )
+                await session.execute(
+                    text(
+                        """INSERT INTO system_model_config_versions
+                        (id,model_config_id,version_number,provider_adapter,
+                         provider_model,settings,supports_thinking,
+                         supports_reasoning_effort,supports_vision,credential_id,
+                         credential_version_id,credential_env_key,payload_checksum,
+                         supersedes_version_id,created_by_user_id)
+                        VALUES (:version,:model,1,'codex_cli',:name,'{}'::jsonb,
+                                :supports,:supports,:supports,NULL,NULL,NULL,
+                                :checksum,NULL,:owner)"""
+                    ),
+                    {
+                        "version": version_id,
+                        "model": model_id,
+                        "name": name,
+                        "supports": supports,
+                        "checksum": ("b" * 64 if supports else "c" * 64),
+                        "owner": str(seed.owner_a.user_id),
+                    },
+                )
+                await session.execute(
+                    text(
+                        """UPDATE system_model_configs
+                        SET current_version_id=:version
+                        WHERE id=:model"""
+                    ),
+                    {"version": version_id, "model": model_id},
+                )
+            await session.execute(
+                text(
+                    """UPDATE system_model_catalog_state
+                    SET default_model_config_id=:model,revision=revision+1
+                    WHERE id=1"""
+                ),
+                {"model": default_model_id},
+            )
+            generation = int((await session.execute(text("SELECT generation FROM asset_catalog_state WHERE id=1"))).scalar_one())
+
+        resolved = ResolvedAgentSnapshot(
+            kind=AssetKind.AGENT,
+            scope=AssetScope.PROJECT,
+            asset_id=seed.project_agent_id,
+            version_id=agent_version.id,
+            checksum=agent_version.payload_checksum,
+            catalog_generation=generation,
+            dependency_version_ids=(),
+            payload=AgentPayload(
+                description="",
+                soul="thread agent",
+                model_ref="default",
+                model_settings=AgentModelSettings(),
+                tool_groups=(),
+                skill_version_ids=(),
+                mcp_version_ids=(),
+            ),
+        )
+        repository = RunSnapshotRepository(
+            seed.factory,
+            model_catalog=SystemModelCatalogService(seed.factory),
+        )
+        async with seed.factory() as session, session.begin():
+            created = await repository.create_run_with_snapshot_in_session(
+                session,
+                seed.owner_a,
+                thread_id,
+                PrivateRunCreate(
+                    run_id=run_id,
+                    execution_profile=RequestedRunExecutionProfile(
+                        model_name=selected_name,
+                        thinking_enabled=True,
+                        reasoning_effort="high",
+                    ),
+                ),
+                resolved,
+            )
+
+        assert created.model_name == selected_name
+        assert created.kwargs[RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG] == []
+        assert required_current_upload_snapshot_from_run_kwargs(created.kwargs) == ()
+        _, effective = parse_persisted_run_execution_profile(created.kwargs[RUN_EXECUTION_PROFILE_KWARG])
+        assert effective == EffectiveRunExecutionProfile(
+            model_name=selected_name,
+            thinking_enabled=True,
+            reasoning_effort="high",
+            supports_vision=True,
+        )
+        async with seed.factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        """SELECT logical_name,model_config_version_id
+                        FROM run_model_config_snapshots
+                        WHERE run_id=:run_id AND purpose='lead'"""
+                    ),
+                    {"run_id": run_id},
+                )
+            ).one()
+        assert row.logical_name == selected_name
+        assert row.model_config_version_id == selected_version_id
+
+        incompatible_agent = ResolvedAgentSnapshot(
+            kind=resolved.kind,
+            scope=resolved.scope,
+            asset_id=resolved.asset_id,
+            version_id=resolved.version_id,
+            checksum=resolved.checksum,
+            catalog_generation=resolved.catalog_generation,
+            dependency_version_ids=resolved.dependency_version_ids,
+            payload=AgentPayload(
+                description=resolved.payload.description,
+                soul=resolved.payload.soul,
+                model_ref=resolved.payload.model_ref,
+                model_settings=AgentModelSettings(max_tokens=64),
+                tool_groups=resolved.payload.tool_groups,
+                skill_version_ids=resolved.payload.skill_version_ids,
+                mcp_version_ids=resolved.payload.mcp_version_ids,
+            ),
+        )
+        with pytest.raises(
+            PrivateWorkRunExecutionProfileUnsupported,
+            match="selected model does not support",
+        ) as incompatible:
+            await repository.create_run_with_snapshot(
+                seed.owner_a,
+                thread_id,
+                PrivateRunCreate(
+                    run_id=str(uuid.uuid4()),
+                    execution_profile=RequestedRunExecutionProfile(
+                        model_name=selected_name,
+                    ),
+                ),
+                incompatible_agent,
+            )
+        assert incompatible.value.code == "RUN_EXECUTION_PROFILE_UNSUPPORTED"
+    finally:
+        await seed.engine.dispose()

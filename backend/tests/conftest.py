@@ -6,17 +6,29 @@ issues when unit-testing lightweight config/registry code in isolation.
 
 from __future__ import annotations
 
-import importlib.util
+import os
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import pytest_asyncio
+
+# Pytest imports conftest before collecting test modules. Install a deliberately
+# non-sensitive unit-test default here so modules that construct
+# Gateway state at import time never rely on an implicit repository dotenv
+# load. Explicit caller-provided values (including core-suite databases) win.
+os.environ.setdefault(
+    "DATABASE_URL",
+    "postgresql://test-role@localhost/deerflow_test_unit",
+)
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from postgres_utils import RedactedURL, replace_database, temporary_postgres_database  # noqa: E402
+from support.core_gate_plugin import pytest_sessionfinish  # noqa: E402, F401
 
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__
@@ -40,126 +52,36 @@ _executor_mock.get_background_task_result = MagicMock()
 sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 
-@pytest.fixture()
-def provisioner_module():
-    """Load docker/provisioner/app.py as an importable test module.
+@pytest.fixture(scope="session")
+def postgres_admin_url() -> str:
+    """Return a maintenance URL without ever logging credentials."""
+    url = os.getenv("POSTGRES_TEST_URL")
+    if not url:
+        pytest.skip("POSTGRES_TEST_URL is required for PostgreSQL tests")
+    return RedactedURL(replace_database(url, "postgres"))
 
-    Shared by test_provisioner_kubeconfig and test_provisioner_pvc_volumes so
-    that any change to the provisioner entry-point path or module name only
-    needs to be updated in one place.
-    """
-    repo_root = Path(__file__).resolve().parents[2]
-    module_path = repo_root / "docker" / "provisioner" / "app.py"
-    spec = importlib.util.spec_from_file_location("provisioner_app_test", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    previous_module = sys.modules.get(spec.name)
-    sys.modules[spec.name] = module
+
+@pytest_asyncio.fixture()
+async def postgres_database_url(postgres_admin_url: str):
+    async with temporary_postgres_database(postgres_admin_url) as url:
+        yield RedactedURL(url)
+
+
+@pytest_asyncio.fixture()
+async def migrated_postgres_database_url(postgres_database_url: str):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.system_runtime_settings.bootstrap import (
+        bootstrap_system_runtime_policies,
+    )
+    from deerflow.persistence.bootstrap import bootstrap_schema
+
+    engine = create_async_engine(postgres_database_url)
     try:
-        spec.loader.exec_module(module)
-        yield module
-    finally:
-        if previous_module is None:
-            sys.modules.pop(spec.name, None)
-        else:
-            sys.modules[spec.name] = previous_module
-
-
-# ---------------------------------------------------------------------------
-# Auto-set user context for every test unless marked no_auto_user
-# ---------------------------------------------------------------------------
-#
-# Repository methods read ``user_id`` from a contextvar by default
-# (see ``deerflow.runtime.user_context``). Without this fixture, every
-# pre-existing persistence test would raise RuntimeError because the
-# contextvar is unset. The fixture sets a default test user on every
-# test; tests that explicitly want to verify behaviour *without* a user
-# context should mark themselves ``@pytest.mark.no_auto_user``.
-
-
-@pytest.fixture(autouse=True)
-def _reset_skill_storage_singleton():
-    """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
-    try:
-        from deerflow.skills.storage import reset_skill_storage
-    except ImportError:
-        yield
-        return
-    reset_skill_storage()
-    try:
-        yield
-    finally:
-        reset_skill_storage()
-
-
-@pytest.fixture(autouse=True)
-def _reset_frozen_checkpoint_channel_mode(monkeypatch):
-    """Reset the process-global frozen checkpoint channel mode between tests.
-
-    Production treats ``checkpoint_channel_mode`` (and the delta
-    ``snapshot_frequency`` frozen alongside it) as restart-required: the
-    first client/app freezes it for the process. The test suite builds many
-    clients and apps with different modes in one process, so the freeze must
-    not leak across tests. Mirrors the per-test ``monkeypatch.setattr``
-    resets already used in test_client.py / test_lead_agent_model_resolution.py.
-    """
-    from deerflow.runtime import checkpoint_mode
-
-    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
-    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _restore_title_config_singleton():
-    """Reset ``_title_config`` to its pristine default after every test.
-
-    ``AppConfig.from_file()`` writes the on-disk ``title`` block into the
-    module-level singleton (``config/app_config.py`` calls
-    ``load_title_config_from_dict``). Any test that loads the real
-    ``config.yaml`` therefore leaves the singleton in a state that
-    ``test_title_middleware_core_logic.py`` does not expect; that suite
-    relies on the pristine ``TitleConfig()`` default (``enabled=True``).
-    We restore the default after every test so test files stay
-    independent regardless of order.
-    """
-    try:
-        from deerflow.config.title_config import reset_title_config
-    except ImportError:
-        yield
-        return
-
-    try:
-        yield
-    finally:
-        reset_title_config()
-
-
-@pytest.fixture(autouse=True)
-def _auto_user_context(request):
-    """Inject a default ``test-user-autouse`` into the contextvar.
-
-    Opt-out via ``@pytest.mark.no_auto_user``. Uses lazy import so that
-    tests which don't touch the persistence layer never pay the cost
-    of importing runtime.user_context.
-    """
-    if request.node.get_closest_marker("no_auto_user"):
-        yield
-        return
-
-    try:
-        from deerflow.runtime.user_context import (
-            reset_current_user,
-            set_current_user,
+        await bootstrap_schema(engine)
+        await bootstrap_system_runtime_policies(
+            async_sessionmaker(engine, expire_on_commit=False),
         )
-    except ImportError:
-        yield
-        return
-
-    user = SimpleNamespace(id="test-user-autouse", email="test@local")
-    token = set_current_user(user)
-    try:
-        yield
+        yield postgres_database_url
     finally:
-        reset_current_user(token)
+        await engine.dispose()

@@ -16,10 +16,11 @@ helper stops at the extracted raw text.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tracing import inject_langfuse_metadata
@@ -38,6 +39,8 @@ async def run_oneshot_llm(
     app_config: AppConfig,
     model_name: str | None = None,
     thread_id: str | None = None,
+    attach_tracing: bool = True,
+    model_overrides: Mapping[str, object] | None = None,
 ) -> str:
     """Run a single non-graph system+user LLM turn and return the raw text.
 
@@ -48,20 +51,33 @@ async def run_oneshot_llm(
         app_config: Application config used to build the model.
         model_name: Optional model override; ``None`` uses the default model.
         thread_id: Optional thread id, forwarded to Langfuse for tracing only.
+        attach_tracing: Attach configured tracing callbacks to the model. Sensitive
+            auxiliary calls can disable this so prompt bodies are not exported to
+            tracing providers.
+        model_overrides: Optional bounded request sampling overrides accepted by
+            the shared model factory.
 
     Returns:
         The extracted plain-text content of the model response (uncleaned).
     """
-    model = create_chat_model(name=model_name, thinking_enabled=False, app_config=app_config)
-    invoke_config: dict = {"run_name": run_name}
-    inject_langfuse_metadata(
-        invoke_config,
-        thread_id=thread_id,
-        user_id=get_effective_user_id(),
-        assistant_id=run_name,
-        model_name=model_name,
-        environment=_resolve_environment(),
+    model = create_chat_model(
+        name=model_name,
+        thinking_enabled=False,
+        app_config=app_config,
+        attach_tracing=attach_tracing,
+        model_overrides=model_overrides,
     )
+    invoke_config: dict = {"run_name": run_name}
+    if attach_tracing:
+        inject_langfuse_metadata(
+            invoke_config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=run_name,
+            model_name=model_name,
+            environment=_resolve_environment(),
+            include_deerflow_trace_id=is_trace_correlation_enabled(app_config),
+        )
     response = await model.ainvoke(
         [
             SystemMessage(content=system_instruction),

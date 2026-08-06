@@ -1,7 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import { privateWorkQueryKey } from "@/core/private-work/query-keys";
+import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 
 import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
 
@@ -9,15 +12,20 @@ export function useArtifactContent({
   filepath,
   threadId,
   enabled,
+  url,
+  privateWork: explicitPrivateWork,
 }: {
   filepath: string;
   threadId: string;
   enabled?: boolean;
+  url: string;
+  privateWork?: ProjectPrivateWorkScope;
 }) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const isWriteFile = useMemo(() => {
     return filepath.startsWith("write-file:");
   }, [filepath]);
-  const { thread, isMock } = useThread();
+  const { thread } = useThread();
   const content = useMemo(() => {
     if (isWriteFile) {
       return loadArtifactContentFromToolCall({ url: filepath, thread });
@@ -25,31 +33,25 @@ export function useArtifactContent({
     return null;
   }, [filepath, isWriteFile, thread]);
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["artifact", filepath, threadId, isMock],
-    queryFn: () => {
-      return loadArtifactContent({ filepath, threadId, isMock });
+  const { data, isLoading, error } = useQuery({
+    queryKey: privateWorkQueryKey(
+      privateWork.scope,
+      "artifact",
+      filepath,
+      threadId,
+      url,
+    ),
+    queryFn: ({ signal }) => {
+      return loadArtifactContent({ filepath, url, signal });
     },
     enabled,
-    staleTime: 0,
-    refetchOnWindowFocus: true,
+    retry: false,
+    // Cache previewable artifact content for 5 minutes to avoid repeated fetches.
+    staleTime: 5 * 60 * 1000,
   });
-
-  // Refetch once when the run settles so edits made during the run are
-  // visible without a manual reload.
-  const wasLoadingRef = useRef(thread.isLoading);
-  useEffect(() => {
-    const wasLoading = wasLoadingRef.current;
-    wasLoadingRef.current = thread.isLoading;
-    if (wasLoading && !thread.isLoading && enabled && !isWriteFile) {
-      void refetch().catch(() => undefined);
-    }
-  }, [enabled, isWriteFile, refetch, thread.isLoading]);
-
   return {
     content: isWriteFile ? content : data?.content,
     url: isWriteFile ? undefined : data?.url,
-    sha256: isWriteFile ? undefined : data?.sha256,
     isLoading,
     error,
   };

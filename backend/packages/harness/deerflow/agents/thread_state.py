@@ -15,25 +15,31 @@ from langchain_core.messages import (
 from langgraph.channels import DeltaChannel
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
+import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401
 from deerflow.agents.goal_state import GoalState
-from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
+from deerflow.agents.memory.snip import MemoryArchiveReceipt
+from deerflow.config.database_config import (
+    DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
+    CheckpointChannelMode,
+)
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
 def _resolve_snapshot_frequency(snapshot_frequency: int | None) -> int:
-    """Resolve the effective cadence: explicit value, else process-frozen,
-    else default. Imported lazily — ``deerflow.runtime.__init__`` reaches this
-    module via ``checkpoint_state``, so a top-level import would cycle."""
+    """Resolve the explicit, process-frozen, or default delta cadence."""
     if snapshot_frequency is not None:
         return snapshot_frequency
-    from deerflow.runtime.checkpoint_mode import resolve_checkpoint_snapshot_frequency
+    from deerflow.runtime.checkpoint_mode import (
+        resolve_checkpoint_snapshot_frequency,
+    )
 
     return resolve_checkpoint_snapshot_frequency()
 
 
 class SandboxState(TypedDict):
     sandbox_id: NotRequired[str | None]
+    run_id: NotRequired[str | None]
 
 
 class ThreadDataState(TypedDict):
@@ -42,28 +48,32 @@ class ThreadDataState(TypedDict):
     outputs_path: NotRequired[str | None]
 
 
+class ViewedImageFileRef(TypedDict):
+    """Run-bound sandbox coordinates; never contains a host filesystem path."""
+
+    path: str
+    sandbox_id: str
+    run_id: str
+    project_id: NotRequired[str]
+    owner_user_id: NotRequired[str]
+
+
 class ViewedImageData(TypedDict):
-    """Metadata for a viewed image file.
-
-    Only lightweight metadata is persisted in checkpoint state; the actual
-    image bytes are read on-demand from disk when the model needs them.
-    This avoids duplicating large base64 payloads across every checkpoint
-    (see #4138).
-    """
-
     mime_type: str
     size: int
-    actual_path: str
+    sha256: str
+    file_ref: ViewedImageFileRef
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
-    """Reducer for sandbox state - accepts idempotent writes only.
+    """Reducer for sandbox state with run-scoped private lease rotation.
 
     Multiple sandbox tools can initialize lazily in the same graph step and
     emit the same sandbox_id via Command(update=...). LangGraph needs an
-    explicit reducer for that shared state key. Different sandbox ids in the
-    same thread indicate a lifecycle/isolation bug, so fail closed instead of
-    choosing one silently.
+    explicit reducer for that shared state key. Private Runs intentionally use
+    a fresh lease, so a new run_id may replace the checkpointed sandbox. Within
+    one Run, different sandbox ids still indicate a lifecycle/isolation bug and
+    fail closed.
     """
     if new is None:
         return existing
@@ -73,7 +83,12 @@ def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> Sa
     existing_id = existing.get("sandbox_id")
     new_id = new.get("sandbox_id")
     if existing_id == new_id:
-        return existing
+        return {**existing, **new}
+
+    existing_run_id = existing.get("run_id")
+    new_run_id = new.get("run_id")
+    if isinstance(new_run_id, str) and new_run_id and new_run_id != existing_run_id:
+        return new
     raise ValueError(f"Conflicting sandbox state updates: {existing_id!r} != {new_id!r}")
 
 
@@ -90,21 +105,111 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
     return list(dict.fromkeys(existing + new))
 
 
-def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
-    """Reducer for viewed_images dict - merges image dictionaries.
+ViewedImageScope = tuple[str, str, str | None, str | None]
+_VIEWED_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_VIEWED_IMAGE_MIME_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+    }
+)
+_VIEWED_IMAGE_VIRTUAL_ROOTS = (
+    f"{VIRTUAL_PATH_PREFIX}/workspace",
+    f"{VIRTUAL_PATH_PREFIX}/uploads",
+    f"{VIRTUAL_PATH_PREFIX}/outputs",
+)
 
-    Special case: If new is an empty dict {}, it clears the existing images.
-    This allows middlewares to clear the viewed_images state after processing.
-    """
-    if existing is None:
-        return new or {}
+
+def _is_viewed_image_virtual_path(path: str) -> bool:
+    return any(path == root or path.startswith(f"{root}/") for root in _VIEWED_IMAGE_VIRTUAL_ROOTS)
+
+
+def normalize_viewed_images(
+    images: Mapping[str, object] | None,
+) -> dict[str, ViewedImageData]:
+    """Drop legacy base64 payloads and malformed checkpoint references."""
+
+    normalized: dict[str, ViewedImageData] = {}
+    for image_path, raw_image_data in (images or {}).items():
+        if not isinstance(image_path, str) or not isinstance(raw_image_data, Mapping):
+            continue
+        raw_ref = raw_image_data.get("file_ref")
+        mime_type = raw_image_data.get("mime_type")
+        size = raw_image_data.get("size")
+        sha256 = raw_image_data.get("sha256")
+        if (
+            not _is_viewed_image_virtual_path(image_path)
+            or not isinstance(raw_ref, Mapping)
+            or raw_ref.get("path") != image_path
+            or not isinstance(raw_ref.get("sandbox_id"), str)
+            or not raw_ref["sandbox_id"]
+            or not isinstance(raw_ref.get("run_id"), str)
+            or not raw_ref["run_id"]
+            or mime_type not in _VIEWED_IMAGE_MIME_TYPES
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 0 <= size <= _VIEWED_IMAGE_MAX_BYTES
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            continue
+
+        project_id = raw_ref.get("project_id")
+        owner_user_id = raw_ref.get("owner_user_id")
+        if (project_id is None) != (owner_user_id is None):
+            continue
+        if project_id is not None and (not isinstance(project_id, str) or not project_id or not isinstance(owner_user_id, str) or not owner_user_id):
+            continue
+
+        file_ref: ViewedImageFileRef = {
+            "path": image_path,
+            "sandbox_id": raw_ref["sandbox_id"],
+            "run_id": raw_ref["run_id"],
+        }
+        if isinstance(project_id, str) and isinstance(owner_user_id, str):
+            file_ref["project_id"] = project_id
+            file_ref["owner_user_id"] = owner_user_id
+        normalized[image_path] = {
+            "mime_type": mime_type,
+            "size": size,
+            "sha256": sha256,
+            "file_ref": file_ref,
+        }
+    return normalized
+
+
+def _viewed_image_scope(image_data: ViewedImageData) -> ViewedImageScope:
+    file_ref = image_data["file_ref"]
+    return (
+        file_ref["sandbox_id"],
+        file_ref["run_id"],
+        file_ref.get("project_id"),
+        file_ref.get("owner_user_id"),
+    )
+
+
+def merge_viewed_images(
+    existing: dict[str, ViewedImageData] | None,
+    new: dict[str, ViewedImageData] | None,
+) -> dict[str, ViewedImageData]:
+    """Keep only lightweight references from one exact Run/sandbox scope."""
+
+    normalized_existing = normalize_viewed_images(existing)
     if new is None:
-        return existing
-    # Special case: empty dict means clear all viewed images
-    if len(new) == 0:
+        return normalized_existing
+    if not new:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+
+    normalized_new = normalize_viewed_images(new)
+    new_scopes = {_viewed_image_scope(image_data) for image_data in normalized_new.values()}
+    if len(new_scopes) != 1:
+        return {}
+    current_scope = next(iter(new_scopes))
+    retained_existing = {path: image_data for path, image_data in normalized_existing.items() if _viewed_image_scope(image_data) == current_scope}
+    return {**retained_existing, **normalized_new}
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:
@@ -159,6 +264,10 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 class DelegationEntry(TypedDict):
     id: str
+    occurrence: NotRequired[int]
+    dispatch_ref: NotRequired[str]
+    project_id: NotRequired[str]
+    owner_user_id: NotRequired[str]
     run_id: NotRequired[str]
     description: str
     subagent_type: str
@@ -173,6 +282,33 @@ class DelegationEntry(TypedDict):
     created_at: str
 
 
+DelegationIdentity = tuple[str | None, str | None, str | None, str, int]
+_DELEGATION_SCOPE_FIELDS = ("project_id", "owner_user_id", "run_id")
+
+
+def delegation_occurrence(entry: Mapping[str, object]) -> int:
+    """Normalize legacy entries without an occurrence to the first call."""
+    occurrence = entry.get("occurrence")
+    if isinstance(occurrence, int) and not isinstance(occurrence, bool) and occurrence >= 1:
+        return occurrence
+    return 1
+
+
+def delegation_identity(entry: Mapping[str, object]) -> DelegationIdentity:
+    """Return the private Run- and occurrence-scoped delegation identity."""
+    return (
+        str(entry["project_id"]) if entry.get("project_id") is not None else None,
+        str(entry["owner_user_id"]) if entry.get("owner_user_id") is not None else None,
+        str(entry["run_id"]) if entry.get("run_id") is not None else None,
+        str(entry["id"]),
+        delegation_occurrence(entry),
+    )
+
+
+def _has_delegation_scope(entry: Mapping[str, object]) -> bool:
+    return any(entry.get(field) is not None for field in _DELEGATION_SCOPE_FIELDS)
+
+
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
@@ -184,21 +320,41 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     if not new:
         return existing or []
 
-    by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
-    for entry in [*(existing or []), *new]:
-        entry_id = entry["id"]
-        previous = by_id.get(entry_id)
+    by_identity: dict[DelegationIdentity, DelegationEntry] = {}
+    order: list[DelegationIdentity] = []
+    for entry in existing or []:
+        identity = delegation_identity(entry)
+        if identity not in by_identity:
+            order.append(identity)
+        by_identity[identity] = entry
+
+    for entry in new:
+        identity = delegation_identity(entry)
+        previous = by_identity.get(identity)
+
+        # Older extraction paths emitted an update without scope fields. If
+        # exactly one retained entry has this provider call id, bind the update
+        # to that entry and preserve its server-issued private Run scope. If
+        # multiple scoped entries reused the same provider id, ambiguity fails
+        # closed by retaining a separate unscoped legacy entry.
+        if previous is None and not _has_delegation_scope(entry):
+            matches = [candidate for candidate in order if candidate[3] == str(entry["id"]) and candidate[4] == delegation_occurrence(entry)]
+            if len(matches) == 1:
+                identity = matches[0]
+                previous = by_identity[identity]
+                entry = {
+                    **entry,
+                    **{field: previous[field] for field in _DELEGATION_SCOPE_FIELDS if previous.get(field) is not None},
+                }
+
         if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
             continue
-        if entry_id not in by_id:
-            order.append(entry_id)
+        if identity not in by_identity:
+            order.append(identity)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
-            if previous.get("run_id") and not entry.get("run_id"):
-                entry["run_id"] = previous["run_id"]
-        by_id[entry_id] = entry
-    merged = [by_id[entry_id] for entry_id in order]
+        by_identity[identity] = entry
+    merged = [by_identity[identity] for identity in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
         merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
     return merged
@@ -269,11 +425,12 @@ class ThreadState(AgentState):
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+    memory_archive_receipt: NotRequired[MemoryArchiveReceipt | None]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:
@@ -300,19 +457,15 @@ def _index_messages(
 
 
 def _raise_null_write(has_messages: bool) -> None:
-    # ``add_messages(left, None)`` reports only ``left`` when the accumulated
-    # message list is non-empty; with an empty list, it reports only ``right``.
     received = "left" if has_messages else "right"
     raise ValueError(f"Must specify non-null arguments for both 'left' and 'right'. Only received: '{received}'.")
 
 
-def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list[AnyMessage]:
-    """Fold DeltaChannel writes with ``add_messages`` semantics in linear time.
-
-    LangGraph's private ``_messages_delta_reducer`` is also linear, but does
-    not preserve the public reducer's full coercion, ID, removal, and
-    ``REMOVE_ALL_MESSAGES`` behavior.
-    """
+def merge_message_writes(
+    state: list[AnyMessage],
+    writes: Sequence[Any],
+) -> list[AnyMessage]:
+    """Fold DeltaChannel writes with add_messages-compatible semantics."""
     if not writes:
         return list(state)
     if writes[0] is None:
@@ -363,11 +516,16 @@ def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list
     return [message for message in messages if message is not None]
 
 
-def delta_messages_field(snapshot_frequency: int = DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY) -> Any:
-    """Messages field annotation with a ``DeltaChannel`` at the given cadence."""
+def delta_messages_field(
+    snapshot_frequency: int = DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
+) -> Any:
+    """Return the messages annotation for a DeltaChannel cadence."""
     return Annotated[
         list[AnyMessage],
-        DeltaChannel(merge_message_writes, snapshot_frequency=snapshot_frequency),
+        DeltaChannel(
+            merge_message_writes,
+            snapshot_frequency=snapshot_frequency,
+        ),
     ]
 
 
@@ -393,7 +551,10 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
 )
 
 
-def get_thread_state_schema(mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> type:
+def get_thread_state_schema(
+    mode: CheckpointChannelMode,
+    snapshot_frequency: int | None = None,
+) -> type:
     if mode != "delta":
         return ThreadState
     return _delta_thread_state_schema(_resolve_snapshot_frequency(snapshot_frequency))
@@ -401,8 +562,6 @@ def get_thread_state_schema(mode: CheckpointChannelMode, snapshot_frequency: int
 
 @cache
 def _delta_thread_state_schema(snapshot_frequency: int) -> type:
-    """Delta thread schema keyed by cadence; the default keeps the static
-    ``DeltaThreadState`` identity so existing type checks keep holding."""
     if snapshot_frequency == DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY:
         return DeltaThreadState
     annotations = get_type_hints(ThreadState, include_extras=True)
@@ -414,14 +573,24 @@ def _delta_thread_state_schema(snapshot_frequency: int) -> type:
     )
 
 
-def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> type:
+def adapt_state_schema_for_mode(
+    schema: type,
+    mode: CheckpointChannelMode,
+    snapshot_frequency: int | None = None,
+) -> type:
     if mode == "full":
         return schema
-    return _adapt_state_schema_for_delta(schema, _resolve_snapshot_frequency(snapshot_frequency))
+    return _adapt_state_schema_for_delta(
+        schema,
+        _resolve_snapshot_frequency(snapshot_frequency),
+    )
 
 
 @cache
-def _adapt_state_schema_for_delta(schema: type, snapshot_frequency: int) -> type:
+def _adapt_state_schema_for_delta(
+    schema: type,
+    snapshot_frequency: int,
+) -> type:
     annotations = get_type_hints(schema, include_extras=True)
     annotations["messages"] = delta_messages_field(snapshot_frequency)
     return TypedDict(
@@ -431,7 +600,11 @@ def _adapt_state_schema_for_delta(schema: type, snapshot_frequency: int) -> type
     )
 
 
-def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> list[Any]:
+def normalize_middleware_state_schemas(
+    middleware: Sequence[Any],
+    mode: CheckpointChannelMode,
+    snapshot_frequency: int | None = None,
+) -> list[Any]:
     if mode == "full":
         return list(middleware)
     resolved_frequency = _resolve_snapshot_frequency(snapshot_frequency)
@@ -442,6 +615,10 @@ def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: Checkpoi
             normalized.append(item)
             continue
         adapted = copy.copy(item)
-        adapted.state_schema = adapt_state_schema_for_mode(schema, mode, resolved_frequency)
+        adapted.state_schema = adapt_state_schema_for_mode(
+            schema,
+            mode,
+            resolved_frequency,
+        )
         normalized.append(adapted)
     return normalized

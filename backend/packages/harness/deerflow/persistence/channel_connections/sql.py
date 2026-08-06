@@ -7,20 +7,28 @@ import hashlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.channel_connections.identity_lock import (
+    lock_channel_identities,
+)
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -30,6 +38,11 @@ logger = logging.getLogger(__name__)
 # identity guarded by the partial unique index). Each retry re-reads the
 # now-visible state, so a small bound converges under realistic contention.
 _UPSERT_MAX_ATTEMPTS = 3
+
+ExternalIdentityCandidateFactory = Callable[
+    [str, uuid.UUID, str, str],
+    tuple[tuple[str, str], ...],
+]
 
 
 class ChannelCredentialCipher:
@@ -63,9 +76,11 @@ class ChannelConnectionRepository:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         cipher: ChannelCredentialCipher | None = None,
+        external_identity_candidates: ExternalIdentityCandidateFactory | None = None,
     ) -> None:
         self.session_factory = session_factory
         self._cipher = cipher
+        self._external_identity_candidates = external_identity_candidates
 
     async def close(self) -> None:
         from deerflow.persistence.engine import close_engine
@@ -79,6 +94,67 @@ class ChannelConnectionRepository:
     @staticmethod
     def _normalize_optional_identity(value: str | None) -> str:
         return value or ""
+
+    @staticmethod
+    def _channel_instance_uuid(
+        value: uuid.UUID | str | None,
+    ) -> uuid.UUID | None:
+        if value is None:
+            return None
+        try:
+            return value if isinstance(value, uuid.UUID) else uuid.UUID(value)
+        except (TypeError, ValueError):
+            raise RuntimeError("invalid channel instance id") from None
+
+    @staticmethod
+    def _connection_instance_condition(value: uuid.UUID | None):
+        if value is None:
+            return ChannelConnectionRow.channel_instance_id.is_(None)
+        return ChannelConnectionRow.channel_instance_id == value
+
+    def _lookup_identity_candidates(
+        self,
+        provider: str,
+        channel_instance_id: uuid.UUID | None,
+        external_account_id: str,
+        workspace_id: str | None,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return raw personal and optional pseudonymous group coordinates."""
+
+        raw = (
+            self._normalize_optional_identity(external_account_id),
+            self._normalize_optional_identity(workspace_id),
+        )
+        if channel_instance_id is None or self._external_identity_candidates is None:
+            return (raw,)
+        derived = self._external_identity_candidates(
+            provider,
+            channel_instance_id,
+            raw[0],
+            raw[1],
+        )
+        candidates = [raw]
+        for candidate in derived:
+            if type(candidate) is not tuple or len(candidate) != 2 or any(type(value) is not str or not value for value in candidate):
+                raise RuntimeError("invalid channel identity candidate")
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return tuple(candidates)
+
+    @staticmethod
+    def _oauth_instance_condition(value: uuid.UUID | None):
+        if value is None:
+            return ChannelOAuthStateRow.channel_instance_id.is_(None)
+        return ChannelOAuthStateRow.channel_instance_id == value
+
+    @staticmethod
+    def _coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
+        if type(scope) is not PrivateResourceScope:
+            raise RuntimeError("channel connection operation requires private scope")
+        try:
+            return uuid.UUID(scope.project_id), str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            raise RuntimeError("invalid channel connection private scope") from None
 
     @staticmethod
     def _coerce_datetime(value: datetime | None) -> datetime | None:
@@ -96,12 +172,22 @@ class ChannelConnectionRepository:
     @staticmethod
     def _connection_to_dict(row: ChannelConnectionRow) -> dict[str, Any]:
         data = row.to_dict()
+        data["project_id"] = str(data["project_id"])
+        if data.get("channel_instance_id") is not None:
+            data["channel_instance_id"] = str(data["channel_instance_id"])
+        data["account_id"] = data["owner_user_id"]
         data["external_account_id"] = data["external_account_id"] or None
         data["workspace_id"] = data["workspace_id"] or None
         data["scopes"] = data.pop("scopes_json") or []
         data["capabilities"] = data.pop("capabilities_json") or {}
         data["metadata"] = data.pop("metadata_json") or {}
-        for key in ("created_at", "updated_at", "last_seen_at", "last_error_at"):
+        for key in (
+            "created_at",
+            "updated_at",
+            "last_seen_at",
+            "last_error_at",
+            "frozen_at",
+        ):
             value = data.get(key)
             if isinstance(value, datetime):
                 data[key] = coerce_iso(value)
@@ -110,7 +196,7 @@ class ChannelConnectionRepository:
     async def upsert_connection(
         self,
         *,
-        owner_user_id: str,
+        scope: PrivateResourceScope,
         provider: str,
         external_account_id: str | None = None,
         external_account_name: str | None = None,
@@ -121,7 +207,10 @@ class ChannelConnectionRepository:
         capabilities: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         status: str = "connected",
+        channel_instance_id: uuid.UUID | str | None = None,
     ) -> dict[str, Any]:
+        project_id, owner_user_id = self._coordinates(scope)
+        instance_id = self._channel_instance_uuid(channel_instance_id)
         external_account_id_value = self._normalize_optional_identity(external_account_id)
         workspace_id_value = self._normalize_optional_identity(workspace_id)
 
@@ -134,17 +223,21 @@ class ChannelConnectionRepository:
             row.capabilities_json = dict(capabilities or {})
             row.metadata_json = dict(metadata or {})
 
-        async def _revoke_other_active_owners(session: AsyncSession) -> None:
+        async def _revoke_other_active_scopes(session: AsyncSession) -> None:
             if status != "connected":
                 return
             with session.no_autoflush:
                 result = await session.execute(
                     select(ChannelConnectionRow.id).where(
                         ChannelConnectionRow.provider == provider,
+                        self._connection_instance_condition(instance_id),
                         ChannelConnectionRow.external_account_id == external_account_id_value,
                         ChannelConnectionRow.workspace_id == workspace_id_value,
-                        ChannelConnectionRow.owner_user_id != owner_user_id,
-                        ChannelConnectionRow.status != "revoked",
+                        ChannelConnectionRow.status == "connected",
+                        or_(
+                            ChannelConnectionRow.project_id != project_id,
+                            ChannelConnectionRow.owner_user_id != owner_user_id,
+                        ),
                     )
                 )
             transferred_ids = [row_id for row_id in result.scalars()]
@@ -154,8 +247,10 @@ class ChannelConnectionRepository:
             await session.execute(delete(ChannelCredentialRow).where(ChannelCredentialRow.connection_id.in_(transferred_ids)))
 
         stmt = select(ChannelConnectionRow).where(
+            ChannelConnectionRow.project_id == project_id,
             ChannelConnectionRow.owner_user_id == owner_user_id,
             ChannelConnectionRow.provider == provider,
+            self._connection_instance_condition(instance_id),
             ChannelConnectionRow.external_account_id == external_account_id_value,
             ChannelConnectionRow.workspace_id == workspace_id_value,
         )
@@ -164,16 +259,22 @@ class ChannelConnectionRepository:
             last_error: IntegrityError | None = None
             for _ in range(_UPSERT_MAX_ATTEMPTS):
                 try:
+                    await lock_channel_identities(
+                        session,
+                        ((provider, external_account_id_value, workspace_id_value),),
+                    )
                     row = (await session.execute(stmt)).scalar_one_or_none()
                     # Revoke any other owner's active row for this external identity
                     # *before* our connected row is flushed, so the partial unique
                     # index on active identities is satisfied at commit time.
-                    await _revoke_other_active_owners(session)
+                    await _revoke_other_active_scopes(session)
                     if row is None:
                         row = ChannelConnectionRow(
                             id=self._new_id(),
+                            project_id=project_id,
                             owner_user_id=owner_user_id,
                             provider=provider,
+                            channel_instance_id=instance_id,
                             external_account_id=external_account_id_value,
                             workspace_id=workspace_id_value,
                         )
@@ -191,15 +292,43 @@ class ChannelConnectionRepository:
                     await session.rollback()
             raise last_error  # type: ignore[misc]  # loop runs at least once
 
-    async def list_connections(self, owner_user_id: str) -> list[dict[str, Any]]:
+    async def list_connections(
+        self,
+        scope: PrivateResourceScope,
+    ) -> list[dict[str, Any]]:
+        project_id, owner_user_id = self._coordinates(scope)
         async with self.session_factory() as session:
-            result = await session.execute(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == owner_user_id).order_by(ChannelConnectionRow.updated_at.desc(), ChannelConnectionRow.id.desc()))
+            result = await session.execute(
+                select(ChannelConnectionRow)
+                .where(
+                    ChannelConnectionRow.project_id == project_id,
+                    ChannelConnectionRow.owner_user_id == owner_user_id,
+                )
+                .order_by(
+                    ChannelConnectionRow.updated_at.desc(),
+                    ChannelConnectionRow.id.desc(),
+                )
+            )
             return [self._connection_to_dict(row) for row in result.scalars()]
 
-    async def disconnect_connection(self, *, connection_id: str, owner_user_id: str) -> bool:
+    async def disconnect_connection(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        connection_id: str,
+    ) -> bool:
+        project_id, owner_user_id = self._coordinates(scope)
         async with self.session_factory() as session:
-            row = await session.get(ChannelConnectionRow, connection_id)
-            if row is None or row.owner_user_id != owner_user_id:
+            row = (
+                await session.execute(
+                    select(ChannelConnectionRow).where(
+                        ChannelConnectionRow.id == connection_id,
+                        ChannelConnectionRow.project_id == project_id,
+                        ChannelConnectionRow.owner_user_id == owner_user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
                 return False
 
             row.status = "revoked"
@@ -209,7 +338,7 @@ class ChannelConnectionRepository:
             await session.commit()
             return True
 
-    async def disconnect_provider_connections(self, *, provider: str) -> int:
+    async def trusted_disconnect_provider_connections(self, *, provider: str) -> int:
         """Revoke all active user connections for an instance-wide provider removal."""
         async with self.session_factory() as session:
             result = await session.execute(
@@ -227,20 +356,38 @@ class ChannelConnectionRepository:
             await session.commit()
             return len(connection_ids)
 
+    async def disconnect_provider_connections(self, *, provider: str) -> int:
+        """Compatibility alias for the trusted instance-wide admin operation."""
+        return await self.trusted_disconnect_provider_connections(provider=provider)
+
     async def store_credentials(
         self,
-        connection_id: str,
         *,
+        scope: PrivateResourceScope,
+        connection_id: str,
         access_token: str | None,
         refresh_token: str | None = None,
         token_type: str | None = None,
         expires_at: datetime | None = None,
         refresh_expires_at: datetime | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
+        project_id, owner_user_id = self._coordinates(scope)
         if self._cipher is None:
             raise RuntimeError("channel connection encryption key is required")
         async with self.session_factory() as session:
+            connection = (
+                await session.execute(
+                    select(ChannelConnectionRow.id).where(
+                        ChannelConnectionRow.id == connection_id,
+                        ChannelConnectionRow.project_id == project_id,
+                        ChannelConnectionRow.owner_user_id == owner_user_id,
+                        ChannelConnectionRow.status == "connected",
+                    )
+                )
+            ).scalar_one_or_none()
+            if connection is None:
+                return False
             row = await session.get(ChannelCredentialRow, connection_id)
             if row is None:
                 row = ChannelCredentialRow(connection_id=connection_id)
@@ -253,12 +400,33 @@ class ChannelConnectionRepository:
             row.encrypted_extra_json = self._cipher.encrypt_text(json.dumps(extra or {}, ensure_ascii=False))
             row.version = (row.version or 0) + 1
             await session.commit()
+            return True
 
-    async def get_credentials(self, connection_id: str) -> dict[str, Any] | None:
+    async def get_credentials(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        project_id, owner_user_id = self._coordinates(scope)
         if self._cipher is None:
             return None
         async with self.session_factory() as session:
-            row = await session.get(ChannelCredentialRow, connection_id)
+            row = (
+                await session.execute(
+                    select(ChannelCredentialRow)
+                    .join(
+                        ChannelConnectionRow,
+                        ChannelConnectionRow.id == ChannelCredentialRow.connection_id,
+                    )
+                    .where(
+                        ChannelConnectionRow.id == connection_id,
+                        ChannelConnectionRow.project_id == project_id,
+                        ChannelConnectionRow.owner_user_id == owner_user_id,
+                        ChannelConnectionRow.status == "connected",
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None:
                 return None
             try:
@@ -286,7 +454,7 @@ class ChannelConnectionRepository:
     async def create_oauth_state(
         self,
         *,
-        owner_user_id: str,
+        scope: PrivateResourceScope,
         provider: str,
         state: str,
         expires_at: datetime,
@@ -295,11 +463,16 @@ class ChannelConnectionRepository:
         redirect_after: str | None = None,
         requested_scopes: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        channel_instance_id: uuid.UUID | str | None = None,
     ) -> None:
+        project_id, owner_user_id = self._coordinates(scope)
+        instance_id = self._channel_instance_uuid(channel_instance_id)
         row = ChannelOAuthStateRow(
             state_hash=self.hash_state(state),
+            project_id=project_id,
             owner_user_id=owner_user_id,
             provider=provider,
+            channel_instance_id=instance_id,
             code_verifier_encrypted=self._encrypt_optional_secret(code_verifier),
             nonce_hash=nonce_hash,
             redirect_after=redirect_after,
@@ -314,7 +487,7 @@ class ChannelConnectionRepository:
     async def create_oauth_state_within_cap(
         self,
         *,
-        owner_user_id: str,
+        scope: PrivateResourceScope,
         provider: str,
         state: str,
         expires_at: datetime,
@@ -325,31 +498,27 @@ class ChannelConnectionRepository:
         redirect_after: str | None = None,
         requested_scopes: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        channel_instance_id: uuid.UUID | str | None = None,
     ) -> bool:
-        """Atomically enforce the per-(owner, provider) pending cap, then insert.
+        """Atomically enforce the per-private-scope/provider pending cap."""
+        project_id, owner_user_id = self._coordinates(scope)
+        instance_id = self._channel_instance_uuid(channel_instance_id)
 
-        delete-expired + count + insert run in a single transaction serialized
-        per (owner, provider), so concurrent connect requests cannot each
-        observe ``count < max_pending`` and all insert (which would leak past
-        the cap). PostgreSQL takes a transaction-scoped advisory lock; SQLite
-        serializes writers through the write lock the leading DELETE acquires.
-
-        Returns ``True`` when the row was inserted, ``False`` when the cap is
-        already reached.
-        """
         current_time = now or datetime.now(UTC)
         async with self.session_factory() as session:
-            await self._serialize_oauth_owner_scope(session, owner_user_id, provider)
-            # Prune only this owner/provider's expired codes (the ones that affect
-            # this cap), not every user's — avoids a global DELETE on each connect
-            # POST. Issuing this write first also takes the SQLite database write
-            # lock so the count below cannot race a concurrent inserter between
-            # count and commit. Stale codes for other owners are pruned globally
-            # by consume_oauth_state / delete_expired_oauth_states.
+            await self._serialize_oauth_scope(
+                session,
+                project_id,
+                owner_user_id,
+                provider,
+                instance_id,
+            )
             await session.execute(
                 delete(ChannelOAuthStateRow).where(
+                    ChannelOAuthStateRow.project_id == project_id,
                     ChannelOAuthStateRow.owner_user_id == owner_user_id,
                     ChannelOAuthStateRow.provider == provider,
+                    self._oauth_instance_condition(instance_id),
                     ChannelOAuthStateRow.expires_at < current_time,
                 )
             )
@@ -357,8 +526,10 @@ class ChannelConnectionRepository:
                 select(func.count())
                 .select_from(ChannelOAuthStateRow)
                 .where(
+                    ChannelOAuthStateRow.project_id == project_id,
                     ChannelOAuthStateRow.owner_user_id == owner_user_id,
                     ChannelOAuthStateRow.provider == provider,
+                    self._oauth_instance_condition(instance_id),
                     ChannelOAuthStateRow.consumed_at.is_(None),
                     ChannelOAuthStateRow.expires_at >= current_time,
                 )
@@ -369,8 +540,10 @@ class ChannelConnectionRepository:
             session.add(
                 ChannelOAuthStateRow(
                     state_hash=self.hash_state(state),
+                    project_id=project_id,
                     owner_user_id=owner_user_id,
                     provider=provider,
+                    channel_instance_id=instance_id,
                     code_verifier_encrypted=self._encrypt_optional_secret(code_verifier),
                     nonce_hash=nonce_hash,
                     redirect_after=redirect_after,
@@ -382,24 +555,34 @@ class ChannelConnectionRepository:
             await session.commit()
             return True
 
-    async def _serialize_oauth_owner_scope(self, session: AsyncSession, owner_user_id: str, provider: str) -> None:
-        """Serialize concurrent pending-cap transactions for one (owner, provider).
-
-        On PostgreSQL this takes a transaction-scoped advisory lock so concurrent
-        issuers run their count+insert one at a time. On SQLite the leading
-        DELETE in the caller's transaction already acquires the database write
-        lock, which serializes writers, so no extra lock is required.
-        """
-        try:
-            dialect = session.bind.dialect.name if session.bind is not None else ""
-        except Exception:
-            dialect = ""
-        if dialect == "postgresql":
-            await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": self._oauth_scope_lock_key(owner_user_id, provider)})
+    async def _serialize_oauth_scope(
+        self,
+        session: AsyncSession,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        provider: str,
+        channel_instance_id: uuid.UUID | None,
+    ) -> None:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {
+                "lock_key": self._oauth_scope_lock_key(
+                    project_id,
+                    owner_user_id,
+                    provider,
+                    channel_instance_id,
+                )
+            },
+        )
 
     @staticmethod
-    def _oauth_scope_lock_key(owner_user_id: str, provider: str) -> int:
-        digest = hashlib.sha256(f"{owner_user_id}\x00{provider}".encode()).digest()
+    def _oauth_scope_lock_key(
+        project_id: uuid.UUID,
+        owner_user_id: str,
+        provider: str,
+        channel_instance_id: uuid.UUID | None,
+    ) -> int:
+        digest = hashlib.sha256(f"{project_id}\x00{owner_user_id}\x00{provider}\x00{channel_instance_id or 'legacy'}".encode()).digest()
         # 63-bit non-negative key for pg_advisory_xact_lock(bigint).
         return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
@@ -413,15 +596,20 @@ class ChannelConnectionRepository:
     async def count_oauth_states(
         self,
         *,
-        owner_user_id: str,
+        scope: PrivateResourceScope,
         provider: str,
         active_only: bool = False,
         now: datetime | None = None,
+        channel_instance_id: uuid.UUID | str | None = None,
     ) -> int:
+        project_id, owner_user_id = self._coordinates(scope)
+        instance_id = self._channel_instance_uuid(channel_instance_id)
         current_time = now or datetime.now(UTC)
         conditions = [
+            ChannelOAuthStateRow.project_id == project_id,
             ChannelOAuthStateRow.owner_user_id == owner_user_id,
             ChannelOAuthStateRow.provider == provider,
+            self._oauth_instance_condition(instance_id),
         ]
         if active_only:
             conditions.extend(
@@ -441,13 +629,15 @@ class ChannelConnectionRepository:
         provider: str,
         state: str,
         now: datetime | None = None,
+        channel_instance_id: uuid.UUID | str | None = None,
     ) -> dict[str, Any] | None:
         current_time = now or datetime.now(UTC)
+        instance_id = self._channel_instance_uuid(channel_instance_id)
         state_hash = self.hash_state(state)
         async with self.session_factory() as session:
             await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.expires_at < current_time))
             row = await session.get(ChannelOAuthStateRow, state_hash)
-            if row is None or row.provider != provider or row.consumed_at is not None:
+            if row is None or row.provider != provider or row.channel_instance_id != instance_id or row.consumed_at is not None:
                 await session.commit()
                 return None
             expires_at = self._coerce_datetime(row.expires_at)
@@ -470,8 +660,10 @@ class ChannelConnectionRepository:
             if result.rowcount != 1:
                 return None
             return {
+                "project_id": str(row.project_id),
                 "owner_user_id": row.owner_user_id,
                 "provider": row.provider,
+                "channel_instance_id": (str(row.channel_instance_id) if row.channel_instance_id is not None else None),
                 "requested_scopes": row.requested_scopes_json or [],
                 "metadata": row.metadata_json or {},
                 "redirect_after": row.redirect_after,
@@ -483,43 +675,150 @@ class ChannelConnectionRepository:
         provider: str,
         external_account_id: str,
         workspace_id: str | None = None,
+        channel_instance_id: uuid.UUID | str | None = None,
+        expected_connection_id: str | None = None,
+        expected_scope: PrivateResourceScope | None = None,
     ) -> dict[str, Any] | None:
+        instance_id = self._channel_instance_uuid(channel_instance_id)
+        expected_project_id: uuid.UUID | None = None
+        expected_owner_user_id: str | None = None
+        if expected_connection_id is not None:
+            if type(expected_connection_id) is not str or not expected_connection_id or len(expected_connection_id) > 64:
+                return None
+        if expected_scope is not None:
+            expected_project_id, expected_owner_user_id = self._coordinates(
+                expected_scope,
+            )
+        identity_candidates = self._lookup_identity_candidates(
+            provider,
+            instance_id,
+            external_account_id,
+            workspace_id,
+        )
+        conditions = [
+            ChannelConnectionRow.provider == provider,
+            self._connection_instance_condition(instance_id),
+            ChannelConnectionRow.status == "connected",
+            ProjectMembershipRow.status == "active",
+        ]
+        if expected_connection_id is not None:
+            conditions.append(ChannelConnectionRow.id == expected_connection_id)
+        else:
+            conditions.append(
+                or_(
+                    *(
+                        and_(
+                            ChannelConnectionRow.external_account_id == account_id,
+                            ChannelConnectionRow.workspace_id == candidate_workspace_id,
+                        )
+                        for account_id, candidate_workspace_id in identity_candidates
+                    )
+                )
+            )
+        if expected_project_id is not None and expected_owner_user_id is not None:
+            conditions.extend(
+                [
+                    ChannelConnectionRow.project_id == expected_project_id,
+                    ChannelConnectionRow.owner_user_id == expected_owner_user_id,
+                ]
+            )
         async with self.session_factory() as session:
             result = await session.execute(
-                select(ChannelConnectionRow)
-                .where(
-                    ChannelConnectionRow.provider == provider,
-                    ChannelConnectionRow.external_account_id == self._normalize_optional_identity(external_account_id),
-                    ChannelConnectionRow.workspace_id == self._normalize_optional_identity(workspace_id),
-                    ChannelConnectionRow.status == "connected",
+                select(
+                    ChannelConnectionRow,
+                    ProjectMembershipRow.version.label("membership_version"),
                 )
+                .join(
+                    ProjectMembershipRow,
+                    (ProjectMembershipRow.project_id == ChannelConnectionRow.project_id) & (ProjectMembershipRow.user_id == ChannelConnectionRow.owner_user_id),
+                )
+                .where(*conditions)
                 .order_by(ChannelConnectionRow.updated_at.desc(), ChannelConnectionRow.id.desc())
                 .limit(1)
             )
-            row = result.scalar_one_or_none()
-            return self._connection_to_dict(row) if row is not None else None
+            resolved = result.one_or_none()
+            if resolved is None:
+                return None
+            row, membership_version = resolved
+            if expected_connection_id is not None and (row.external_account_id, row.workspace_id) not in identity_candidates:
+                return None
+            data = self._connection_to_dict(row)
+            data["membership_version"] = int(membership_version)
+            return data
 
     async def set_thread_id(
         self,
         *,
+        scope: PrivateResourceScope,
         connection_id: str,
-        owner_user_id: str,
         provider: str,
         external_conversation_id: str,
         thread_id: str,
         external_topic_id: str | None = None,
-    ) -> None:
+    ) -> bool:
+        project_id, owner_user_id = self._coordinates(scope)
         topic_id = external_topic_id or ""
-        async with self.session_factory() as session:
-            stmt = select(ChannelConversationRow).where(
-                ChannelConversationRow.connection_id == connection_id,
-                ChannelConversationRow.external_conversation_id == external_conversation_id,
-                ChannelConversationRow.external_topic_id == topic_id,
-            )
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
-                row = ChannelConversationRow(
+        async with self.session_factory() as session, session.begin():
+            project = (
+                await session.execute(
+                    select(ProjectRow.id)
+                    .where(
+                        ProjectRow.id == project_id,
+                        ProjectRow.status == "active",
+                        ProjectRow.is_suspended.is_(False),
+                    )
+                    .with_for_update(read=True, of=ProjectRow)
+                )
+            ).scalar_one_or_none()
+            if project is None:
+                return False
+            connection = (
+                await session.execute(
+                    select(ChannelConnectionRow)
+                    .where(
+                        ChannelConnectionRow.id == connection_id,
+                        ChannelConnectionRow.project_id == project_id,
+                        ChannelConnectionRow.owner_user_id == owner_user_id,
+                        ChannelConnectionRow.provider == provider,
+                        ChannelConnectionRow.status == "connected",
+                    )
+                    .with_for_update(of=ChannelConnectionRow)
+                )
+            ).scalar_one_or_none()
+            if connection is None:
+                return False
+
+            connection_metadata = connection.metadata_json or {}
+            if connection_metadata.get("group_binding_id") is not None:
+                try:
+                    connection_agent_asset_id = uuid.UUID(
+                        connection_metadata["agent_asset_id"],
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return False
+                connection_agent_scope = connection_metadata.get("agent_scope")
+                if connection_agent_scope not in {"project", "system"}:
+                    return False
+                thread = (
+                    await session.execute(
+                        select(ThreadMetaRow.thread_id).where(
+                            ThreadMetaRow.thread_id == thread_id,
+                            ThreadMetaRow.project_id == project_id,
+                            ThreadMetaRow.owner_user_id == owner_user_id,
+                            ThreadMetaRow.agent_asset_id == connection_agent_asset_id,
+                            ThreadMetaRow.agent_scope == connection_agent_scope,
+                            ThreadMetaRow.deleted_at.is_(None),
+                            ThreadMetaRow.frozen_at.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if thread is None:
+                    return False
+            insert_result = await session.execute(
+                pg_insert(ChannelConversationRow)
+                .values(
                     id=self._new_id(),
+                    project_id=project_id,
                     connection_id=connection_id,
                     owner_user_id=owner_user_id,
                     provider=provider,
@@ -527,23 +826,116 @@ class ChannelConnectionRepository:
                     external_topic_id=topic_id,
                     thread_id=thread_id,
                 )
-                session.add(row)
-            else:
-                row.thread_id = thread_id
-                row.owner_user_id = owner_user_id
-                row.provider = provider
-            await session.commit()
+                .on_conflict_do_nothing(
+                    constraint="uq_channel_conversation_connection_external",
+                )
+                .returning(ChannelConversationRow.id)
+            )
+            if insert_result.scalar_one_or_none() is not None:
+                return True
+
+            # Another process already owns this exact provider conversation.
+            # Identical retries are idempotent; a different Thread never
+            # silently remaps established private work.
+            existing = (
+                await session.execute(
+                    select(
+                        ChannelConversationRow.provider,
+                        ChannelConversationRow.thread_id,
+                    ).where(
+                        ChannelConversationRow.project_id == project_id,
+                        ChannelConversationRow.owner_user_id == owner_user_id,
+                        ChannelConversationRow.connection_id == connection_id,
+                        ChannelConversationRow.external_conversation_id == external_conversation_id,
+                        ChannelConversationRow.external_topic_id == topic_id,
+                    )
+                )
+            ).one_or_none()
+            return existing is not None and existing[0] == provider and existing[1] == thread_id
 
     async def get_thread_id(
         self,
+        *,
+        scope: PrivateResourceScope,
         connection_id: str,
         external_conversation_id: str,
         external_topic_id: str | None = None,
+        provider: str | None = None,
     ) -> str | None:
+        project_id, owner_user_id = self._coordinates(scope)
         async with self.session_factory() as session:
-            stmt = select(ChannelConversationRow.thread_id).where(
+            conditions = [
+                ChannelConversationRow.project_id == project_id,
+                ChannelConversationRow.owner_user_id == owner_user_id,
                 ChannelConversationRow.connection_id == connection_id,
                 ChannelConversationRow.external_conversation_id == external_conversation_id,
                 ChannelConversationRow.external_topic_id == (external_topic_id or ""),
-            )
+            ]
+            if provider is not None:
+                conditions.append(ChannelConversationRow.provider == provider)
+            stmt = select(ChannelConversationRow.thread_id).where(*conditions)
             return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def remove_thread_ids(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        connection_id: str,
+        provider: str,
+        external_conversation_id: str,
+        external_topic_id: str | None = None,
+    ) -> bool:
+        """Delete one topic mapping, or every topic for one conversation."""
+        project_id, owner_user_id = self._coordinates(scope)
+        conditions = [
+            ChannelConversationRow.project_id == project_id,
+            ChannelConversationRow.owner_user_id == owner_user_id,
+            ChannelConversationRow.connection_id == connection_id,
+            ChannelConversationRow.provider == provider,
+            ChannelConversationRow.external_conversation_id == external_conversation_id,
+        ]
+        if external_topic_id is not None:
+            conditions.append(ChannelConversationRow.external_topic_id == external_topic_id)
+        async with self.session_factory() as session:
+            result = await session.execute(delete(ChannelConversationRow).where(*conditions))
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def list_thread_ids(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        connection_id: str,
+        provider: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List mappings for one exact private connection."""
+        project_id, owner_user_id = self._coordinates(scope)
+        conditions = [
+            ChannelConversationRow.project_id == project_id,
+            ChannelConversationRow.owner_user_id == owner_user_id,
+            ChannelConversationRow.connection_id == connection_id,
+        ]
+        if provider is not None:
+            conditions.append(ChannelConversationRow.provider == provider)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(ChannelConversationRow)
+                .where(*conditions)
+                .order_by(
+                    ChannelConversationRow.created_at.asc(),
+                    ChannelConversationRow.id.asc(),
+                )
+            )
+            entries: list[dict[str, Any]] = []
+            for row in result.scalars():
+                entry: dict[str, Any] = {
+                    "channel_name": row.provider,
+                    "chat_id": row.external_conversation_id,
+                    "thread_id": row.thread_id,
+                    "created_at": self._coerce_datetime(row.created_at),
+                    "updated_at": self._coerce_datetime(row.updated_at),
+                }
+                if row.external_topic_id:
+                    entry["topic_id"] = row.external_topic_id
+                entries.append(entry)
+            return entries

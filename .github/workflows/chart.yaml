@@ -1,15 +1,14 @@
 name: Publish Helm Chart
 
-# Publishes the DeerFlow Helm chart as an OCI artifact to GHCR alongside the
+# Publishes the ActWeave Helm chart as an OCI artifact to GHCR alongside the
 # container images (see container.yaml). Triggers on the same `v*` tags.
 #
 # On pull requests touching the chart or config.example.yaml, `validate-chart`
-# runs lint + template render + a sandbox Service-type gating check + a
-# config_version drift check (the chart's embedded config_version must not lag
-# config.example.yaml) so a broken or stale chart fails the PR, not the release.
+# runs lint + template render + process-topology, sandbox exposure, and exact
+# config-version checks so a broken or stale chart fails the PR, not release.
 #
 # Users then install with:
-#   helm install deer-flow oci://ghcr.io/${{ owner }}/charts/deer-flow --version <ver>
+#   helm install deer-flow oci://ghcr.io/${{ owner }}/deer-flow --version <ver>
 
 on:
   push:
@@ -22,6 +21,7 @@ on:
       - ".github/workflows/chart.yaml"
       - "scripts/check_config_version.sh"
       - "scripts/check_chart_sandbox_service.sh"
+      - "scripts/check_chart_runtime_topology.sh"
 
 jobs:
   validate-chart:
@@ -39,25 +39,14 @@ jobs:
 
       # ubuntu-latest ships with helm 3 preinstalled - no setup-helm action needed.
       - name: Lint chart
-        run: helm lint deploy/helm/deer-flow
-      - name: Validate templates render
-        run: helm template deer-flow deploy/helm/deer-flow --include-crds >/dev/null
-
-      # Assert the sandbox Service-type gating: default emits
-      # SANDBOX_SERVICE_TYPE=ClusterIP and no NODE_HOST; the NodePort opt-in
-      # emits both. Guards the #3929 default flip against regressions.
-      - name: Validate sandbox Service-type gating
+        run: >-
+          helm lint deploy/helm/deer-flow
+          --set-string postgresql.external.databaseUrl=postgresql://postgres:test@db:5432/deerflow
+      - name: Validate Gateway, Worker, and Scheduler ownership
+        run: bash scripts/check_chart_runtime_topology.sh
+      - name: Validate sandbox Service exposure
         run: bash scripts/check_chart_sandbox_service.sh
-
-      # The chart's `config:` block embeds a config_version that must not fall
-      # behind config.example.yaml. A stale version is silent in-cluster (the
-      # image ships no example to compare against, so _check_config_version
-      # never warns) but means the chart's config is authored against an older
-      # schema. Bump it in values.yaml and the README example. config_version
-      # gates no runtime behavior - it only drives the outdated-warning - so a
-      # bare version bump needs no field changes. Logic lives in
-      # scripts/check_config_version.sh (shared with nightly.yaml).
-      - name: config_version drift check
+      - name: Validate exact config schema version
         run: bash scripts/check_config_version.sh
 
   verify-versions:
@@ -90,5 +79,5 @@ jobs:
         run: |
           for pkg in ./packages/*.tgz; do
             echo "--- pushing $pkg"
-            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}/charts
+            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}
           done

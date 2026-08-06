@@ -12,12 +12,21 @@ import {
   type ReactNode,
 } from "react";
 
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
+  adoptSidecarThread as guardSidecarAdoption,
+  advanceSidecarIdentity,
   appendSidecarReference,
   buildMessageSidecarContext,
+  createSidecarIdentity,
   getNextSidecarOpenState,
+  guardSidecarClear,
+  isCurrentSidecarIdentity,
+  visibleSidecarThreadId,
   type SidecarContext,
+  type SidecarIdentity,
   type SidecarReferenceStateItem,
+  type SidecarThreadBinding,
 } from "@/core/sidecar";
 import { findLatestSidecarThread } from "@/core/sidecar/api";
 import type { ThreadStreamOptions } from "@/core/threads/hooks";
@@ -31,16 +40,20 @@ type SidecarContextValue = {
   parentThreadId: string;
   context: ThreadStreamOptions["context"];
   setContext: (context: ThreadStreamOptions["context"]) => void;
-  isMock?: boolean;
+  identity: SidecarIdentity;
+  captureIdentity: () => SidecarIdentity;
+  isIdentityCurrent: (identity: SidecarIdentity) => boolean;
   sidecarThreadId: string | null;
-  setSidecarThreadId: (threadId: string | null) => void;
+  adoptSidecarThread: (identity: SidecarIdentity, threadId: string) => boolean;
+  resetSidecar: (identity: SidecarIdentity) => boolean;
   restoreSidecarThread: (options?: {
     force?: boolean;
+    identity?: SidecarIdentity;
   }) => Promise<string | null>;
   addContextToConversation: (context: SidecarContext) => void;
   clearConversationQuotes: (ids?: number[]) => void;
   clearActiveReferences: () => void;
-  openSidecar: () => void;
+  openSidecar: (identity: SidecarIdentity) => void;
   openContext: (context: SidecarContext) => void;
   openSelectedText: (
     message: Message,
@@ -56,18 +69,27 @@ export function SidecarProvider({
   children,
   parentThreadId,
   context,
-  isMock,
 }: {
   children: ReactNode;
   parentThreadId: string;
   context: ThreadStreamOptions["context"];
-  isMock?: boolean;
 }) {
+  const privateWork = usePrivateWorkAccess();
   const [open, setOpen] = useState(false);
   const [activeReferences, setActiveReferences] = useState<SidecarReference[]>(
     [],
   );
-  const [sidecarThreadId, setSidecarThreadId] = useState<string | null>(null);
+  const identityRef = useRef(createSidecarIdentity(parentThreadId));
+  if (identityRef.current.parentThreadId !== parentThreadId) {
+    identityRef.current = advanceSidecarIdentity(
+      identityRef.current,
+      parentThreadId,
+    );
+  }
+  const identity = identityRef.current;
+  const [, setIdentityRevision] = useState(identity.generation);
+  const [sidecarThreadBinding, setSidecarThreadBinding] =
+    useState<SidecarThreadBinding | null>(null);
   const [sidecarContext, setSidecarContext] =
     useState<ThreadStreamOptions["context"]>(context);
   const [conversationQuotes, setConversationQuotes] = useState<
@@ -75,16 +97,71 @@ export function SidecarProvider({
   >([]);
   const referenceIdRef = useRef(0);
   const parentThreadIdRef = useRef(parentThreadId);
-  const sidecarThreadIdRef = useRef<string | null>(null);
+  const sidecarThreadBindingRef = useRef<SidecarThreadBinding | null>(null);
   const restoreRequestRef = useRef<{
-    parentThreadId: string;
+    identity: SidecarIdentity;
     promise: Promise<string | null>;
   } | null>(null);
 
-  const updateSidecarThreadId = useCallback((threadId: string | null) => {
-    sidecarThreadIdRef.current = threadId;
-    setSidecarThreadId(threadId);
+  const captureIdentity = useCallback(() => identityRef.current, []);
+  const isIdentityCurrent = useCallback((candidate: SidecarIdentity) => {
+    return isCurrentSidecarIdentity(identityRef.current, candidate);
   }, []);
+  const updateSidecarThreadBinding = useCallback(
+    (binding: SidecarThreadBinding | null) => {
+      sidecarThreadBindingRef.current = binding;
+      setSidecarThreadBinding(binding);
+    },
+    [],
+  );
+  const adoptSidecarThread = useCallback(
+    (candidate: SidecarIdentity, threadId: string) => {
+      const binding = guardSidecarAdoption(
+        identityRef.current,
+        candidate,
+        threadId,
+      );
+      if (!binding) return false;
+      updateSidecarThreadBinding(binding);
+      return true;
+    },
+    [updateSidecarThreadBinding],
+  );
+  const sidecarThreadId = visibleSidecarThreadId(
+    identity,
+    sidecarThreadBinding,
+  );
+
+  const invalidateIdentity = useCallback(
+    (candidate: SidecarIdentity, clearThread: boolean) => {
+      const current = identityRef.current;
+      if (!guardSidecarClear(current, candidate)) return false;
+      const currentThreadId = visibleSidecarThreadId(
+        current,
+        sidecarThreadBindingRef.current,
+      );
+      const next = advanceSidecarIdentity(current);
+      identityRef.current = next;
+      setIdentityRevision(next.generation);
+      updateSidecarThreadBinding(
+        clearThread || !currentThreadId
+          ? null
+          : { identity: next, threadId: currentThreadId },
+      );
+      return true;
+    },
+    [updateSidecarThreadBinding],
+  );
+
+  const resetSidecar = useCallback(
+    (candidate: SidecarIdentity) => {
+      if (!invalidateIdentity(candidate, true)) return false;
+      setOpen(false);
+      setActiveReferences([]);
+      return true;
+    },
+    [invalidateIdentity],
+  );
 
   const createReference = useCallback((nextContext: SidecarContext) => {
     referenceIdRef.current += 1;
@@ -102,44 +179,51 @@ export function SidecarProvider({
     setOpen(false);
     setActiveReferences([]);
     setSidecarContext(context);
-    updateSidecarThreadId(null);
+    updateSidecarThreadBinding(null);
     setConversationQuotes([]);
-  }, [context, parentThreadId, updateSidecarThreadId]);
+  }, [context, parentThreadId, updateSidecarThreadBinding]);
 
   const restoreSidecarThread = useCallback(
-    async (options?: { force?: boolean }) => {
+    async (options?: { force?: boolean; identity?: SidecarIdentity }) => {
+      const operationIdentity = options?.identity ?? captureIdentity();
+      if (!isIdentityCurrent(operationIdentity)) return null;
       // A non-forced restore trusts the cached id; a forced restore always
       // re-queries the backend so a sidecar deleted elsewhere reconciles to
       // null instead of pointing the trigger at a dead thread (#3555).
-      if (!options?.force && sidecarThreadIdRef.current) {
-        return sidecarThreadIdRef.current;
+      const currentThreadId = visibleSidecarThreadId(
+        identityRef.current,
+        sidecarThreadBindingRef.current,
+      );
+      if (!options?.force && currentThreadId) {
+        return currentThreadId;
       }
 
       const restoreRequest = restoreRequestRef.current;
-      if (restoreRequest?.parentThreadId === parentThreadId) {
+      if (
+        restoreRequest &&
+        isCurrentSidecarIdentity(restoreRequest.identity, operationIdentity)
+      ) {
         return restoreRequest.promise;
       }
 
       const promise = findLatestSidecarThread({
-        parentThreadId,
-        isMock,
+        parentThreadId: operationIdentity.parentThreadId,
+        apiClient: privateWork.client,
       })
         .then((thread) => {
           const threadId = thread?.thread_id ?? null;
-          if (parentThreadIdRef.current !== parentThreadId) {
-            return null;
-          }
           // Reconcile the cache with the backend: adopt a freshly found
           // thread, and on a forced refresh clear a stale id when the backend
           // no longer has a matching sidecar thread.
           if (threadId) {
-            if (!sidecarThreadIdRef.current) {
-              updateSidecarThreadId(threadId);
-            }
-          } else if (options?.force && sidecarThreadIdRef.current) {
-            updateSidecarThreadId(null);
+            return adoptSidecarThread(operationIdentity, threadId)
+              ? threadId
+              : null;
           }
-          return threadId;
+          if (options?.force) {
+            resetSidecar(operationIdentity);
+          }
+          return null;
         })
         .catch(() => null)
         .finally(() => {
@@ -149,18 +233,24 @@ export function SidecarProvider({
         });
 
       restoreRequestRef.current = {
-        parentThreadId,
+        identity: operationIdentity,
         promise,
       };
 
       return promise;
     },
-    [isMock, parentThreadId, updateSidecarThreadId],
+    [
+      adoptSidecarThread,
+      captureIdentity,
+      isIdentityCurrent,
+      privateWork.client,
+      resetSidecar,
+    ],
   );
 
   useEffect(() => {
-    void restoreSidecarThread();
-  }, [restoreSidecarThread]);
+    void restoreSidecarThread({ identity: captureIdentity() });
+  }, [captureIdentity, parentThreadId, restoreSidecarThread]);
 
   const openContext = useCallback(
     (nextContext: SidecarContext) => {
@@ -205,7 +295,8 @@ export function SidecarProvider({
     setActiveReferences([]);
   }, []);
 
-  const openSidecar = useCallback(() => {
+  const openSidecar = useCallback((candidate: SidecarIdentity) => {
+    if (!isCurrentSidecarIdentity(identityRef.current, candidate)) return;
     setOpen(true);
   }, []);
 
@@ -223,8 +314,9 @@ export function SidecarProvider({
   );
 
   const close = useCallback(() => {
+    invalidateIdentity(identityRef.current, false);
     setOpen(false);
-  }, []);
+  }, [invalidateIdentity]);
 
   const value = useMemo<SidecarContextValue>(
     () => ({
@@ -234,9 +326,12 @@ export function SidecarProvider({
       parentThreadId,
       context: sidecarContext,
       setContext: setSidecarContext,
-      isMock,
+      identity,
+      captureIdentity,
+      isIdentityCurrent,
       sidecarThreadId,
-      setSidecarThreadId: updateSidecarThreadId,
+      adoptSidecarThread,
+      resetSidecar,
       restoreSidecarThread,
       addContextToConversation,
       clearConversationQuotes,
@@ -249,20 +344,23 @@ export function SidecarProvider({
     [
       activeReferences,
       addContextToConversation,
+      adoptSidecarThread,
+      captureIdentity,
       clearActiveReferences,
       clearConversationQuotes,
       close,
       conversationQuotes,
-      isMock,
+      identity,
+      isIdentityCurrent,
       open,
       openContext,
       openSelectedText,
       openSidecar,
       parentThreadId,
       restoreSidecarThread,
+      resetSidecar,
       sidecarContext,
       sidecarThreadId,
-      updateSidecarThreadId,
     ],
   );
 

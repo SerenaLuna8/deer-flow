@@ -13,29 +13,29 @@ export type ComposerDraftStorage = Pick<
 
 export function getSessionComposerDraftStorage(): ComposerDraftStorage | null {
   try {
-    if (typeof window === "undefined") {
-      return null;
-    }
-    return window.sessionStorage;
+    return typeof window === "undefined" ? null : window.sessionStorage;
   } catch {
     return null;
   }
 }
 
 export function buildComposerDraftKey({
-  userId,
+  accountId,
+  projectId,
   agentName,
-  threadId,
+  conversationScope,
 }: {
-  userId: string;
+  accountId: string;
+  projectId: string;
   agentName?: string | null;
-  threadId: string;
+  conversationScope: string;
 }) {
   return [
     COMPOSER_DRAFT_PREFIX,
-    encodeURIComponent(userId ? userId : "anonymous"),
+    encodeURIComponent(accountId || "anonymous"),
+    encodeURIComponent(projectId || "no-project"),
     encodeURIComponent(agentName ?? "lead-agent"),
-    encodeURIComponent(threadId),
+    encodeURIComponent(conversationScope),
   ].join(":");
 }
 
@@ -44,19 +44,9 @@ export function readComposerDraft(
   key: string,
 ): ComposerDraft | null {
   try {
-    if (!storage) {
-      return null;
-    }
-    const raw = storage.getItem(key);
-    if (!raw) {
-      return null;
-    }
-
-    const parsed = JSON.parse(raw) as {
-      version?: unknown;
-      text?: unknown;
-      skillName?: unknown;
-    };
+    const raw = storage?.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (
       parsed.version !== COMPOSER_DRAFT_VERSION ||
       typeof parsed.text !== "string" ||
@@ -64,11 +54,7 @@ export function readComposerDraft(
     ) {
       return null;
     }
-
-    return {
-      text: parsed.text,
-      skillName: parsed.skillName,
-    };
+    return { text: parsed.text, skillName: parsed.skillName };
   } catch {
     return null;
   }
@@ -80,24 +66,17 @@ export function writeComposerDraft(
   draft: ComposerDraft,
 ) {
   try {
-    if (!storage) {
-      return;
-    }
+    if (!storage) return;
     if (!draft.text && !draft.skillName) {
       storage.removeItem(key);
       return;
     }
-
     storage.setItem(
       key,
-      JSON.stringify({
-        version: COMPOSER_DRAFT_VERSION,
-        text: draft.text,
-        skillName: draft.skillName,
-      }),
+      JSON.stringify({ version: COMPOSER_DRAFT_VERSION, ...draft }),
     );
   } catch {
-    // Browser storage can be disabled or full; drafting must keep working.
+    // Storage may be disabled or full. Drafting must remain usable.
   }
 }
 
@@ -106,12 +85,9 @@ export function clearComposerDraft(
   key: string,
 ) {
   try {
-    if (!storage) {
-      return;
-    }
-    storage.removeItem(key);
+    storage?.removeItem(key);
   } catch {
-    // Browser storage can be disabled; sending must keep working.
+    // Sending must remain usable when browser storage is unavailable.
   }
 }
 
@@ -122,7 +98,6 @@ export function resolveComposerDraft(
   if (!draft.skillName || enabledSkillNames.has(draft.skillName)) {
     return draft;
   }
-
   return {
     text: `/${draft.skillName}${draft.text ? ` ${draft.text}` : ""}`,
     skillName: null,

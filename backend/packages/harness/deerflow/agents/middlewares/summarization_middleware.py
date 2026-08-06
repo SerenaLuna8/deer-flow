@@ -1,56 +1,49 @@
-"""Summarization middleware extensions for DeerFlow."""
+"""Summarization middleware extensions for ActWeave."""
 
 from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, override, runtime_checkable
+from typing import Any, Literal, NotRequired, TypedDict, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+    get_buffer_string,
+)
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.memory.snip import (
+    MEMORY_ARCHIVE_CONTEXT_KEY,
+    SNIP_ARCHIVE_PROMPT,
+    MemoryArchiveReceipt,
+    SnipArchiveContext,
+    SnipOutputInvalid,
+    build_memory_archive_receipt,
+    validate_snip_output,
+)
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.config.summarization_config import validate_summary_prompt_template
 from deerflow.models import create_chat_model
+from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
+from deerflow.utils.messages import SUMMARY_MESSAGE_NAME, is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
-_UNSET = object()
-# Valid non-generated summaries for the empty / too-long-to-summarize edges; these
-# short-circuit model invocation (and must not be treated as generation failures).
-_CANNED_SUMMARIES = frozenset(
-    {
-        "No previous conversation history.",
-        "Previous conversation was too long to summarize.",
-    }
-)
-
-
-class SummaryGenerationError(RuntimeError):
-    """Summary generation failed after exhausting the run-model fallback.
-
-    Raised only when a caller opts in via ``raise_on_failure`` (the manual
-    ``/compact`` path) so a real failure is reported distinctly from "nothing to
-    compact". The automatic path leaves ``raise_on_failure`` False and swallows the
-    failure, leaving compaction state unchanged for the turn.
-    """
-
-
-@dataclass(frozen=True)
-class SummarizationEvent:
-    """Context emitted before conversation history is summarized away."""
-
-    messages_to_summarize: tuple[AnyMessage, ...]
-    preserved_messages: tuple[AnyMessage, ...]
-    thread_id: str | None
-    agent_name: str | None
-    runtime: Runtime
+_ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 
 
 @dataclass(frozen=True)
@@ -61,13 +54,42 @@ class ContextCompactionResult:
     messages_to_summarize: tuple[AnyMessage, ...]
     preserved_messages: tuple[AnyMessage, ...]
     total_tokens: int
+    memory_archive_receipt: MemoryArchiveReceipt | None
 
 
-@runtime_checkable
-class BeforeSummarizationHook(Protocol):
-    """Hook invoked before summarization removes messages from state."""
+class ContextTriggerUsage(TypedDict):
+    """One configured OR trigger measured against the current retained context."""
 
-    def __call__(self, event: SummarizationEvent) -> None: ...
+    type: Literal["fraction", "tokens", "messages"]
+    configured_value: int | float
+    current_value: int | float
+    threshold_value: int | float
+    remaining_value: int | float
+    progress_percent: float
+    reached: bool
+    context_window_tokens: NotRequired[int]
+    threshold_tokens: NotRequired[int]
+
+
+@dataclass(frozen=True)
+class ContextUsageMeasurement:
+    """Read-only context measurement using the automatic compactor's counter."""
+
+    estimated_tokens: int
+    message_count: int
+    summary_present: bool
+    context_window_tokens: int | None
+    triggers: tuple[ContextTriggerUsage, ...]
+    primary_trigger: ContextTriggerUsage | None
+
+
+@dataclass(frozen=True)
+class _PreparedCompaction:
+    source_messages: tuple[AnyMessage, ...]
+    snip_messages: tuple[AnyMessage, ...]
+    preserved_messages: tuple[AnyMessage, ...]
+    previous_summary: str | None
+    total_tokens: int
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:
@@ -82,134 +104,29 @@ def _resolve_thread_id(runtime: Runtime) -> str | None:
     return thread_id
 
 
-def _resolve_agent_name(runtime: Runtime) -> str | None:
-    """Resolve the current agent name from runtime context or LangGraph config."""
-    agent_name = runtime.context.get("agent_name") if runtime.context else None
-    if agent_name is None:
-        try:
-            config_data = get_config()
-        except RuntimeError:
-            return None
-        agent_name = config_data.get("configurable", {}).get("agent_name")
-    return agent_name
-
-
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
-    """Summarization middleware with pre-compression hook dispatch."""
+    """SNIP compaction that removes only complete conversation turns."""
 
     def __init__(
         self,
         *args,
-        before_summarization: list[BeforeSummarizationHook] | None = None,
-        app_config: Any | None = None,
-        configured_model_name: str | None = None,
-        run_model_name: str | None = None,
-        anchor_model_name: str | None = _UNSET,  # type: ignore[assignment]
+        compact_all_complete_turns: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self._before_summarization_hooks = before_summarization or []
-        # Model-ownership state. The model that actually executes the run is selected
-        # per run and is the authoritative source of truth, so the caller (lead /
-        # subagent / manual builders) supplies it directly as ``run_model_name``
-        # instead of the middleware re-deriving it from ``runtime.context`` /
-        # ``get_config()`` — those fields do not carry a custom agent's or a subagent's
-        # resolved model.
-        #
-        # ``configured_model_name`` is the explicitly configured summary model
-        # (``None`` => summarize with the run's own model). ``run_model_name`` is the
-        # model the run executes with; when they differ and the summary provider is
-        # broken (expired key, quota, outage) the run's own working model can still
-        # compact.
-        self._app_config = app_config
-        self._configured_summary_model_name = configured_model_name
-        self._run_model_name = run_model_name
+        self._compact_all_complete_turns = compact_all_complete_turns
         # The summary LLM call runs inside a LangGraph middleware hook, so its token
         # stream would otherwise be captured by the messages-tuple stream callback and
         # broadcast to the frontend as a phantom AI message. Tag a dedicated model copy
         # with TAG_NOSTREAM so the streaming handler skips it.
         # Keep self.model untagged so the parent's profile / ls_params inspection still works.
-        self._summary_model = self._tag_nostream(self.model)
-        # ``self.model`` is the pre-built *anchor* model: it drives the parent's token
-        # counter / profile inspection and is reused verbatim by generation when a
-        # candidate matches its name. The factory builds it guarded and passes its name
-        # explicitly; direct construction (tests) mirrors the old factory choice
-        # (configured model, else default) so the passed ``model`` is the primary.
-        if anchor_model_name is _UNSET:
-            self._anchor_model_name = configured_model_name or self._default_model_name()
-        else:
-            self._anchor_model_name = anchor_model_name
-        # Nostream generation models built lazily by name and cached (None = a build
-        # that failed, so a broken candidate config is not retried every turn and does
-        # not escape the fail-open boundary).
-        self._model_cache: dict[str | None, Any] = {}
-
-    def _tag_nostream(self, model: Any) -> Any:
-        """Return a copy of ``model`` carrying TAG_NOSTREAM without clobbering tags.
-
-        lead_agent/agent.py binds "middleware:summarize" for RunJournal attribution;
-        RunnableBinding.with_config shallow-merges config, so existing tags must be
-        preserved explicitly instead of being overwritten with just [TAG_NOSTREAM].
-        """
-        existing_tags = list((getattr(model, "config", None) or {}).get("tags") or [])
+        #
+        # Preserve any tags already bound on the model (e.g. "middleware:summarize" set in
+        # lead_agent/agent.py for RunJournal attribution): RunnableBinding.with_config does a
+        # shallow merge that would otherwise overwrite the existing tags list entirely.
+        existing_tags = list((getattr(self.model, "config", None) or {}).get("tags") or [])
         merged_tags = [*existing_tags, TAG_NOSTREAM] if TAG_NOSTREAM not in existing_tags else existing_tags
-        return model.with_config(tags=merged_tags)
-
-    def _default_model_name(self) -> str | None:
-        if self._app_config is None:
-            return None
-        models = getattr(self._app_config, "models", None)
-        return models[0].name if models else None
-
-    def _generation_candidate_names(self) -> list[str | None]:
-        """Ordered summary-generation candidates by name (deduplicated).
-
-        Explicit summary model: the configured model first, then the run's own model
-        as a distinct fallback. ``model_name: null``: the run's own model only — its
-        construction is the primary, so there is no eager dependency on
-        ``config.models[0]`` (a bare default is used only when no run model was
-        resolved). A ``None`` entry means "let ``create_chat_model`` pick the default",
-        which only occurs when nothing resolves a name.
-        """
-        default = self._default_model_name()
-        if self._configured_summary_model_name is not None:
-            names = [self._configured_summary_model_name, self._run_model_name or default]
-        else:
-            names = [self._run_model_name or default]
-        deduped: list[str | None] = []
-        seen: set[str | None] = set()
-        for name in names:
-            if name in seen:
-                continue
-            seen.add(name)
-            deduped.append(name)
-        return deduped
-
-    def _model_for(self, name: str | None) -> Any | None:
-        """The nostream summary model for ``name``, built lazily and guarded.
-
-        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
-        constructs and caches. A construction failure is caught and cached as ``None``
-        so a broken candidate config never escapes the fail-open boundary, is never
-        retried this turn, and still lets the next candidate run.
-        """
-        if name == self._anchor_model_name:
-            return self._summary_model
-        if name in self._model_cache:
-            return self._model_cache[name]
-        try:
-            model = create_chat_model(
-                name=name,
-                thinking_enabled=False,
-                app_config=self._app_config,
-                attach_tracing=False,
-            )
-            built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
-        except Exception:
-            logger.exception("Failed to build summary model %r; trying the next candidate", name)
-            built = None
-        self._model_cache[name] = built
-        return built
+        self._summary_model = self.model.with_config(tags=merged_tags)
 
     @override
     def _create_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
@@ -219,31 +136,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
         return await self._asummarize_with(messages_to_summarize)
 
-    def _prepare_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None) -> str | None:
-        """Return the formatted prompt, or a canned string for the empty/too-long edges.
-
-        A non-``None`` return that is not a real prompt (the two canned strings) is a
-        valid summary and short-circuits generation; ``None`` means "build a prompt".
-        """
-        if not messages_to_summarize:
-            return "No previous conversation history."
-        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
-        if prompt is None:
-            return "Previous conversation was too long to summarize."
-        return prompt
-
-    @staticmethod
-    def _nonempty_summary(text: Any) -> str | None:
-        """Normalize a model response's text; a blank/whitespace-only body is a failure.
-
-        Committing ``""`` as a summary would fire the before_summarization hooks and
-        remove all prior history for an empty replacement, so an empty body is treated
-        as generation failure (try the fallback, or leave state unchanged) rather than
-        a valid summary.
-        """
-        stripped = text.strip() if isinstance(text, str) else ""
-        return stripped or None
-
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Mirror the parent ``_create_summary`` but invoke the nostream-tagged model.
 
@@ -251,84 +143,60 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         cached and reused across concurrent runs, so a temporary swap would leak the
         ``RunnableBinding`` to other coroutines during ``await`` and break parent logic
         that inspects the raw model (``profile`` / ``_get_ls_params``).
-
-        Generation uses the run's own model (``model_name: null``) or the explicitly
-        configured summary model, falling back to the run model on failure so a broken
-        summary provider cannot disable compaction while a working model is available.
         """
-        prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
-        if prompt is None or prompt in _CANNED_SUMMARIES:
-            return prompt
-        # Walk the ordered candidates; each attempt owns its full lifecycle (lazy
-        # guarded construction -> invoke -> text extraction -> non-empty validation),
-        # and any failure at any stage falls through to the next candidate. When all
-        # candidates fail the caller leaves compaction state unchanged.
-        names = self._generation_candidate_names()
-        for index, name in enumerate(names):
-            text = self._invoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
-            if text is not None:
-                return text
-        return None
+        if not messages_to_summarize:
+            return None
+        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
+        if prompt is None:
+            return None
+        try:
+            response = self._summary_model.invoke(
+                prompt,
+                config={"metadata": {"lc_source": "summarization"}},
+            )
+            return validate_snip_output(response.text)
+        except SnipOutputInvalid:
+            logger.warning("SNIP model returned invalid output; skipping compaction this turn")
+            return None
+        except Exception:
+            logger.exception("SNIP generation failed; skipping compaction this turn")
+            return None
 
-    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    async def _asummarize_with(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        previous_summary: str | None = None,
+        *,
+        authorization_context: object | None = None,
+    ) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
-        prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
-        if prompt is None or prompt in _CANNED_SUMMARIES:
-            return prompt
-        names = self._generation_candidate_names()
-        for index, name in enumerate(names):
-            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
-            if text is not None:
-                return text
-        return None
-
-    def _invoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
-        """Invoke ``model`` for a summary; ``None`` on error or a blank response.
-
-        Text extraction / non-empty validation runs *inside* the try: reading the
-        response's ``.text`` is part of consuming the provider result, so a failing
-        accessor must convert to a candidate failure (fall through) rather than escape
-        the fail-open boundary.
-        """
-        if model is None:
+        if not messages_to_summarize:
+            return None
+        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
+        if prompt is None:
             return None
         try:
-            response = model.invoke(prompt, config={"metadata": {"lc_source": "summarization"}})
-            return self._checked_summary(response, last)
+            try:
+                parent_config = get_config()
+            except RuntimeError:
+                parent_config = {}
+            await check_authorization_boundary(
+                authorization_context or parent_config.get("context"),
+                "before_model_call",
+            )
+            response = await self._summary_model.ainvoke(
+                prompt,
+                config={"metadata": {"lc_source": "summarization"}},
+            )
+            return validate_snip_output(response.text)
+        except AuthorizationRevoked:
+            raise
+        except SnipOutputInvalid:
+            logger.warning("SNIP model returned invalid output; skipping compaction this turn")
+            return None
         except Exception:
-            self._log_summary_error(last)
+            logger.exception("SNIP generation failed; skipping compaction this turn")
             return None
-
-    async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
-        """Async counterpart of :meth:`_invoke_summary`."""
-        if model is None:
-            return None
-        try:
-            response = await model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
-            return self._checked_summary(response, last)
-        except Exception:
-            self._log_summary_error(last)
-            return None
-
-    def _checked_summary(self, response: Any, last: bool) -> str | None:
-        summary = self._nonempty_summary(getattr(response, "text", None))
-        if summary is None:
-            self._log_summary_empty(last)
-        return summary
-
-    @staticmethod
-    def _log_summary_error(last: bool) -> None:
-        if last:
-            logger.exception("Summary generation failed; skipping compaction this turn")
-        else:
-            logger.warning("Summary generation failed; falling back to the run model", exc_info=True)
-
-    @staticmethod
-    def _log_summary_empty(last: bool) -> None:
-        if last:
-            logger.warning("Summary model returned empty text; skipping compaction this turn")
-        else:
-            logger.warning("Summary model returned empty text; falling back to the run model")
 
     @staticmethod
     def _summary_count_message(summary_text: str) -> HumanMessage:
@@ -340,93 +208,135 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return [*messages, self._summary_count_message(summary_text)]
 
     @staticmethod
-    def _bound_text(text: str, cap: int) -> str:
-        if len(text) <= cap:
-            return text
-        if cap <= 0:
-            return ""
-        head = cap * 2 // 3
-        omitted_marker = "\n...\n"
-        if cap <= len(omitted_marker):
-            return text[:cap]
-        tail = max(0, cap - head - len(omitted_marker))
-        if tail == 0:
-            return text[:cap]
-        return f"{text[:head]}{omitted_marker}{text[-tail:]}"
+    def _context_progress(current: int | float, threshold: int | float) -> float:
+        if threshold <= 0:
+            raise ValueError("Context trigger threshold must be positive")
+        return round(min(100.0, max(0.0, float(current) / float(threshold) * 100.0)), 2)
 
-    def _trim_summary_section_text(self, text: str, max_tokens: int, *, strategy: str) -> str:
-        if not text.strip():
-            return ""
-        max_tokens = max(1, max_tokens)
-        try:
-            trimmed = trim_messages(
-                [HumanMessage(content=text)],
-                max_tokens=max_tokens,
-                token_counter=self.token_counter,
-                strategy=strategy,
-                allow_partial=True,
-                text_splitter=list,
+    def measure_context_usage(
+        self,
+        messages: list[AnyMessage],
+        *,
+        summary_text: str | None,
+    ) -> ContextUsageMeasurement:
+        """Measure the same retained input used by automatic trigger evaluation.
+
+        This path only invokes the configured token counter and model-profile
+        inspection. It never invokes the summary model or mutates Agent state.
+        """
+
+        trigger_messages = self._messages_for_trigger_count(messages, summary_text)
+        estimated_tokens = self.token_counter(trigger_messages)
+        message_count = len(trigger_messages)
+        context_window_tokens = self._get_profile_limits()
+        if context_window_tokens is not None and context_window_tokens <= 0:
+            raise ValueError("Model max_input_tokens must be positive")
+
+        triggers: list[ContextTriggerUsage] = []
+        for trigger_type, configured_value in self._trigger_conditions:
+            if trigger_type == "messages":
+                threshold = int(configured_value)
+                current = message_count
+                triggers.append(
+                    ContextTriggerUsage(
+                        type="messages",
+                        configured_value=threshold,
+                        current_value=current,
+                        threshold_value=threshold,
+                        remaining_value=max(0, threshold - current),
+                        progress_percent=self._context_progress(current, threshold),
+                        reached=current >= threshold,
+                    )
+                )
+                continue
+
+            if trigger_type == "tokens":
+                threshold_tokens = int(configured_value)
+                reached = estimated_tokens >= threshold_tokens or self._should_summarize_based_on_reported_tokens(
+                    trigger_messages,
+                    float(threshold_tokens),
+                )
+                triggers.append(
+                    ContextTriggerUsage(
+                        type="tokens",
+                        configured_value=threshold_tokens,
+                        current_value=estimated_tokens,
+                        threshold_value=threshold_tokens,
+                        remaining_value=max(0, threshold_tokens - estimated_tokens),
+                        progress_percent=self._context_progress(
+                            estimated_tokens,
+                            threshold_tokens,
+                        ),
+                        reached=reached,
+                        threshold_tokens=threshold_tokens,
+                    )
+                )
+                continue
+
+            if context_window_tokens is None:
+                raise ValueError("Model max_input_tokens is required for fraction triggers")
+            threshold_fraction = float(configured_value)
+            threshold_tokens = max(1, int(context_window_tokens * threshold_fraction))
+            current_fraction = round(estimated_tokens / context_window_tokens, 6)
+            reached = estimated_tokens >= threshold_tokens or self._should_summarize_based_on_reported_tokens(
+                trigger_messages,
+                float(threshold_tokens),
             )
-            if trimmed:
-                content = trimmed[-1].content
-                if isinstance(content, str) and content.strip():
-                    return content
-        except Exception:
-            logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
-        return self._bound_text(text, max_tokens)
+            triggers.append(
+                ContextTriggerUsage(
+                    type="fraction",
+                    configured_value=threshold_fraction,
+                    current_value=current_fraction,
+                    threshold_value=threshold_fraction,
+                    remaining_value=round(
+                        max(0.0, threshold_fraction - current_fraction),
+                        6,
+                    ),
+                    progress_percent=self._context_progress(
+                        current_fraction,
+                        threshold_fraction,
+                    ),
+                    reached=reached,
+                    context_window_tokens=context_window_tokens,
+                    threshold_tokens=threshold_tokens,
+                )
+            )
 
-    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
-        if self.trim_tokens_to_summarize is None:
-            trimmed_new_messages = formatted_messages
-            trimmed_previous_summary = previous_summary.strip() if previous_summary else ""
-        else:
-            max_tokens = max(1, self.trim_tokens_to_summarize)
-            if previous_summary:
-                new_message_tokens = max(1, max_tokens // 2)
-                previous_summary_tokens = max(1, max_tokens - new_message_tokens)
-                trimmed_previous_summary = self._trim_summary_section_text(
-                    previous_summary.strip(),
-                    previous_summary_tokens,
-                    strategy="last",
-                )
-                trimmed_new_messages = self._trim_summary_section_text(
-                    formatted_messages,
-                    new_message_tokens,
-                    strategy="first",
-                )
-            else:
-                trimmed_previous_summary = ""
-                trimmed_new_messages = self._trim_summary_section_text(
-                    formatted_messages,
-                    max_tokens,
-                    strategy="first",
-                )
+        primary_trigger = max(
+            triggers,
+            key=lambda trigger: trigger["progress_percent"],
+            default=None,
+        )
+        return ContextUsageMeasurement(
+            estimated_tokens=estimated_tokens,
+            message_count=message_count,
+            summary_present=bool(summary_text),
+            context_window_tokens=context_window_tokens,
+            triggers=tuple(triggers),
+            primary_trigger=primary_trigger,
+        )
 
-        # Escape < > & before embedding into the <existing_summary>/<new_messages>
-        # blocks. new_messages is get_buffer_string over the raw state["messages"]
-        # tail (InputSanitizationMiddleware only overrides the ModelRequest, never
-        # state, so the summarizer sees genuine user text); existing_summary is the
-        # prior turn's summary_text. An unescaped value like "</new_messages>..."
-        # would close the block and forge an authority section for the extraction
-        # LLM. Same block-breakout defense #4162 applied to the <conversation> block
-        # and #4097 to the <memory> block. Escape after trimming so a trailing "..."
-        # cannot split an entity; quote=False because content lands in element-text
-        # position (never an attribute value).
+    @staticmethod
+    def _assemble_summary_input_text(
+        escaped_new_messages: str,
+        escaped_previous_summary: str,
+    ) -> str | None:
+        """Assemble already-escaped summary sections into the prompt payload."""
         parts: list[str] = []
-        if trimmed_previous_summary:
+        if escaped_previous_summary:
             parts.extend(
                 [
                     "<existing_summary>",
-                    html.escape(trimmed_previous_summary, quote=False),
+                    escaped_previous_summary,
                     "</existing_summary>",
                     "",
                 ]
             )
-        if trimmed_new_messages:
+        if escaped_new_messages:
             parts.extend(
                 [
                     "<new_messages>",
-                    html.escape(trimmed_new_messages, quote=False),
+                    escaped_new_messages,
                     "</new_messages>",
                 ]
             )
@@ -434,20 +344,58 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         return "\n".join(parts)
 
+    def _count_rendered_summary_prompt_tokens(self, input_text: str) -> int | None:
+        """Count the exact rendered prompt without exposing its durable contents."""
+        try:
+            validate_summary_prompt_template(self.summary_prompt)
+            rendered_prompt = self.summary_prompt.format(messages=input_text).rstrip()
+            return self.token_counter([HumanMessage(content=rendered_prompt)])
+        except Exception:
+            logger.debug("Failed to count rendered summary prompt; skipping compaction safely", exc_info=True)
+            return None
+
+    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
+        """Escape and assemble the exact selected source without truncation."""
+
+        escaped_new_messages = html.escape(formatted_messages, quote=False)
+        escaped_previous_summary = html.escape(previous_summary.strip(), quote=False) if previous_summary else ""
+        return self._assemble_summary_input_text(
+            escaped_new_messages,
+            escaped_previous_summary,
+        )
+
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
-        trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
-        if not trimmed_messages:
-            trimmed_messages = messages_to_summarize[-1:]
-        if not trimmed_messages:
+        try:
+            validate_summary_prompt_template(self.summary_prompt)
+        except (KeyError, IndexError, TypeError, ValueError):
+            # Direct middleware construction can bypass ``SummarizationConfig``.
+            # Fail closed before any template rendering and without logging
+            # prompt or conversation contents.
+            logger.exception("Invalid summary prompt template; skipping compaction this turn")
             return None
-        # Format messages to avoid token inflation from metadata when str() is called on
-        # message objects.
-        formatted_messages = get_buffer_string(trimmed_messages)
+
+        if not messages_to_summarize:
+            return None
+        formatted_messages = get_buffer_string(messages_to_summarize)
         formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary)
         if not formatted_messages:
             return None
-        return self.summary_prompt.format(messages=formatted_messages).rstrip()
+        try:
+            prompt = self.summary_prompt.format(messages=formatted_messages).rstrip()
+            if self.trim_tokens_to_summarize is not None:
+                rendered_tokens = self._count_rendered_summary_prompt_tokens(formatted_messages)
+                if rendered_tokens is None:
+                    return None
+                if rendered_tokens > max(1, self.trim_tokens_to_summarize):
+                    logger.warning("Rendered summary prompt exceeds configured token budget; skipping compaction this turn")
+                    return None
+            return prompt
+        except (KeyError, IndexError, TypeError, ValueError):
+            # Keep the final assembly fail-closed if formatting behavior changes
+            # after validation.
+            logger.exception("Invalid summary prompt template; skipping compaction this turn")
+            return None
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)
@@ -455,12 +403,184 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return await self._amaybe_summarize(state, runtime)
 
+    @staticmethod
+    def _is_turn_user(message: AnyMessage) -> bool:
+        if is_real_user_message(message):
+            return True
+        return (
+            isinstance(message, HumanMessage)
+            and message.name != SUMMARY_MESSAGE_NAME
+            and not is_dynamic_context_reminder(message)
+            and isinstance(
+                message.additional_kwargs.get("human_input_response"),
+                dict,
+            )
+        )
+
+    @classmethod
+    def _turn_prefix_start(
+        cls,
+        messages: list[AnyMessage],
+        user_index: int,
+    ) -> int:
+        index = user_index
+        while index > 0:
+            candidate = messages[index - 1]
+            hidden_prefix = isinstance(candidate, (HumanMessage, SystemMessage)) and bool(candidate.additional_kwargs.get("hide_from_ui")) and not cls._is_turn_user(candidate)
+            if not is_dynamic_context_reminder(candidate) and not hidden_prefix:
+                break
+            index -= 1
+        return index
+
+    @staticmethod
+    def _clarification_request_tool_call_id(
+        message: AnyMessage,
+        request_id: str,
+    ) -> str | None:
+        if not isinstance(message, ToolMessage) or message.name != _ASK_CLARIFICATION_TOOL_NAME or message.id != request_id:
+            return None
+        tool_call_id = message.tool_call_id
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        artifact = message.artifact
+        if not isinstance(artifact, Mapping):
+            return None
+        payload = artifact.get("human_input")
+        if not isinstance(payload, Mapping):
+            return None
+        version = payload.get("version")
+        if (
+            type(version) is not int
+            or version not in (1, 2)
+            or payload.get("kind") != "human_input_request"
+            or payload.get("source") != _ASK_CLARIFICATION_TOOL_NAME
+            or payload.get("request_id") != request_id
+            or payload.get("tool_call_id") != tool_call_id
+        ):
+            return None
+        return tool_call_id
+
+    @classmethod
+    def _is_clarification_continuation(
+        cls,
+        messages: list[AnyMessage],
+        *,
+        turn_start: int,
+        response_index: int,
+    ) -> bool:
+        """Match one server-hidden reply to its exact request ToolMessage and tool call."""
+
+        response_message = messages[response_index]
+        if not isinstance(response_message, HumanMessage) or response_message.additional_kwargs.get("hide_from_ui") is not True:
+            return False
+        response = read_human_input_response(response_message.additional_kwargs)
+        if response is None or response["source"] != _ASK_CLARIFICATION_TOOL_NAME:
+            return False
+
+        request_index = next(
+            (index for index in range(response_index - 1, turn_start - 1, -1) if isinstance(messages[index], ToolMessage) and messages[index].name == _ASK_CLARIFICATION_TOOL_NAME),
+            None,
+        )
+        if request_index is None:
+            return False
+        tool_call_id = cls._clarification_request_tool_call_id(
+            messages[request_index],
+            response["request_id"],
+        )
+        if tool_call_id is None:
+            return False
+        matching_tool_calls = 0
+        for message in messages[turn_start:request_index]:
+            if not isinstance(message, AIMessage):
+                continue
+            matching_tool_calls += sum(1 for tool_call in message.tool_calls if isinstance(tool_call, Mapping) and tool_call.get("id") == tool_call_id and tool_call.get("name") == _ASK_CLARIFICATION_TOOL_NAME)
+        return matching_tool_calls == 1
+
+    @classmethod
+    def _complete_turn_ranges(
+        cls,
+        messages: list[AnyMessage],
+    ) -> tuple[tuple[int, int], ...]:
+        """Return contiguous complete user turns from the state head."""
+
+        user_indexes = [index for index, message in enumerate(messages) if cls._is_turn_user(message)]
+        if not user_indexes:
+            return ()
+
+        starts = [0]
+        seen_assistant = False
+        for index in range(user_indexes[0] + 1, len(messages)):
+            message = messages[index]
+            if isinstance(message, AIMessage):
+                seen_assistant = True
+                continue
+            if cls._is_turn_user(message) and seen_assistant:
+                if cls._is_clarification_continuation(
+                    messages,
+                    turn_start=starts[-1],
+                    response_index=index,
+                ):
+                    continue
+                starts.append(cls._turn_prefix_start(messages, index))
+                seen_assistant = False
+
+        ranges: list[tuple[int, int]] = []
+        for position, start in enumerate(starts):
+            end = starts[position + 1] if position + 1 < len(starts) else len(messages)
+            turn = messages[start:end]
+            first_user = next(
+                (index for index, message in enumerate(turn) if cls._is_turn_user(message)),
+                None,
+            )
+            if first_user is None:
+                break
+            assistant_messages = [message for message in turn[first_user + 1 :] if isinstance(message, AIMessage)]
+            if not assistant_messages:
+                break
+            tool_calls = [tool_call for message in assistant_messages for tool_call in message.tool_calls]
+            if any(not isinstance(tool_call, dict) or not isinstance(tool_call.get("id"), str) or not tool_call.get("id") for tool_call in tool_calls):
+                break
+            expected_tool_calls = {tool_call["id"] for tool_call in tool_calls}
+            completed_tool_calls = {message.tool_call_id for message in turn[first_user + 1 :] if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id}
+            response_tail = next(
+                (message for message in reversed(turn[first_user + 1 :]) if isinstance(message, (AIMessage, ToolMessage))),
+                None,
+            )
+            if expected_tool_calls != completed_tool_calls or not isinstance(response_tail, AIMessage):
+                break
+            ranges.append((start, end))
+        return tuple(ranges)
+
+    def _requested_cutoff(self, messages: list[AnyMessage]) -> int:
+        if self._compact_all_complete_turns:
+            return len(messages)
+        return self._determine_cutoff_index(messages)
+
+    def _candidate_cutoffs(
+        self,
+        messages: list[AnyMessage],
+        requested_cutoff: int,
+    ) -> tuple[int, ...]:
+        cutoffs: list[int] = []
+        expected_start = 0
+        for start, end in self._complete_turn_ranges(messages):
+            if start != expected_start:
+                break
+            expected_start = end
+            if end <= requested_cutoff:
+                cutoffs.append(end)
+        return tuple(reversed(cutoffs))
+
+    @staticmethod
+    def _snip_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+        return [message for message in messages if not is_dynamic_context_reminder(message)]
+
     def _prepare_compaction(
         self,
         state: AgentState,
         *,
         force: bool = False,
-    ) -> tuple[list[AnyMessage], list[AnyMessage], str | None, int] | None:
+    ) -> _PreparedCompaction | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
@@ -470,15 +590,92 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
 
-        cutoff_index = self._determine_cutoff_index(messages)
-        if cutoff_index <= 0:
+        requested_cutoff = self._requested_cutoff(messages)
+        if requested_cutoff <= 0:
             return None
 
-        messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
-        if not messages_to_summarize:
+        for cutoff_index in self._candidate_cutoffs(
+            messages,
+            requested_cutoff,
+        ):
+            source_messages = messages[:cutoff_index]
+            snip_messages = self._snip_messages(source_messages)
+            if not snip_messages:
+                continue
+            # Rendering the exact prompt is also the budget test. Overflow
+            # moves to the preceding whole-turn boundary; selected text is
+            # never partially token- or character-trimmed.
+            if (
+                self._build_summary_prompt(
+                    snip_messages,
+                    previous_summary=previous_summary,
+                )
+                is None
+            ):
+                continue
+            return _PreparedCompaction(
+                source_messages=tuple(source_messages),
+                snip_messages=tuple(snip_messages),
+                preserved_messages=tuple(messages[cutoff_index:]),
+                previous_summary=previous_summary,
+                total_tokens=total_tokens,
+            )
+        return None
+
+    @staticmethod
+    def _archive_context(runtime: Runtime) -> SnipArchiveContext | None:
+        runtime_context = runtime.context
+        if not isinstance(runtime_context, dict):
             return None
-        return messages_to_summarize, preserved_messages, previous_summary, total_tokens
+        value = runtime_context.get(MEMORY_ARCHIVE_CONTEXT_KEY)
+        return value if type(value) is SnipArchiveContext else None
+
+    @staticmethod
+    def _source_checkpoint_id(
+        runtime: Runtime,
+        archive_context: SnipArchiveContext | None,
+    ) -> str | None:
+        explicit_checkpoint_id = archive_context.source_checkpoint_id if archive_context is not None else None
+        execution_info = getattr(runtime, "execution_info", None)
+        runtime_checkpoint_id = getattr(execution_info, "checkpoint_id", None)
+        if isinstance(runtime_checkpoint_id, str) and runtime_checkpoint_id:
+            if explicit_checkpoint_id is not None and explicit_checkpoint_id != runtime_checkpoint_id:
+                raise ValueError(
+                    "SNIP archive runtime checkpoint does not match its explicit source",
+                )
+            return runtime_checkpoint_id
+        if explicit_checkpoint_id is not None:
+            return explicit_checkpoint_id
+        try:
+            configurable = get_config().get("configurable", {})
+        except RuntimeError:
+            return None
+        value = configurable.get("checkpoint_id")
+        return value if isinstance(value, str) and value else None
+
+    def _receipt(
+        self,
+        prepared: _PreparedCompaction,
+        summary: str,
+        runtime: Runtime,
+    ) -> MemoryArchiveReceipt | None:
+        archive_context = self._archive_context(runtime)
+        if archive_context is None or not archive_context.enabled:
+            return None
+        thread_id = _resolve_thread_id(runtime)
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("SNIP archive Thread identity is unavailable")
+        return build_memory_archive_receipt(
+            archive_context,
+            thread_id=thread_id,
+            source_checkpoint_id=self._source_checkpoint_id(
+                runtime,
+                archive_context,
+            ),
+            previous_summary=prepared.previous_summary,
+            messages=prepared.source_messages,
+            tagged_text=summary,
+        )
 
     def compact_state(
         self,
@@ -486,35 +683,27 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         runtime: Runtime,
         *,
         force: bool = False,
-        raise_on_failure: bool = False,
     ) -> ContextCompactionResult | None:
-        """Summarize old context and retain the active tail.
-
-        ``force`` bypasses the automatic trigger threshold (a manual caller always
-        wants to compact). ``raise_on_failure`` is a *separate* concern: when set (the
-        manual ``/compact`` path), a generation failure raises ``SummaryGenerationError``
-        so it can be reported distinctly from "nothing to compact"; the automatic path
-        leaves it False and swallows the failure, retrying on a later triggered turn.
-        """
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
-        messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
+        summary = self._summarize_with(
+            list(prepared.snip_messages),
+            previous_summary=prepared.previous_summary,
+        )
         if summary is None:
-            if raise_on_failure:
-                raise SummaryGenerationError("summary generation failed")
             return None
-        # Fire hooks only once a replacement summary exists — flushing pre-compaction
-        # messages into durable memory for a summary that never materializes would
-        # duplicate that work on the next attempt. Messages are still removed after
-        # this returns (in _maybe_summarize), so hooks run before they are gone.
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        try:
+            receipt = self._receipt(prepared, summary, runtime)
+        except (SnipOutputInvalid, ValueError):
+            logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
+            return None
         return ContextCompactionResult(
             summary_text=summary,
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            total_tokens=total_tokens,
+            messages_to_summarize=prepared.source_messages,
+            preserved_messages=prepared.preserved_messages,
+            total_tokens=prepared.total_tokens,
+            memory_archive_receipt=receipt,
         )
 
     async def acompact_state(
@@ -523,25 +712,28 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         runtime: Runtime,
         *,
         force: bool = False,
-        raise_on_failure: bool = False,
     ) -> ContextCompactionResult | None:
-        """Async counterpart of :meth:`compact_state` (see it for ``raise_on_failure``)."""
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
-        messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
+        summary = await self._asummarize_with(
+            list(prepared.snip_messages),
+            previous_summary=prepared.previous_summary,
+            authorization_context=runtime.context,
+        )
         if summary is None:
-            if raise_on_failure:
-                raise SummaryGenerationError("summary generation failed")
             return None
-        # Fire hooks only once a replacement summary exists (see compact_state).
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        try:
+            receipt = self._receipt(prepared, summary, runtime)
+        except (SnipOutputInvalid, ValueError):
+            logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
+            return None
         return ContextCompactionResult(
             summary_text=summary,
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            total_tokens=total_tokens,
+            messages_to_summarize=prepared.source_messages,
+            preserved_messages=prepared.preserved_messages,
+            total_tokens=prepared.total_tokens,
+            memory_archive_receipt=receipt,
         )
 
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -554,6 +746,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            "memory_archive_receipt": result.memory_archive_receipt,
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -566,139 +759,20 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            "memory_archive_receipt": result.memory_archive_receipt,
         }
-
-    def _preserve_dynamic_context_reminders(
-        self,
-        messages_to_summarize: list[AnyMessage],
-        preserved_messages: list[AnyMessage],
-    ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
-
-        These reminders carry the current date and optional memory. If summarization
-        removes them, DynamicContextMiddleware can lose the already-injected reminder
-        and inject a replacement into the wrong point of the conversation.
-
-        The ID-swap triplet produced by ``_make_reminder_and_user_messages`` contains
-        three messages: ``SystemMessage(id=X)`` and ``HumanMessage(id=X__memory)`` are
-        both tagged with ``dynamic_context_reminder=True``, but ``HumanMessage(id=X__user)``
-        carries the original user content and is **not** tagged. Without peer rescue,
-        ``__user`` would stay in ``to_summarize`` and be compressed into prose — orphaning
-        the tagged messages and losing the user question from the model's direct context.
-
-        This method rescues tagged reminders and also rescues any untagged messages whose
-        ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
-        """
-        reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
-        if not reminders:
-            return messages_to_summarize, preserved_messages
-
-        # Collect the base IDs (the stable_id prefix) from tagged reminders.
-        # For a reminder with id="ctx-001__memory", the base is "ctx-001".
-        # For a reminder with id="ctx-001" (SystemMessage), the base is "ctx-001".
-        # removesuffix is suffix-only — it won't strip a "__" that sits in the
-        # middle of a stable_id (e.g. "ctx__001" stays intact, unlike rsplit
-        # which would mis-derive "ctx").  Only known ID-swap suffixes (__memory,
-        # __user) are stripped; __user is not tagged so won't appear in reminders,
-        # but is included defensively.
-        reminder_base_ids: set[str] = set()
-        for msg in reminders:
-            if msg.id:
-                base = msg.id.removesuffix("__memory").removesuffix("__user")
-                reminder_base_ids.add(base)
-
-        # Single-pass partition: walk messages_to_summarize in chronological order
-        # and rescue both tagged reminders and untagged ID-swap peers (whose id
-        # starts with a known base + "__").  This preserves the original message
-        # order within rescued — critical when multiple triplets land in one
-        # summarization window — and eliminates the need for id(m)-based dedup
-        # that the previous reminders+peers concatenation required.
-        rescued: list[AnyMessage] = []
-        remaining: list[AnyMessage] = []
-        for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
-                rescued.append(msg)
-            else:
-                remaining.append(msg)
-        return remaining, rescued + preserved_messages
-
-    def _fire_hooks(
-        self,
-        messages_to_summarize: list[AnyMessage],
-        preserved_messages: list[AnyMessage],
-        runtime: Runtime,
-    ) -> None:
-        if not self._before_summarization_hooks:
-            return
-
-        event = SummarizationEvent(
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            thread_id=_resolve_thread_id(runtime),
-            agent_name=_resolve_agent_name(runtime),
-            runtime=runtime,
-        )
-
-        for hook in self._before_summarization_hooks:
-            try:
-                hook(event)
-            except Exception:
-                hook_name = getattr(hook, "__name__", None) or type(hook).__name__
-                logger.exception("before_summarization hook %s failed", hook_name)
-
-
-def _build_summary_anchor(candidate_names: list[str | None], app_config: Any) -> tuple[Any | None, str | None]:
-    """Build the first constructible model among ``candidate_names`` (guarded).
-
-    The returned model is tagged for RunJournal attribution but *not* TAG_NOSTREAM (the
-    middleware wraps a nostream copy). It becomes the parent's token-counter / profile
-    anchor and is reused for generation when a candidate matches its name. A per-name
-    construction failure is swallowed and the next candidate tried, so a broken primary
-    constructor neither breaks agent construction nor skips the healthy run model; a
-    trailing ``None`` name asks ``create_chat_model`` for its own default. Returns
-    ``(None, None)`` when nothing can be constructed.
-    """
-    tried: set[str | None] = set()
-    for name in candidate_names:
-        if name in tried:
-            continue
-        tried.add(name)
-        try:
-            model = create_chat_model(name=name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
-        except Exception:
-            logger.exception("Failed to build summary anchor model %r; trying the next candidate", name)
-            continue
-        return model.with_config(tags=["middleware:summarize"]), name
-    return None, None
 
 
 def create_summarization_middleware(
     *,
     app_config: Any | None = None,
     keep: tuple[str, int | float] | None = None,
-    skip_memory_flush: bool = False,
-    run_model_name: str | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
     Both the lead-agent automatic path and the manual context-compaction path
-    use this factory so model resolution, hooks, prompt config, and retention
+    use this factory so model resolution, the fixed SNIP prompt, and retention
     defaults cannot drift.
-
-    ``run_model_name`` is the model the run actually executes with, resolved by the
-    caller (the lead / subagent / manual builders each already resolve it) and passed
-    in as the authoritative source of truth for ``model_name: null`` summarization and
-    the explicit-summary-model fallback. The middleware does not re-derive it from
-    ``runtime.context`` / ``get_config()``, which do not carry a custom agent's or a
-    subagent's resolved model.
-
-    ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
-    flushes pre-compaction messages into the durable memory queue. The lead
-    chain keeps it (research should persist); the subagent chain sets it so a
-    subagent's INTERNAL turns (the "Task" human message + intermediate AI/tool
-    turns) are not written into the PARENT thread's durable memory — the hook
-    is keyed by ``thread_id`` and subagents share the parent's ``thread_id``
-    (#3875 Phase 3 review).
     """
     resolved_app_config = app_config or get_app_config()
     config = resolved_app_config.summarization
@@ -713,44 +787,32 @@ def create_summarization_middleware(
         else:
             trigger = config.trigger.to_tuple()
 
-    default_name = resolved_app_config.models[0].name if getattr(resolved_app_config, "models", None) else None
-    # Build the anchor (token-counter / profile model, reused for generation) guarded,
-    # rather than eagerly building the configured/default model and letting a broken
-    # constructor escape. Candidates in order: the primary generation model (configured
-    # summary model, else the run's own model), then the run model, then the default,
-    # then ``None`` (create_chat_model's default) as a last resort. So the null case
-    # builds from ``run_model_name`` — not ``config.models[0]`` — and a broken primary
-    # falls through to the healthy run model instead of failing agent construction.
-    primary_name = config.model_name or run_model_name or default_name
-    anchor_model, anchor_name = _build_summary_anchor(
-        [primary_name, run_model_name or default_name, default_name, None],
-        resolved_app_config,
-    )
-    if anchor_model is None:
-        logger.warning("Summarization is enabled but no summary model could be constructed; compaction is unavailable for this build")
-        return None
+    if config.model_name:
+        model = create_chat_model(
+            name=config.model_name,
+            thinking_enabled=False,
+            app_config=resolved_app_config,
+            attach_tracing=False,
+        )
+    else:
+        model = create_chat_model(
+            thinking_enabled=False,
+            app_config=resolved_app_config,
+            attach_tracing=False,
+        )
+    model = model.with_config(tags=["middleware:summarize"])
 
+    requested_keep = keep or config.keep.to_tuple()
+    compact_all_complete_turns = requested_keep[0] == "messages" and requested_keep[1] == 0
+    effective_keep = ("messages", 1) if compact_all_complete_turns else requested_keep
     kwargs: dict[str, Any] = {
-        "model": anchor_model,
+        "model": model,
         "trigger": trigger,
-        "keep": keep or config.keep.to_tuple(),
+        "keep": effective_keep,
+        "compact_all_complete_turns": compact_all_complete_turns,
+        "summary_prompt": SNIP_ARCHIVE_PROMPT,
     }
     if config.trim_tokens_to_summarize is not None:
         kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
-    if config.summary_prompt is not None:
-        kwargs["summary_prompt"] = config.summary_prompt
 
-    hooks: list[BeforeSummarizationHook] = []
-    if resolved_app_config.memory.enabled and not skip_memory_flush:
-        from deerflow.agents.memory.summarization_hook import memory_flush_hook
-
-        hooks.append(memory_flush_hook)
-
-    return DeerFlowSummarizationMiddleware(
-        **kwargs,
-        before_summarization=hooks,
-        app_config=resolved_app_config,
-        configured_model_name=config.model_name,
-        run_model_name=run_model_name,
-        anchor_model_name=anchor_name,
-    )
+    return DeerFlowSummarizationMiddleware(**kwargs)

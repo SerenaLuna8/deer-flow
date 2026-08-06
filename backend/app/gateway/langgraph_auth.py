@@ -1,9 +1,9 @@
-"""LangGraph compatibility auth handler — shares JWT logic with Gateway.
+"""Development-only LangGraph tooling auth — shares JWT logic with Gateway.
 
-The default DeerFlow runtime is embedded in the FastAPI Gateway; scripts and
-Docker deployments do not load this module.  It is retained for LangGraph
-tooling, Studio, or direct LangGraph Server compatibility through
-``langgraph.json``'s ``auth.path``.
+Gateway, local launchers, Docker, and production deployments do not load this
+module. It remains only for explicit LangGraph Studio/direct-server tooling
+through ``langgraph.json``'s ``auth.path``; it is not a project-private HTTP
+authority or a production runtime entry point.
 
 When that compatibility path is used, this module reuses the same JWT and CSRF
 rules as Gateway so both modes validate sessions consistently.
@@ -20,6 +20,7 @@ from langgraph_sdk import Auth
 
 from app.gateway.auth.errors import TokenError
 from app.gateway.auth.jwt import decode_token
+from app.gateway.auth.sessions import AuthSessionUnavailable, validate_access_session
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
 from app.gateway.deps import get_local_provider
 
@@ -63,7 +64,7 @@ async def authenticate(request):
     """Validate the session cookie, decode JWT, and check token_version.
 
     Same validation chain as Gateway's get_current_user_from_request:
-      cookie → decode JWT → DB lookup → token_version match
+      cookie → decode JWT → DB lookup → token_version → durable session
     Also enforces CSRF on state-changing methods.
     """
     # CSRF check before authentication so forged cross-site requests
@@ -97,6 +98,18 @@ async def authenticate(request):
         raise Auth.exceptions.HTTPException(
             status_code=401,
             detail="Token revoked (password changed)",
+        )
+    try:
+        session_is_active = await validate_access_session(payload)
+    except AuthSessionUnavailable:
+        raise Auth.exceptions.HTTPException(
+            status_code=503,
+            detail="Authentication storage unavailable",
+        ) from None
+    if not session_is_active:
+        raise Auth.exceptions.HTTPException(
+            status_code=401,
+            detail="Invalid token",
         )
 
     return payload.sub

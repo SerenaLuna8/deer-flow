@@ -4,15 +4,13 @@ import {
   FileIcon,
   Loader2Icon,
   PencilIcon,
-  ThumbsDownIcon,
-  ThumbsUpIcon,
   XIcon,
 } from "lucide-react";
 import {
   memo,
   useCallback,
+  useEffect,
   useMemo,
-  useState,
   type ImgHTMLAttributes,
 } from "react";
 
@@ -22,40 +20,29 @@ import {
   MessageContent as AIElementMessageContent,
   MessageToolbar,
 } from "@/components/ai-elements/message";
-import {
-  Reasoning,
-  ReasoningTrigger,
-} from "@/components/ai-elements/reasoning";
-import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  deleteFeedback,
-  upsertFeedback,
-  type FeedbackData,
-} from "@/core/api/feedback";
-import {
-  resolveArtifactURL,
-  resolveMessageImageURL,
-} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
+  getReasoningDurationSeconds,
   extractReasoningContentFromMessage,
   getMessageCopyData,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
+import { useProjectArtifactReferenceURL } from "@/core/private-work/file-hooks";
+import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { useProjectSlashSkills } from "@/core/shared-assets";
 import { readReferenceMessageContexts } from "@/core/sidecar";
 import {
   parseSlashSkillReference,
   resolveSlashSkillDisplay,
 } from "@/core/skills";
-import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
@@ -68,100 +55,38 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
-
-function FeedbackButtons({
-  threadId,
-  runId,
-  initialFeedback,
-}: {
-  threadId: string;
-  runId: string;
-  initialFeedback: FeedbackData | null;
-}) {
-  const [feedback, setFeedback] = useState<FeedbackData | null>(
-    initialFeedback,
-  );
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const handleClick = useCallback(
-    async (rating: number) => {
-      if (isSubmitting) return;
-      setIsSubmitting(true);
-      try {
-        if (feedback?.rating === rating) {
-          await deleteFeedback(threadId, runId);
-          setFeedback(null);
-        } else {
-          const result = await upsertFeedback(threadId, runId, rating);
-          setFeedback(result);
-        }
-      } catch {
-        // Revert on error — feedback state unchanged on catch
-      } finally {
-        setIsSubmitting(false);
-      }
-    },
-    [threadId, runId, feedback, isSubmitting],
-  );
-
-  return (
-    <div className="flex gap-1">
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-          feedback?.rating === 1 && "text-foreground",
-        )}
-        onClick={() => handleClick(1)}
-        disabled={isSubmitting}
-      >
-        <ThumbsUpIcon
-          className={cn("size-4", feedback?.rating === 1 && "fill-current")}
-        />
-      </button>
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-          feedback?.rating === -1 && "text-foreground",
-        )}
-        onClick={() => handleClick(-1)}
-        disabled={isSubmitting}
-      >
-        <ThumbsDownIcon
-          className={cn("size-4", feedback?.rating === -1 && "fill-current")}
-        />
-      </button>
-    </div>
-  );
-}
+import { ThinkingDisclosure } from "./thinking-disclosure";
 
 export function MessageListItem({
   className,
   message,
   isLoading,
-  feedback,
   runId,
   threadId,
-  artifactPaths = [],
   showCopyButton = true,
-  showWorkspaceChanges = false,
+  showReasoning = true,
   canEdit = false,
   isEditPending = false,
+  editSession,
   onEditAndRegenerate,
+  onEditStart,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
-  artifactPaths?: readonly string[];
-  feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
-  showWorkspaceChanges?: boolean;
+  showReasoning?: boolean;
   canEdit?: boolean;
   isEditPending?: boolean;
-  onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
+  editSession?: {
+    draft: string;
+    onCancel: () => void;
+    onDraftChange: (value: string) => void;
+  };
+  onEditAndRegenerate?: (replacementText: string) => Promise<boolean>;
+  onEditStart?: (initialDraft: string) => void;
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
@@ -169,37 +94,38 @@ export function MessageListItem({
     () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
     [isHuman, message],
   );
-  const [isEditing, setIsEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const isEditing = editSession !== undefined;
+  const draft = editSession?.draft ?? "";
   const trimmedDraft = draft.trim();
   const editSubmitDisabled =
+    !canEdit ||
     isEditPending ||
-    isSubmittingEdit ||
     trimmedDraft.length === 0 ||
     trimmedDraft === editableText.trim();
 
   const startEditing = useCallback(() => {
-    setDraft(editableText);
-    setIsEditing(true);
-  }, [editableText]);
+    if (!canEdit || !onEditStart) {
+      return;
+    }
+    onEditStart(editableText);
+  }, [canEdit, editableText, onEditStart]);
   const cancelEditing = useCallback(() => {
-    setIsEditing(false);
-    setDraft("");
-  }, []);
+    editSession?.onCancel();
+  }, [editSession]);
+  useEffect(() => {
+    if (isEditing && !canEdit && !isEditPending) {
+      cancelEditing();
+    }
+  }, [canEdit, cancelEditing, isEditPending, isEditing]);
   const submitEdit = useCallback(async () => {
     if (editSubmitDisabled || !onEditAndRegenerate) {
       return;
     }
-    setIsSubmittingEdit(true);
     try {
-      const result = await onEditAndRegenerate(trimmedDraft);
-      if (result !== false) {
-        setIsEditing(false);
-        setDraft("");
-      }
-    } finally {
-      setIsSubmittingEdit(false);
+      await onEditAndRegenerate(trimmedDraft);
+    } catch {
+      // The scoped replay owner reports the concrete error. Keep this draft
+      // open so an unexpected callback failure cannot lose the user's edit.
     }
   }, [editSubmitDisabled, onEditAndRegenerate, trimmedDraft]);
 
@@ -213,17 +139,16 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
-        artifactPaths={artifactPaths}
         runId={runId}
-        showWorkspaceChanges={showWorkspaceChanges}
+        showReasoning={showReasoning}
         editState={
           isHuman && isEditing
             ? {
                 draft,
-                disabled: isEditPending || isSubmittingEdit,
+                disabled: !canEdit || isEditPending,
                 submitDisabled: editSubmitDisabled,
                 onCancel: cancelEditing,
-                onDraftChange: setDraft,
+                onDraftChange: editSession.onDraftChange,
                 onSubmit: submitEdit,
               }
             : undefined
@@ -240,27 +165,24 @@ export function MessageListItem({
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={getMessageCopyData(message)} />
-            {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
-              <Tooltip content={t.common.editAndRerun}>
-                <Button
-                  aria-label={t.common.editAndRerun}
-                  size="icon-sm"
-                  type="button"
-                  variant="ghost"
-                  disabled={isEditPending || isSubmittingEdit}
-                  onClick={startEditing}
-                >
-                  <PencilIcon className="size-3" />
-                </Button>
-              </Tooltip>
-            )}
-            {feedback !== undefined && runId && threadId && (
-              <FeedbackButtons
-                threadId={threadId}
-                runId={runId}
-                initialFeedback={feedback}
-              />
-            )}
+            {canEdit &&
+              isHuman &&
+              onEditAndRegenerate &&
+              onEditStart &&
+              !isEditing && (
+                <Tooltip content={t.common.editAndRerun}>
+                  <Button
+                    aria-label={t.common.editAndRerun}
+                    size="icon-sm"
+                    type="button"
+                    variant="ghost"
+                    disabled={isEditPending}
+                    onClick={startEditing}
+                  >
+                    <PencilIcon className="size-3" />
+                  </Button>
+                </Tooltip>
+              )}
           </div>
         </MessageToolbar>
       )}
@@ -275,49 +197,34 @@ function MessageImage({
   src,
   alt,
   threadId,
-  artifactPaths,
   maxWidth = "90%",
   ...props
 }: React.ImgHTMLAttributes<HTMLImageElement> & {
   threadId: string;
-  artifactPaths: readonly string[];
   maxWidth?: string;
 }) {
+  const projectURL = useProjectArtifactReferenceURL(
+    threadId,
+    typeof src === "string" ? src : "",
+  );
   if (!src) return null;
 
-  // `maxWidth` is applied inline rather than through a `max-w-[${maxWidth}]`
-  // class: Tailwind's JIT only generates utilities it can find as literal
-  // source tokens, so an interpolated arbitrary value would never be emitted.
-  const imgClassName = cn("overflow-hidden rounded-lg", props.className);
-  const imgStyle: React.CSSProperties = { maxWidth, ...props.style };
+  const imageProps = {
+    ...props,
+    className: cn("max-w-full overflow-hidden rounded-lg", props.className),
+    style: { ...props.style, maxWidth },
+  };
 
   if (typeof src !== "string") {
-    return (
-      <img
-        {...props}
-        className={imgClassName}
-        style={imgStyle}
-        src={src}
-        alt={alt}
-        loading="lazy"
-        decoding="async"
-      />
-    );
+    return <img src={src} alt={alt} {...imageProps} />;
   }
 
-  const url = resolveMessageImageURL(src, threadId, artifactPaths);
+  const url = src.startsWith("/mnt/") ? projectURL : src;
+  if (!url) return null;
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
-      <img
-        {...props}
-        className={imgClassName}
-        style={imgStyle}
-        src={url}
-        alt={alt}
-        loading="lazy"
-        decoding="async"
-      />
+      <img src={url} alt={alt} {...imageProps} />
     </a>
   );
 }
@@ -339,7 +246,7 @@ function HumanMessageText({ content }: { content: string }) {
 }
 
 function HumanSlashSkillText({ content }: { content: string }) {
-  const { skills } = useSkills();
+  const { skills } = useProjectSlashSkills();
   const slashSkill = resolveSlashSkillDisplay(content, skills);
 
   if (!slashSkill) {
@@ -363,18 +270,16 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
-  artifactPaths,
   runId,
-  showWorkspaceChanges = false,
+  showReasoning,
   editState,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
-  artifactPaths: readonly string[];
   runId?: string;
-  showWorkspaceChanges?: boolean;
+  showReasoning: boolean;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -385,45 +290,27 @@ function MessageContent_({
   };
 }) {
   const { t } = useI18n();
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
-  const getReasoningMessage = useCallback(
-    (isStreaming: boolean) =>
-      isStreaming ? (
-        <Shimmer duration={1}>{t.runDuration.reasoning}</Shimmer>
-      ) : (
-        t.runDuration.reasoning
-      ),
-    [t.runDuration.reasoning],
-  );
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage
-          {...props}
-          threadId={threadId}
-          artifactPaths={artifactPaths}
-          maxWidth="90%"
-        />
+        <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
       a: createMarkdownLinkComponent(threadId),
     }),
-    [artifactPaths, threadId],
+    [threadId],
   );
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
+  const reasoningDuration = getReasoningDurationSeconds(message);
 
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
-      if (
-        rawContent.includes("<current_uploads>") ||
-        rawContent.includes("<uploaded_files>")
-      ) {
-        // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
-        return parseUploadedFiles(rawContent);
-      }
-      return null;
+      const parsedFiles = parseUploadedFiles(rawContent);
+      return parsedFiles.length > 0 ? parsedFiles : null;
     }
     return files as FileInMessage[];
   }, [message.additional_kwargs?.files, rawContent]);
@@ -471,13 +358,17 @@ function MessageContent_({
   }
 
   // Reasoning-only AI message (no main response content yet)
-  if (!isHuman && reasoningContent && !rawContent) {
+  if (!isHuman && showReasoning && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning isStreaming={isLoading}>
-          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+        <ThinkingDisclosure
+          duration={reasoningDuration}
+          isStreaming={isLoading}
+        >
+          <SafeReasoningContent className="border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 leading-6">
+            {reasoningContent}
+          </SafeReasoningContent>
+        </ThinkingDisclosure>
       </AIElementMessageContent>
     );
   }
@@ -507,6 +398,7 @@ function MessageContent_({
             <Textarea
               autoFocus
               className="min-h-24 resize-y"
+              data-testid="message-edit-textarea"
               disabled={editState.disabled}
               value={editState.draft}
               onChange={(event) =>
@@ -560,20 +452,26 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {reasoningContent && (
-        <Reasoning isStreaming={isLoading}>
-          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+      {showReasoning && reasoningContent && (
+        <ThinkingDisclosure
+          className="mb-3"
+          duration={reasoningDuration}
+          isStreaming={isLoading}
+        >
+          <SafeReasoningContent className="border-border/70 text-foreground/75 mt-2 ml-1.5 border-l py-1 pr-0 pl-5 leading-6">
+            {reasoningContent}
+          </SafeReasoningContent>
+        </ThinkingDisclosure>
       )}
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
+        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
-      {message.type === "ai" && showWorkspaceChanges && (
+      {message.type === "ai" && (
         <WorkspaceChangeBadge
           threadId={threadId}
           runId={runId}
@@ -674,6 +572,7 @@ function RichFileCard({
   const { t } = useI18n();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
+  const fileUrl = useProjectArtifactReferenceURL(threadId, file.path ?? "");
 
   if (isUploading) {
     return (
@@ -704,7 +603,7 @@ function RichFileCard({
 
   if (!file.path) return null;
 
-  const fileUrl = resolveArtifactURL(file.path, threadId);
+  if (!fileUrl) return null;
 
   if (isImage) {
     return (
@@ -717,8 +616,6 @@ function RichFileCard({
         <img
           src={fileUrl}
           alt={file.filename}
-          loading="lazy"
-          decoding="async"
           className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
         />
       </a>

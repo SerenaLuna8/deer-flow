@@ -9,34 +9,23 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
-from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
+from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.mcp.client import build_servers_config
-from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.config import ExtensionsConfig, McpOAuthConfig, resolve_effective_mcp_routing
+from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
-from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
-
-# MCP tool names arrive verbatim from external (potentially hostile/compromised)
-# servers. A tool name is only ever a function identifier: the provider's
-# function-calling API validates it against this same charset at bind time. But
-# deferred (tool_search) MCP tools are withheld from binding, so that provider
-# check never runs on their names — they only ever live in the system-prompt
-# string, where a crafted name (newlines, markdown, angle brackets) could forge
-# framework prompt structure. Canonicalizing at the load boundary constrains
-# both bound and deferred names to the same safe identifier charset, mirroring
-# the load-time validation skill names get (skills/storage/skill_storage.py).
-_VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Subdirectory under the thread's workspace used as the temp dir for stdio MCP
 # subprocesses. Pinning the process temp dir here (alongside its cwd) makes
@@ -70,10 +59,7 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     """
     if not uri:
         return None
-    try:
-        parsed = urlparse(uri)
-    except ValueError:
-        return None
+    parsed = urlparse(uri)
     if parsed.scheme == "file":
         raw = unquote(parsed.path)
     elif parsed.scheme == "":
@@ -102,7 +88,7 @@ def _local_uri_to_virtual_path(
     Stdio MCP servers run with their cwd and temp dir pinned inside the thread's
     mounted user-data tree (see :func:`_make_session_pool_tool`), so the files
     they produce already live somewhere the sandbox/artifact API can serve — the
-    only thing missing is the virtual prefix the rest of DeerFlow addresses them
+    only thing missing is the virtual prefix the rest of ActWeave addresses them
     by. This performs that purely deterministic host→virtual mapping: no copy, no
     trusted-root list, and no exposure of files outside the thread's own tree.
 
@@ -117,9 +103,9 @@ def _local_uri_to_virtual_path(
 
     try:
         real = src.resolve()
-        if not real.is_file():
-            return None
     except OSError:
+        return None
+    if not real.is_file():
         return None
 
     try:
@@ -504,6 +490,8 @@ def _make_session_pool_tool(
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
+            from deerflow.sandbox.sandbox import check_authorization_boundary
+
             async def base_handler(request: MCPToolCallRequest) -> Any:
                 # Preserve interceptor-injected headers for stdio MCP calls by
                 # forwarding them through MCP call meta.
@@ -513,6 +501,10 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
+                await check_authorization_boundary(
+                    getattr(runtime, "context", None),
+                    "before_mcp_tool_dispatch",
+                )
                 return await session.call_tool(
                     request.name,
                     request.args,
@@ -536,6 +528,12 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
+            from deerflow.sandbox.sandbox import check_authorization_boundary
+
+            await check_authorization_boundary(
+                getattr(runtime, "context", None),
+                "before_mcp_tool_dispatch",
+            )
             call_tool_result = await session.call_tool(
                 original_name,
                 arguments,
@@ -569,7 +567,100 @@ def _make_session_pool_tool(
     )
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+def _catalog_mcp_definition(definition: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "enabled": True,
+        "type": definition.get("transport", "stdio"),
+        "command": definition.get("command"),
+        "args": list(definition.get("args", ())),
+        "url": definition.get("url"),
+        "description": definition.get("description", ""),
+        "env": dict(definition.get("env", {})),
+        "headers": dict(definition.get("headers", {})),
+        "oauth": dict(definition.get("oauth", {})) or None,
+        "routing": dict(definition.get("routing", {})),
+        "tools": dict(definition.get("tool_overrides", {})),
+        "tool_call_timeout": definition.get("timeout_seconds"),
+    }
+
+
+def _merge_catalog_mcp_secrets(
+    server_config: Mapping[str, object],
+    materialized: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    merged = dict(server_config)
+    transport = merged.get("transport", "stdio")
+    for payload in materialized.values():
+        if not isinstance(payload, Mapping):
+            raise ValueError
+        for section in ("env", "headers", "query"):
+            values = payload.get(section)
+            if values is None:
+                continue
+            if not isinstance(values, Mapping):
+                raise ValueError
+            if values and ((section == "env" and transport != "stdio") or (section in {"headers", "query"} and transport not in {"http", "sse"})):
+                raise AssetCatalogUnavailable("MCP credential section is invalid for transport")
+            if section == "query":
+                if not values:
+                    continue
+                url = merged.get("url")
+                if not isinstance(url, str) or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value for key, value in values.items()):
+                    raise AssetCatalogUnavailable("MCP query credential is invalid for transport")
+                parsed = urlsplit(url)
+                existing = parse_qsl(parsed.query, keep_blank_values=True)
+                existing_names = {name for name, _value in existing}
+                if existing_names.intersection(values):
+                    raise AssetCatalogUnavailable("MCP query credential conflicts with endpoint")
+                merged["url"] = urlunsplit(
+                    (
+                        parsed.scheme,
+                        parsed.netloc,
+                        parsed.path,
+                        urlencode((*existing, *values.items())),
+                        parsed.fragment,
+                    )
+                )
+                continue
+            current = dict(merged.get(section) or {})
+            current.update({str(key): value for key, value in values.items()})
+            merged[section] = current
+    return merged
+
+
+def _catalog_oauth_configs(
+    runtime_mcp_config: ExtensionsConfig,
+    secrets_by_server: Mapping[str, Mapping[str, Mapping[str, object]]],
+) -> dict[str, McpOAuthConfig]:
+    oauth_configs: dict[str, McpOAuthConfig] = {}
+    for server_name, materialized in secrets_by_server.items():
+        raw_oauth: dict[str, object] = {}
+        for payload in materialized.values():
+            values = payload.get("oauth")
+            if values is None:
+                continue
+            if not isinstance(values, Mapping):
+                raise AssetCatalogUnavailable("system MCP OAuth credential is invalid")
+            raw_oauth.update({str(key): value for key, value in values.items()})
+        if not raw_oauth:
+            continue
+        server = runtime_mcp_config.mcp_servers.get(server_name)
+        if server is None or server.type not in {"http", "sse"} or server.oauth is None:
+            raise AssetCatalogUnavailable("system MCP OAuth credential is invalid for transport")
+        try:
+            oauth_configs[server_name] = McpOAuthConfig.model_validate({**server.oauth.model_dump(), **raw_oauth})
+        except (TypeError, ValueError):
+            raise AssetCatalogUnavailable("system MCP OAuth credential is invalid") from None
+    return oauth_configs
+
+
+async def _load_admitted_mcp_config(
+    asset_context: object | None,
+) -> tuple[ExtensionsConfig, dict[str, Mapping[str, Mapping[str, object]]]]:
+    raise AssetCatalogUnavailable("global MCP discovery was removed; use the admitted run MCP snapshot")
+
+
+async def get_mcp_tools(*, asset_context: object | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -586,12 +677,8 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
-    servers_config = build_servers_config(extensions_config)
+    runtime_mcp_config, secrets_by_server = await _load_admitted_mcp_config(asset_context)
+    servers_config = build_servers_config(runtime_mcp_config)
 
     if not servers_config:
         logger.info("No enabled MCP servers configured")
@@ -601,8 +688,9 @@ async def get_mcp_tools() -> list[BaseTool]:
         # Create the multi-server MCP client
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
-        # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        # Snapshot plaintext never enters the typed server definition; a local
+        # token manager converts admitted material to Authorization headers.
+        initial_oauth_headers = {} if secrets_by_server else await get_initial_oauth_headers(runtime_mcp_config)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -612,33 +700,37 @@ async def get_mcp_tools() -> list[BaseTool]:
                 servers_config[server_name]["headers"] = existing_headers
 
         tool_interceptors: list[Any] = []
-        oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
+        oauth_interceptor = None if secrets_by_server else build_oauth_tool_interceptor(runtime_mcp_config)
         if oauth_interceptor is not None:
             tool_interceptors.append(oauth_interceptor)
 
-        # Load custom interceptors declared in extensions_config.json
-        # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
-        raw_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
-        if isinstance(raw_interceptor_paths, str):
-            raw_interceptor_paths = [raw_interceptor_paths]
-        elif not isinstance(raw_interceptor_paths, list):
-            if raw_interceptor_paths is not None:
-                logger.warning(f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping")
-            raw_interceptor_paths = []
-        for interceptor_path in raw_interceptor_paths:
-            try:
-                builder = resolve_variable(interceptor_path)
-                interceptor = builder()
-                if callable(interceptor):
-                    tool_interceptors.append(interceptor)
-                    logger.info(f"Loaded MCP interceptor: {interceptor_path}")
-                elif interceptor is not None:
-                    logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load MCP interceptor {interceptor_path}: {e}",
-                    exc_info=True,
-                )
+        for server_name, materialized in secrets_by_server.items():
+            if server_name not in servers_config:
+                raise RuntimeError("materialized MCP server is unavailable")
+            servers_config[server_name] = _merge_catalog_mcp_secrets(
+                servers_config[server_name],
+                materialized,
+            )
+
+        catalog_oauth = _catalog_oauth_configs(runtime_mcp_config, secrets_by_server)
+        if catalog_oauth:
+            token_manager = OAuthTokenManager(catalog_oauth)
+            for server_name in token_manager.oauth_server_names():
+                authorization = await token_manager.get_authorization_header(server_name)
+                if authorization:
+                    headers = dict(servers_config[server_name].get("headers", {}))
+                    headers["Authorization"] = authorization
+                    servers_config[server_name]["headers"] = headers
+
+            async def catalog_oauth_interceptor(request: Any, handler: Any) -> Any:
+                authorization = await token_manager.get_authorization_header(request.server_name)
+                if not authorization:
+                    return await handler(request)
+                headers = dict(request.headers or {})
+                headers["Authorization"] = authorization
+                return await handler(request.override(headers=headers))
+
+            tool_interceptors.append(catalog_oauth_interceptor)
 
         client = MultiServerMCPClient(
             servers_config,
@@ -676,16 +768,8 @@ async def get_mcp_tools() -> list[BaseTool]:
         # behavior of leaving unprefixed tools unwrapped.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
             transport = servers_config[source_name].get("transport", "stdio")
-            server_cfg = extensions_config.mcp_servers.get(source_name)
+            server_cfg = runtime_mcp_config.mcp_servers.get(source_name)
             for tool in server_tools:
-                if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
-                    logger.warning(
-                        "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
-                        source_name,
-                        tool.name,
-                        _VALID_MCP_TOOL_NAME.pattern,
-                    )
-                    continue
                 tag_mcp_tool(tool)
                 prefix = f"{source_name}_"
                 original_name = tool.name[len(prefix) :] if tool.name.startswith(prefix) else tool.name
@@ -711,6 +795,8 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         return wrapped_tools
 
+    except AssetCatalogUnavailable:
+        raise
     except Exception as e:
         logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
         return []

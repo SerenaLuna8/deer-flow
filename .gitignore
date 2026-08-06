@@ -1,4 +1,4 @@
-# DeerFlow docker image cache
+# ActWeave docker image cache
 docker/.cache/
 # oh-my-claudecode state
 .omc/
@@ -64,8 +64,9 @@ config.yaml.bak
 .playwright-mcp
 /frontend/test-results/
 /frontend/playwright-report/
+test-artifacts/
 .gstack/
 .worktrees
 
-# Monocle agent-observability trace output (local file exporter)
-.monocle/
+# Subagent-Driven Development 本地产物
+.superpowers/sdd/*

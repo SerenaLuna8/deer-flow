@@ -10,7 +10,7 @@ from _detector_cli import run_detector
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    return run_detector("support.detectors.thread_boundaries", argv)
+    return run_detector("detectors.thread_boundaries", argv)
 
 
 if __name__ == "__main__":

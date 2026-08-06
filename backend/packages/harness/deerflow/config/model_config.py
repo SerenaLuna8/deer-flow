@@ -1,4 +1,6 @@
-from pydantic import BaseModel, ConfigDict, Field
+import uuid
+
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 class ModelConfig(BaseModel):
@@ -13,6 +15,9 @@ class ModelConfig(BaseModel):
     )
     model: str = Field(..., description="Model name")
     model_config = ConfigDict(extra="allow")
+    _system_model_config_version_id: uuid.UUID | None = PrivateAttr(
+        default=None,
+    )
     use_responses_api: bool | None = Field(
         default=None,
         description="Whether to route OpenAI ChatOpenAI calls through the /v1/responses API",
@@ -32,16 +37,6 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is disabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
-    context_window: int | None = Field(
-        default=None,
-        gt=0,
-        description=(
-            "Positive total context window size in tokens (prompt + completion). Used to compute the real-time "
-            "context usage percentage displayed in the chat UI. Distinct from `max_tokens`, which is the "
-            "per-call output cap passed to the provider. Leave unset if unknown; the UI will hide the "
-            "percentage."
-        ),
-    )
     stream_chunk_timeout: float | None = Field(
         default=None,
         description=(

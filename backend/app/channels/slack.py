@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
-import re
 from typing import Any
 
 from markdown_to_mrkdwn import SlackMarkdownConverter
@@ -13,40 +11,13 @@ from markdown_to_mrkdwn import SlackMarkdownConverter
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
 _slack_md_converter = SlackMarkdownConverter()
-
-
-def _escape_slack_text(text: str) -> str:
-    """Escape Slack's reserved characters (``&``, ``<``, ``>``) in raw message text,
-    except a ``>`` at the very start of a line -- Slack's own blockquote marker.
-
-    Slack requires callers to replace these with their HTML entity equivalents
-    (``&amp;``, ``&lt;``, ``&gt;``) before sending message text -- an unescaped
-    ``<...>`` triggers Slack's own mention/link syntax (e.g. ``<@USERID>``,
-    ``<http://url|label>``). See:
-    https://api.slack.com/reference/surfaces/formatting#escaping
-
-    This MUST run before ``_slack_md_converter.convert()``, not after: the
-    converter emits its own mrkdwn link syntax (``<url|label>``) for real
-    markdown links, and that generated syntax must reach Slack unescaped.
-    Escaping the raw input first -- and leaving the converter's own output
-    alone -- satisfies both requirements. ``html.escape(..., quote=False)``
-    replaces ``&`` before ``<``/``>``, so the entities it introduces are never
-    re-escaped.
-
-    Only ``&`` and ``<`` neutralize Slack's ``<...>`` mention/link syntax; a
-    ``>`` is special to Slack only at the start of a line, where the mrkdwn
-    converter passes it through unchanged as a blockquote marker. Escaping
-    every ``>`` would turn a quoted line into visible ``&gt;`` text instead of
-    a rendered blockquote, so a line-leading ``>`` is restored to a literal
-    ``>`` after escaping; a ``>`` anywhere else in the text still escapes.
-    """
-    escaped = html.escape(text, quote=False)
-    return re.sub(r"(?m)^&gt;", ">", escaped)
 
 
 def _normalize_allowed_users(allowed_users: Any) -> set[str]:
@@ -159,7 +130,7 @@ class SlackChannel(Channel):
 
         kwargs: dict[str, Any] = {
             "channel": msg.chat_id,
-            "text": _slack_md_converter.convert(_escape_slack_text(msg.text)),
+            "text": _slack_md_converter.convert(msg.text),
         }
         if msg.thread_ts:
             kwargs["thread_ts"] = msg.thread_ts
@@ -237,8 +208,11 @@ class SlackChannel(Channel):
             logger.warning("[Slack] failed to resolve bot user id; app mention text may include the bot mention", exc_info=True)
 
     async def _get_web_client_for_message(self, msg: OutboundMessage):
-        if msg.connection_id and self._connection_repo is not None:
-            credentials = await self._connection_repo.get_credentials(msg.connection_id)
+        if msg.connection_id and msg.private_scope is not None and self._connection_repo is not None:
+            credentials = await self._connection_repo.get_credentials(
+                scope=msg.private_scope,
+                connection_id=msg.connection_id,
+            )
             access_token = credentials.get("access_token") if credentials else None
             if not access_token:
                 return self._web_client
@@ -367,6 +341,7 @@ class SlackChannel(Channel):
             text=text,
             msg_type=msg_type,
             thread_ts=thread_ts,
+            provider_delivery_id=str(event.get("ts") or "").strip() or None,
             metadata={
                 # team_id is already resolved (payload team_id/team, else event team) by the caller.
                 "team_id": team_id,
@@ -377,16 +352,58 @@ class SlackChannel(Channel):
         inbound.topic_id = thread_ts
 
         if self._loop and self._loop.is_running():
-            # Acknowledge with an eyes reaction
-            self._add_reaction(channel_id, event.get("ts", thread_ts), "eyes")
-            # Send "running" reply first (fire-and-forget from SDK thread)
-            self._send_running_reply(channel_id, thread_ts)
-            if self._connection_repo is None:
-                asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._loop)
-            else:
-                asyncio.run_coroutine_threadsafe(self._publish_inbound_with_connection(inbound, team_id=team_id), self._loop)
+            future = asyncio.run_coroutine_threadsafe(
+                self._prepare_inbound_with_feedback(
+                    inbound,
+                    team_id=team_id,
+                    channel_id=channel_id,
+                    reaction_ts=str(event.get("ts") or thread_ts),
+                    thread_ts=thread_ts,
+                ),
+                self._loop,
+            )
+            future.add_done_callback(
+                lambda done: self._log_future_error(
+                    done,
+                    "prepare_inbound_with_feedback",
+                    str(event.get("ts") or thread_ts),
+                )
+            )
+
+    async def _prepare_inbound_with_feedback(
+        self,
+        inbound,
+        *,
+        team_id: str | None,
+        channel_id: str,
+        reaction_ts: str,
+        thread_ts: str,
+    ) -> None:
+        """Fence user-visible feedback on the main loop before dispatch."""
+
+        if not await self._has_instance_authority():
+            return
+        await asyncio.to_thread(
+            self._add_reaction,
+            channel_id,
+            reaction_ts,
+            "eyes",
+        )
+        if not await self._has_instance_authority():
+            return
+        await asyncio.to_thread(
+            self._send_running_reply,
+            channel_id,
+            thread_ts,
+        )
+        await self._publish_inbound_with_connection(
+            inbound,
+            team_id=team_id,
+        )
 
     async def _publish_inbound_with_connection(self, inbound, *, team_id: str | None = None) -> None:
+        if not await self._has_instance_authority():
+            return
         inbound = await self._attach_connection_identity(inbound, team_id=team_id)
         await self.bus.publish_inbound(inbound)
 
@@ -400,33 +417,54 @@ class SlackChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, event: dict, team_id: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
+        if not await self._has_instance_authority():
+            return True
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
             return False
 
         channel_id = str(event.get("channel") or "")
         thread_ts = str(event.get("thread_ts") or event.get("ts") or "")
-        state = await self._connection_repo.consume_oauth_state(provider="slack", state=code)
-        if state is None:
-            await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
-            return True
-
         user_id = str(event.get("user") or "")
         if not user_id or not team_id:
             await self._post_connection_reply(channel_id, "Slack connection could not be completed from this message.", thread_ts)
             return True
 
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="slack",
-            external_account_id=user_id,
-            workspace_id=team_id,
-            metadata={
-                "team_id": team_id,
-                "channel_id": channel_id,
-            },
-            status="connected",
-        )
-        await self._post_connection_reply(channel_id, "Slack connected to DeerFlow.", thread_ts)
+        metadata = {"team_id": team_id, "channel_id": channel_id}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "slack",
+                    code,
+                    user_id,
+                    team_id,
+                    channel_instance_id=self.channel_instance_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+                return True
+        else:
+            instance_id = persisted_channel_instance_id("slack", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="slack",
+                channel_instance_id=instance_id,
+                state=code,
+            )
+            if state is None:
+                await self._post_connection_reply(channel_id, "Slack connection code is invalid or expired.", thread_ts)
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="slack",
+                channel_instance_id=instance_id,
+                external_account_id=user_id,
+                workspace_id=team_id,
+                metadata=metadata,
+                status="connected",
+            )
+        await self._post_connection_reply(channel_id, "Slack connected to ActWeave.", thread_ts)
         return True
 
     async def _post_connection_reply(self, channel_id: str, text: str, thread_ts: str | None = None) -> None:

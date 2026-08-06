@@ -1,14 +1,10 @@
-"""Slash-command registry for the DeerFlow TUI (pure).
+"""Slash-command registry for the ActWeave TUI (pure).
 
-Normalizes two command sources into one searchable list:
-
-* **Built-ins** — TUI-owned affordances (``/help``, ``/model``, ``/threads`` …).
-* **Skills** — one ``/<skill-name>`` per enabled skill, preserving DeerFlow's
-  existing slash-skill activation semantics.
+Provides one searchable list of TUI-owned built-in commands (``/help``,
+``/model``, ``/threads`` …).
 
 The picker filters this list; :func:`resolve` classifies a submitted line as a
-built-in command, a skill activation, an unknown command, or a plain message.
-No Textual dependency.
+built-in command, an unknown command, or a plain message. No Textual dependency.
 """
 
 from __future__ import annotations
@@ -21,12 +17,11 @@ from typing import Literal
 class Command:
     name: str  # without leading slash
     description: str
-    category: Literal["builtin", "skill"] = "builtin"
 
 
 @dataclass(frozen=True)
 class Resolution:
-    kind: Literal["builtin", "skill", "unknown", "message"]
+    kind: Literal["builtin", "unknown", "message"]
     name: str = ""
     args: str = ""
     text: str = ""
@@ -36,16 +31,12 @@ class Resolution:
 BUILTIN_COMMANDS: tuple[Command, ...] = (
     Command("help", "Show commands and keybindings"),
     Command("new", "Start a fresh thread"),
-    Command("clear", "Clear the transcript display"),
     Command("threads", "Open the thread switcher"),
     Command("switch", "Open the thread switcher"),
     Command("resume", "Resume a thread by id or title"),
     Command("goal", "Set, show or clear the active goal"),
     Command("model", "Open the model picker"),
-    Command("skills", "Browse enabled and available skills"),
-    Command("tools", "Show built-in, MCP and sandbox tools"),
-    Command("mcp", "Show MCP server status"),
-    Command("memory", "Show memory status and injected facts"),
+    Command("tools", "Show tools available to the admitted run"),
     Command("uploads", "Show uploaded files for this thread"),
     Command("artifacts", "Show generated artifacts"),
     Command("details", "Toggle verbose activity rendering"),
@@ -57,28 +48,9 @@ BUILTIN_COMMANDS: tuple[Command, ...] = (
 _BUILTIN_NAMES = frozenset(c.name for c in BUILTIN_COMMANDS)
 
 
-def format_command_help() -> str:
-    """One-line summary of every built-in slash command, for ``/help``.
-
-    Derived from :data:`BUILTIN_COMMANDS` so the help text can never drift out
-    of sync with the registry (and, therefore, the picker). Adding a built-in
-    surfaces it in ``/help`` automatically.
-    """
-    names = "  ".join(f"/{command.name}" for command in BUILTIN_COMMANDS)
-    return f"Commands:  {names}"
-
-
-def build_registry(skills: list[dict]) -> list[Command]:
-    """Merge built-ins with one command per enabled skill."""
-    commands = list(BUILTIN_COMMANDS)
-    for skill in skills:
-        if not skill.get("enabled", False):
-            continue
-        name = skill.get("name")
-        if not name or name in _BUILTIN_NAMES:
-            continue
-        commands.append(Command(name=name, description=skill.get("description", "") or "", category="skill"))
-    return commands
+def build_registry() -> list[Command]:
+    """Return the TUI-owned built-in commands."""
+    return list(BUILTIN_COMMANDS)
 
 
 def filter_commands(commands: list[Command], query: str) -> list[Command]:
@@ -105,7 +77,7 @@ def filter_commands(commands: list[Command], query: str) -> list[Command]:
     return prefix + substring + description
 
 
-def resolve(text: str, skills: list[str] | None = None) -> Resolution:
+def resolve(text: str) -> Resolution:
     """Classify a submitted input line."""
     stripped = text.strip()
     if not stripped.startswith("/"):
@@ -121,8 +93,5 @@ def resolve(text: str, skills: list[str] | None = None) -> Resolution:
 
     if name in _BUILTIN_NAMES:
         return Resolution(kind="builtin", name=name, args=args)
-
-    if skills and name in skills:
-        return Resolution(kind="skill", name=name, args=args)
 
     return Resolution(kind="unknown", name=name, args=args)

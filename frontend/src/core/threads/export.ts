@@ -3,9 +3,9 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  filterUIVisibleMessages,
   hasContent,
   hasToolCalls,
-  isHiddenFromUIMessage,
   stripInternalMarkers,
 } from "../messages/utils";
 
@@ -30,16 +30,14 @@ export interface ExportOptions {
   includeHidden?: boolean;
 }
 
-export type ThreadExportFormat = "markdown" | "json";
-
 function visibleMessages(
   messages: Message[],
   options: ExportOptions,
 ): Message[] {
-  return messages.filter((message) => {
-    if (!options.includeHidden && isHiddenFromUIMessage(message)) {
-      return false;
-    }
+  const visibilityFiltered = options.includeHidden
+    ? messages
+    : filterUIVisibleMessages(messages);
+  return visibilityFiltered.filter((message) => {
     if (!options.includeToolMessages && message.type === "tool") {
       return false;
     }
@@ -223,16 +221,4 @@ export function exportThreadAsJSON(thread: AgentThread, messages: Message[]) {
   const json = formatThreadAsJSON(thread, messages);
   const filename = `${sanitizeFilename(titleOfThread(thread))}.json`;
   downloadAsFile(json, filename, "application/json;charset=utf-8");
-}
-
-export function exportThread(
-  thread: AgentThread,
-  messages: Message[],
-  format: ThreadExportFormat,
-) {
-  if (format === "markdown") {
-    exportThreadAsMarkdown(thread, messages);
-  } else {
-    exportThreadAsJSON(thread, messages);
-  }
 }

@@ -1,6 +1,6 @@
 """ISO 8601 timestamp helpers for the Gateway and embedded runtime.
 
-DeerFlow stores and serializes thread/run timestamps as ISO 8601 UTC
+ActWeave stores and serializes thread/run timestamps as ISO 8601 UTC
 strings to match the LangGraph Platform schema (see
 ``langgraph_sdk.schema.Thread``, where ``created_at`` / ``updated_at``
 are ``datetime`` and JSON-encode to ISO 8601). All timestamp generation
@@ -15,29 +15,9 @@ records that historically stored ``str(time.time())`` floats.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-__all__ = ["coerce_iso", "is_lease_expired", "now_iso"]
-
-
-def is_lease_expired(lease_expires_at: str | None, *, grace_seconds: int) -> bool:
-    """Return ``True`` when *lease_expires_at* has elapsed past grace.
-
-    A NULL lease (pre-ownership data) is always considered expired so
-    take-over (cancel from a non-owning worker) can reclaim it in the
-    same way reconciliation does.  Unparseable timestamps are also
-    treated as expired (defence in depth).
-    """
-    if lease_expires_at is None:
-        return True
-    try:
-        dt = datetime.fromisoformat(lease_expires_at)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-    except (ValueError, TypeError):
-        return True
-    return dt < datetime.now(UTC) - timedelta(seconds=grace_seconds)
-
+__all__ = ["coerce_iso", "now_iso"]
 
 _UNIX_TIMESTAMP_PATTERN = re.compile(r"^\d{10}(?:\.\d+)?$")
 """Matches the unix-timestamp string shape historically written by
@@ -59,7 +39,7 @@ def coerce_iso(value: object) -> str:
     """Best-effort coerce a stored timestamp to an ISO 8601 string.
 
     Translates legacy unix-timestamp floats / strings written by older
-    DeerFlow versions into ISO without a one-shot migration. ISO strings
+    ActWeave versions into ISO without a one-shot migration. ISO strings
     pass through unchanged; ``datetime`` instances are normalised to UTC
     (tz-naive values are assumed to be UTC) and emitted via
     ``isoformat()`` so the wire format always uses the ``T`` separator;

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 #
-# DeerFlow gateway dev entrypoint — runs inside the docker-compose-dev gateway
+# ActWeave gateway dev entrypoint — runs inside the docker-compose-dev gateway
 # container. Extracted from docker/docker-compose-dev.yaml's inline `command:`
 # (PR #2767, addressing review on Issue #2754).
 #
@@ -9,8 +9,8 @@
 #      mirroring scripts/detect_uv_extras.py for parity with local `make dev`).
 #   2. Validate each extra against [A-Za-z][A-Za-z0-9_-]* so a stray shell
 #      metacharacter in `.env` cannot reach `uv sync`.
-#   3. `uv sync --all-packages` so workspace member extras (deerflow-harness's
-#      postgres extra in particular) are installed — see PR #2584.
+#   3. `uv sync --all-packages` so selected workspace-member extras are
+#      installed consistently.
 #   4. Self-heal: if the first sync fails, recreate .venv and retry once.
 #   5. Hand off to uvicorn with reload, replacing this shell so uvicorn becomes
 #      PID 1 inside the container.
@@ -42,6 +42,10 @@ if [ -n "${UV_EXTRAS:-}" ]; then
     # Normalize comma → space, then split on whitespace via the unquoted `for`.
     for raw in $(printf '%s' "$UV_EXTRAS" | tr ',' ' '); do
         [ -z "$raw" ] && continue
+        if [ "$raw" = "postgres" ]; then
+            echo "[startup] postgres extra no longer exists; PostgreSQL dependencies are installed by default" >&2
+            exit 1
+        fi
         # Reject anything that does not look like an identifier.
         # Two patterns: leading non-letter, or any non-[A-Za-z0-9_-] character.
         case "$raw" in
@@ -78,21 +82,19 @@ mkdir -p "$DEER_FLOW_HOME" /app/backend/.deer-flow /app/backend/sandbox
 cd /app/backend
 
 # `--all-packages` propagates extras into workspace members (PR #2584).
-# `--extra redis` is always installed because docker-compose-dev defaults the
-# stream bridge to Redis (DEER_FLOW_STREAM_BRIDGE_REDIS_URL); redis is an
-# optional extra elsewhere. It is kept out of EXTRAS_FLAGS so the --print-extras
-# contract (UV_EXTRAS-derived flags only) stays unchanged.
 # `$EXTRAS_FLAGS` intentionally unquoted so each `--extra X` becomes its own arg.
 # shellcheck disable=SC2086 # word-splitting is intentional here
-if ! uv sync --all-packages --extra redis $EXTRAS_FLAGS; then
+if ! uv sync --all-packages $EXTRAS_FLAGS; then
     echo "[startup] uv sync failed; recreating .venv and retrying once"
     uv venv --allow-existing .venv
     # shellcheck disable=SC2086
-    uv sync --all-packages --extra redis $EXTRAS_FLAGS
+    uv sync --all-packages $EXTRAS_FLAGS
 fi
 
 # ── Hand off to uvicorn ─────────────────────────────────────────────────────
 
+GATEWAY_WORKERS=1
+export GATEWAY_WORKERS
 PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
     --host 0.0.0.0 --port 8001 \
     --reload \

@@ -1,6 +1,6 @@
 ---
 title: Lead Agent
-description: Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
+description: Lead Agent 是 ActWeave 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
 ---
 
 import { Callout, Steps } from "nextra/components";
@@ -8,12 +8,12 @@ import { Callout, Steps } from "nextra/components";
 # Lead Agent
 
 <Callout type="info" emoji="🧠">
-  Lead Agent 是每个 DeerFlow
+  Lead Agent 是每个 ActWeave
   线程中的主要推理和编排单元。它决定要做什么、调用工具、委派子
   Agent，并返回产出物。
 </Callout>
 
-Lead Agent 是 DeerFlow 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
+Lead Agent 是 ActWeave 线程中的核心执行者。每个对话、任务和工作流都通过它进行。理解它的工作方式有助于你有效地配置它，并在需要时扩展它。
 
 ## Lead Agent 的职责
 
@@ -33,7 +33,7 @@ Lead Agent 不硬编码特定的工作流。它使用模型的推理能力来适
 
 Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
 
-- `langchain.agents` 的 [`create_agent`](https://docs.langchain.com/oss/python/langchain/agents) 将 LLM 封装成工具调用 Agent 循环。
+- `langchain.agents` 的 [`create_agent`](https://python.langchain.com/docs/concepts/agents/) 将 LLM 封装成工具调用 Agent 循环。
 - LangGraph 管理 `ThreadState`，提供检查点、流式传输和图执行模型。
 - **中间件链**包裹 Agent 循环的每一轮，提供记忆、摘要和澄清等跨领域能力。
 
@@ -47,7 +47,7 @@ Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
 
 ### 中间件前处理
 
-在调用模型之前，每个活跃的中间件都有机会修改状态。例如，`MemoryMiddleware` 将持久化的记忆事实注入到系统提示中，`SummarizationMiddleware` 在 token 预算超出时可能压缩旧消息。
+在调用模型之前，每个活跃的中间件都有机会修改状态。例如，`DynamicContextMiddleware` 读取 Run 固定的 Memory 文档快照，并加入一条隐藏的低权限 Human message；`SummarizationMiddleware` 在 token 预算超出时可能压缩当前 Thread 的旧消息。
 
 ### LLM 推理
 
@@ -67,7 +67,7 @@ Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
 
 ### 状态更新
 
-`ThreadState` 更新为新消息、产出物和记忆队列。如果配置了检查点，状态将被持久化。
+`ThreadState` 更新为新消息、产出物和 durable Thread Context。如果配置了检查点，状态将被持久化。长期 Memory 不是 Thread state 队列：SNIP 把通过校验的压缩输出归档为待整理历史，独立 Worker 再处理 durable `memory_dream` Job。
 
 </Steps>
 
@@ -77,27 +77,11 @@ Lead Agent 在运行时使用以下优先级顺序解析要使用的模型：
 
 1. 每次请求配置中的 `model_name`（或 `model`），如果提供且有效。
 2. 活跃自定义 Agent 配置中的 `model` 字段，如果指定了 Agent。
-3. `config.yaml` 中 `models:` 列表的第一个模型（全局默认值）。
+3. PostgreSQL 系统模型目录中处于启用状态的默认模型。
 
-如果请求的模型名称在配置中找不到，系统回退到默认模型并记录警告。
-
-```yaml
-models:
-  - name: my-primary-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o
-    api_key: $OPENAI_API_KEY
-    request_timeout: 600.0
-    max_retries: 2
-    supports_vision: true
-
-  - name: my-fast-model
-    use: langchain_openai:ChatOpenAI
-    model: gpt-4o-mini
-    api_key: $OPENAI_API_KEY
-```
-
-第一个条目（`my-primary-model`）成为默认值。任何不指定模型或指定未知模型名称的请求都将使用它。
+平台管理员在 **系统管理 → 系统设置 → 模型配置** 中管理逻辑名称、供应商参数、
+能力标记、版本化系统凭据、启停状态和默认模型。Run 准入时会冻结准确的模型版本
+与凭据版本，后续修改不会悄悄改变已排队的任务。
 
 ## 思考模式
 
@@ -121,7 +105,7 @@ models:
 - 它可以使用的**工具组**
 - 它默认使用的**模型**
 
-自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。其配置存储在后端目录的 `agents/{name}/config.yaml` 中。
+Agent 通过项目 Agents 页面创建；平台级 Agent 则通过系统资产管理区创建。版本化定义和显式项目绑定存储在 PostgreSQL 中。
 
 <Callout type="tip">
   当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定

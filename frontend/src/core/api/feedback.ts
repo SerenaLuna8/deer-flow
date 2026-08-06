@@ -1,42 +1,87 @@
-import { getBackendBaseURL } from "../config";
+import { z } from "zod";
 
+import type { ProjectPrivateWorkScope } from "../private-work/types";
+
+import { throwGatewayApiError } from "./errors";
 import { fetch } from "./fetcher";
 
-export interface FeedbackData {
-  feedback_id: string;
-  rating: number;
-  comment: string | null;
+export const feedbackDataSchema = z
+  .object({
+    feedback_id: z.string().min(1),
+    run_id: z.string().min(1),
+    thread_id: z.string().min(1),
+    message_id: z.string().min(1).nullable(),
+    rating: z.union([z.literal(1), z.literal(-1)]),
+    comment: z.string().nullable(),
+    created_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export type FeedbackData = z.infer<typeof feedbackDataSchema>;
+export type FeedbackRating = FeedbackData["rating"];
+
+type FeedbackAccess = Pick<ProjectPrivateWorkScope, "apiBaseURL">;
+
+function feedbackURL(
+  privateWork: FeedbackAccess,
+  threadId: string,
+  runId: string,
+) {
+  return `${privateWork.apiBaseURL}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`;
+}
+
+export async function getFeedback(
+  privateWork: FeedbackAccess,
+  threadId: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<FeedbackData | null> {
+  const response = await fetch(feedbackURL(privateWork, threadId, runId), {
+    signal,
+  });
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to load feedback");
+  }
+  const value: unknown = await response.json();
+  return value === null ? null : feedbackDataSchema.parse(value);
 }
 
 export async function upsertFeedback(
+  privateWork: FeedbackAccess,
   threadId: string,
   runId: string,
-  rating: number,
-  comment?: string,
+  rating: FeedbackRating,
+  messageId?: string | null,
+  comment?: string | null,
+  signal?: AbortSignal,
 ): Promise<FeedbackData> {
-  const res = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rating, comment: comment ?? null }),
-    },
-  );
-  if (!res.ok) {
-    throw new Error(`Failed to submit feedback: ${res.status}`);
+  const response = await fetch(feedbackURL(privateWork, threadId, runId), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      rating,
+      message_id: messageId ?? null,
+      comment: comment ?? null,
+    }),
+    signal,
+  });
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to submit feedback");
   }
-  return res.json();
+  return feedbackDataSchema.parse(await response.json());
 }
 
 export async function deleteFeedback(
+  privateWork: FeedbackAccess,
   threadId: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
-    { method: "DELETE" },
-  );
-  if (!res.ok && res.status !== 404) {
-    throw new Error(`Failed to delete feedback: ${res.status}`);
+  const response = await fetch(feedbackURL(privateWork, threadId, runId), {
+    method: "DELETE",
+    signal,
+  });
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to delete feedback");
   }
 }

@@ -13,6 +13,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -90,15 +91,33 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return False
 
     @staticmethod
+    def _is_hidden_from_ui_message(message: object) -> bool:
+        if isinstance(message, dict):
+            additional_kwargs = message.get("additional_kwargs")
+        else:
+            additional_kwargs = getattr(message, "additional_kwargs", None)
+        return isinstance(additional_kwargs, dict) and additional_kwargs.get("hide_from_ui") is True
+
+    @staticmethod
     def _is_user_message_for_title(message: object) -> bool:
-        return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message)
+        return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message) and not TitleMiddleware._is_hidden_from_ui_message(message)
+
+    @staticmethod
+    def _message_has_tool_calls(message: object) -> bool:
+        if isinstance(message, dict):
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                return True
+            additional_kwargs = message.get("additional_kwargs")
+            return isinstance(additional_kwargs, dict) and bool(additional_kwargs.get("tool_calls"))
+        return bool(getattr(message, "tool_calls", None))
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
         messages = state.get("messages") or []
         user_msg_content = next((self._message_content(m) for m in messages if self._is_user_message_for_title(m)), "")
         return self._normalize_content(user_msg_content)
 
-    def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
+    def _should_generate_title(self, state: TitleMiddlewareState) -> bool:
         """Check if we should generate a title for this thread."""
         config = self._get_title_config()
         if not config.enabled:
@@ -112,19 +131,27 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         # Defensively coerce a None ``messages`` channel (possible when reading a
         # partially-initialized checkpoint) into an empty list so ``len()`` is safe.
         messages = state.get("messages") or []
-        min_messages = 1 if allow_partial_exchange else 2
-        if len(messages) < min_messages:
+        if len(messages) < 2:
             return False
 
         # Count user and assistant messages
         user_messages = [m for m in messages if self._is_user_message_for_title(m)]
         assistant_messages = [m for m in messages if self._message_type(m) == "ai"]
 
-        # Normal path: title only after first complete exchange. Interrupted path
-        # (``allow_partial_exchange=True``) accepts a lone first-turn user message
-        # so a fallback title can still be persisted when the run is cancelled
-        # before any AI chunk reaches the checkpoint.
-        return len(user_messages) == 1 and (len(assistant_messages) >= 1 or allow_partial_exchange)
+        if len(user_messages) != 1:
+            return False
+        if not assistant_messages:
+            return False
+
+        final_assistant = assistant_messages[-1]
+        if self._message_has_tool_calls(final_assistant):
+            return False
+        final_content = self._strip_think_tags(
+            self._normalize_content(
+                self._message_content(final_assistant),
+            )
+        )
+        return bool(final_content)
 
     def _build_title_prompt(self, state: TitleMiddlewareState) -> tuple[str, str]:
         """Extract user/assistant messages and build the title prompt.
@@ -160,14 +187,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     def _fallback_title(self, user_msg: str) -> str:
         config = self._get_title_config()
-        fallback_chars = min(config.max_chars, 50)
+        max_chars = max(config.max_chars, 0)
+        fallback_chars = min(max_chars, 50)
         if len(user_msg) > fallback_chars:
-            # Reserve room for the ellipsis so this path honours ``max_chars``
-            # exactly as ``_parse_title`` does on the model path.
             ellipsis = "..."
-            body = min(fallback_chars, config.max_chars - len(ellipsis))
-            return user_msg[:body].rstrip() + ellipsis
-        return user_msg if user_msg else "New Conversation"
+            if max_chars <= len(ellipsis):
+                return ellipsis[:max_chars]
+            body_chars = min(fallback_chars, max_chars - len(ellipsis))
+            return user_msg[:body_chars].rstrip() + ellipsis
+        fallback = user_msg if user_msg else "New Conversation"
+        return fallback[:max_chars]
 
     def _get_runnable_config(self) -> dict[str, Any]:
         """Inherit the parent RunnableConfig and add middleware tag.
@@ -188,15 +217,19 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         ]
         return config
 
-    def _generate_title_result(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> dict | None:
+    def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
         """Generate a local fallback title without blocking on an LLM call."""
-        if not self._should_generate_title(state, allow_partial_exchange=allow_partial_exchange):
+        if not self._should_generate_title(state):
             return None
 
         user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
-    async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    async def _agenerate_title_result(
+        self,
+        state: TitleMiddlewareState,
+        runtime_context: object | None = None,
+    ) -> dict | None:
         """Generate a configured LLM title asynchronously and fall back locally."""
         if not self._should_generate_title(state):
             return None
@@ -218,10 +251,16 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
             model = create_chat_model(name=config.model_name, **model_kwargs)
+            await check_authorization_boundary(
+                runtime_context,
+                "before_model_call",
+            )
             response = await model.ainvoke(prompt, config=self._get_runnable_config())
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}
+        except AuthorizationRevoked:
+            raise
         except Exception:
             logger.debug("Failed to generate async title; falling back to local title", exc_info=True)
         return {"title": self._fallback_title(user_msg)}
@@ -232,4 +271,4 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @override
     async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return await self._agenerate_title_result(state)
+        return await self._agenerate_title_result(state, runtime.context)

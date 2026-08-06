@@ -1,91 +1,100 @@
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+"""Authenticated, secret-free public projection of active system models."""
 
-from app.gateway.deps import get_config
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.gateway.deps import (
+    get_current_agent_runtime_config,
+    get_current_user_from_request,
+    get_system_model_catalog,
+)
+from app.system_settings import (
+    PublicSystemModelView,
+    SystemModelCatalogService,
+)
+from app.system_settings.errors import SystemModelStorageUnavailable
 from deerflow.config.app_config import AppConfig
 
 router = APIRouter(prefix="/api", tags=["models"])
 
 
-class ModelResponse(BaseModel):
-    """Response model for model information."""
-
-    name: str = Field(..., description="Unique identifier for the model")
-    model: str = Field(..., description="Actual provider model identifier")
-    display_name: str | None = Field(None, description="Human-readable name")
-    description: str | None = Field(None, description="Model description")
-    supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
-    supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class TokenUsageResponse(BaseModel):
-    """Token usage display configuration."""
+class ModelResponse(_StrictModel):
+    """Safe selector metadata; provider configuration is admin-only."""
 
-    enabled: bool = Field(default=False, description="Whether token usage display is enabled")
+    name: str = Field(..., description="Stable logical model name")
+    model: str = Field(
+        ...,
+        description="Compatibility alias equal to the logical model name",
+    )
+    display_name: str
+    description: str
+    supports_thinking: bool = False
+    supports_reasoning_effort: bool = False
+    supports_vision: bool = False
+    is_default: bool = False
 
 
-class ModelsListResponse(BaseModel):
-    """Response model for listing all models."""
+class TokenUsageResponse(_StrictModel):
+    enabled: bool = False
 
+
+class ModelsListResponse(_StrictModel):
     models: list[ModelResponse]
     token_usage: TokenUsageResponse
+
+
+def _public_response(model: PublicSystemModelView) -> ModelResponse:
+    return ModelResponse(
+        name=model.logical_name,
+        # Never expose the provider model identifier through this endpoint.
+        model=model.logical_name,
+        display_name=model.display_name,
+        description=model.description,
+        supports_thinking=model.supports_thinking,
+        supports_reasoning_effort=model.supports_reasoning_effort,
+        supports_vision=model.supports_vision,
+        is_default=model.is_default,
+    )
+
+
+def _storage_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "system_model_storage_unavailable",
+            "message": "System model storage unavailable",
+        },
+    )
 
 
 @router.get(
     "/models",
     response_model=ModelsListResponse,
-    summary="List All Models",
-    description="Retrieve a list of all available AI models configured in the system.",
+    summary="List available models",
 )
-async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResponse:
-    """List all available models from configuration.
-
-    Returns model information suitable for frontend display,
-    excluding sensitive fields like API keys and internal configuration.
-
-    Returns:
-        A list of all configured models with their metadata and token usage display settings.
-
-    Example Response:
-        ```json
-        {
-            "models": [
-                {
-                    "name": "gpt-4",
-                    "model": "gpt-4",
-                    "display_name": "GPT-4",
-                    "description": "OpenAI GPT-4 model",
-                    "supports_thinking": false,
-                    "supports_reasoning_effort": false
-                },
-                {
-                    "name": "claude-3-opus",
-                    "model": "claude-3-opus",
-                    "display_name": "Claude 3 Opus",
-                    "description": "Anthropic Claude 3 Opus model",
-                    "supports_thinking": true,
-                    "supports_reasoning_effort": false
-                }
-            ],
-            "token_usage": {
-                "enabled": true
-            }
-        }
-        ```
-    """
-    models = [
-        ModelResponse(
-            name=model.name,
-            model=model.model,
-            display_name=model.display_name,
-            description=model.description,
-            supports_thinking=model.supports_thinking,
-            supports_reasoning_effort=model.supports_reasoning_effort,
-        )
-        for model in config.models
-    ]
+async def list_models(
+    service: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+    config: Annotated[AppConfig, Depends(get_current_agent_runtime_config)],
+    _user=Depends(get_current_user_from_request),
+) -> ModelsListResponse:
+    del _user
+    try:
+        models = await service.list_available_models()
+    except SystemModelStorageUnavailable:
+        raise _storage_unavailable() from None
     return ModelsListResponse(
-        models=models,
+        models=[_public_response(model) for model in models],
         token_usage=TokenUsageResponse(enabled=config.token_usage.enabled),
     )
 
@@ -93,40 +102,32 @@ async def list_models(config: AppConfig = Depends(get_config)) -> ModelsListResp
 @router.get(
     "/models/{model_name}",
     response_model=ModelResponse,
-    summary="Get Model Details",
-    description="Retrieve detailed information about a specific AI model by its name.",
+    summary="Get available model",
 )
-async def get_model(model_name: str, config: AppConfig = Depends(get_config)) -> ModelResponse:
-    """Get a specific model by name.
+async def get_model(
+    model_name: str,
+    service: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+    _user=Depends(get_current_user_from_request),
+) -> ModelResponse:
+    del _user
+    try:
+        selected = next(
+            (model for model in await service.list_available_models() if model.logical_name == model_name),
+            None,
+        )
+    except SystemModelStorageUnavailable:
+        raise _storage_unavailable() from None
+    if selected is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    return _public_response(selected)
 
-    Args:
-        model_name: The unique name of the model to retrieve.
 
-    Returns:
-        Model information if found.
-
-    Raises:
-        HTTPException: 404 if model not found.
-
-    Example Response:
-        ```json
-        {
-            "name": "gpt-4",
-            "display_name": "GPT-4",
-            "description": "OpenAI GPT-4 model",
-            "supports_thinking": false
-        }
-        ```
-    """
-    model = config.get_model_config(model_name)
-    if model is None:
-        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
-
-    return ModelResponse(
-        name=model.name,
-        model=model.model,
-        display_name=model.display_name,
-        description=model.description,
-        supports_thinking=model.supports_thinking,
-        supports_reasoning_effort=model.supports_reasoning_effort,
-    )
+__all__ = [
+    "ModelResponse",
+    "ModelsListResponse",
+    "TokenUsageResponse",
+    "router",
+]

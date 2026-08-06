@@ -43,8 +43,8 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 _SECRET_ENV_VAR = "GITHUB_WEBHOOK_SECRET"
 _ALLOW_UNVERIFIED_ENV_VAR = "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS"
 
-# Events we explicitly recognise. Anything else still returns 200 (so
-# GitHub does not retry) but is logged as "unhandled" for visibility.
+# Events we explicitly recognise. Anything else still returns 200, so GitHub
+# marks the delivery successful, but is logged as "unhandled" for visibility.
 _KNOWN_EVENTS: frozenset[str] = frozenset(
     {
         "ping",
@@ -183,31 +183,16 @@ async def receive_github_webhook(
     - Returns ``{"ok": True, ...}`` on successful (or no-op) dispatch so
       GitHub marks the delivery successful and does not retry.
 
-    **Transient fan-out failures return 503**, not 200. GitHub does NOT
-    automatically retry a failed delivery of any kind — 5xx, timeout, or
-    connection error are all simply recorded as failed; see
-    https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries.
-    Swallowing a transient registry filesystem error or bus publish
-    failure into a 200 would mark the delivery successful, so it never
-    surfaces as failed in GitHub's Recent Deliveries / Deliveries API and
-    a scheduled recovery script filtering on non-OK status (the pattern
-    GitHub's own docs recommend) will never flag it for redelivery. That
-    is a discoverability problem, not literal unrecoverability — GitHub's
-    manual "Redeliver" button and its REST/App redelivery endpoints place
-    no failed-status precondition on the delivery id (see
-    https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks),
-    so an operator who independently identifies this exact delivery can
-    still redeliver it by hand within GitHub's ~3-day redelivery window —
-    they just get no automated signal telling them to. Returning 503
-    keeps the delivery correctly recorded as failed instead, so that same
-    manual click, REST call, or recovery script actually finds it rather
-    than merely being capable of redelivering it if asked, well inside
-    the window the underlying outage usually clears in. The
-    `is_route_enabled()` startup check still handles *configuration*
-    errors fail-closed (route absent → 404); 503 is reserved for runtime
-    failures worth making discoverable and recoverable this way.
-    Permanent / non-retryable conditions (unknown event, missing channel
-    service) keep returning 200.
+    **Transient fan-out failures return 503**, not 200. GitHub does not
+    automatically redeliver failed webhooks. A non-2xx status keeps the
+    delivery visibly failed in Recent Deliveries and makes it discoverable
+    to an operator or recovery script for manual/API redelivery. The
+    same delivery can also be manually/API redelivered after an accidental
+    200 when its delivery id is already known, but it will not appear in the
+    failed-delivery recovery set. The
+    `is_route_enabled()` startup check still handles *configuration* errors
+    fail-closed (route absent → 404); permanent no-op conditions (unknown
+    event, missing channel service) keep returning 200.
 
     The route is fail-closed: :func:`is_route_enabled` should have already
     prevented this handler from being mounted when no secret is configured.
@@ -253,10 +238,15 @@ async def receive_github_webhook(
 
     if not x_github_event:
         raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
+    if not isinstance(x_github_delivery, str) or not x_github_delivery.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing X-GitHub-Delivery header",
+        )
 
     # Parse JSON payload after signature is verified (verify-then-parse).
     try:
-        payload: dict[str, Any] = json.loads(body) if body else {}
+        parsed_payload = json.loads(body) if body else {}
     except json.JSONDecodeError as exc:
         logger.warning(
             "github_webhook: invalid JSON body (event=%s delivery=%s): %s",
@@ -265,6 +255,12 @@ async def receive_github_webhook(
             exc,
         )
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(parsed_payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub webhook payload must be a JSON object",
+        )
+    payload: dict[str, Any] = parsed_payload
 
     if x_github_event in _KNOWN_EVENTS:
         logger.info(
@@ -281,13 +277,10 @@ async def receive_github_webhook(
         service = get_channel_service()
         if service is None:
             # Permanent state, not a transient failure: ``channels.github``
-            # is not enabled in this deployment. Returning 503 would mark
-            # this delivery "failed" and invite a manual "Redeliver" or an
-            # operator's recovery script to retry it — pointlessly, since
-            # every such retry hits this same disabled-channel state until
-            # the config changes. Stay on 200 and surface the reason in
-            # the response body for operators checking the redelivery
-            # page.
+            # is not enabled in this deployment. Returning 503 would
+            # mark a permanently disabled integration as a failed delivery.
+            # Stay on 200 and surface the reason in the response body for
+            # operators checking the delivery page.
             logger.warning(
                 "github_webhook: channel service not available — no agents fired (delivery=%s event=%s)",
                 x_github_delivery,
@@ -307,10 +300,8 @@ async def receive_github_webhook(
             # back to GitHub via ``gh``, contradicting the documented
             # off-switch. Bail before ``fanout_event`` so no inbound
             # ever reaches the bus consumer in ChannelManager. Stay on
-            # 200 (permanent state, not transient) rather than mark the
-            # delivery failed and invite a pointless manual/scripted
-            # redelivery; surface the reason in dispatch_result for the
-            # Recent Deliveries panel.
+            # 200 (permanent state, not transient); surface the reason in
+            # dispatch_result for the Recent Deliveries panel.
             logger.info(
                 "github_webhook: channels.github.enabled=false — skipping fan-out (delivery=%s event=%s)",
                 x_github_delivery,
@@ -330,24 +321,14 @@ async def receive_github_webhook(
             raw_default_mention = github_channel_config.get("default_mention_login")
             operator_default_mention_login = raw_default_mention.strip() if isinstance(raw_default_mention, str) else None
 
-            # Let fan-out exceptions propagate as 503, not 200.
+            # Let fan-out exceptions propagate as 503 so the delivery stays
+            # visibly failed and can be manually/API redelivered.
             # ``fanout_event`` calls the registry (filesystem) and the
             # message bus; both can fail transiently (disk hiccup, bus
             # queue full, asyncio cancellation). Swallowing those into a
-            # 200 would hide a real failure: GitHub treats 200 as final
-            # success and never automatically retries any failure,
-            # including 5xx (see
-            # https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries).
-            # A 200 delivery can still be redelivered by hand — GitHub's
-            # manual "Redeliver" button and REST redelivery endpoint have
-            # no failed-status precondition (see
-            # https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks)
-            # — but nothing flags it for an operator or recovery script
-            # to do so. 503 keeps the delivery correctly recorded as
-            # failed so that same manual click, REST call, or recovery
-            # script actually finds and recovers it. The startup-time
-            # ``is_route_enabled`` check still covers fail-closed
-            # *configuration* errors.
+            # 200 would hide the failure from normal failed-delivery recovery
+            # workflows. The startup-time ``is_route_enabled`` check still
+            # covers fail-closed *configuration* errors.
             try:
                 dispatch_result = await fanout_event(
                     service.bus,
@@ -358,13 +339,13 @@ async def receive_github_webhook(
                 )
             except Exception as exc:  # noqa: BLE001 — re-raised as 503 below
                 logger.exception(
-                    "github_webhook: fanout failed (delivery=%s event=%s) — returning 503 (recoverable via manual/API redelivery)",
+                    "github_webhook: fanout failed (delivery=%s event=%s) — returning 503 for manual or API redelivery",
                     x_github_delivery,
                     x_github_event,
                 )
                 raise HTTPException(
                     status_code=503,
-                    detail=f"fan-out failed for delivery {x_github_delivery!r}: {exc!r}",
+                    detail=f"fan-out failed for delivery {x_github_delivery!r}; retry by manual or API redelivery",
                 ) from exc
     else:
         logger.info(

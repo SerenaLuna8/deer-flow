@@ -1,10 +1,16 @@
-import { AUTH_REQUEST_TIMEOUT_MS } from "./constants";
+import { z } from "zod";
+
+import { AUTH_PROBE_TIMEOUT_MS, fetchAuth } from "./request";
 import { parseAuthError } from "./types";
 
-export type SetupStatusResponse = {
-  needs_setup?: boolean;
-  registration_enabled?: boolean;
-};
+export const setupStatusSchema = z
+  .object({
+    needs_setup: z.boolean(),
+    registration_enabled: z.boolean(),
+  })
+  .strict();
+
+export type SetupStatusResponse = z.infer<typeof setupStatusSchema>;
 
 export type SetupStatusCheck = {
   checked: boolean;
@@ -16,22 +22,21 @@ export const setupStatusFetchInit = {
   credentials: "include",
 } satisfies RequestInit;
 
-export async function fetchSetupStatus(): Promise<SetupStatusResponse> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch("/api/v1/auth/setup-status", {
+export async function fetchSetupStatus(
+  signal?: AbortSignal,
+): Promise<SetupStatusResponse> {
+  const response = await fetchAuth(
+    "/api/v1/auth/setup-status",
+    {
       ...setupStatusFetchInit,
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`setup-status failed: ${response.status}`);
-    }
-    return (await response.json()) as SetupStatusResponse;
-  } finally {
-    clearTimeout(timeout);
+      signal,
+    },
+    AUTH_PROBE_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw new Error(`setup-status failed: ${response.status}`);
   }
+  return setupStatusSchema.parse(await response.json());
 }
 
 export function isSystemAlreadyInitializedError(data: unknown): boolean {
@@ -39,11 +44,9 @@ export function isSystemAlreadyInitializedError(data: unknown): boolean {
 }
 
 export function canCreateRegularAccount(check: SetupStatusCheck): boolean {
-  // registration_enabled is absent on older Gateways; treat that as allowed so
-  // the signup entry only disappears when the backend actively closes it.
   return (
     check.checked &&
-    check.status?.needs_setup !== true &&
-    check.status?.registration_enabled !== false
+    check.status?.needs_setup === false &&
+    check.status.registration_enabled
   );
 }

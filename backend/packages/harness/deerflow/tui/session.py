@@ -1,9 +1,8 @@
-"""Embedded session wiring for the TUI.
+"""Fail-closed embedded session wiring for the TUI.
 
-Owns construction of the ``DeerFlowClient`` (with a persistent checkpointer),
-thread resolution for ``--continue`` / ``--resume`` (by id **or** title), and the
-shared-persistence writer that makes terminal sessions visible in the Web UI (see
-``deerflow.tui.persistence``).
+The CLI has no authenticated project authority, so its default session is
+stateless. Trusted embeddings may construct :class:`Session` with an explicitly
+project-scoped client and writer.
 """
 
 from __future__ import annotations
@@ -29,7 +28,10 @@ class Session:
         if plan.thread_id:
             return self.resolve_ref(plan.thread_id)
         if plan.continue_recent:
-            threads = self.client.list_threads(limit=1).get("thread_list", [])
+            try:
+                threads = self.client.list_threads(limit=1).get("thread_list", [])
+            except Exception:  # noqa: BLE001 - no scoped persistence is expected
+                return None
             if threads:
                 return threads[0].get("thread_id")
         return None
@@ -53,7 +55,10 @@ class Session:
         return ref
 
     def recent_threads(self, limit: int = 20) -> list[dict]:
-        return self.client.list_threads(limit=limit).get("thread_list", [])
+        try:
+            return self.client.list_threads(limit=limit).get("thread_list", [])
+        except Exception:  # noqa: BLE001 - no scoped persistence is expected
+            return []
 
     def close(self) -> None:
         """Stop the background DB loop and dispose the engine (best-effort)."""
@@ -71,22 +76,12 @@ class Session:
 
 
 def open_session(persistence: bool = True) -> Session:
-    """Build an embedded session backed by the configured checkpointer.
+    """Build a stateless embedded session.
 
-    ``persistence`` controls the shared ``threads_meta`` writer (and its background
-    DB loop/engine). Headless one-shots never use the writer, so they pass
-    ``persistence=False`` to avoid standing up an event loop + connection pool only
-    to discard it.
+    ``persistence`` is retained for CLI call compatibility but never grants
+    project authority. A TUI process without an authenticated immutable project
+    scope cannot read or write persisted Thread data.
     """
     from deerflow.client import DeerFlowClient
-    from deerflow.runtime.checkpointer.provider import get_checkpointer
 
-    checkpointer = get_checkpointer()
-    client = DeerFlowClient(checkpointer=checkpointer)
-    if not persistence:
-        return Session(client=client)
-
-    from .persistence import build_persistence
-
-    loop, writer = build_persistence()
-    return Session(client=client, writer=writer, _loop=loop)
+    return Session(client=DeerFlowClient())

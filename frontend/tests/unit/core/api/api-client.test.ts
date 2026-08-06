@@ -2,11 +2,17 @@ import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
   clearReconnectRun,
-  getAPIClient,
+  createCompatibleClient,
   isInactiveRunStreamError,
   isRunNotCancellableError,
-  StreamReplayGapError,
 } from "@/core/api/api-client";
+import { RUN_EXECUTION_PROFILE_CONTEXT_KEY } from "@/core/private-work/execution-profile";
+
+const TEST_API_URL = "http://localhost:3000/test/api";
+
+function createTestClient() {
+  return createCompatibleClient({ apiUrl: TEST_API_URL });
+}
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -21,18 +27,69 @@ function makeSessionStorage() {
   };
 }
 
-function makeSSEResponse(body: string, headers?: HeadersInit) {
-  return new Response(body, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/event-stream",
-      ...headers,
-    },
-  });
-}
-
 afterEach(() => {
   rs.unstubAllGlobals();
+});
+
+test("creates explicit project compatibility clients without a global registry", () => {
+  const options = {
+    apiUrl:
+      "http://localhost:2026/api/projects/00000000-0000-0000-0000-000000000001/private-work",
+  };
+  expect(createCompatibleClient(options)).not.toBe(
+    createCompatibleClient(options),
+  );
+  expect(createTestClient()).not.toBe(createTestClient());
+});
+
+test("rejects a compatibility client without an explicit project API URL", () => {
+  expect(() => createCompatibleClient()).toThrow(
+    "A project-private API URL is required",
+  );
+});
+
+test("promotes the reserved execution profile to the private Run body", async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+    if (typeof init?.body !== "string") {
+      throw new TypeError("expected a serialized JSON request body");
+    }
+    requestBody = JSON.parse(init.body) as Record<string, unknown>;
+    return new Response("", {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const profile = {
+    model_name: "gpt-5.6-luna",
+    thinking_enabled: true,
+    reasoning_effort: "high" as const,
+  };
+  const stream = createTestClient().runs.stream(
+    "thread-1",
+    "project-assistant-v1",
+    {
+      input: { messages: [] },
+      context: {
+        thread_id: "thread-1",
+        [RUN_EXECUTION_PROFILE_CONTEXT_KEY]: profile,
+      },
+    },
+  );
+
+  await expect(stream.next()).resolves.toMatchObject({ done: true });
+  expect(requestBody).toMatchObject({
+    execution_profile: profile,
+    context: { thread_id: "thread-1" },
+  });
+  expect(
+    Reflect.has(
+      requestBody?.context as object,
+      RUN_EXECUTION_PROFILE_CONTEXT_KEY,
+    ),
+  ).toBe(false);
 });
 
 test("identifies inactive run stream errors", () => {
@@ -105,7 +162,7 @@ test("clears stale reconnect metadata when join stream cannot be resumed", async
   );
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient().runs.joinStream("thread-1", "run-1").next(),
   ).resolves.toMatchObject({ done: true });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
@@ -128,7 +185,7 @@ test("rethrows unrelated streaming errors", async () => {
   );
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient().runs.joinStream("thread-1", "run-1").next(),
   ).rejects.toThrow("HTTP 409");
 
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
@@ -179,7 +236,7 @@ test("swallows terminal-state cancel 409 and clears stale key", async () => {
 
   // Resolves (no throw) — cancelling an already-finished run is a no-op.
   await expect(
-    getAPIClient(true).runs.cancel("thread-1", "run-1"),
+    createTestClient().runs.cancel("thread-1", "run-1"),
   ).resolves.toBeUndefined();
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
@@ -206,7 +263,7 @@ test("rethrows not-active-on-worker cancel 409", async () => {
   );
 
   await expect(
-    getAPIClient(true).runs.cancel("thread-1", "run-1"),
+    createTestClient().runs.cancel("thread-1", "run-1"),
   ).rejects.toThrow("HTTP 409");
 
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
@@ -234,7 +291,7 @@ test("short-circuits reconnect to a terminal run", async () => {
   });
   rs.stubGlobal("fetch", fetchFn);
 
-  const gen = getAPIClient(true).runs.joinStream("thread-1", "run-1");
+  const gen = createTestClient().runs.joinStream("thread-1", "run-1");
   await expect(gen.next()).resolves.toMatchObject({ done: true });
 
   // Preflight only — no stream/join request beyond the GET.
@@ -268,7 +325,7 @@ test("falls back to join when preflight cannot resolve the run", async () => {
   rs.stubGlobal("fetch", fetchFn);
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient().runs.joinStream("thread-1", "run-1").next(),
   ).resolves.toMatchObject({ done: true });
 
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
@@ -304,342 +361,12 @@ test("proceeds to join when the run is still active", async () => {
   rs.stubGlobal("fetch", fetchFn);
 
   await expect(
-    getAPIClient(true).runs.joinStream("thread-1", "run-1").next(),
+    createTestClient().runs.joinStream("thread-1", "run-1").next(),
   ).resolves.toMatchObject({ done: true });
 
   // Two requests: preflight GET + the real join. A short-circuit would be one.
   expect(fetchFn).toHaveBeenCalledTimes(2);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
-});
-
-test("recovers a join stream gap from durable state and resumes after the retained tail", async () => {
-  const sessionStorage = makeSessionStorage();
-  sessionStorage.setItem("lg:stream:thread-1", "run-1");
-  const gap = {
-    code: "stream_replay_gap",
-    run_id: "run-1",
-    requested_event_id: "1-0",
-    earliest_available_event_id: "2-0",
-    latest_available_event_id: "3-0",
-    recovery: "reload_durable_state",
-  };
-  const recoveryRequests: RequestInit[] = [];
-  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
-    const path = url.toString();
-    if (path.endsWith("/runs/run-1")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
-    }
-    if (path.includes("/runs/run-1/stream")) {
-      recoveryRequests.push(init ?? {});
-      if (recoveryRequests.length === 1) {
-        return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`);
-      }
-      return makeSSEResponse("event: end\ndata: null\n\n");
-    }
-    if (path.includes("/threads/thread-1/state")) {
-      return new Response(
-        JSON.stringify({
-          values: { messages: [{ type: "ai", content: "durable" }] },
-          next: [],
-          tasks: [],
-          metadata: {},
-          created_at: null,
-          checkpoint: {},
-          parent_checkpoint: null,
-        }),
-        { status: 200 },
-      );
-    }
-    return new Response(JSON.stringify({ detail: "unexpected request" }), {
-      status: 500,
-    });
-  });
-  rs.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
-    sessionStorage,
-  });
-  rs.stubGlobal("fetch", fetchFn);
-
-  const received: Array<{ id?: string; event: string; data: unknown }> = [];
-  for await (const entry of getAPIClient(true).runs.joinStream(
-    "thread-1",
-    "run-1",
-    { lastEventId: "1-0" },
-  )) {
-    received.push(entry);
-  }
-
-  expect(received).toEqual([
-    {
-      event: "custom",
-      data: { type: "stream_replay_gap", ...gap },
-    },
-    {
-      event: "values",
-      data: { messages: [{ type: "ai", content: "durable" }] },
-    },
-    { event: "end", data: null },
-  ]);
-  expect(new Headers(recoveryRequests[1]?.headers).get("Last-Event-ID")).toBe(
-    "3-0",
-  );
-});
-
-test("recovers a gap emitted by the initial run stream", async () => {
-  const sessionStorage = makeSessionStorage();
-  const gap = {
-    code: "stream_replay_gap",
-    run_id: "run-2",
-    requested_event_id: null,
-    earliest_available_event_id: "4-0",
-    latest_available_event_id: "5-0",
-    recovery: "reload_durable_state",
-  };
-  const recoveryHeaders: Headers[] = [];
-  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
-    const path = url.toString();
-    if (path.endsWith("/threads/thread-2/runs/stream")) {
-      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
-        "Content-Location": "/threads/thread-2/runs/run-2",
-      });
-    }
-    if (path.includes("/threads/thread-2/state")) {
-      return new Response(
-        JSON.stringify({
-          values: { messages: [{ type: "ai", content: "checkpoint" }] },
-        }),
-        { status: 200 },
-      );
-    }
-    if (path.includes("/runs/run-2/stream")) {
-      recoveryHeaders.push(new Headers(init?.headers));
-      return makeSSEResponse("event: end\ndata: null\n\n");
-    }
-    return new Response(JSON.stringify({ detail: "unexpected request" }), {
-      status: 500,
-    });
-  });
-  rs.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
-    sessionStorage,
-  });
-  rs.stubGlobal("fetch", fetchFn);
-
-  const received: Array<{ id?: string; event: string; data: unknown }> = [];
-  for await (const entry of getAPIClient(true).runs.stream(
-    "thread-2",
-    "lead_agent",
-    { streamResumable: true },
-  )) {
-    received.push(entry);
-  }
-
-  expect(received).toEqual([
-    {
-      event: "custom",
-      data: { type: "stream_replay_gap", ...gap },
-    },
-    {
-      event: "values",
-      data: { messages: [{ type: "ai", content: "checkpoint" }] },
-    },
-    { event: "end", data: null },
-  ]);
-  expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("5-0");
-});
-
-test("clears reconnect metadata when an initial stream gap resume is inactive", async () => {
-  const sessionStorage = makeSessionStorage();
-  const gap = {
-    code: "stream_replay_gap",
-    run_id: "run-inactive-resume",
-    requested_event_id: null,
-    earliest_available_event_id: "4-0",
-    latest_available_event_id: "5-0",
-    recovery: "reload_durable_state",
-  };
-  let recoveryRequests = 0;
-  const fetchFn = rs.fn(async (url: string | URL) => {
-    const path = url.toString();
-    if (path.endsWith("/threads/thread-inactive-resume/runs/stream")) {
-      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
-        "Content-Location":
-          "/threads/thread-inactive-resume/runs/run-inactive-resume",
-      });
-    }
-    if (path.includes("/threads/thread-inactive-resume/state")) {
-      return new Response(
-        JSON.stringify({
-          values: { messages: [{ type: "ai", content: "checkpoint" }] },
-        }),
-        { status: 200 },
-      );
-    }
-    if (path.includes("/runs/run-inactive-resume/stream")) {
-      recoveryRequests += 1;
-      return new Response(
-        JSON.stringify({
-          detail:
-            "Run run-inactive-resume is not active on this worker and cannot be streamed",
-        }),
-        { status: 409 },
-      );
-    }
-    return new Response(JSON.stringify({ detail: "unexpected request" }), {
-      status: 500,
-    });
-  });
-  rs.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
-    sessionStorage,
-  });
-  rs.stubGlobal("fetch", fetchFn);
-
-  const stream = getAPIClient(true).runs.stream(
-    "thread-inactive-resume",
-    "lead_agent",
-    { streamResumable: true },
-  );
-
-  await expect(stream.next()).resolves.toMatchObject({
-    done: false,
-    value: {
-      event: "custom",
-      data: { type: "stream_replay_gap", ...gap },
-    },
-  });
-  await expect(stream.next()).resolves.toMatchObject({
-    done: false,
-    value: {
-      event: "values",
-      data: { messages: [{ type: "ai", content: "checkpoint" }] },
-    },
-  });
-  await expect(stream.next()).resolves.toMatchObject({ done: true });
-
-  expect(recoveryRequests).toBe(1);
-  expect(sessionStorage.getItem("lg:stream:thread-inactive-resume")).toBeNull();
-});
-
-test("stops after five consecutive stream gap recoveries", async () => {
-  const sessionStorage = makeSessionStorage();
-  sessionStorage.setItem("lg:stream:thread-gap-loop", "run-gap-loop");
-  let streamCalls = 0;
-  let stateCalls = 0;
-  const fetchFn = rs.fn(async (url: string | URL) => {
-    const path = url.toString();
-    if (path.endsWith("/runs/run-gap-loop")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
-    }
-    if (path.includes("/runs/run-gap-loop/stream")) {
-      streamCalls += 1;
-      const gap = {
-        code: "stream_replay_gap",
-        run_id: "run-gap-loop",
-        requested_event_id: `${streamCalls}-0`,
-        earliest_available_event_id: `${streamCalls + 1}-0`,
-        latest_available_event_id: `${streamCalls + 2}-0`,
-        recovery: "reload_durable_state",
-      };
-      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`);
-    }
-    if (path.includes("/threads/thread-gap-loop/state")) {
-      stateCalls += 1;
-      return new Response(JSON.stringify({ values: { messages: [] } }), {
-        status: 200,
-      });
-    }
-    return new Response(JSON.stringify({ detail: "unexpected request" }), {
-      status: 500,
-    });
-  });
-  rs.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
-    sessionStorage,
-  });
-  rs.stubGlobal("fetch", fetchFn);
-
-  const consume = async () => {
-    for await (const entry of getAPIClient(true).runs.joinStream(
-      "thread-gap-loop",
-      "run-gap-loop",
-      { lastEventId: "1-0" },
-    )) {
-      // Drain until the recovery budget is exhausted.
-      void entry;
-    }
-  };
-
-  await expect(consume()).rejects.toBeInstanceOf(StreamReplayGapError);
-  expect(streamCalls).toBe(6);
-  expect(stateCalls).toBe(5);
-});
-
-test("surfaces durable-state recovery failures as a structured gap error", async () => {
-  const sessionStorage = makeSessionStorage();
-  sessionStorage.setItem("lg:stream:thread-gap-state", "run-gap-state");
-  sessionStorage.setItem.mockClear();
-  const gap = {
-    code: "stream_replay_gap",
-    run_id: "run-gap-state",
-    requested_event_id: "1-0",
-    earliest_available_event_id: "2-0",
-    latest_available_event_id: "3-0",
-    recovery: "reload_durable_state",
-  };
-  const fetchFn = rs.fn(async (url: string | URL) => {
-    const path = url.toString();
-    if (path.endsWith("/runs/run-gap-state")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
-    }
-    if (path.includes("/runs/run-gap-state/stream")) {
-      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`);
-    }
-    if (path.includes("/threads/thread-gap-state/state")) {
-      return new Response(JSON.stringify({ detail: "state unavailable" }), {
-        status: 404,
-      });
-    }
-    return new Response(JSON.stringify({ detail: "unexpected request" }), {
-      status: 500,
-    });
-  });
-  rs.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
-    sessionStorage,
-  });
-  rs.stubGlobal("fetch", fetchFn);
-
-  const consume = async () => {
-    for await (const entry of getAPIClient(true).runs.joinStream(
-      "thread-gap-state",
-      "run-gap-state",
-      { lastEventId: "1-0" },
-    )) {
-      void entry;
-    }
-  };
-
-  const error = await consume().catch((cause: unknown) => cause);
-  expect(error).toBeInstanceOf(StreamReplayGapError);
-  expect(error).toMatchObject({
-    gap,
-    recoveryAttempts: 1,
-    recoveryCause: expect.any(Error),
-  });
-  expect(sessionStorage.removeItem).toHaveBeenCalledWith(
-    "lg:stream:thread-gap-state",
-  );
-  expect(sessionStorage.setItem).not.toHaveBeenCalledWith(
-    "lg:stream:thread-gap-state",
-    "run-gap-state",
-  );
 });
 
 test("short-circuits reconnect to an interrupted (user-cancelled) run", async () => {
@@ -667,9 +394,44 @@ test("short-circuits reconnect to an interrupted (user-cancelled) run", async ()
   });
   rs.stubGlobal("fetch", fetchFn);
 
-  const gen = getAPIClient(true).runs.joinStream("thread-1", "run-1");
+  const gen = createTestClient().runs.joinStream("thread-1", "run-1");
   await expect(gen.next()).resolves.toMatchObject({ done: true });
 
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
+test("keeps raw error frames for an active ephemeral run", async () => {
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    if (url.toString().endsWith("/runs/run-1")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    return new Response(
+      [
+        "event: error",
+        'data: {"error":"RuntimeError","message":"worker failed"}',
+        "",
+        "",
+      ].join("\n"),
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const frames: unknown[] = [];
+  for await (const frame of createTestClient().runs.joinStream(
+    "thread-1",
+    "run-1",
+  )) {
+    frames.push(frame);
+  }
+
+  expect(frames).toEqual([
+    {
+      event: "error",
+      data: { error: "RuntimeError", message: "worker failed" },
+    },
+  ]);
 });

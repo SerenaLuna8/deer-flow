@@ -34,7 +34,7 @@ body:
     id: areas
     attributes:
       label: Affected area(s)
-      description: Which part of DeerFlow does this touch? Select all that apply.
+      description: Which part of ActWeave does this touch? Select all that apply.
       multiple: true
       options:
         - Frontend (UI / Next.js)
@@ -92,7 +92,7 @@ body:
   - type: dropdown
     id: run_mode
     attributes:
-      label: How are you running DeerFlow?
+      label: How are you running ActWeave?
       options:
         - Local (make dev)
         - Docker (make docker-start)
@@ -159,7 +159,7 @@ body:
       label: Support bundle summary
       description: For local setup, configuration, sandbox, or runtime issues, run `make support-bundle` and paste the generated `*-issue-summary.md` here. AI-assisted reports can start from `*-issue-draft.md`, but every REQUIRED placeholder must be replaced before filing. Attach the zip only if a maintainer asks for the evidence bundle or the summary is not enough.
       placeholder: |
-        ## DeerFlow support bundle summary
+        ## ActWeave support bundle summary
         - Triage status: ...
         - Active signals: ...
 

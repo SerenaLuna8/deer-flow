@@ -1,7 +1,6 @@
 import { formatTokenCount, type TokenUsage } from "@/core/messages/usage";
 import type { Model } from "@/core/models/types";
 
-/** Return the user-facing label for a configured subagent model. */
 export function resolveSubtaskModelLabel(
   modelName: string | undefined,
   models: Model[],

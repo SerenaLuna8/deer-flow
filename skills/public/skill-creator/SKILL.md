@@ -31,50 +31,62 @@ Cool? Cool.
 
 ---
 
-## DeerFlow Environment (⚠️ READ THIS FIRST)
+## ActWeave Skill Builder
 
-If you are running inside a **DeerFlow** sandboxed agent environment (you have access to the `skill_manage` tool), you MUST follow these rules for all skill file operations. These override the generic file-writing and packaging instructions below.
+When running inside the dedicated ActWeave Skill Builder, follow this section instead of
+the generic initialization, validation, packaging, and installation steps below. Builder
+authoring is staged: prepare a candidate package first and let the product own persistence.
 
-### Why this matters
+### Build the candidate package
 
-In DeerFlow, the sandbox filesystem is isolated. Files written with `write_file` land in `/mnt/user-data/outputs/`, which is a **per-thread output directory** — new chats cannot see files there. Skills must be persisted through the dedicated `skill_manage` tool so they are stored in the per-user skill directory and immediately visible to all future chats.
+1. Extract known intent from the conversation, then ask only the missing questions needed
+   to clarify triggers, inputs, outputs, dependencies, edge cases, and acceptance examples.
+2. Plan the smallest complete package before writing files.
+3. Use only the candidate-file operations exposed by Builder. Follow their schemas and
+   revision rules rather than inventing operation names or writing elsewhere.
+4. Keep every path relative and normalized. Reject absolute paths, `..`, symlinks, and
+   hidden platform-control paths.
+5. Summarize files added, changed, or removed after each generation pass so the user can
+   review the candidate without losing the conversation.
 
-### Use `skill_manage` for all skill file operations
+Use the standard layout:
 
-| Operation | skill_manage action | Example |
-|-----------|---------------------|---------|
-| Create a new skill | `action="create"` | `skill_manage(action="create", name="my-skill", content="---\nname: my-skill\n---\n...")` |
-| Replace entire SKILL.md | `action="edit"` | `skill_manage(action="edit", name="my-skill", content="updated SKILL.md")` |
-| Partial edit (find & replace) | `action="patch"` | `skill_manage(action="patch", name="my-skill", find="old text", replace="new text")` |
-| Delete a skill | `action="delete"` | `skill_manage(action="delete", name="my-skill")` |
-| Add a supporting file | `action="write_file"` | `skill_manage(action="write_file", name="my-skill", path="scripts/helper.py", content="...")` |
-| Remove a supporting file | `action="remove_file"` | `skill_manage(action="remove_file", name="my-skill", path="scripts/helper.py")` |
+```text
+skill-name/
+├── SKILL.md
+├── scripts/       # optional deterministic helpers
+├── references/    # optional material loaded on demand
+└── assets/        # optional templates or output resources
+```
 
-### Key rules
+Keep `SKILL.md` at the package root, include valid `name` and `description` frontmatter,
+and create only resource directories the skill actually needs.
 
-1. **NEVER use sandbox `write_file` to create or modify skill files** (SKILL.md, scripts/, references/, assets/). These would land in `/mnt/user-data/outputs/` and be invisible to future chats. Always use `skill_manage` instead.
+### Respect the staging boundary
 
-2. **Skip the `package_skill.py` step**. In DeerFlow, `skill_manage` already persists the skill to the correct per-user directory. No `.skill` packaging or manual install is needed. The skill is immediately available in all new chats.
+- Modify candidate files only. Do not directly create or update a persisted Skill or
+  version, publish it, enable it, bind it to an Agent, suspend it, or delete it.
+- Do not write to installed Skill directories or `/mnt/skills`, and do not treat ordinary
+  sandbox output as an installed Skill.
+- Do not run `scripts/init_skill.py`, `scripts/quick_validate.py`, or
+  `scripts/package_skill.py` in Builder. Do not execute candidate scripts or substitute
+  local checks for the product's checks. These paths bypass Builder staging and are not
+  authoritative.
+- Do not run evals from Builder unless a later isolated evaluation operation explicitly
+  supports them and the user requests that evaluation.
 
-3. **Skip the `present_files` step for skills**. Skills are NOT deliverables — they are persisted via `skill_manage` and auto-loaded by the skill system. Only use `present_files` for non-skill outputs (eval reports, benchmarks, etc.).
+### Hand off validation and import
 
-4. **Eval workspace files are OK in sandbox**. Test prompts, benchmark data, eval viewer HTML, grading results, etc. are NOT skill files — you can write these to `/mnt/user-data/outputs/` or `/mnt/user-data/workspace/` using sandbox `write_file` as usual.
+When the candidate is complete, hand it to **Builder validation**. Treat Builder findings
+as authoritative, update only the candidate files to address them, and validate again.
+Do not emulate validation with bundled scripts.
 
-5. **To read an existing skill's SKILL.md**, use `read_file("/mnt/skills/custom/<name>/SKILL.md")` in the sandbox (it maps to the per-user skill directory).
+**Builder commit** is the only import boundary. It must require explicit user confirmation
+after validation succeeds. Never commit automatically or claim that a candidate is already
+installed, published, or enabled; let Builder report the persisted result.
 
-6. **Updating an existing skill**: use `skill_manage(action="edit")` or `skill_manage(action="patch")`. Do NOT copy to `/tmp/` first — `skill_manage` handles the per-user storage directly.
-
-### Workflow in DeerFlow
-
-The core loop is the same, but the persistence mechanism changes:
-
-1. Capture intent → interview → draft SKILL.md content
-2. **Call `skill_manage(action="create", name=<name>, content=<SKILL.md>)`** to persist the skill
-3. Run test cases (eval workspace files use sandbox `write_file`)
-4. Evaluate results, gather feedback
-5. **Call `skill_manage(action="edit")` or `skill_manage(action="patch")`** to improve the skill
-6. Repeat until satisfied
-7. **Done — no packaging needed.** The skill is already persisted and visible to all future chats.
+Outside the dedicated ActWeave Skill Builder, ignore this section and follow the
+environment-appropriate generic workflow below.
 
 ---
 

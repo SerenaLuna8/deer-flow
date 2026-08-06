@@ -1,7 +1,19 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
-import { buildThreadSubmitMessages } from "@/core/threads/hooks";
+import {
+  buildThreadSubmitCheckpointOptions,
+  buildThreadSubmitMessages,
+  uploadedFileInfoToMessage,
+} from "@/core/threads/hooks";
+
+test("omits the SDK branch checkpoint after a successful compaction", () => {
+  expect(buildThreadSubmitCheckpointOptions(true)).toEqual({
+    checkpoint: null,
+  });
+  expect(buildThreadSubmitCheckpointOptions(false)).toEqual({});
+  expect(buildThreadSubmitCheckpointOptions(undefined)).toEqual({});
+});
 
 test("builds thread submit messages with hidden sidecar context before the visible user message", () => {
   const hiddenContext = {
@@ -15,6 +27,7 @@ test("builds thread submit messages with hidden sidecar context before the visib
 
   const messages = buildThreadSubmitMessages({
     text: "What should we do next?",
+    messageId: "human-visible-1",
     additionalInputMessages: [hiddenContext],
   });
 
@@ -22,6 +35,7 @@ test("builds thread submit messages with hidden sidecar context before the visib
     hiddenContext,
     {
       type: "human",
+      id: "human-visible-1",
       content: [{ type: "text", text: "What should we do next?" }],
       additional_kwargs: {},
     },
@@ -31,6 +45,7 @@ test("builds thread submit messages with hidden sidecar context before the visib
 test("keeps uploaded files on the visible user message only", () => {
   const messages = buildThreadSubmitMessages({
     text: "Use this file",
+    messageId: "human-visible-2",
     additionalInputMessages: [
       {
         type: "human",
@@ -40,6 +55,7 @@ test("keeps uploaded files on the visible user message only", () => {
     ],
     filesForSubmit: [
       {
+        file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
         filename: "report.pdf",
         size: 42,
         path: "/uploads/report.pdf",
@@ -52,6 +68,7 @@ test("keeps uploaded files on the visible user message only", () => {
   expect(messages[1]?.additional_kwargs).toEqual({
     files: [
       {
+        file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
         filename: "report.pdf",
         size: 42,
         path: "/uploads/report.pdf",
@@ -59,6 +76,51 @@ test("keeps uploaded files on the visible user message only", () => {
       },
     ],
   });
+});
+
+test("maps a private upload response to current-run file authority metadata", () => {
+  expect(
+    uploadedFileInfoToMessage({
+      id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+      kind: "upload",
+      filename: "report.pdf",
+      size: 42,
+      path: "/mnt/user-data/uploads/report.pdf",
+      virtual_path: "/mnt/user-data/uploads/report.pdf",
+      artifact_url: "/api/files/opaque",
+    }),
+  ).toEqual({
+    file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+    filename: "report.pdf",
+    size: 42,
+    path: "/mnt/user-data/uploads/report.pdf",
+    status: "uploaded",
+  });
+});
+
+test("rejects an uploaded response without an opaque file id", () => {
+  expect(() =>
+    uploadedFileInfoToMessage({
+      filename: "report.pdf",
+      size: 42,
+      path: "/mnt/user-data/uploads/report.pdf",
+      virtual_path: "/mnt/user-data/uploads/report.pdf",
+      artifact_url: "/api/files/opaque",
+    }),
+  ).toThrow("Uploaded file response is missing its opaque id");
+});
+
+test("rejects an uploaded response with a malformed opaque file id", () => {
+  expect(() =>
+    uploadedFileInfoToMessage({
+      id: "not-an-opaque-uuid",
+      filename: "report.pdf",
+      size: 42,
+      path: "/mnt/user-data/uploads/report.pdf",
+      virtual_path: "/mnt/user-data/uploads/report.pdf",
+      artifact_url: "/api/files/opaque",
+    }),
+  ).toThrow("Uploaded file response has an invalid opaque id");
 });
 
 test("keeps human input response metadata on the hidden user message", () => {
@@ -74,6 +136,7 @@ test("keeps human input response metadata on the hidden user message", () => {
 
   const messages = buildThreadSubmitMessages({
     text: 'For your clarification "Which environment?", my answer is: staging',
+    messageId: "human-hidden-response",
     additionalKwargs: {
       hide_from_ui: true,
       human_input_response: response,
@@ -83,6 +146,7 @@ test("keeps human input response metadata on the hidden user message", () => {
   expect(messages).toEqual([
     {
       type: "human",
+      id: "human-hidden-response",
       content: [
         {
           type: "text",

@@ -3,19 +3,12 @@
 
 Order of resolution:
 1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
-   extras can be layered (e.g. ``UV_EXTRAS=postgres,ollama``). The same
+   extras can be layered (e.g. ``UV_EXTRAS=ollama,discord``). The same
    parsing semantics apply in the Docker dev container via
    ``docker/dev-entrypoint.sh`` and in the production Docker image build via
    ``backend/Dockerfile``.
 2. Auto-detection from config.yaml — currently maps:
-   - database.backend == postgres        -> postgres
-   - checkpointer.type == postgres       -> postgres
-   - stream_bridge.type == redis         -> redis
-   - tools[].name == browser_navigate    -> browser
-   - sandbox.ownership.type == redis     -> redis
-3. Runtime environment toggles that enable optional backends:
-   - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
-   - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
+   - channels.discord.enabled == true -> discord
 
 Each extra name is validated against ``^[A-Za-z][A-Za-z0-9_-]*$`` (the same
 shape uv enforces for `[project.optional-dependencies]` keys). Anything else
@@ -23,7 +16,7 @@ is dropped with a stderr warning so a stray shell metacharacter in `.env`
 cannot reach the `uv sync` invocation downstream.
 
 Output: space-separated `--extra <name>` flags ready for splat into
-`uv sync`, e.g. `--extra postgres`. Empty output means "no extras".
+`uv sync`, e.g. `--extra discord`. Empty output means "no extras".
 
 Intentionally implemented with the standard library only: this script must run
 *before* `uv sync` has populated the venv, so it cannot depend on PyYAML.
@@ -40,12 +33,18 @@ from pathlib import Path
 # `uv sync --extra <name>` invocation free of shell metacharacters even when
 # `UV_EXTRAS` comes from `.env` or another semi-trusted source.
 _EXTRA_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _validate_extras(names: list[str]) -> list[str]:
     valid: list[str] = []
     for name in names:
-        if _EXTRA_NAME_RE.match(name):
+        if name.casefold() == "postgres":
+            print(
+                "detect_uv_extras: ignoring UV_EXTRAS entry 'postgres' (the postgres extra no longer exists; PostgreSQL dependencies are installed by default)",
+                file=sys.stderr,
+            )
+        elif _EXTRA_NAME_RE.match(name):
             valid.append(name)
         else:
             print(
@@ -62,22 +61,25 @@ def parse_env_extras(value: str) -> list[str]:
 
 
 def find_config_file() -> Path | None:
-    """Locate config.yaml using the same precedence as serve.sh."""
+    """Resolve explicit/env config first, otherwise repository-root config."""
     explicit = os.environ.get("DEER_FLOW_CONFIG_PATH")
     if explicit:
         candidate = Path(explicit)
-        if candidate.is_file():
-            return candidate
-    for path in (Path("config.yaml"), Path("backend/config.yaml")):
-        if path.is_file():
-            return path
+        if not candidate.is_file():
+            raise FileNotFoundError(
+                "Config file specified by DEER_FLOW_CONFIG_PATH "
+                f"does not exist: {candidate}"
+            )
+        return candidate.resolve()
+    path = REPO_ROOT / "config.yaml"
+    if path.is_file():
+        return path
     return None
 
 
 _SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
 _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
-_LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
 
 
 def _strip_comment(line: str) -> str:
@@ -109,7 +111,7 @@ def _unquote(value: str) -> str:
 def section_value(lines: list[str], section: str, key: str) -> str | None:
     """Return the value of `section.key` from a flat-ish YAML, or None.
 
-    Only handles the shallow shape DeerFlow uses for these settings:
+    Only handles the shallow shape ActWeave uses for these settings:
         database:
           backend: postgres
     Nested mappings deeper than the immediate child level are ignored on
@@ -224,32 +226,6 @@ def nested_section_value(lines: list[str], section_path: str, key: str) -> str |
     return None
 
 
-def tools_include_name(lines: list[str], tool_name: str) -> bool:
-    """Return True when the top-level tools list has an active item name."""
-    inside = False
-    for raw in lines:
-        line = _strip_comment(raw)
-        if not line.strip():
-            continue
-        sect_match = _SECTION_RE.match(line)
-        if sect_match:
-            inside = sect_match.group(1) == "tools"
-            continue
-        if not inside:
-            continue
-        name_match = _LIST_ITEM_NAME_RE.match(line)
-        if name_match:
-            if _unquote(name_match.group(1).strip()) == tool_name:
-                return True
-            continue
-        stripped = line.lstrip()
-        indent = len(line) - len(stripped)
-        if indent == 0:
-            inside = False
-            continue
-    return False
-
-
 def detect_from_config(path: Path) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -257,27 +233,15 @@ def detect_from_config(path: Path) -> list[str]:
         return []
     lines = text.splitlines()
     extras: set[str] = set()
-    if (section_value(lines, "database", "backend") or "").lower() == "postgres":
-        extras.add("postgres")
-    if (section_value(lines, "checkpointer", "type") or "").lower() == "postgres":
-        extras.add("postgres")
-    if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
-        extras.add("redis")
-    if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
-        extras.add("redis")
-    if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
+    if (
+        nested_section_value(lines, "channels.discord", "enabled") or ""
+    ).lower() == "true":
         extras.add("discord")
-    if tools_include_name(lines, "browser_navigate"):
-        extras.add("browser")
     return sorted(extras)
 
 
 def detect_from_runtime_env() -> list[str]:
     extras: set[str] = set()
-    if os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "").strip():
-        extras.add("redis")
-    if os.environ.get("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "").strip():
-        extras.add("redis")
     return sorted(extras)
 
 

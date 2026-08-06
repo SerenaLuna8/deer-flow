@@ -1,174 +1,43 @@
 ---
 title: Memory
-description: Memory is a runtime feature of the DeerFlow Harness. It is not a simple conversation log — it is a structured store of facts and context summaries that persist across separate sessions and inform the agent's behavior in future conversations.
+description: Project-scoped long-term Memory built from SNIP archives and Dream.
 ---
-
-import { Callout } from "nextra/components";
 
 # Memory
 
-<Callout type="info" emoji="💾">
-  Memory lets DeerFlow carry useful information across sessions. The agent
-  remembers user preferences, project context, and recurring facts so it can
-  give better responses without starting from zero every time.
-</Callout>
+Project Memory is one private, versioned Markdown document for each authenticated owner in a project. PostgreSQL stores the current document, pending history entries, Dream runs, immutable document versions, and the exact document snapshot frozen for each admitted Run. The server derives project, owner, and the fixed internal namespace from the authenticated request; the browser cannot select another scope.
 
-Memory is a runtime feature of the DeerFlow Harness. It is not a simple conversation log — it is a structured store of facts and context summaries that persist across separate sessions and inform the agent's behavior in future conversations.
+Thread summaries remain separate. They compact one Thread's model context and are preserved when long-term Memory is reset.
 
-## What memory stores
+## SNIP and pending history
 
-The memory store holds several categories of information:
+When a Thread is compacted, SNIP makes one bounded model call over complete older turns. Its validated tagged output becomes both the Thread's `summary_text` and a pending private history entry. An exact `(nothing)` still updates the Thread summary but creates no long-term entry. The checkpoint receipt and database transaction use an idempotent handshake so a retry cannot archive the same compaction twice.
 
-- **Work context**: summaries of ongoing projects, goals, and recurring topics the user works on.
-- **Personal context**: preferences, communication style, and other user-specific details the agent has learned.
-- **Top of mind**: the most recent focus areas and active tasks.
-- **History**: recent months' context, earlier background, and long-term facts.
-- **Facts**: discrete, specific facts the agent has extracted from conversations (e.g., preferred tools, team names, project constraints).
+Use `/compact` to run only this Thread-local compaction. The full visible chat remains available.
 
-Each category is updated over time as the agent learns from ongoing conversations.
+## Dream
 
-## How it works
+Dream periodically organizes at most the oldest 20 pending entries into the current document. The isolated Dream session receives only the current document, the bounded pending batch, and in-memory read/replace tools. It has no shared Agent, files, shell, web, MCP, Skill, or Subagent access.
 
-Memory has two operation modes:
+Document replacement, a new immutable version, a real unified diff, cursor advancement, pending-entry tombstones, and Job success settle atomically. If model, tool, validation, timeout, or database work fails, the document and pending entries remain unchanged for a safe retry.
 
-1. **Injection in both modes**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
-2. **Middleware mode (default)**: `MemoryMiddleware` runs after each Lead Agent turn. It filters the conversation, queues a background update, and extracts new facts automatically. Updates are debounced by `debounce_seconds` to batch rapid changes.
-3. **Tool mode (experimental)**: DeerFlow registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` as agent tools and skips `MemoryMiddleware`. The model decides when to search or write memory, so effectiveness depends on model tool-use behavior. These explicit CRUD tools are not the passive staleness-review path; operators who enable tool mode are opting into model-directed updates/deletes instead of the middleware staleness guardrails.
-4. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+`/Dream` first compacts the current Thread and then admits one manual Dream batch. The Memory page's **Organize now** action admits the same job without changing chat messages.
 
-In tool mode, the four `memory_*` tool names are reserved. If an MCP server or custom tool already uses `memory_search`, `memory_add`, `memory_update`, or `memory_delete`, the existing tool keeps that name and the colliding memory tool is skipped with a warning.
+## Recall
 
-## Configuration
+Run admission reads the current bounded document once and freezes it in a single Run snapshot. Worker model boundaries reuse only that snapshot; first recall performs no model call, vector lookup, or ranking query. Dream finishing during a Run cannot change that Run's Memory.
 
-```yaml
-memory:
-  enabled: true
-  injection_enabled: true
+When enabled, the complete frozen document is injected as a hidden, low-authority Human message marked as private data rather than an instruction. Turning Memory off skips injection at the next model boundary. Reset removes long-term documents, history, versions, Dream records, and Run Memory snapshots while preserving chats and Thread summaries.
 
-  # Backend selector: deermem (default) | noop | openviking | a dotted path to a custom
-  # MemoryManager subclass. Swap backend = drop a backends/<name>/ folder and
-  # set this (see backend/.../agents/memory/backends/).
-  manager_class: deermem
+## Project Memory page
 
-  # Operation mode:
-  #   middleware - default; passive background extraction after each turn
-  #   tool - experimental; model calls memory_* tools directly
-  mode: middleware
+The project page shows only:
 
-  # DeerMem-private knobs. These live under backend_config (NOT at the top
-  # level) because they are DeerMem-specific -- a different backend
-  # self-interprets its own backend_config. Unknown keys are ignored.
-  backend_config:
-    # Data root. Empty = deer-flow base_dir; per-user memory at
-    # {root}/users/{user_id}/memory.json. Absolute path = that root.
-    storage_path: ""
+- the current long-term document, version, update time, and pending count;
+- **Organize now** and an active-Dream state;
+- Dream and restore history with the processed count and real diff;
+- each saved document version and an explicit restore confirmation.
 
-    # Storage class (empty = FileMemoryStorage, the portable default; no importlib).
-    storage_class: ""
+Restore writes the selected historical content as a new version. It never rewinds the history cursor or deletes later records. `/dream-log [version]` opens this history, and `/dream-restore <version>` asks for confirmation before calling the restore API. None of these commands is sent to the normal Agent chat flow.
 
-    # Seconds to wait before processing queued memory updates (debounce)
-    debounce_seconds: 30
-
-    # LLM for memory extraction. Omit all fields = the host factory injects the
-    # app default model (mirrors the old model_name: null). Set explicitly to
-    # use a different/cheaper model.
-    model:
-      # provider: openai
-      # model: gpt-4o-mini
-      # api_key: $OPENAI_API_KEY
-      # base_url:               # optional, for OpenAI-compatible gateways
-      # temperature:            # optional
-
-    # Maximum number of facts to store
-    max_facts: 100
-
-    # Minimum confidence score required to store a fact (0.0–1.0)
-    fact_confidence_threshold: 0.7
-
-    # Maximum tokens to use for memory injection into system prompt
-    max_injection_tokens: 2000
-```
-
-## OpenViking HTTP backend
-
-Set `manager_class: openviking` to send completed turns to an independent
-OpenViking server and recall its memory over HTTP. This backend currently
-supports middleware mode only; DeerMem remains the default.
-
-```yaml
-memory:
-  enabled: true
-  injection_enabled: true
-  manager_class: openviking
-  mode: middleware
-  backend_config:
-    base_url: http://openviking:1933
-    auth_mode: trusted
-    account: deerflow
-    api_key_env: OPENVIKING_API_KEY
-    failure_policy:
-      read: fail_open
-      write: log_and_drop
-    retrieval:
-      top_k: 8
-      score_threshold: 0.25
-      max_injection_chars: 12000
-```
-
-The backend hashes each DeerFlow user/agent scope into a distinct OpenViking
-trusted identity. Keep trusted-mode OpenViking on an internal network and put
-the API key in the server environment, not directly in `config.yaml`.
-
-## Global vs per-agent memory
-
-DeerFlow supports two levels of memory:
-
-- **Global memory**: stored at `{base_dir}/memory.json`. Used when no specific agent is active or when the agent has no per-agent memory file.
-- **Per-agent memory**: stored at `{base_dir}/agents/{agent_name}/memory.json`. Used when a custom agent is active, keeping that agent's learned knowledge separate.
-
-The `MemoryMiddleware` automatically selects the correct memory file based on the active `agent_name` in the request configuration.
-
-Agent names used for memory storage are validated against `AGENT_NAME_PATTERN` to ensure filesystem safety.
-
-## Storage location
-
-By default, memory files are stored under the backend base directory:
-
-- Base directory: `backend/.deer-flow/`
-- Global memory: `backend/.deer-flow/memory.json`
-- Per-agent memory: `backend/.deer-flow/agents/{agent_name}/memory.json`
-
-You can change the storage path with the `storage_path` field. Relative paths are resolved against the base directory. Use an absolute path to store memory in a custom location.
-
-## Custom storage backend
-
-The `storage_class` field allows you to replace the default file-based storage with a custom implementation. Any class that extends `MemoryStorage` and implements `load()`, `reload()`, and `save()` methods can be used:
-
-```yaml
-memory:
-  storage_class: mypackage.storage.RedisMemoryStorage
-```
-
-If the configured class cannot be loaded, the system falls back to the default `FileMemoryStorage` and logs an error.
-
-## Disabling memory
-
-To disable memory entirely:
-
-```yaml
-memory:
-  enabled: false
-```
-
-To keep memory storage but prevent injection into the system prompt:
-
-```yaml
-memory:
-  enabled: true
-  injection_enabled: false
-```
-
-<Cards num={2}>
-  <Cards.Card title="Configuration" href="/docs/harness/configuration" />
-  <Cards.Card title="Middlewares" href="/docs/harness/middlewares" />
-</Cards>
+Runs without a trusted project-private scope cannot read, inject, organize, restore, or reset Memory.

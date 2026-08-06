@@ -18,8 +18,7 @@ class UserNotFoundError(LookupError):
 class UserRepository(ABC):
     """Abstract interface for user data storage.
 
-    Implement this interface to support different storage backends
-    (SQLite)
+    Implement this interface for user persistence.
     """
 
     @abstractmethod
@@ -30,10 +29,7 @@ class UserRepository(ABC):
             user: User object to create
 
         Returns:
-            Created User with ID assigned. ``email`` is the canonical
-            (lowercase) stored form, which may differ in case from what was
-            passed in -- implementations mutate the input ``user`` in place
-            to reflect this rather than returning a fresh object.
+            Created User with ID assigned
 
         Raises:
             ValueError: If email already exists
@@ -72,9 +68,7 @@ class UserRepository(ABC):
             user: User object with updated fields
 
         Returns:
-            Updated User. ``email`` is the canonical (lowercase) stored
-            form -- implementations mutate the input ``user`` in place to
-            reflect this rather than returning a fresh object.
+            Updated User
 
         Raises:
             UserNotFoundError: If no row exists for ``user.id``. This is
@@ -90,7 +84,7 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def count_admin_users(self) -> int:
-        """Return number of users with system_role == 'admin'."""
+        """Return number of users with system_role == 'system_admin'."""
         raise NotImplementedError
 
     @abstractmethod

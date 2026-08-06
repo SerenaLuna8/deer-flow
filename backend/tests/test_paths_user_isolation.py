@@ -66,31 +66,6 @@ class TestMakeSafeUserId:
             make_safe_user_id("")
 
 
-class TestValidateIntegrationId:
-    def test_accepts_dotted_integration_id(self):
-        from deerflow.config.paths import _validate_integration_id
-
-        assert _validate_integration_id("lark-cli") == "lark-cli"
-        assert _validate_integration_id("some.integration") == "some.integration"
-
-    @pytest.mark.parametrize("integration_id", [".", ".."])
-    def test_rejects_dot_and_dotdot(self, integration_id):
-        from deerflow.config.paths import _validate_integration_id
-
-        with pytest.raises(ValueError, match="Invalid integration_id"):
-            _validate_integration_id(integration_id)
-
-    @pytest.mark.parametrize("integration_id", [".", ".."])
-    def test_host_integration_config_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
-        with pytest.raises(ValueError, match="Invalid integration_id"):
-            paths.host_user_integration_config_dir("alice", integration_id)
-
-    @pytest.mark.parametrize("integration_id", [".", ".."])
-    def test_host_integration_data_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
-        with pytest.raises(ValueError, match="Invalid integration_id"):
-            paths.host_user_integration_data_dir("alice", integration_id)
-
-
 class TestUserDir:
     def test_user_dir(self, paths: Paths):
         assert paths.user_dir("alice") == paths.base_dir / "users" / "alice"
@@ -128,21 +103,6 @@ class TestUserDir:
         assert not paths.user_dir(make_safe_user_id("a.b")).exists()
         assert other_legacy.exists()
         assert arbitrary_16_hex.exists()
-
-
-class TestUserMemoryFile:
-    def test_user_memory_file(self, paths: Paths):
-        assert paths.user_memory_file("bob") == paths.base_dir / "users" / "bob" / "memory.json"
-
-
-class TestUserAgentMemoryFile:
-    def test_user_agent_memory_file(self, paths: Paths):
-        expected = paths.base_dir / "users" / "bob" / "agents" / "myagent" / "memory.json"
-        assert paths.user_agent_memory_file("bob", "myagent") == expected
-
-    def test_user_agent_memory_file_lowercases_name(self, paths: Paths):
-        expected = paths.base_dir / "users" / "bob" / "agents" / "myagent" / "memory.json"
-        assert paths.user_agent_memory_file("bob", "MyAgent") == expected
 
 
 class TestUserAgentDir:

@@ -1,9 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-@source "../../node_modules/streamdown/dist/index.js";
-@source "../../node_modules/@streamdown/code/dist/*.js";
-@source "../../node_modules/@streamdown/mermaid/dist/*.js";
+@source "../node_modules/streamdown/dist/index.js";
 
 /* Heading */
 @source inline("text-{xs,sm,base,lg,xl,2xl,3xl,4xl,5xl,6xl}");
@@ -72,16 +70,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@keyframes streaming-list-marker-fade-in {
-  from {
-    color: transparent;
-  }
-}
-
-[data-streaming-list-item]::marker {
-  animation: streaming-list-marker-fade-in 200ms ease both;
-}
-
 @theme {
   --font-sans:
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
@@ -94,16 +82,6 @@
     }
     100% {
       opacity: 1;
-    }
-  }
-
-  --animate-loading-bar: loading-bar 1s ease-in-out infinite;
-  @keyframes loading-bar {
-    0% {
-      transform: translateX(-100%);
-    }
-    100% {
-      transform: translateX(400%);
     }
   }
 
@@ -194,6 +172,11 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-selection: var(--selection);
+  --color-selection-foreground: var(--selection-foreground);
+  --color-selection-subtle: var(--selection-subtle);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -246,37 +229,42 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(0.9855 0.0098 87.47);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0.0098 87.47);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0.0098 87.47);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.9455 0.0098 87.47);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0.0098 87.47);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.94 0.0098 87.47);
-  --accent-foreground: oklch(0.205 0 0);
+  --background: #ffffff;
+  --foreground: #17181c;
+  --card: #ffffff;
+  --card-foreground: #17181c;
+  --popover: #ffffff;
+  --popover-foreground: #17181c;
+  --primary: #17181c;
+  --primary-foreground: #ffffff;
+  --secondary: #f7f8fa;
+  --secondary-foreground: #17181c;
+  --muted: #f7f8fa;
+  --muted-foreground: #697180;
+  --accent: #f7f8fa;
+  --accent-foreground: #17181c;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0.0098 87.47);
-  --input: oklch(0.88 0.0098 87.47);
-  --ring: oklch(0.58 0.18 255);
+  --border: #e5e7eb;
+  --input: #d7dbe2;
+  --ring: #5b5bd6;
+  --selection: #5b5bd6;
+  --selection-foreground: #ffffff;
+  --selection-subtle: #f1f0ff;
+  --success: #18a67a;
+  --success-foreground: #063227;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.965 0.0098 87.47);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0.0098 87.47);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.925 0.0098 87.47);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0.0098 87.47);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #f7f8fa;
+  --sidebar-foreground: #17181c;
+  --sidebar-primary: #17181c;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f1f0ff;
+  --sidebar-accent-foreground: #17181c;
+  --sidebar-border: #e5e7eb;
+  --sidebar-ring: #5b5bd6;
 }
 
 .dark {
@@ -298,6 +286,11 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.74 0.16 255);
+  --selection: #8b8ae8;
+  --selection-foreground: #ffffff;
+  --selection-subtle: #302e47;
+  --success: #34c99a;
+  --success-foreground: #082d24;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
@@ -446,4 +439,5 @@
   --container-width-sm: calc(var(--spacing) * 144);
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
+  --chat-content-width: var(--container-width-md);
 }

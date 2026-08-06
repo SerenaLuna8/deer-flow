@@ -1,13 +1,15 @@
-import { getBackendBaseURL } from "@/core/config";
+import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
 
 import type { WorkspaceChangesResponse } from "./types";
 
 export async function fetchWorkspaceChanges({
+  privateWork,
   threadId,
   runId,
   includeFiles = true,
   includeDiff = true,
 }: {
+  privateWork: ProjectPrivateWorkScope;
   threadId: string;
   runId: string;
   includeFiles?: boolean;
@@ -18,7 +20,7 @@ export async function fetchWorkspaceChanges({
     include_diff: includeDiff ? "true" : "false",
   });
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+    `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
       threadId,
     )}/runs/${encodeURIComponent(runId)}/workspace-changes?${query}`,
   );

@@ -1,8 +1,8 @@
-"""BoxLite micro-VM backend for DeerFlow sandboxes.
+"""BoxLite micro-VM backend for ActWeave sandboxes.
 
 Integrates `BoxLite <https://github.com/boxlite-ai/boxlite>`_ — a daemonless,
 OCI-native micro-VM runtime (libkrun/KVM on Linux, Hypervisor.framework on
-macOS) — behind DeerFlow's :class:`Sandbox` / :class:`SandboxProvider` contract.
+macOS) — behind ActWeave's :class:`Sandbox` / :class:`SandboxProvider` contract.
 Each sandbox is a hardware-isolated VM with its own kernel that runs any OCI
 image unchanged. See https://github.com/bytedance/deer-flow/issues/3936.
 
@@ -27,7 +27,7 @@ Install the optional runtime before selecting this provider::
     pip install "deerflow-harness[boxlite]"
 
 Host requirement: BoxLite boots micro-VMs, so a Linux host needs KVM (nested
-virtualization when DeerFlow itself runs inside a cloud VM); macOS uses
+virtualization when ActWeave itself runs inside a cloud VM); macOS uses
 Hypervisor.framework.
 """
 

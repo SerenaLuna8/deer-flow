@@ -4,7 +4,43 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessage
+from deerflow.runtime.private_scope import PrivateResourceScope
+
+
+def attach_resolved_connection_identity(
+    inbound: InboundMessage,
+    connection: Any,
+) -> InboundMessage:
+    """Attach one server-resolved connection without treating it as authority."""
+
+    inbound.connection_id = None
+    inbound.private_scope = None
+    if connection is None:
+        return inbound
+    try:
+        membership_version = int(connection.get("membership_version", 1))
+        scope = PrivateResourceScope(
+            project_id=str(connection["project_id"]),
+            owner_user_id=str(connection["owner_user_id"]),
+            membership_version=membership_version,
+        )
+        if membership_version < 1:
+            raise ValueError
+        connection_id = str(connection["id"])
+        if not connection_id:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        return inbound
+    inbound.connection_id = connection_id
+    inbound.private_scope = scope
+    resolved_conversation_id = connection.get("resolved_conversation_id")
+    resolved_topic_id = connection.get("resolved_topic_id")
+    if isinstance(resolved_conversation_id, str) and resolved_conversation_id:
+        inbound.resolved_conversation_id = resolved_conversation_id
+        inbound.resolved_topic_id = resolved_topic_id if isinstance(resolved_topic_id, str) and resolved_topic_id else None
+    return inbound
 
 
 async def attach_connection_identity(
@@ -13,32 +49,24 @@ async def attach_connection_identity(
     repo: Any,
     provider: str,
     workspace_id: str | None,
-    fallback_without_workspace: bool = False,
 ) -> InboundMessage:
-    """Attach connection metadata to an inbound message when a persisted binding exists."""
+    """Attach only the exact server-resolved connection coordinate.
+
+    The immutable private scope attached here is limited to PostgreSQL
+    conversation-alias lookup. The private-work resolver re-reads connection,
+    project, owner, membership and capability immediately before creating a
+    Thread or Run, so this mutable message never becomes execution authority.
+    """
+    inbound.workspace_id = workspace_id
     if repo is None:
-        return inbound
-
-    workspace_candidates: list[str | None] = []
-    if workspace_id:
-        workspace_candidates.append(workspace_id)
-    if fallback_without_workspace:
-        workspace_candidates.append(None)
-    if not workspace_candidates:
-        return inbound
-
-    for candidate in workspace_candidates:
-        connection = await repo.find_connection_by_external_identity(
-            provider=provider,
-            external_account_id=inbound.user_id,
-            workspace_id=candidate,
-        )
-        if connection is None:
-            continue
-
-        inbound.connection_id = connection["id"]
-        inbound.owner_user_id = connection["owner_user_id"]
-        inbound.workspace_id = connection.get("workspace_id")
-        return inbound
-
-    return inbound
+        return attach_resolved_connection_identity(inbound, None)
+    connection = await repo.find_connection_by_external_identity(
+        provider=provider,
+        channel_instance_id=persisted_channel_instance_id(
+            provider,
+            inbound.channel_instance_id,
+        ),
+        external_account_id=inbound.user_id,
+        workspace_id=workspace_id,
+    )
+    return attach_resolved_connection_identity(inbound, connection)

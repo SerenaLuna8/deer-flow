@@ -18,7 +18,9 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import openai
@@ -44,10 +46,23 @@ _CUMULATIVE_USAGE_TRACKER_CAPACITY = 1024
 _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS = 60 * 60
 
 
-def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
-    """Map DeerFlow's legacy ``thinking`` toggle to vLLM/Qwen's ``enable_thinking``.
+@dataclass(slots=True)
+class _UsageStreamScope:
+    """Keep one streaming request's tracker keys isolated and recoverable."""
 
-    DeerFlow originally documented ``extra_body.chat_template_kwargs.thinking``
+    marker: object = field(default_factory=object)
+
+
+_ACTIVE_USAGE_STREAM_SCOPE: ContextVar[_UsageStreamScope | None] = ContextVar(
+    "vllm_active_usage_stream_scope",
+    default=None,
+)
+
+
+def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
+    """Map ActWeave's legacy ``thinking`` toggle to vLLM/Qwen's ``enable_thinking``.
+
+    The legacy DeerFlow configuration documented ``extra_body.chat_template_kwargs.thinking``
     for vLLM, but vLLM 0.19.0's Qwen reasoning parser reads
     ``chat_template_kwargs.enable_thinking``. Normalize the payload just before
     it is sent so existing configs keep working and flash mode can truly
@@ -166,11 +181,11 @@ def _restore_reasoning_field(payload_msg: dict[str, Any], orig_msg: AIMessage) -
 
 def _get_completion_id(chunk: Mapping[str, Any]) -> str | None:
     """Return a stable completion id when the provider supplied one."""
+
     candidates = [chunk.get("id")]
     nested_chunk = chunk.get("chunk")
     if isinstance(nested_chunk, Mapping):
         candidates.append(nested_chunk.get("id"))
-
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
@@ -186,36 +201,153 @@ class VllmChatModel(ChatOpenAI):
         default=False,
         description=("Treat streaming usage snapshots from vLLM as cumulative per completion and convert them to per-chunk deltas."),
     )
-    _cumulative_usage_by_completion: OrderedDict[str, tuple[UsageMetadata, float]] = PrivateAttr(default_factory=OrderedDict)
+    _cumulative_usage_by_completion: OrderedDict[
+        object,
+        tuple[UsageMetadata, float],
+    ] = PrivateAttr(default_factory=OrderedDict)
+    _terminal_usage_by_completion: OrderedDict[object, UsageMetadata] = PrivateAttr(default_factory=OrderedDict)
     _cumulative_usage_lock: Any = PrivateAttr(default_factory=threading.Lock)
 
     @property
     def _llm_type(self) -> str:
         return "vllm-openai-compatible"
 
-    def _usage_delta(self, completion_id: str, usage: UsageMetadata, *, terminal: bool) -> UsageMetadata:
-        """Convert a completion's cumulative usage snapshot into a delta."""
+    def _usage_delta(
+        self,
+        completion_id: str,
+        usage: UsageMetadata,
+        *,
+        terminal: bool,
+        remember_terminal: bool = False,
+    ) -> UsageMetadata:
+        """Convert one completion's cumulative usage snapshot into a delta."""
+
+        tracker_key = self._usage_tracker_key(completion_id)
         with self._cumulative_usage_lock:
-            previous_snapshot = self._cumulative_usage_by_completion.get(completion_id)
+            previous_snapshot = self._cumulative_usage_by_completion.get(tracker_key)
             previous = previous_snapshot[0] if previous_snapshot is not None else None
+            if previous is None and terminal:
+                previous = self._terminal_usage_by_completion.pop(
+                    tracker_key,
+                    None,
+                )
             delta = subtract_usage(usage, previous)
             if terminal:
-                self._cumulative_usage_by_completion.pop(completion_id, None)
+                self._cumulative_usage_by_completion.pop(tracker_key, None)
+                if remember_terminal:
+                    self._terminal_usage_by_completion[tracker_key] = usage
+                    self._terminal_usage_by_completion.move_to_end(tracker_key)
+                    while len(self._terminal_usage_by_completion) > _CUMULATIVE_USAGE_TRACKER_CAPACITY:
+                        self._terminal_usage_by_completion.popitem(last=False)
             else:
                 now = time.monotonic()
-                self._cumulative_usage_by_completion[completion_id] = (usage, now)
-                self._cumulative_usage_by_completion.move_to_end(completion_id)
+                self._cumulative_usage_by_completion[tracker_key] = (
+                    usage,
+                    now,
+                )
+                self._cumulative_usage_by_completion.move_to_end(tracker_key)
                 while len(self._cumulative_usage_by_completion) > _CUMULATIVE_USAGE_TRACKER_CAPACITY:
-                    oldest_completion_id, (_, updated_at) = next(iter(self._cumulative_usage_by_completion.items()))
-                    if now - updated_at < _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS:
-                        break
-                    self._cumulative_usage_by_completion.pop(oldest_completion_id, None)
+                    oldest_key, (_, updated_at) = next(iter(self._cumulative_usage_by_completion.items()))
+                    if now - updated_at >= _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS:
+                        self._cumulative_usage_by_completion.pop(oldest_key, None)
+                        continue
+                    # Memory safety is a hard boundary. If every entry is
+                    # active, evict the least recently updated snapshot; that
+                    # one stream may report its next cumulative value in full,
+                    # but the Worker cache can never grow without bound.
+                    self._cumulative_usage_by_completion.popitem(last=False)
             return delta
 
-    def _clear_usage_snapshot(self, completion_id: str) -> None:
-        """Forget a completed stream even when its terminal frame has no usage."""
+    def _usage_tracker_key(self, completion_id: str) -> object:
+        scope = _ACTIVE_USAGE_STREAM_SCOPE.get()
+        if scope is None:
+            return completion_id
+        return (scope.marker, completion_id)
+
+    def _finish_usage_snapshot_without_usage(self, completion_id: str) -> None:
+        """Move the last cumulative value to the bounded terminal dedupe map."""
+
+        tracker_key = self._usage_tracker_key(completion_id)
         with self._cumulative_usage_lock:
-            self._cumulative_usage_by_completion.pop(completion_id, None)
+            previous = self._cumulative_usage_by_completion.pop(
+                tracker_key,
+                None,
+            )
+            if previous is None:
+                return
+            self._terminal_usage_by_completion[tracker_key] = previous[0]
+            self._terminal_usage_by_completion.move_to_end(tracker_key)
+            while len(self._terminal_usage_by_completion) > _CUMULATIVE_USAGE_TRACKER_CAPACITY:
+                self._terminal_usage_by_completion.popitem(last=False)
+
+    def _clear_usage_scope(self, scope: _UsageStreamScope) -> None:
+        def belongs_to_scope(tracker_key: object) -> bool:
+            return isinstance(tracker_key, tuple) and len(tracker_key) == 2 and tracker_key[0] is scope.marker
+
+        with self._cumulative_usage_lock:
+            for tracker_key in tuple(self._cumulative_usage_by_completion):
+                if belongs_to_scope(tracker_key):
+                    self._cumulative_usage_by_completion.pop(
+                        tracker_key,
+                        None,
+                    )
+            for tracker_key in tuple(self._terminal_usage_by_completion):
+                if belongs_to_scope(tracker_key):
+                    self._terminal_usage_by_completion.pop(
+                        tracker_key,
+                        None,
+                    )
+
+    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        """Always release usage snapshots after success, error, or cancellation."""
+
+        if not self.cumulative_stream_usage:
+            yield from super()._stream(*args, **kwargs)
+            return
+
+        scope = _UsageStreamScope()
+        stream = super()._stream(*args, **kwargs)
+        try:
+            while True:
+                token = _ACTIVE_USAGE_STREAM_SCOPE.set(scope)
+                try:
+                    chunk = next(stream)
+                except StopIteration:
+                    return
+                finally:
+                    _ACTIVE_USAGE_STREAM_SCOPE.reset(token)
+                yield chunk
+        finally:
+            self._clear_usage_scope(scope)
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+        """Async counterpart of :meth:`_stream` with cancellation cleanup."""
+
+        if not self.cumulative_stream_usage:
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
+            return
+
+        scope = _UsageStreamScope()
+        stream = super()._astream(*args, **kwargs)
+        try:
+            while True:
+                token = _ACTIVE_USAGE_STREAM_SCOPE.set(scope)
+                try:
+                    chunk = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                finally:
+                    _ACTIVE_USAGE_STREAM_SCOPE.reset(token)
+                yield chunk
+        finally:
+            self._clear_usage_scope(scope)
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                await close()
 
     def _get_request_payload(
         self,
@@ -281,10 +413,18 @@ class VllmChatModel(ChatOpenAI):
         if len(choices) == 0:
             generation_chunk = ChatGenerationChunk(message=default_chunk_class(content="", usage_metadata=usage_metadata), generation_info=base_generation_info)
             if completion_id is not None:
-                if usage_metadata is not None and isinstance(generation_chunk.message, AIMessageChunk):
-                    generation_chunk.message.usage_metadata = self._usage_delta(completion_id, usage_metadata, terminal=True)
+                if usage_metadata is not None and isinstance(
+                    generation_chunk.message,
+                    AIMessageChunk,
+                ):
+                    generation_chunk.message.usage_metadata = self._usage_delta(
+                        completion_id,
+                        usage_metadata,
+                        terminal=True,
+                        remember_terminal=True,
+                    )
                 else:
-                    self._clear_usage_snapshot(completion_id)
+                    self._finish_usage_snapshot_without_usage(completion_id)
             if self.output_version == "v1":
                 generation_chunk.message.content = []
                 generation_chunk.message.response_metadata["output_version"] = "v1"
@@ -297,7 +437,8 @@ class VllmChatModel(ChatOpenAI):
         message_chunk = _convert_delta_to_message_chunk_with_reasoning(choice["delta"], default_chunk_class)
         generation_info = {**base_generation_info} if base_generation_info else {}
 
-        if finish_reason := choice.get("finish_reason"):
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
             generation_info["finish_reason"] = finish_reason
             if model_name := chunk.get("model"):
                 generation_info["model_name"] = model_name
@@ -311,8 +452,15 @@ class VllmChatModel(ChatOpenAI):
 
         if usage_metadata and isinstance(message_chunk, AIMessageChunk):
             if completion_id is not None:
-                usage_metadata = self._usage_delta(completion_id, usage_metadata, terminal=False)
+                usage_metadata = self._usage_delta(
+                    completion_id,
+                    usage_metadata,
+                    terminal=bool(finish_reason),
+                    remember_terminal=bool(finish_reason),
+                )
             message_chunk.usage_metadata = usage_metadata
+        elif completion_id is not None and finish_reason:
+            self._finish_usage_snapshot_without_usage(completion_id)
 
         message_chunk.response_metadata["model_provider"] = "openai"
         return ChatGenerationChunk(message=message_chunk, generation_info=generation_info or None)

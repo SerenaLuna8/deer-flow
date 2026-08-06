@@ -5,10 +5,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
+import { usePrivateWorkAccess } from "../private-work/provider";
+import { privateWorkQueryKey } from "../private-work/query-keys";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+  type ProjectPrivateWorkScope,
+} from "../private-work/types";
+
 import {
   deleteUploadedFile,
   getUploadLimits,
   listUploadedFiles,
+  supportsUploadLimits,
   uploadFiles,
   type UploadedFileInfo,
   type UploadResponse,
@@ -16,13 +25,23 @@ import {
 
 /**
  * Hook to load the gateway-enforced upload limits.
- * Callers intentionally degrade to server-side validation if this request fails.
+ * Submission performs a second fail-closed preflight immediately before the
+ * first sequential POST; the server remains authoritative for 413/429 races.
  */
-export function useUploadLimits(threadId: string) {
+export function useUploadLimits(
+  threadId: string,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery({
-    queryKey: ["uploads", "limits", threadId],
-    queryFn: () => getUploadLimits(threadId),
-    enabled: !!threadId,
+    queryKey: privateWorkQueryKey(
+      privateWork.scope,
+      "uploads",
+      "limits",
+      threadId,
+    ),
+    queryFn: ({ signal }) => getUploadLimits(threadId, privateWork, signal),
+    enabled: !!threadId && supportsUploadLimits(privateWork),
     retry: false,
     staleTime: 60_000,
   });
@@ -31,15 +50,34 @@ export function useUploadLimits(threadId: string) {
 /**
  * Hook to upload files
  */
-export function useUploadFiles(threadId: string) {
+export function useUploadFiles(
+  threadId: string,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
 
   return useMutation<UploadResponse, Error, File[]>({
-    mutationFn: (files: File[]) => uploadFiles(threadId, files),
+    mutationKey: privateWorkQueryKey(
+      privateWork.scope,
+      "uploads",
+      "create",
+      threadId,
+    ),
+    mutationFn: (files: File[]) =>
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        uploadFiles(threadId, files, privateWork, signal),
+      ),
     onSuccess: () => {
+      if (!isPrivateWorkAccessActive(privateWork)) return;
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
-        queryKey: ["uploads", "list", threadId],
+        queryKey: privateWorkQueryKey(
+          privateWork.scope,
+          "uploads",
+          "list",
+          threadId,
+        ),
       });
     },
   });
@@ -48,26 +86,55 @@ export function useUploadFiles(threadId: string) {
 /**
  * Hook to list uploaded files
  */
-export function useUploadedFiles(threadId: string) {
+export function useUploadedFiles(
+  threadId: string,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+  enabled = true,
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery({
-    queryKey: ["uploads", "list", threadId],
-    queryFn: () => listUploadedFiles(threadId),
-    enabled: !!threadId,
+    queryKey: privateWorkQueryKey(
+      privateWork.scope,
+      "uploads",
+      "list",
+      threadId,
+    ),
+    queryFn: ({ signal }) => listUploadedFiles(threadId, privateWork, signal),
+    enabled: !!threadId && enabled,
   });
 }
 
 /**
  * Hook to delete an uploaded file
  */
-export function useDeleteUploadedFile(threadId: string) {
+export function useDeleteUploadedFile(
+  threadId: string,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (filename: string) => deleteUploadedFile(threadId, filename),
+    mutationKey: privateWorkQueryKey(
+      privateWork.scope,
+      "uploads",
+      "delete",
+      threadId,
+    ),
+    mutationFn: (filename: string) =>
+      runPrivateWorkAbortable(privateWork, (signal) =>
+        deleteUploadedFile(threadId, filename, privateWork, signal),
+      ),
     onSuccess: () => {
+      if (!isPrivateWorkAccessActive(privateWork)) return;
       // Invalidate the uploaded files list
       void queryClient.invalidateQueries({
-        queryKey: ["uploads", "list", threadId],
+        queryKey: privateWorkQueryKey(
+          privateWork.scope,
+          "uploads",
+          "list",
+          threadId,
+        ),
       });
     },
   });
@@ -77,8 +144,11 @@ export function useDeleteUploadedFile(threadId: string) {
  * Hook to handle file uploads in submit flow
  * Returns a function that uploads files and returns their info
  */
-export function useUploadFilesOnSubmit(threadId: string) {
-  const uploadMutation = useUploadFiles(threadId);
+export function useUploadFilesOnSubmit(
+  threadId: string,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+) {
+  const uploadMutation = useUploadFiles(threadId, explicitPrivateWork);
 
   return useCallback(
     async (files: File[]): Promise<UploadedFileInfo[]> => {

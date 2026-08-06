@@ -1,5 +1,10 @@
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Iterator, Mapping
+from dataclasses import dataclass
+from typing import Protocol
+
+from langgraph.errors import GraphBubbleUp
 
 from deerflow.sandbox.search import GrepMatch
 
@@ -12,6 +17,83 @@ from deerflow.sandbox.search import GrepMatch
 # contract: a future shell-splicing implementation must not have to re-derive
 # its own rule.
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+AUTHORIZATION_REVOKED_REASON = "authorization_revoked"
+PRIVATE_FILE_IO_CHUNK_SIZE = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxFileInfo:
+    path: str
+    size: int
+    file_type: str
+
+
+class SandboxBinaryReader(Protocol):
+    def read(self, size: int) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
+class SandboxAtomicWriter(Protocol):
+    def write(self, content: bytes) -> None: ...
+
+    def commit(self) -> None: ...
+
+    def abort(self) -> None: ...
+
+
+class AuthorizationRevoked(GraphBubbleUp):
+    """Internal control-flow signal with one stable, non-sensitive public reason."""
+
+    def __init__(self) -> None:
+        super().__init__(AUTHORIZATION_REVOKED_REASON)
+
+
+class AuthorizationBoundary(Protocol):
+    """App-supplied run authorization checks; the harness stays app-agnostic."""
+
+    async def before_model_call(self) -> None: ...
+
+    async def before_tool_call(self) -> None: ...
+
+    async def before_read_only_tool_call(self) -> None: ...
+
+    async def before_mcp_call(self) -> None: ...
+
+    async def before_mcp_tool_dispatch(self) -> None: ...
+
+    async def before_sandbox_write(self) -> None: ...
+
+    async def before_sandbox_exec(self) -> None: ...
+
+    async def before_checkpoint_read(self) -> None: ...
+
+    async def before_checkpoint_write(self) -> None: ...
+
+    async def before_file_finalization(self) -> None: ...
+
+
+async def check_authorization_boundary(
+    runtime_context: object | None,
+    operation: str,
+) -> None:
+    """Call a trusted boundary when present; legacy runs remain a no-op."""
+
+    if not isinstance(runtime_context, Mapping):
+        return
+    boundary = runtime_context.get("__authorization_boundary")
+    method = getattr(boundary, operation, None)
+    if not callable(method) and operation == "before_read_only_tool_call":
+        method = getattr(boundary, "before_tool_call", None)
+    if callable(method):
+        await method()
+        return
+    checker = runtime_context.get("__authorization_checker")
+    if callable(checker):
+        result = checker()
+        if isinstance(result, Awaitable):
+            await result
 
 
 def _validate_extra_env(extra_env: dict[str, str] | None) -> None:
@@ -48,10 +130,106 @@ class Sandbox(ABC):
 
     def __init__(self, id: str):
         self._id = id
+        self._private_atomic_writers: dict[str, SandboxAtomicWriter] = {}
+        self._private_regular_readers: dict[str, SandboxBinaryReader] = {}
 
     @property
     def id(self) -> str:
         return self._id
+
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+    ) -> Iterator[SandboxFileInfo]:
+        """List regular and rejected objects without following links.
+
+        Providers that do not implement this private-work boundary fail closed.
+        """
+
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    def remove_path(self, path: str) -> None:
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        raise SandboxRuntimeError("Private file authority is unsupported by this sandbox")
+
+    # Stateful compatibility facade used by the app authority. Handles are
+    # opaque and never contain physical paths.
+    def begin_atomic_file(self, path: str) -> str:
+        import uuid
+
+        writer = self.open_atomic_writer(path)
+        handle = uuid.uuid4().hex
+        self._private_atomic_writers[handle] = writer
+        return handle
+
+    def append_atomic_file(self, handle: str, content: bytes) -> None:
+        if not isinstance(content, bytes) or not 0 < len(content) <= PRIVATE_FILE_IO_CHUNK_SIZE:
+            raise ValueError("Private sandbox writes must be bounded to 1 MiB")
+        self._private_atomic_writers[handle].write(content)
+
+    def publish_atomic_file(self, handle: str) -> None:
+        writer = self._private_atomic_writers[handle]
+        writer.commit()
+        self._private_atomic_writers.pop(handle, None)
+
+    def abort_atomic_file(self, handle: str) -> None:
+        writer = self._private_atomic_writers.pop(handle, None)
+        if writer is not None:
+            writer.abort()
+
+    def remove_file(self, path: str) -> None:
+        self.remove_path(path)
+
+    def open_regular_file(self, path: str) -> str:
+        import uuid
+
+        reader = self.open_regular_reader(path)
+        handle = uuid.uuid4().hex
+        self._private_regular_readers[handle] = reader
+        return handle
+
+    def read_regular_file(self, handle: str, max_bytes: int) -> bytes:
+        if max_bytes != PRIVATE_FILE_IO_CHUNK_SIZE:
+            raise ValueError("Private sandbox reads use the fixed 1 MiB bound")
+        return self._private_regular_readers[handle].read(max_bytes)
+
+    def close_regular_file(self, handle: str) -> None:
+        reader = self._private_regular_readers.pop(handle, None)
+        if reader is not None:
+            reader.close()
+
+    def close_private_file_authority(self) -> None:
+        """Close every opaque secure-I/O handle owned by this lease."""
+
+        writers = tuple(self._private_atomic_writers.values())
+        readers = tuple(self._private_regular_readers.values())
+        self._private_atomic_writers.clear()
+        self._private_regular_readers.clear()
+        for writer in writers:
+            try:
+                writer.abort()
+            except Exception:
+                pass
+        for reader in readers:
+            try:
+                reader.close()
+            except Exception:
+                pass
 
     @abstractmethod
     def execute_command(
@@ -91,18 +269,11 @@ class Sandbox(ABC):
         pass
 
     @abstractmethod
-    def read_file(
-        self,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> str:
+    def read_file(self, path: str) -> str:
         """Read the content of a file.
 
         Args:
             path: The absolute path of the file to read.
-            start_line: Optional starting line number (1-indexed, inclusive).
-            end_line: Optional ending line number (1-indexed, inclusive).
 
         Returns:
             The content of the file.

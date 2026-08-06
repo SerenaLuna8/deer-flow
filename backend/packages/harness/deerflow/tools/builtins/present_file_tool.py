@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, tool
@@ -7,10 +7,34 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.file_authority import require_private_file_authority
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
+
+
+def _private_file_authority(runtime: Runtime) -> object | None:
+    return require_private_file_authority(
+        runtime.context,
+        method="record_presented_paths",
+    )
+
+
+def _normalize_private_presented_filepath(filepath: str) -> str:
+    if type(filepath) is not str or "\\" in filepath:
+        raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}")
+    path = PurePosixPath(filepath)
+    root = PurePosixPath(OUTPUTS_VIRTUAL_PREFIX)
+    if not path.is_absolute() or path.as_posix() != filepath or ".." in path.parts:
+        raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}")
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}") from exc
+    if not relative.parts:
+        raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}")
+    return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative.as_posix()}"
 
 
 def _get_thread_id(runtime: Runtime) -> str | None:
@@ -105,8 +129,13 @@ def present_file_tool(
     Args:
         filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
     """
+    authority = _private_file_authority(runtime)
     try:
-        normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
+        if authority is None:
+            normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
+        else:
+            normalized_paths = [_normalize_private_presented_filepath(filepath) for filepath in filepaths]
+            authority.record_presented_paths(tuple(normalized_paths))
     except ValueError as exc:
         return Command(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},

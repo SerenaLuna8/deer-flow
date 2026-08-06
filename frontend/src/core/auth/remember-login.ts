@@ -6,42 +6,56 @@ export interface RememberLoginPreference {
   rememberMe: boolean;
 }
 
+const DEFAULT_PREFERENCE: RememberLoginPreference = {
+  email: "",
+  rememberMe: true,
+};
+
 function getStorage(): Storage | null {
-  if (typeof globalThis.localStorage === "undefined") return null;
-  return globalThis.localStorage;
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
 }
 
 export function loadRememberLoginPreference(): RememberLoginPreference {
+  const storage = getStorage();
+  if (!storage) return DEFAULT_PREFERENCE;
+
   try {
-    const storage = getStorage();
-    if (!storage) {
-      return { email: "", rememberMe: true };
-    }
-    const rememberValue = storage.getItem(REMEMBER_LOGIN_KEY);
-    const rememberMe = rememberValue !== "0";
+    const storedPreference = storage.getItem(REMEMBER_LOGIN_KEY);
+    const rememberMe =
+      storedPreference === null ? true : storedPreference === "1";
     return {
       email: rememberMe ? (storage.getItem(REMEMBERED_EMAIL_KEY) ?? "") : "",
       rememberMe,
     };
   } catch {
-    return { email: "", rememberMe: true };
+    return DEFAULT_PREFERENCE;
   }
 }
 
+/**
+ * Persist only the user's convenience preference and email address.
+ * Passwords and session material never enter Web Storage.
+ */
 export function saveRememberLoginPreference({
   email,
   rememberMe,
 }: RememberLoginPreference): void {
+  const storage = getStorage();
+  if (!storage) return;
+
   try {
-    const storage = getStorage();
-    if (!storage) return;
-    storage.setItem(REMEMBER_LOGIN_KEY, rememberMe ? "1" : "0");
     if (rememberMe) {
+      storage.setItem(REMEMBER_LOGIN_KEY, "1");
       storage.setItem(REMEMBERED_EMAIL_KEY, email);
-    } else {
-      storage.removeItem(REMEMBERED_EMAIL_KEY);
+      return;
     }
+    storage.setItem(REMEMBER_LOGIN_KEY, "0");
+    storage.removeItem(REMEMBERED_EMAIL_KEY);
   } catch {
-    // Login must not depend on localStorage availability.
+    // Storage can be denied in private/locked-down browser contexts.
   }
 }

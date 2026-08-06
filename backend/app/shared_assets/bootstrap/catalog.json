@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "source_key": "builtin:skill:academic-paper-review",
+      "kind": "skill",
+      "slug": "academic-paper-review",
+      "display_name": "academic-paper-review",
+      "version": 1,
+      "payload_path": "content/public-skills/academic-paper-review-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "bd3c59b7078d9f30c0e6ba60f272a9138fe35b6c134abadc3eb341c0665c251c"
+    },
+    {
+      "source_key": "builtin:skill:bootstrap",
+      "kind": "skill",
+      "slug": "bootstrap",
+      "display_name": "bootstrap",
+      "version": 1,
+      "payload_path": "content/public-skills/bootstrap-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "03979b721ea93a8a7147d7adaf5da05db836ef9bc03bf5eb308ecb169d1c1147"
+    },
+    {
+      "source_key": "builtin:skill:chart-visualization",
+      "kind": "skill",
+      "slug": "chart-visualization",
+      "display_name": "chart-visualization",
+      "version": 1,
+      "payload_path": "content/public-skills/chart-visualization-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "59047997703d934c2ff77e63ffbd54fddf74ad34fe5384cadb692f253572415c"
+    },
+    {
+      "source_key": "builtin:skill:code-documentation",
+      "kind": "skill",
+      "slug": "code-documentation",
+      "display_name": "code-documentation",
+      "version": 1,
+      "payload_path": "content/public-skills/code-documentation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "a0a8c7bab0003e85104638e969197b809beea5698f46d36984b4fd070fbcd904"
+    },
+    {
+      "source_key": "builtin:skill:consulting-analysis",
+      "kind": "skill",
+      "slug": "consulting-analysis",
+      "display_name": "consulting-analysis",
+      "version": 1,
+      "payload_path": "content/public-skills/consulting-analysis-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "140825a82c8f55d6099f99fa2c8711bf64bcbb099d1732c6d43d387ddf466a0d"
+    },
+    {
+      "source_key": "builtin:skill:data-analysis",
+      "kind": "skill",
+      "slug": "data-analysis",
+      "display_name": "data-analysis",
+      "version": 1,
+      "payload_path": "content/public-skills/data-analysis-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "47c564eb525c57ddb3ced01fccc3a499a8056fe070bb775f518ebd9cf21b3a55"
+    },
+    {
+      "source_key": "builtin:skill:deep-research",
+      "kind": "skill",
+      "slug": "deep-research",
+      "display_name": "deep-research",
+      "version": 1,
+      "payload_path": "content/public-skills/deep-research-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "2a99fe96df03cd61d1eec4e53a871bb9bbe007e496e38e4b076203221dd5fd7c"
+    },
+    {
+      "source_key": "builtin:skill:frontend-design",
+      "kind": "skill",
+      "slug": "frontend-design",
+      "display_name": "frontend-design",
+      "version": 1,
+      "payload_path": "content/public-skills/frontend-design-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "ae40a8cdc9a22a8f064897d8c9d9737187b2c524965b4a60e1144787aff64d3b"
+    },
+    {
+      "source_key": "builtin:skill:github-deep-research",
+      "kind": "skill",
+      "slug": "github-deep-research",
+      "display_name": "github-deep-research",
+      "version": 1,
+      "payload_path": "content/public-skills/github-deep-research-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "40166480d45fa196761cd05e156bfb1d6f3e303620188de9dcaf299154ef2f58"
+    },
+    {
+      "source_key": "builtin:skill:newsletter-generation",
+      "kind": "skill",
+      "slug": "newsletter-generation",
+      "display_name": "newsletter-generation",
+      "version": 1,
+      "payload_path": "content/public-skills/newsletter-generation-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "570796893db146b2e0354b7085ea95a37e0b3e307e0d414b348ab6e9f2ffc995"
+    },
+    {
+      "source_key": "builtin:skill:skill-creator",
+      "kind": "skill",
+      "slug": "skill-creator",
+      "display_name": "skill-creator",
+      "version": 1,
+      "payload_path": "content/public-skills/skill-creator-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "068793e0cf7488504c2d8ac9a3386d7fc8b6fd8ab431e2229a6846b38b16726f"
+    },
+    {
+      "source_key": "builtin:skill:surprise-me",
+      "kind": "skill",
+      "slug": "surprise-me",
+      "display_name": "surprise-me",
+      "version": 1,
+      "payload_path": "content/public-skills/surprise-me-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "b5a87a8cc81698845f72eed3bbdbfabd1b77a00adb80f519b7d9c178ae325f80"
+    },
+    {
+      "source_key": "builtin:skill:systematic-literature-review",
+      "kind": "skill",
+      "slug": "systematic-literature-review",
+      "display_name": "systematic-literature-review",
+      "version": 1,
+      "payload_path": "content/public-skills/systematic-literature-review-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "cbc9978a0723c1c2a57303543818e2efbe9981d3db1eb780a699868851d567df"
+    },
+    {
+      "source_key": "builtin:skill:web-design-guidelines",
+      "kind": "skill",
+      "slug": "web-design-guidelines",
+      "display_name": "web-design-guidelines",
+      "version": 1,
+      "payload_path": "content/public-skills/web-design-guidelines-v1.skill.json",
+      "payload_format": "skill_archive_v1",
+      "sha256": "15337866f334317451c18e5700a2e0a66f9469c9bbea0f61050012fcb06152c2"
+    },
+    {
+      "source_key": "builtin:mcp:deerflow-docs",
+      "kind": "mcp",
+      "slug": "deerflow-docs",
+      "display_name": "ActWeave Docs",
+      "version": 1,
+      "payload_path": "content/deerflow-docs-v1.mcp.json",
+      "sha256": "6be8c3d123effac0f9fac447901f9171516b57c6d40e7b5f0694254b1885fcda"
+    },
+    {
+      "source_key": "builtin:agent:project-assistant",
+      "kind": "agent",
+      "slug": "project-assistant",
+      "display_name": "Main",
+      "version": 1,
+      "payload_path": "content/project-assistant-v1.agent.json",
+      "sha256": "a846b076ff31718cfc4c17a9d40927b14762c724b91371cf9cf41e35f92a823f"
+    }
+  ]
+}

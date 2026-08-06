@@ -1,6 +1,6 @@
 # Plan Mode with TodoList Middleware
 
-This document describes how to enable and use the Plan Mode feature with TodoList middleware in DeerFlow 2.0.
+This document describes how to enable and use the Plan Mode feature with TodoList middleware in ActWeave 2.0.
 
 ## Overview
 
@@ -103,6 +103,7 @@ You can enable/disable plan mode dynamically for different conversations or task
 from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.agent import make_lead_agent
 
+
 def create_agent_for_task(task_complexity: str):
     """Create agent with plan mode based on task complexity."""
     is_complex = task_complexity in ["high", "very_high"]
@@ -116,6 +117,7 @@ def create_agent_for_task(task_complexity: str):
     )
 
     return make_lead_agent(config)
+
 
 # Simple task - no TodoList needed
 simple_agent = create_agent_for_task("low")
@@ -179,10 +181,10 @@ config = RunnableConfig(
 
 ## Custom Prompts
 
-DeerFlow uses custom `system_prompt` and `tool_description` for the TodoListMiddleware that match the overall DeerFlow prompt style:
+ActWeave uses custom `system_prompt` and `tool_description` for the TodoListMiddleware that match the overall ActWeave prompt style:
 
 ### System Prompt Features
-- Uses XML tags (`<todo_list_system>`) for structure consistency with DeerFlow's main prompt
+- Uses XML tags (`<todo_list_system>`) for structure consistency with ActWeave's main prompt
 - Emphasizes CRITICAL rules and best practices
 - Clear "When to Use" vs "When NOT to Use" guidelines
 - Focuses on real-time updates and immediate task completion
@@ -194,11 +196,12 @@ DeerFlow uses custom `system_prompt` and `tool_description` for the TodoListMidd
 - Comprehensive best practices section
 - Task completion requirements to prevent premature marking
 
-The custom prompts are defined in `_create_todo_list_middleware()` in `/Users/hetao/workspace/deer-flow/backend/packages/harness/deerflow/agents/lead_agent/agent.py:57`.
+The custom prompts are defined in `_create_todo_list_middleware()` in
+`packages/harness/deerflow/agents/lead_agent/agent.py`.
 
 ## Notes
 
-- TodoList middleware uses LangChain's built-in `TodoListMiddleware` with **custom DeerFlow-style prompts**
+- TodoList middleware uses LangChain's built-in `TodoListMiddleware` with **custom ActWeave-style prompts**
 - Plan mode is **disabled by default** (`is_plan_mode=False`) to maintain backward compatibility
 - The middleware is positioned before `ClarificationMiddleware` to allow todo management during clarification flows
-- Custom prompts emphasize the same principles as DeerFlow's main system prompt (clarity, action-oriented, critical rules)
+- Custom prompts emphasize the same principles as ActWeave's main system prompt (clarity, action-oriented, critical rules)

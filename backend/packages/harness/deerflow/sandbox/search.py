@@ -191,10 +191,16 @@ def find_grep_matches(
             for name in files:
                 if should_ignore_name(name):
                     continue
-                yield Path(current_root) / name, (rel_dir / name).as_posix()
+                yield (
+                    Path(current_root) / name,
+                    (rel_dir / name).as_posix(),
+                )
 
     for candidate_path, rel_path in candidate_files():
-        if glob_pattern is not None and not path_matches(glob_pattern, rel_path):
+        if glob_pattern is not None and not path_matches(
+            glob_pattern,
+            rel_path,
+        ):
             continue
 
         try:
@@ -205,7 +211,10 @@ def find_grep_matches(
                 continue
             if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
                 continue
-            with file_path.open(encoding="utf-8", errors="replace") as handle:
+            with file_path.open(
+                encoding="utf-8",
+                errors="replace",
+            ) as handle:
                 for line_number, line in enumerate(handle, start=1):
                     if len(line) > _max_line_chars:
                         continue
@@ -214,7 +223,10 @@ def find_grep_matches(
                             GrepMatch(
                                 path=str(file_path),
                                 line_number=line_number,
-                                line=truncate_line(line, line_summary_length),
+                                line=truncate_line(
+                                    line,
+                                    line_summary_length,
+                                ),
                             )
                         )
                         if len(matches) >= max_results:

@@ -8,78 +8,52 @@ required.
 
 from __future__ import annotations
 
-KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
-    {
-        "/bootstrap",
-        "/goal",
-        "/new",
-        "/status",
-        "/models",
-        "/memory",
-        "/help",
-    }
-)
+from dataclasses import dataclass
+
+KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/help", "/models"})
+
+# These former commands are intentionally tombstoned instead of becoming
+# ordinary prompts. Provider adapters no longer advertise or classify them as
+# active commands; the manager recognizes them defensively and returns the
+# stable unsupported-command response without admitting a project Run.
+REMOVED_CHANNEL_COMMANDS: frozenset[str] = frozenset({"/bootstrap", "/goal", "/memory", "/new", "/status"})
 
 
-def _is_leading_mention_token(token: str) -> bool:
-    """Return whether *token* looks like a platform bot/user mention.
+@dataclass(frozen=True, slots=True)
+class GroupBindCommand:
+    """Classification result for the provider-facing group bind command."""
 
-    Group chats often require ``@bot`` before the message is delivered. Slack
-    and Discord strip those tokens before connect parsing; Feishu / DingTalk
-    leave them in the text (``@_user_1``, ``@bot``, ``<@id>``). Treat them as
-    transport noise only when they lead the message so
-    ``@bot /connect <code>`` still binds.
-    """
-    if not token:
-        return False
-    # Slack / Discord style: <@U123> or <@!U123> or <@U123|name>
-    if token.startswith("<@") and token.endswith(">"):
-        return True
-    # Feishu / DingTalk / generic: @_user_1, @bot, @nickname
-    if token.startswith("@") and len(token) > 1:
-        return True
-    return False
-
-
-def strip_leading_mentions(text: str) -> str:
-    """Drop leading platform mention tokens (``@bot``, ``<@id>``) so a group-chat
-    ``@bot /goal`` reads as ``/goal`` for command classification and dispatch.
-
-    A mention must be flush at the start (no preceding whitespace), mirroring the
-    "a control command must be at position 0" rule in :func:`is_known_channel_command`:
-    text with a leading space or no leading mention is returned unchanged, so
-    ``" /new"`` stays a non-command. Whitespace is otherwise preserved (unlike
-    :func:`extract_connect_code`, which is deliberately whitespace-lenient for the
-    bind path). Channels that resolve their own bot id (Slack/Discord) strip only
-    the bot's mention upstream; this is for adapters that leave the mention in the
-    text and cannot tell the bot's mention from another user's (Feishu/DingTalk).
-    """
-    remainder = text
-    while True:
-        parts = remainder.split(maxsplit=1)
-        if not parts or remainder[0].isspace() or not _is_leading_mention_token(parts[0]):
-            break
-        remainder = parts[1] if len(parts) > 1 else ""
-    return remainder
+    matched: bool
+    code: str | None = None
 
 
 def extract_connect_code(text: str) -> str | None:
-    """Extract the one-time channel binding code from a connect command.
-
-    Accepts a leading platform mention so group ``@bot /connect <code>``
-    messages bind the same way as bare ``/connect <code>`` (Slack/Discord
-    already strip mentions before calling this helper).
-    """
+    """Extract the one-time channel binding code from a connect command."""
     parts = text.strip().split()
-    index = 0
-    while index < len(parts) and _is_leading_mention_token(parts[index]):
-        index += 1
-    if index + 1 >= len(parts):
+    if len(parts) < 2:
         return None
-    command = parts[index].lower()
-    if command == "/connect":
-        return parts[index + 1]
+    command = parts[0].lower()
+    if command in {"/connect", "connect"}:
+        return parts[1]
     return None
+
+
+def parse_group_bind_command(text: str) -> GroupBindCommand:
+    """Classify an exact group bind command with optional leading mentions."""
+    parts = text.strip().split()
+    command_index = 0
+    while command_index < len(parts) and parts[command_index].startswith("@"):
+        command_index += 1
+    if command_index >= len(parts) or parts[command_index].lower() != "/bind-project":
+        return GroupBindCommand(matched=False)
+    if len(parts) != command_index + 2:
+        return GroupBindCommand(matched=True)
+    return GroupBindCommand(matched=True, code=parts[command_index + 1])
+
+
+def extract_group_bind_code(text: str) -> str | None:
+    """Extract a valid group binding code for compatibility callers."""
+    return parse_group_bind_command(text).code
 
 
 def is_known_channel_command(text: str) -> bool:
@@ -87,3 +61,10 @@ def is_known_channel_command(text: str) -> bool:
     if not text.startswith("/"):
         return False
     return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+
+
+def is_removed_channel_command(text: str) -> bool:
+    """Return whether text starts with a tombstoned channel command."""
+    if not text.startswith("/"):
+        return False
+    return text.split(maxsplit=1)[0].lower() in REMOVED_CHANNEL_COMMANDS

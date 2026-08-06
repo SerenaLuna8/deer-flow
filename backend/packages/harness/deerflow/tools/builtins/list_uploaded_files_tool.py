@@ -1,221 +1,163 @@
-"""Tool for discovering historical uploaded files in the current thread.
-
-Unlike ``<current_uploads>`` which lists only this run's newly uploaded files,
-this tool lets the agent discover files uploaded in previous turns on demand.
-"""
+"""Project-scoped historical upload metadata query."""
 
 from __future__ import annotations
 
-import logging
-import os
-from collections import Counter
-from pathlib import Path
-from typing import Annotated, Any
+import json
+from pathlib import PurePosixPath
 
 from langchain.tools import tool
-from langgraph.config import get_config
+from langchain_core.messages import HumanMessage
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
-from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.input_sanitization_middleware import (
+    neutralize_untrusted_tags,
+)
+from deerflow.file_authority import require_private_file_authority
 from deerflow.tools.types import Runtime
-from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file
 
-logger = logging.getLogger(__name__)
-
-_DEFAULT_MAX_RESULTS = 20
-_MAX_MAX_RESULTS = 100
+_DEFAULT_LIMIT = 20
+_MAX_LIMIT = 100
 
 
-def _extension_label(file_path: Path) -> str:
-    suffix = file_path.suffix.lower()
-    return neutralize_untrusted_tags(suffix) or "(no extension)"
+def _current_upload_ids(
+    runtime: Runtime,
+    authority: object,
+) -> frozenset[str]:
+    """Return upload version ids attached to the latest user message."""
 
+    result: set[str] = set()
+    authority_current_upload_ids = getattr(
+        authority,
+        "current_upload_ids",
+        None,
+    )
+    if callable(authority_current_upload_ids):
+        raw_authority_ids = authority_current_upload_ids()
+        if type(raw_authority_ids) is not tuple or any(type(file_id) is not str or not file_id for file_id in raw_authority_ids):
+            raise RuntimeError("Private upload authority is unavailable")
+        result.update(raw_authority_ids)
 
-def _format_omitted_summary(omitted: list[str]) -> str:
-    counts = Counter(_extension_label(Path(f)) for f in omitted)
-    parts = [f"{count} {ext}" for ext, count in sorted(counts.items())]
-    return neutralize_untrusted_tags(", ".join(parts))
-
-
-def _resolve_thread_id(runtime: Runtime) -> str | None:
-    """Resolve the current thread id from runtime context or RunnableConfig."""
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id:
-        return thread_id
-
-    runtime_config = getattr(runtime, "config", None) or {}
-    thread_id = runtime_config.get("configurable", {}).get("thread_id")
-    if thread_id:
-        return thread_id
-
-    try:
-        return get_config().get("configurable", {}).get("thread_id")
-    except RuntimeError:
-        return None
-
-
-def _resolve_user_id(runtime: Runtime) -> str:
-    """Resolve the current user id."""
-    from deerflow.runtime.user_context import resolve_runtime_user_id
-
-    return resolve_runtime_user_id(runtime) or get_effective_user_id()
-
-
-def _list_uploaded_files_impl(
-    include_outline: bool | list[str] = False,
-    max_results: int = _DEFAULT_MAX_RESULTS,
-    runtime: Runtime | None = None,
-    *,
-    _paths: Any | None = None,
-) -> dict:
-    """Core implementation — testable without the @tool wrapper."""
-    if runtime is None:
-        return {"files": [], "message": "No runtime context available."}
-
-    thread_id = _resolve_thread_id(runtime)
-    if thread_id is None:
-        return {"files": [], "message": "Thread not found."}
-
-    user_id = _resolve_user_id(runtime)
-    paths = _paths or get_paths()
-    uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
-
-    if not uploads_dir.exists():
-        return {"files": [], "message": "No uploads directory for this thread."}
-
-    # Resolve the set of filenames uploaded in the current run so we can exclude them.
-    current_run_filenames: set[str] = set()
-    try:
-        state = runtime.state
-        uploaded = state.get("uploaded_files") if isinstance(state, dict) else getattr(state, "uploaded_files", None)
-        if isinstance(uploaded, list):
-            for entry in uploaded:
-                if isinstance(entry, dict) and entry.get("filename"):
-                    current_run_filenames.add(entry["filename"])
-    except Exception:
-        logger.warning(
-            "Failed to read uploaded_files from runtime.state; current-run files may appear in list_uploaded_files results",
-            exc_info=True,
+    state = runtime.state
+    if not isinstance(state, dict):
+        return frozenset(result)
+    messages = state.get("messages")
+    if not isinstance(messages, list):
+        return frozenset(result)
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        additional_kwargs = message.additional_kwargs or {}
+        if additional_kwargs.get("hide_from_ui") is True and read_human_input_response(additional_kwargs) is None:
+            continue
+        raw_files = additional_kwargs.get("files")
+        if not isinstance(raw_files, list):
+            return frozenset(result)
+        result.update(
+            file_id
+            for item in raw_files
+            if isinstance(item, dict)
+            and isinstance(
+                (file_id := item.get("file_id")),
+                str,
+            )
+            and file_id
         )
+        return frozenset(result)
+    return frozenset(result)
 
-    # Normalize max_results
-    max_results = max(1, min(max_results, _MAX_MAX_RESULTS))
 
-    # Normalize include_outline
-    if isinstance(include_outline, bool):
-        outline_for_all: bool = include_outline
-        outline_filenames: set[str] = set()
-    else:
-        outline_for_all = False
-        outline_filenames = set(include_outline)
+def _validated_upload(raw: object) -> dict[str, object]:
+    """Validate one opaque manifest item and remove its virtual path."""
 
-    # Collect historical files (sorted by mtime descending).
-    # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
-    candidates: list[tuple[float, Path, int]] = []
-    try:
-        # Collect file entries once to build the name set and iterate.
-        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_staging_file(e.name)]
-        all_names: set[str] = {e.name for e in entries}
-
-        for entry in entries:
-            if entry.name in current_run_filenames:
-                continue
-            # Skip .md files that are conversion artifacts of another file.
-            # Known limitation: if a user manually uploads both report.pdf and
-            # report.md, the .md is hidden as a "conversion artifact".  This is
-            # acceptable for the MVP — triggering this requires uploading files
-            # whose stems collide with converted documents, which is rare.
-            if entry.name.endswith(".md"):
-                stem = entry.name[:-3]  # remove ".md"
-                non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
-                if non_md_siblings:
-                    continue
-            stat = entry.stat()
-            candidates.append((stat.st_mtime, Path(entry.path), stat.st_size))
-    except OSError:
-        return {"files": [], "message": f"Failed to read uploads directory: {uploads_dir}"}
-
-    if not candidates:
-        return {"files": [], "message": "No historical uploaded files in this thread."}
-
-    # Sort by mtime descending (most recent first)
-    candidates.sort(key=lambda item: item[0], reverse=True)
-
-    total_count = len(candidates)
-    truncated = total_count > max_results
-    visible = candidates[:max_results]
-    omitted_paths = [p.name for _, p, _ in candidates[max_results:]]
-
-    files: list[dict] = []
-    for _, file_path, st_size in visible:
-        filename = file_path.name
-        file_info: dict = {
-            "filename": neutralize_untrusted_tags(filename),
-            "size": st_size,
-            "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
-            "extension": neutralize_untrusted_tags(file_path.suffix),
-        }
-
-        should_include_outline = outline_for_all or filename in outline_filenames
-        if should_include_outline:
-            outline, preview = extract_outline_for_file(file_path)
-            if outline:
-                file_info["outline"] = [{**entry, "title": neutralize_untrusted_tags(entry["title"])} if "title" in entry else entry for entry in outline]
-            if preview:
-                file_info["outline_preview"] = [neutralize_untrusted_tags(p) for p in preview]
-
-        files.append(file_info)
-
-    result: dict = {
-        "files": files,
-        "total_count": total_count,
+    if type(raw) is not dict:
+        raise RuntimeError("Private upload authority is unavailable")
+    file_id = raw.get("file_id")
+    version = raw.get("version")
+    filename = raw.get("filename")
+    size = raw.get("size")
+    path = raw.get("path")
+    media_type = raw.get("media_type")
+    if (
+        type(file_id) is not str
+        or not file_id
+        or type(version) is not int
+        or version < 1
+        or type(filename) is not str
+        or not filename
+        or PurePosixPath(filename).name != filename
+        or type(size) is not int
+        or size < 0
+        or type(path) is not str
+        or path != f"/mnt/user-data/uploads/{filename}"
+        or type(media_type) is not str
+        or not media_type
+    ):
+        raise RuntimeError("Private upload authority is unavailable")
+    return {
+        "file_version_id": file_id,
+        "version": version,
+        "display_name": neutralize_untrusted_tags(filename),
+        "size": size,
+        "media_type": neutralize_untrusted_tags(media_type),
     }
 
-    if truncated:
-        result["truncated"] = True
-        result["omitted_summary"] = _format_omitted_summary(omitted_paths)
 
-    if files:
-        result["message"] = f"Found {total_count} historical file(s)."
-    else:
-        result["message"] = "No historical uploaded files in this thread."
-
-    return result
-
-
-@tool
-def list_uploaded_files(
+@tool("list_uploaded_files", parse_docstring=True)
+async def list_uploaded_files_tool(
     runtime: Runtime,
-    include_outline: Annotated[
-        bool | list[str],
-        "Control which files get their document outline (headings/preview) returned. "
-        "False (default): no outline for any file — just filename, size, and path. "
-        "True: include outline/preview for every .md-convertible file. "
-        'list of filenames: include outline/preview only for those specific files (e.g. ["report.md", "data.csv"]).',
-    ] = False,
-    max_results: Annotated[
-        int,
-        "Maximum number of files to return (default 20, max 100).",
-    ] = _DEFAULT_MAX_RESULTS,
-) -> dict:
-    """Discover historical uploaded files available in this thread.
+    filename: str | None = None,
+    limit: int = _DEFAULT_LIMIT,
+) -> str:
+    """List historical uploads authorized for the current project thread.
 
-    Returns files that were uploaded in PREVIOUS turns — files uploaded in the
-    current run are excluded (they are already listed in <current_uploads>).
+    The result contains opaque file-version identifiers and display metadata
+    only. It never scans host directories or exposes storage paths.
 
-    Use this tool when:
-    - The user refers to previously uploaded files without naming them (e.g. "analyze those PDFs I uploaded before")
-    - You need to check what files are available in this thread
-    - You are starting work on a thread and want an overview of available data
-
-    Skip this tool when:
-    - The user names a specific file — use read_file or grep directly with the path
-    - The file was uploaded in the current run — it's already in <current_uploads>
+    Args:
+        filename: Optional exact display-name filter.
+        limit: Maximum results to return, from 1 through 100.
     """
-    return _list_uploaded_files_impl(
-        include_outline=include_outline,
-        max_results=max_results,
-        runtime=runtime,
+
+    if type(limit) is not int or not 1 <= limit <= _MAX_LIMIT:
+        return "Error: limit must be an integer between 1 and 100"
+    if filename is not None and (not isinstance(filename, str) or not filename or PurePosixPath(filename).name != filename):
+        return "Error: filename must be a single display name"
+
+    try:
+        authority = require_private_file_authority(
+            runtime.context,
+            method="visible_uploads",
+        )
+        if authority is None:
+            return "Error: Historical uploads are available only in project runs"
+        raw_uploads = authority.visible_uploads()
+        if type(raw_uploads) is not tuple:
+            raise RuntimeError("Private upload authority is unavailable")
+        current_ids = _current_upload_ids(runtime, authority)
+        uploads: list[dict[str, object]] = []
+        for raw in raw_uploads:
+            validated = _validated_upload(raw)
+            if validated["file_version_id"] in current_ids:
+                continue
+            if filename is not None and raw.get("filename") != filename:
+                continue
+            uploads.append(validated)
+    except RuntimeError:
+        return "Error: Private upload authority is unavailable"
+
+    uploads.sort(
+        key=lambda item: (
+            str(item["display_name"]).casefold(),
+            str(item["file_version_id"]),
+        )
+    )
+    selected = uploads[:limit]
+    return json.dumps(
+        {
+            "count": len(selected),
+            "files": selected,
+            "omitted": max(0, len(uploads) - len(selected)),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
     )

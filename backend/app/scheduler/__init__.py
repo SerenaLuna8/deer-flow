@@ -1,3 +1,3 @@
-from .service import ScheduledTaskService
+from .service import AutomationSchedulerService
 
-__all__ = ["ScheduledTaskService"]
+__all__ = ["AutomationSchedulerService"]

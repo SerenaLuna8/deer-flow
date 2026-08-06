@@ -1,3 +1,4 @@
+import { currentBrowserReturnPath } from "@/core/auth/private-return-path";
 import { buildLoginUrl } from "@/core/auth/types";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -15,6 +16,15 @@ export function isStateChangingMethod(method: string): boolean {
 }
 
 const CSRF_COOKIE_PREFIX = "csrf_token=";
+
+export class AuthRequiredError extends Error {
+  readonly status = 401;
+
+  constructor() {
+    super("Authentication required");
+    this.name = "AuthRequiredError";
+  }
+}
 
 /**
  * Read the ``csrf_token`` cookie set by the gateway at login.
@@ -81,8 +91,12 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    window.location.href = buildLoginUrl(window.location.pathname);
-    throw new Error("Unauthorized");
+    if (typeof window !== "undefined") {
+      window.location.href = buildLoginUrl(
+        currentBrowserReturnPath(window.location),
+      );
+    }
+    throw new AuthRequiredError();
   }
 
   return res;

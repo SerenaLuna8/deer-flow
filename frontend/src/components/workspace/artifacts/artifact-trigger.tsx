@@ -10,10 +10,15 @@ import { useArtifacts } from "./context";
 
 export const ArtifactTrigger = () => {
   const { t } = useI18n();
-  const { artifacts, setOpen: setArtifactsOpen } = useArtifacts();
+  const {
+    artifacts,
+    selectedArtifact,
+    setOpen: setArtifactsOpen,
+    showList,
+  } = useArtifacts();
   const sidecar = useMaybeSidecar();
 
-  if (!artifacts || artifacts.length === 0) {
+  if ((!artifacts || artifacts.length === 0) && !selectedArtifact) {
     return null;
   }
   return (
@@ -25,7 +30,11 @@ export const ArtifactTrigger = () => {
         data-testid="artifact-trigger"
         onClick={() => {
           sidecar?.close();
-          setArtifactsOpen(true);
+          if (artifacts.length > 0) {
+            showList();
+          } else {
+            setArtifactsOpen(true);
+          }
         }}
       >
         <FilesIcon />

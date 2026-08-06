@@ -6,52 +6,6 @@ export {
 
 export const MAX_SKILL_SUGGESTIONS = 6;
 
-// Mirror of the backend raw request limit (`ThreadGoalRequest.objective`
-// max_length and `MAX_GOAL_OBJECTIVE_CHARS` in backend goal.py). Kept here so
-// the composer can reject an over-length `/goal <objective>` before issuing the
-// PUT request and show a friendly error instead of surfacing a raw HTTP 422.
-export const MAX_GOAL_OBJECTIVE_CHARS = 4000;
-
-export function isGoalObjectiveTooLong(objective: string): boolean {
-  return objective.length > MAX_GOAL_OBJECTIVE_CHARS;
-}
-
-// The live composer counter stays hidden until the objective approaches the
-// limit, so it only surfaces when the user is at risk of being rejected rather
-// than adding permanent noise to the footer.
-export const GOAL_OBJECTIVE_COUNTER_VISIBLE_AT = Math.floor(
-  MAX_GOAL_OBJECTIVE_CHARS * 0.9,
-);
-
-export type GoalObjectiveCounter = {
-  length: number;
-  max: number;
-  overLimit: boolean;
-};
-
-// Derive the live counter for the composer footer from the same parsed
-// objective string sent to the API. Returns null unless the input is a
-// `/goal <objective>` set command whose raw length has reached the visibility
-// threshold, so the counter only appears for the case the limit actually
-// applies to.
-export function getGoalObjectiveCounter(
-  value: string,
-): GoalObjectiveCounter | null {
-  const command = parseGoalCommand(value);
-  if (command?.kind !== "set") {
-    return null;
-  }
-  const length = command.objective.length;
-  if (length < GOAL_OBJECTIVE_COUNTER_VISIBLE_AT) {
-    return null;
-  }
-  return {
-    length,
-    max: MAX_GOAL_OBJECTIVE_CHARS,
-    overLimit: length > MAX_GOAL_OBJECTIVE_CHARS,
-  };
-}
-
 export type SlashSuggestion = {
   name: string;
   description: string;
@@ -66,6 +20,14 @@ export type GoalCommand =
 export type InputSubmitAction =
   | { kind: "goal"; command: GoalCommand }
   | { kind: "compact" }
+  | { kind: "dream" }
+  | { kind: "dream-log"; version: number | null }
+  | { kind: "dream-restore"; version: number }
+  | {
+      kind: "dream-invalid";
+      command: "dream" | "dream-log" | "dream-restore";
+      reason: "arguments" | "attachments";
+    }
   | { kind: "stop" }
   | { kind: "empty" }
   | { kind: "message" };
@@ -81,6 +43,47 @@ export type ActiveGoalRequest = {
   sequence: number;
   threadId: string;
 };
+
+export type LatestCheckpointContinuationState = {
+  pending: boolean;
+  threadId: string | null;
+};
+
+export function createLatestCheckpointContinuationState(): LatestCheckpointContinuationState {
+  return { pending: false, threadId: null };
+}
+
+export function markLatestCheckpointContinuation(
+  state: LatestCheckpointContinuationState,
+  threadId: string,
+): void {
+  state.pending = true;
+  state.threadId = threadId;
+}
+
+export function shouldContinueFromLatestCheckpoint(
+  state: LatestCheckpointContinuationState,
+  threadId: string,
+): boolean {
+  return state.pending && state.threadId === threadId;
+}
+
+export function completeLatestCheckpointContinuation(
+  state: LatestCheckpointContinuationState,
+  threadId: string,
+): void {
+  if (state.pending && state.threadId === threadId) {
+    state.pending = false;
+    state.threadId = null;
+  }
+}
+
+export function resetLatestCheckpointContinuation(
+  state: LatestCheckpointContinuationState,
+): void {
+  state.pending = false;
+  state.threadId = null;
+}
 
 export function createGoalRequestState(): GoalRequestState {
   return {
@@ -235,6 +238,56 @@ export function parseCompactCommand(value: string): boolean {
   return /^\/(?:compact|context\s+compact)\s*$/i.test(value.trim());
 }
 
+export function parseDreamCommand(value: string): "valid" | "arguments" | null {
+  const trimmed = value.trim();
+  if (!/^\/dream(?:\s|$)/i.test(trimmed)) {
+    return null;
+  }
+  return /^\/dream$/i.test(trimmed) ? "valid" : "arguments";
+}
+
+type DreamVersionCommand =
+  | { matched: false }
+  | { matched: true; valid: false }
+  | { matched: true; valid: true; version: number | null };
+
+function parsePositiveVersion(value: string) {
+  if (!/^[1-9][0-9]*$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function parseDreamLogCommand(value: string): DreamVersionCommand {
+  const trimmed = value.trim();
+  const match = /^\/dream-log(?:\s+(.+))?$/i.exec(trimmed);
+  if (!match) {
+    return /^\/dream-log(?:\s|$)/i.test(trimmed)
+      ? { matched: true, valid: false }
+      : { matched: false };
+  }
+  if (match[1] === undefined) {
+    return { matched: true, valid: true, version: null };
+  }
+  const version = parsePositiveVersion(match[1]);
+  return version === null
+    ? { matched: true, valid: false }
+    : { matched: true, valid: true, version };
+}
+
+export function parseDreamRestoreCommand(value: string): DreamVersionCommand {
+  const trimmed = value.trim();
+  const match = /^\/dream-restore\s+(.+)$/i.exec(trimmed);
+  if (!match) {
+    return /^\/dream-restore(?:\s|$)/i.test(trimmed)
+      ? { matched: true, valid: false }
+      : { matched: false };
+  }
+  const version = parsePositiveVersion(match[1]!);
+  return version === null
+    ? { matched: true, valid: false }
+    : { matched: true, valid: true, version };
+}
+
 export function canPolishInput(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -243,7 +296,13 @@ export function canPolishInput(value: string): boolean {
   // Reserved builtin command lines are routed to their own handlers, not the
   // LLM, so they must not be rewritten. Reuse the same parsers the composer
   // uses to dispatch them instead of maintaining a third parallel list.
-  return parseGoalCommand(trimmed) === null && !parseCompactCommand(trimmed);
+  return (
+    parseGoalCommand(trimmed) === null &&
+    !parseCompactCommand(trimmed) &&
+    parseDreamCommand(trimmed) === null &&
+    !parseDreamLogCommand(trimmed).matched &&
+    !parseDreamRestoreCommand(trimmed).matched
+  );
 }
 
 export function getInputSubmitAction({
@@ -256,6 +315,53 @@ export function getInputSubmitAction({
   status: string;
 }): InputSubmitAction {
   const goalCommand = parseGoalCommand(text);
+  const dreamLogCommand = parseDreamLogCommand(text);
+  const dreamRestoreCommand = parseDreamRestoreCommand(text);
+  const dreamCommand = parseDreamCommand(text);
+  if (dreamRestoreCommand.matched) {
+    if (fileCount > 0) {
+      return {
+        kind: "dream-invalid",
+        command: "dream-restore",
+        reason: "attachments",
+      };
+    }
+    return dreamRestoreCommand.valid && dreamRestoreCommand.version !== null
+      ? { kind: "dream-restore", version: dreamRestoreCommand.version }
+      : {
+          kind: "dream-invalid",
+          command: "dream-restore",
+          reason: "arguments",
+        };
+  }
+  if (dreamLogCommand.matched) {
+    if (fileCount > 0) {
+      return {
+        kind: "dream-invalid",
+        command: "dream-log",
+        reason: "attachments",
+      };
+    }
+    return dreamLogCommand.valid
+      ? { kind: "dream-log", version: dreamLogCommand.version }
+      : {
+          kind: "dream-invalid",
+          command: "dream-log",
+          reason: "arguments",
+        };
+  }
+  if (dreamCommand !== null) {
+    if (fileCount > 0) {
+      return {
+        kind: "dream-invalid",
+        command: "dream",
+        reason: "attachments",
+      };
+    }
+    return dreamCommand === "valid"
+      ? { kind: "dream" }
+      : { kind: "dream-invalid", command: "dream", reason: "arguments" };
+  }
   if (goalCommand && fileCount === 0) {
     return { kind: "goal", command: goalCommand };
   }

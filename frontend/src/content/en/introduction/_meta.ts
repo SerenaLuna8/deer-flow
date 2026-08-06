@@ -4,8 +4,11 @@ const meta: MetaRecord = {
   index: {
     title: "Introduction",
   },
+  "why-actweave": {
+    title: "Why ActWeave",
+  },
   "why-deerflow": {
-    title: "Why DeerFlow",
+    display: "hidden",
   },
   "core-concepts": {
     title: "Core Concepts",

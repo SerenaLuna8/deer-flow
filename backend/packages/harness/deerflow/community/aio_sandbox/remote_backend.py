@@ -18,71 +18,19 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import time
 
 import requests
 
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
 
-_PROVISIONER_EXTRA_MOUNT_PATHS = {
-    "/mnt/acp-workspace",
-    "/mnt/skills/custom",
-    "/mnt/skills/integrations",
-    "/mnt/integrations/lark-cli/config",
-    "/mnt/integrations/lark-cli/data",
-    "/mnt/integrations/lark-cli/runtime",
-}
-
-_LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
-_LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
-_LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
-
-
-def _provisioner_extra_mounts_payload(
-    extra_mounts: list[tuple[str, str, bool]] | None,
-    *,
-    provision_lark_cli_runtime: bool = False,
-    provision_lark_cli_broker: bool = False,
-) -> list[dict[str, object]]:
-    """Return only extra mounts the provisioner knows how to recreate safely.
-
-    When ``provision_lark_cli_runtime`` is set, the provisioner supplies the
-    lark-cli runtime via an init container + emptyDir, so the runtime extra mount
-    is dropped here to avoid a colliding hostPath/PVC mount at the same path. The
-    per-user config/data credential mounts are still forwarded (they are mounted
-    into the sandbox in Pattern A).
-
-    When ``provision_lark_cli_broker`` is set (Pattern B, issue #4338), the
-    provisioner runs a broker sidecar that holds the credentials, so the
-    config/data mounts are **forwarded** (the provisioner wires them into the
-    sidecar, not the sandbox) while the runtime mount is dropped. Nothing changes
-    in this payload beyond keeping config/data available for the provisioner to
-    place; the runtime entry is dropped in both modes.
-    """
-    if not extra_mounts:
-        return []
-
-    drop_runtime = provision_lark_cli_runtime or provision_lark_cli_broker
-
-    payload: list[dict[str, object]] = []
-    for host_path, container_path, read_only in extra_mounts:
-        if container_path not in _PROVISIONER_EXTRA_MOUNT_PATHS:
-            continue
-        if drop_runtime and container_path == _LARK_CLI_RUNTIME_CONTAINER_PATH:
-            continue
-        payload.append(
-            {
-                "host_path": host_path,
-                "container_path": container_path,
-                "read_only": read_only,
-            }
-        )
-    return payload
+_PRIVATE_DESTROY_CONFIRM_TIMEOUT = 15.0
+_PRIVATE_DESTROY_POLL_INTERVAL = 0.25
 
 
 class RemoteSandboxBackend(SandboxBackend):
@@ -100,13 +48,13 @@ class RemoteSandboxBackend(SandboxBackend):
     """
 
     def __init__(self, provisioner_url: str, api_key: str = ""):
-        """Initialize with the provisioner service URL and optional API key.
+        """Initialize with the provisioner service URL and API key.
 
         Args:
             provisioner_url: URL of the provisioner service
                              (e.g., ``http://provisioner:8002``).
-            api_key: Value sent as ``X-API-Key`` header on every request.
-                     Leave empty to send no authentication header.
+            api_key: Value sent as ``X-API-Key`` on Provisioner control
+                     requests. An empty value sends no authentication header.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
@@ -127,26 +75,22 @@ class RemoteSandboxBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
-        provision_lark_cli_runtime: bool = False,
-        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
-        return self._provisioner_create(
-            thread_id,
-            sandbox_id,
-            extra_mounts,
-            user_id=user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-        )
+        return self._provisioner_create(thread_id, sandbox_id, extra_mounts, user_id=user_id)
 
     def destroy(self, info: SandboxInfo) -> None:
         """Destroy a sandbox Pod + Service via the provisioner."""
         self._provisioner_destroy(info.sandbox_id)
+
+    def destroy_private(self, info: SandboxInfo) -> None:
+        """Destroy a private Pod, raising unless deletion is confirmed."""
+
+        self._provisioner_destroy(info.sandbox_id, strict=True)
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check whether the sandbox Pod is running."""
@@ -177,7 +121,11 @@ class RemoteSandboxBackend(SandboxBackend):
     def _provisioner_list(self) -> list[SandboxInfo]:
         """GET /api/sandboxes → list all running sandboxes."""
         try:
-            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", headers=self._auth_headers(), timeout=10)
+            resp = requests.get(
+                f"{self._provisioner_url}/api/sandboxes",
+                headers=self._auth_headers(),
+                timeout=10,
+            )
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
@@ -213,31 +161,19 @@ class RemoteSandboxBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
-        provision_lark_cli_runtime: bool = False,
-        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
+        del extra_mounts
         effective_user_id = user_id or get_effective_user_id()
-        include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
-        payload = {
-            "sandbox_id": sandbox_id,
-            "thread_id": thread_id,
-            "user_id": effective_user_id,
-            "include_legacy_skills": include_legacy_skills,
-            "provision_lark_cli_runtime": provision_lark_cli_runtime,
-            "provision_lark_cli_broker": provision_lark_cli_broker,
-        }
-        provisioner_extra_mounts = _provisioner_extra_mounts_payload(
-            extra_mounts,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-        )
-        if provisioner_extra_mounts:
-            payload["extra_mounts"] = provisioner_extra_mounts
         try:
             resp = requests.post(
                 f"{self._provisioner_url}/api/sandboxes",
-                json=payload,
+                json={
+                    "sandbox_id": sandbox_id,
+                    "thread_id": thread_id,
+                    "user_id": effective_user_id,
+                    "include_legacy_skills": False,
+                },
                 headers=self._auth_headers(),
                 timeout=30,
             )
@@ -252,7 +188,7 @@ class RemoteSandboxBackend(SandboxBackend):
             logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")
             raise RuntimeError(f"Provisioner create failed: {exc}") from exc
 
-    def _provisioner_destroy(self, sandbox_id: str) -> None:
+    def _provisioner_destroy(self, sandbox_id: str, *, strict: bool = False) -> None:
         """DELETE /api/sandboxes/{sandbox_id} → destroy Pod + Service."""
         try:
             resp = requests.delete(
@@ -260,12 +196,59 @@ class RemoteSandboxBackend(SandboxBackend):
                 headers=self._auth_headers(),
                 timeout=15,
             )
-            if resp.ok:
-                logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
-            else:
+            if resp.status_code == 404:
+                logger.info(f"Provisioner sandbox {sandbox_id} was already absent")
+                return
+            if not resp.ok:
                 logger.warning(f"Provisioner destroy returned {resp.status_code}: {resp.text}")
+                if strict:
+                    raise RuntimeError(f"Provisioner private destroy failed: HTTP {resp.status_code}")
+                return
+            if strict:
+                self._confirm_private_destroyed(sandbox_id)
+            logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
         except requests.RequestException as exc:
             logger.warning(f"Provisioner destroy failed for {sandbox_id}: {exc}")
+            if strict:
+                # DELETE may have reached the server before the client timed
+                # out.  Confirm absence before deciding whether release must
+                # remain retryable.
+                try:
+                    if self._private_sandbox_is_absent(sandbox_id):
+                        logger.info(f"Provisioner sandbox {sandbox_id} was absent after DELETE failure")
+                        return
+                except (requests.RequestException, RuntimeError):
+                    pass
+                raise RuntimeError("Provisioner private destroy request failed") from exc
+
+    def _private_sandbox_is_absent(self, sandbox_id: str) -> bool:
+        response = requests.get(
+            f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+            headers=self._auth_headers(),
+            timeout=10,
+        )
+        if response.status_code == 404:
+            return True
+        if response.ok:
+            return False
+        raise RuntimeError(f"Provisioner private destroy confirmation failed: HTTP {response.status_code}")
+
+    def _confirm_private_destroyed(self, sandbox_id: str) -> None:
+        deadline = time.monotonic() + _PRIVATE_DESTROY_CONFIRM_TIMEOUT
+        last_error: Exception | None = None
+        while True:
+            try:
+                if self._private_sandbox_is_absent(sandbox_id):
+                    return
+                last_error = None
+            except (requests.RequestException, RuntimeError) as exc:
+                last_error = exc
+            if time.monotonic() >= deadline:
+                error = RuntimeError("Provisioner private destroy was not confirmed")
+                if last_error is not None:
+                    raise error from last_error
+                raise error
+            time.sleep(_PRIVATE_DESTROY_POLL_INTERVAL)
 
     def _provisioner_is_alive(self, sandbox_id: str) -> bool:
         """GET /api/sandboxes/{sandbox_id} → check Pod phase."""

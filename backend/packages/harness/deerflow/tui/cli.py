@@ -1,4 +1,4 @@
-"""Command-line entry point and launch-mode planning for the DeerFlow TUI.
+"""Command-line entry point and launch-mode planning for the ActWeave TUI.
 
 ``plan_launch`` is a pure decision function (fully unit-tested): given argv, TTY
 state and the environment, it decides whether to open the terminal UI or run a
@@ -36,7 +36,7 @@ class LaunchPlan:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deerflow",
-        description="DeerFlow terminal workbench — a TUI over the embedded DeerFlow harness.",
+        description="ActWeave terminal workbench — Weave intelligence into action. A TUI over the embedded harness.",
         add_help=True,
     )
     parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or message in --cli mode")
@@ -137,7 +137,7 @@ def plan_launch(
 # --------------------------------------------------------------------------- #
 
 _HEADLESS_HELP = """\
-deerflow — DeerFlow terminal workbench
+deerflow — ActWeave terminal workbench
 
   deerflow                      launch the terminal UI (TTY required)
   deerflow --tui                force the terminal UI

@@ -12,6 +12,7 @@ import logging
 
 from fastapi import HTTPException, status
 
+from app.gateway.auth.email import normalize_email
 from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.oidc import OIDCIdentity
 from deerflow.config.auth_config import OIDCProviderConfig
@@ -25,7 +26,7 @@ async def get_or_provision_oidc_user(
     identity: OIDCIdentity,
     local_provider: LocalAuthProvider,
 ) -> dict:
-    """Resolve an OIDC identity to a DeerFlow user.
+    """Resolve an OIDC identity to an ActWeave user.
 
     Flow:
     1. Look up existing user by (provider, subject)
@@ -53,12 +54,12 @@ async def get_or_provision_oidc_user(
             detail="The identity provider did not provide an email address.",
         )
 
-    email = identity.email.lower()
+    email = normalize_email(identity.email)
 
     # 3. Domain restriction
     if provider_config.allowed_email_domains:
         domain = email.rsplit("@", 1)[-1]
-        if domain not in {d.lower().lstrip("@") for d in provider_config.allowed_email_domains}:
+        if domain not in {configured_domain.strip().lower().lstrip("@") for configured_domain in provider_config.allowed_email_domains}:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your email domain is not allowed. Please use an approved email address.",
@@ -107,6 +108,6 @@ async def get_or_provision_oidc_user(
 
 
 def _resolve_role(email: str, admin_emails: list[str]) -> str:
-    """Return ``admin`` if the email is in the admin list, otherwise ``user``."""
-    email_lower = email.lower()
-    return "admin" if any(e.lower() == email_lower for e in admin_emails) else "user"
+    """Return ``system_admin`` if the email is in the admin list, otherwise ``user``."""
+    canonical_email = normalize_email(email)
+    return "system_admin" if any(normalize_email(configured_email) == canonical_email for configured_email in admin_emails) else "user"

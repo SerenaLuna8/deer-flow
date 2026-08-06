@@ -1,5 +1,6 @@
 import type { Message, Thread } from "@langchain/langgraph-sdk";
 
+import type { EventSequence } from "../private-work/event-sequence";
 import type { Todo } from "../todos";
 
 export interface GoalState {
@@ -40,10 +41,6 @@ export interface AgentThreadState extends Record<string, unknown> {
 export interface AgentThreadContext extends Record<string, unknown> {
   thread_id: string;
   model_name: string | undefined;
-  thinking_enabled: boolean;
-  is_plan_mode: boolean;
-  subagent_enabled: boolean;
-  reasoning_effort?: "minimal" | "low" | "medium" | "high";
   agent_name?: string;
 }
 
@@ -53,19 +50,13 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
-  seq: number;
+  seq?: EventSequence;
   content: Message;
   metadata: {
-    caller: string;
+    caller?: string;
     [key: string]: unknown;
   };
   created_at: string;
-}
-
-export interface ThreadContextUsage {
-  token_count: number;
-  max_context_tokens: number | null;
-  percentage: number | null;
 }
 
 export interface ThreadTokenUsageResponse {
@@ -80,5 +71,4 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
-  context_usage?: ThreadContextUsage | null;
 }

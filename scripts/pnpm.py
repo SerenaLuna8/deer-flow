@@ -56,7 +56,10 @@ def run_pnpm(arguments: Sequence[str]) -> int:
             cwd=FRONTEND_DIR,
         )
     except OSError as exc:
-        print(f"Error: Failed to run pnpm via {command[0]}: {exc}", file=sys.stderr)
+        print(
+            f"Error: Failed to run pnpm via {command[0]}: {exc}",
+            file=sys.stderr,
+        )
         return 126
 
     exit_code = 128 - result.returncode if result.returncode < 0 else result.returncode

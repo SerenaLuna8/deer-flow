@@ -1,4 +1,8 @@
 {{- if .Values.provisioner.enabled -}}
+{{- $sandboxServiceType := default "ClusterIP" .Values.provisioner.sandboxServiceType -}}
+{{- if not (has $sandboxServiceType (list "ClusterIP" "NodePort")) -}}
+{{- fail "provisioner.sandboxServiceType must be ClusterIP or NodePort" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +25,7 @@ spec:
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "deer-flow.fullname" . }}-provisioner
+      automountServiceAccountToken: true
       securityContext:
         # Non-root: provisioner image has no USER directive. uid/gid 1000.
         # No fsGroup — it mounts no PVCs (it references PVC names for the
@@ -49,20 +54,19 @@ spec:
               value: {{ include "deer-flow.namespace" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
+            - name: PROVISIONER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: PROVISIONER_API_KEY
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
-            # Service type for per-sandbox Services. ClusterIP (default) routes the
-            # gateway->sandbox hop over cluster DNS; NodePort is the compose/hybrid
-            # escape hatch (gateway not in K8s), which needs NODE_HOST below.
             - name: SANDBOX_SERVICE_TYPE
-              value: {{ .Values.provisioner.sandboxServiceType | default "ClusterIP" | quote }}
-            {{- if eq (default "ClusterIP" .Values.provisioner.sandboxServiceType) "NodePort" }}
-            # NODE_HOST: address the gateway uses to reach sandbox NodePorts
-            # (NodePort mode only). When `provisioner.nodeHost` is set, use it;
-            # otherwise default to this pod's node IP via the downward API. A
-            # NodePort is exposed on every node, so <node-IP>:<NodePort> routes
-            # from the gateway on most clusters. Override only when pod->node-IP
-            # traffic is blocked by the CNI/policy.
+              value: {{ $sandboxServiceType | quote }}
+            {{- if eq $sandboxServiceType "NodePort" }}
+            # Hybrid-mode escape hatch only. In the default ClusterIP mode the
+            # Worker receives a cluster-DNS URL and NODE_HOST is deliberately
+            # absent.
             - name: NODE_HOST
               {{- if .Values.provisioner.nodeHost }}
               value: {{ .Values.provisioner.nodeHost | quote }}

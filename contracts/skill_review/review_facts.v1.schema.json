@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://deerflow.dev/contracts/skill_review/review_facts.v1.schema.json",
-  "title": "DeerFlow Skill Review Facts v1",
+  "title": "ActWeave Skill Review Facts v1",
   "type": "object",
   "required": ["schema_version", "subject", "profile", "completeness", "summary", "findings", "resources", "evals", "analyzer_errors"],
   "properties": {
@@ -14,8 +14,13 @@
         "source": { "type": ["string", "null"] },
         "category": { "type": ["string", "null"] },
         "declared_name": { "type": ["string", "null"] },
-        "package_digest": { "type": "string" }
-      }
+        "package_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "skill_id": { "type": "string", "format": "uuid" },
+        "version_id": { "type": "string", "format": "uuid" },
+        "version_number": { "type": "integer", "minimum": 1 },
+        "payload_checksum": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
     },
     "profile": { "enum": ["deerflow", "agentskills"] },
     "completeness": {

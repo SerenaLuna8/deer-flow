@@ -41,6 +41,34 @@ load_proxy_env_from_dotenv() {
     done
 }
 
+ensure_proxy_auth_token() {
+    local token_file="$PROJECT_ROOT/backend/.deer-flow/.proxy-auth-token"
+
+    if [ -z "${DEER_FLOW_PROXY_AUTH_TOKEN:-}" ]; then
+        mkdir -p "$(dirname "$token_file")"
+        if [ -f "$token_file" ]; then
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(cat "$token_file")"
+        elif command -v python3 >/dev/null 2>&1; then
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            printf '%s\n' "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$token_file"
+            chmod 600 "$token_file"
+        elif command -v openssl >/dev/null 2>&1; then
+            DEER_FLOW_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"
+            printf '%s\n' "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$token_file"
+            chmod 600 "$token_file"
+        else
+            echo -e "${YELLOW}Cannot generate DEER_FLOW_PROXY_AUTH_TOKEN: python3 and openssl are unavailable.${NC}" >&2
+            exit 1
+        fi
+    fi
+
+    if [ "${#DEER_FLOW_PROXY_AUTH_TOKEN}" -lt 32 ]; then
+        echo -e "${YELLOW}DEER_FLOW_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
+        exit 1
+    fi
+    export DEER_FLOW_PROXY_AUTH_TOKEN
+}
+
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
     local sandbox_use=""
@@ -86,6 +114,20 @@ detect_sandbox_mode() {
     fi
 }
 
+detect_scheduler_enabled() {
+    local config_file="$PROJECT_ROOT/config.yaml"
+    [ -f "$config_file" ] || { echo "false"; return; }
+    awk '
+        /^[[:space:]]*scheduler:[[:space:]]*$/ { in_scheduler=1; next }
+        in_scheduler && /^[^[:space:]#]/ { in_scheduler=0 }
+        in_scheduler && /^[[:space:]]*enabled:[[:space:]]*/ {
+            line=$0; sub(/^[[:space:]]*enabled:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*/, "", line); gsub(/["\047[:space:]]/, "", line)
+            print (tolower(line)=="true" ? "true" : "false"); exit
+        }
+    ' "$config_file" | head -n 1 | grep -E '^(true|false)$' || echo "false"
+}
+
 # Cleanup function for Ctrl+C
 cleanup() {
     echo ""
@@ -113,7 +155,7 @@ docker_available() {
 # Initialize: pre-pull the sandbox image so first Pod startup is fast
 init() {
     echo "=========================================="
-    echo "  DeerFlow Init — Pull Sandbox Image"
+    echo "  ActWeave Init — Pull Sandbox Image"
     echo "=========================================="
     echo ""
 
@@ -185,32 +227,39 @@ start() {
     fi
 
     echo "=========================================="
-    echo "  Starting DeerFlow Docker Development"
+    echo "  Starting ActWeave Docker Development"
     echo "=========================================="
     echo ""
 
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="redis frontend gateway nginx"
+    services="frontend gateway worker nginx"
+    if [ "$(detect_scheduler_enabled)" = "true" ]; then
+        COMPOSE_CMD="$COMPOSE_CMD --profile scheduler"
+        services="$services scheduler"
+        echo -e "${BLUE}Scheduler enabled${NC}"
+    else
+        echo -e "${BLUE}Scheduler disabled${NC}"
+    fi
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="redis frontend gateway provisioner nginx"
+        services="$services provisioner"
     fi
 
     # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
     # Docker socket. Mount it via the opt-in docker-compose.dood.yaml overlay so
     # the default (local) and provisioner modes never expose the host daemon.
-    # Mounting the socket = root-equivalent host control; see SECURITY.md.
+    # Mounting the socket grants root-equivalent control over the host daemon.
     if [ "$sandbox_mode" = "aio" ]; then
         local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
         if [ ! -S "$docker_socket" ]; then
             echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
             exit 1
         fi
-        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+        echo -e "${YELLOW}Mounting host Docker socket into Worker (DooD = host root-equivalent).${NC}"
         COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
     fi
 
-    echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
+    echo -e "${BLUE}Runtime: Gateway admission API + independent Worker execution${NC}"
     echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
     if [ "$sandbox_mode" = "provisioner" ]; then
         echo -e "${BLUE}Provisioner enabled (Kubernetes mode).${NC}"
@@ -233,13 +282,12 @@ start() {
             echo ""
             echo -e "${YELLOW}============================================================${NC}"
             echo -e "${YELLOW}  config.yaml has been created from config.example.yaml.${NC}"
-            echo -e "${YELLOW}  Please edit config.yaml to set your API keys and model   ${NC}"
-            echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
+            echo -e "${YELLOW}  The process configuration is ready.                      ${NC}"
             echo -e "${YELLOW}============================================================${NC}"
             echo ""
-            echo -e "${YELLOW}  Recommended: run 'make setup' before starting Docker.    ${NC}"
-            echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
-            echo -e "${YELLOW}  Then run:        make docker-start${NC}"
+            echo -e "${YELLOW}  Next: run make docker-start, sign in as system admin,    ${NC}"
+            echo -e "${YELLOW}  then configure models and encrypted Credentials at       ${NC}"
+            echo -e "${YELLOW}  /admin/settings/models.                                  ${NC}"
             echo ""
             exit 0
         else
@@ -248,31 +296,19 @@ start() {
         fi
     fi
 
-    # Ensure extensions_config.json exists as a file before mounting.
-    # Docker creates a directory when bind-mounting a non-existent host path.
-    if [ ! -f "$PROJECT_ROOT/extensions_config.json" ]; then
-        if [ -f "$PROJECT_ROOT/extensions_config.example.json" ]; then
-            cp "$PROJECT_ROOT/extensions_config.example.json" "$PROJECT_ROOT/extensions_config.json"
-            echo -e "${BLUE}Created extensions_config.json from example${NC}"
-        else
-            echo "{}" > "$PROJECT_ROOT/extensions_config.json"
-            echo -e "${BLUE}Created empty extensions_config.json${NC}"
-        fi
-    fi
-
     load_proxy_env_from_dotenv
+    ensure_proxy_auth_token
 
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
     echo "=========================================="
-    echo "  DeerFlow Docker is starting!"
+    echo "  ActWeave Docker is starting!"
     echo "=========================================="
     echo ""
     echo "  🌐 Application: http://localhost:2026"
     echo "  📡 API Gateway: http://localhost:2026/api/*"
-    echo "  🤖 Runtime:     Gateway embedded"
-    echo "  API:            /api/langgraph/* → Gateway"
+    echo "  🤖 Runtime:     Independent Worker"
     echo ""
     echo "  📋 View logs: make docker-logs"
     echo "  🛑 Stop:      make docker-stop"
@@ -296,10 +332,6 @@ logs() {
             service="nginx"
             echo -e "${BLUE}Viewing nginx logs...${NC}"
             ;;
-        --redis)
-            service="redis"
-            echo -e "${BLUE}Viewing redis logs...${NC}"
-            ;;
         --provisioner)
             service="provisioner"
             echo -e "${BLUE}Viewing provisioner logs...${NC}"
@@ -309,7 +341,7 @@ logs() {
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--redis|--provisioner]"
+            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
             exit 1
             ;;
     esac
@@ -334,7 +366,7 @@ stop() {
 # Restart Docker development environment
 restart() {
     echo "========================================"
-    echo "  Restarting DeerFlow Docker Services"
+    echo "  Restarting ActWeave Docker Services"
     echo "========================================"
     echo ""
     echo -e "${BLUE}Restarting containers...${NC}"
@@ -349,7 +381,7 @@ restart() {
 
 # Show help
 help() {
-    echo "DeerFlow Docker Management Script"
+    echo "ActWeave Docker Management Script"
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""
@@ -361,7 +393,6 @@ help() {
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
-    echo "                  --redis      View redis logs only"
     echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"

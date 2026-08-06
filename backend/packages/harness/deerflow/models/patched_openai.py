@@ -39,21 +39,10 @@ class PatchedChatOpenAI(ChatOpenAI):
     from ``AIMessage.additional_kwargs["tool_calls"]`` into the serialised
     request payload before it is sent to the API.
 
-    Usage in ``config.yaml``::
-
-        - name: gemini-2.5-pro-thinking
-          display_name: Gemini 2.5 Pro (Thinking)
-          use: deerflow.models.patched_openai:PatchedChatOpenAI
-          model: google/gemini-2.5-pro-preview
-          api_key: $GEMINI_API_KEY
-          base_url: https://<your-openai-compat-gateway>/v1
-          max_tokens: 16384
-          supports_thinking: true
-          supports_vision: true
-          when_thinking_enabled:
-            extra_body:
-              thinking:
-                type: enabled
+    In the PostgreSQL-backed System Settings catalog, choose the
+    ``patched_openai`` adapter, bind an encrypted System Credential, set the
+    provider model name, and place only secret-free options such as
+    ``base_url``, ``max_tokens``, and thinking payload controls in ``settings``.
     """
 
     def _get_request_payload(

@@ -9,6 +9,7 @@ export default tseslint.config(
   {
     ignores: [
       ".next",
+      ".next-static",
       "playwright-report",
       "test-results",
       "src/components/ui/**",

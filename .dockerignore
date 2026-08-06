@@ -51,6 +51,7 @@ docs/
 examples/
 assets/
 tests/
+test-artifacts/
 *.log
 
 # Exclude directories not needed in Docker context

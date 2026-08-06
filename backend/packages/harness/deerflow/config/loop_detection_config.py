@@ -59,8 +59,16 @@ class LoopDetectionConfig(BaseModel):
         description="Number of calls to the same tool type before forcing a stop",
     )
     tool_freq_overrides: dict[str, ToolFreqOverride] = Field(
-        default_factory=dict,
-        description=("Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. Values can be higher or lower than the global defaults. Commonly used to raise thresholds for high-frequency tools like bash."),
+        default_factory=lambda: {
+            "web_fetch": ToolFreqOverride(warn=6, hard_limit=10),
+            "web_search": ToolFreqOverride(warn=6, hard_limit=10),
+        },
+        description=(
+            "Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. "
+            "Remote web tools default to lower bounds so varying searches cannot reach the "
+            "private Run recursion ceiling before loop detection. Values can be higher or lower "
+            "than the global defaults; use higher limits only for intentionally high-frequency tools."
+        ),
     )
 
     @model_validator(mode="after")

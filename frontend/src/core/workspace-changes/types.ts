@@ -1,21 +1,15 @@
-export type WorkspaceChangeStatus =
-  | "created"
-  | "modified"
-  | "deleted"
-  | "symlink_created";
+export type WorkspaceChangeStatus = "created" | "modified" | "deleted";
 
 export type DiffUnavailableReason =
   | "binary"
   | "large"
   | "sensitive"
-  | "truncated"
-  | "symlink";
+  | "truncated";
 
 export interface WorkspaceChangeSummary {
   created: number;
   modified: number;
   deleted: number;
-  symlink_created: number;
   additions: number;
   deletions: number;
   truncated: boolean;
@@ -36,9 +30,6 @@ export interface WorkspaceFileChange {
   diff_unavailable_reason: DiffUnavailableReason | null;
   additions: number;
   deletions: number;
-  symlink: boolean;
-  symlink_target_before: string | null;
-  symlink_target_after: string | null;
 }
 
 export interface WorkspaceChangesResponse {

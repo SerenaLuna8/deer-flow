@@ -1,4 +1,4 @@
-"""Configuration for user-owned IM channel connections."""
+"""Provider enablement for final project-scoped IM connections."""
 
 from __future__ import annotations
 
@@ -39,10 +39,12 @@ class BindingCodeChannelConnectionConfig(BaseModel):
 
 
 class ChannelConnectionsConfig(BaseModel):
-    """Top-level config for browser-connectable IM channels."""
+    """Legacy deployment-config provider availability.
+
+    These flags do not gate database-backed project channel instances.
+    """
 
     enabled: bool = False
-    require_bound_identity: bool = True
     slack: SlackChannelConnectionConfig = Field(default_factory=SlackChannelConnectionConfig)
     telegram: TelegramChannelConnectionConfig = Field(default_factory=TelegramChannelConnectionConfig)
     discord: DiscordChannelConnectionConfig = Field(default_factory=DiscordChannelConnectionConfig)

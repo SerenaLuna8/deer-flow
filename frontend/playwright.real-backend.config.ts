@@ -7,15 +7,13 @@ const gatewayUrl = `http://localhost:${gatewayPort}`;
 const gatewayInternalUrl = `http://127.0.0.1:${gatewayPort}`;
 
 /**
- * Layer 2 of the record/replay e2e: the REAL Next.js frontend rendering data
- * from a REAL gateway whose LLM is the deterministic `ReplayChatModel` (no API
- * key). This is separate from `playwright.config.ts` (which mocks the backend)
- * so the mock-based suite is untouched.
+ * Core full-stack Replay: the real Next.js frontend renders data from a real
+ * Gateway/Worker boundary whose LLM is deterministic `ReplayChatModel` (no API
+ * key). It stays separate from the mocked project-route browser check.
  *
  * Two webServers are started: the replay gateway and the frontend pointed at
  * it. Auth-disabled mode is enabled on both servers so the no-cookie e2e
- * contract is covered; specs that need session cookies still register a
- * throwaway test account at runtime.
+ * contract is covered; the scenario registers one throwaway test account.
  */
 export default defineConfig({
   testDir: "./tests/e2e-real-backend",
@@ -42,11 +40,7 @@ export default defineConfig({
       timeout: 180_000,
       stdout: "pipe",
       stderr: "pipe",
-      // Mount the test-only run/message seeder used by multi-run-order.spec.ts
-      // (#3352). The endpoint exists only on this replay gateway, never in the
-      // production app.
       env: {
-        DEERFLOW_ENABLE_TEST_SEED: "1",
         DEER_FLOW_AUTH_DISABLED: "1",
       },
     },

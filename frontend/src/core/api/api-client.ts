@@ -3,13 +3,7 @@
 import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
-import { isStaticWebsiteOnly } from "../static-mode";
-import {
-  loadStaticDemoThread,
-  loadStaticDemoThreads,
-  staticDemoThreadState,
-} from "../threads/static-demo";
-import type { AgentThreadState } from "../threads/types";
+import { RUN_EXECUTION_PROFILE_CONTEXT_KEY } from "../private-work/execution-profile";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
@@ -20,8 +14,8 @@ import { sanitizeRunStreamOptions } from "./stream-mode";
  *
  * Reading the cookie per-request (rather than baking it into the SDK's
  * ``defaultHeaders`` at construction) handles login / logout / password
- * change cookie rotation transparently. Both the ``/api/langgraph/*`` SDK
- * path and the direct REST endpoints in ``fetcher.ts:fetchWithAuth``
+ * change cookie rotation transparently. Both the project-private SDK adapter
+ * and the direct REST endpoints in ``fetcher.ts:fetchWithAuth``
  * share :func:`readCsrfCookie` and :const:`STATE_CHANGING_METHODS` so
  * the contract stays in lockstep.
  */
@@ -38,6 +32,68 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
   return { ...init, headers };
 }
 
+const PRIVATE_RUN_CREATE_PATH = /\/threads\/[^/]+\/runs(?:\/(?:stream|wait))?$/;
+
+/**
+ * The upstream LangGraph SDK serializes a fixed set of Run fields and does not
+ * yet expose ActWeave's top-level ``execution_profile`` extension. Callers put
+ * the profile under a reserved context key; this final request hook promotes
+ * it after SDK serialization and removes the reserved key before the request
+ * crosses the trust boundary.
+ */
+export function promotePrivateRunExecutionProfile(
+  url: URL,
+  init: RequestInit,
+): RequestInit {
+  if (
+    (init.method ?? "GET").toUpperCase() !== "POST" ||
+    !PRIVATE_RUN_CREATE_PATH.test(url.pathname) ||
+    typeof init.body !== "string"
+  ) {
+    return init;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(init.body);
+  } catch {
+    return init;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return init;
+  }
+
+  const context = Reflect.get(body, "context");
+  if (
+    typeof context !== "object" ||
+    context === null ||
+    Array.isArray(context) ||
+    !Object.hasOwn(context, RUN_EXECUTION_PROFILE_CONTEXT_KEY)
+  ) {
+    return init;
+  }
+
+  const executionProfile = Reflect.get(
+    context,
+    RUN_EXECUTION_PROFILE_CONTEXT_KEY,
+  );
+  const nextContext = { ...context };
+  Reflect.deleteProperty(nextContext, RUN_EXECUTION_PROFILE_CONTEXT_KEY);
+
+  return {
+    ...init,
+    body: JSON.stringify({
+      ...body,
+      context: nextContext,
+      execution_profile: executionProfile,
+    }),
+  };
+}
+
+function prepareSdkRequest(url: URL, init: RequestInit): RequestInit {
+  return injectCsrfHeader(url, promotePrivateRunExecutionProfile(url, init));
+}
+
 // Run statuses that have reached a terminal state where no further streaming
 // is possible. Reconnecting (``joinStream``) to such a run either 409s or, once
 // the backend's in-memory stream bridge is reaped (``worker.py`` calls
@@ -47,7 +103,7 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
 // first message after a reload never sends. The ``joinStream`` wrapper below
 // short-circuits these *before* joining.
 //
-// ``interrupted`` is included because in DeerFlow it is only ever written by
+// ``interrupted`` is included because in ActWeave it is only ever written by
 // ``RunManager.cancel()`` (a user-initiated stop); the resumable human-in-the-
 // loop path uses ``Command(goto=END)`` (``ClarificationMiddleware``), which
 // ends the run as ``success``, not ``interrupted``. So an interrupted run has
@@ -66,59 +122,6 @@ const TERMINAL_RUN_STATUSES = new Set([
   "timeout",
   "interrupted",
 ]);
-
-// This is a rejoin budget: the original stream is not counted, so exhausting
-// five recovery attempts can consume six streams in total.
-const MAX_STREAM_GAP_RECOVERIES = 5;
-
-export type StreamReplayGapData = {
-  code: "stream_replay_gap";
-  run_id: string;
-  requested_event_id: string | null;
-  earliest_available_event_id: string;
-  latest_available_event_id: string;
-  recovery: "reload_durable_state";
-};
-
-type StreamPart = {
-  id?: string;
-  event: string;
-  data: unknown;
-};
-
-export class StreamReplayGapError extends Error {
-  constructor(
-    readonly gap: StreamReplayGapData,
-    readonly recoveryAttempts: number,
-    readonly recoveryCause?: unknown,
-  ) {
-    super(
-      `Unable to recover SSE history after ${recoveryAttempts} attempts (requested ${gap.requested_event_id ?? "initial stream"}, earliest ${gap.earliest_available_event_id})`,
-    );
-    this.name = "StreamReplayGapError";
-  }
-}
-
-function parseStreamReplayGap(data: unknown): StreamReplayGapData {
-  if (typeof data !== "object" || data === null) {
-    throw new Error("Invalid stream replay gap payload.");
-  }
-
-  const value = data as Record<string, unknown>;
-  const requestedEventId = value.requested_event_id;
-  if (
-    value.code !== "stream_replay_gap" ||
-    typeof value.run_id !== "string" ||
-    (requestedEventId !== null && typeof requestedEventId !== "string") ||
-    typeof value.earliest_available_event_id !== "string" ||
-    typeof value.latest_available_event_id !== "string" ||
-    value.recovery !== "reload_durable_state"
-  ) {
-    throw new Error("Invalid stream replay gap payload.");
-  }
-
-  return value as StreamReplayGapData;
-}
 
 /**
  * Shared matcher for the gateway's 409 conflict responses. The SDK surfaces
@@ -203,15 +206,18 @@ async function shouldSkipReconnect(
   }
 }
 
+type RunMetadataStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
 export function clearReconnectRun(
   threadId: string | null | undefined,
   runId: string,
+  storageOverride?: RunMetadataStorage,
 ): void {
   if (typeof window === "undefined" || !threadId) return;
 
   const key = `lg:stream:${threadId}`;
   try {
-    const storage = window.sessionStorage;
+    const storage = storageOverride ?? window.sessionStorage;
     if (storage.getItem(key) === runId) {
       storage.removeItem(key);
     }
@@ -220,155 +226,31 @@ export function clearReconnectRun(
   }
 }
 
-function rememberReconnectRun(
-  threadId: string | null | undefined,
-  runId: string,
-): void {
-  if (typeof window === "undefined" || !threadId) return;
+export type CompatibleClientOptions = {
+  apiUrl?: string;
+  runMetadataStorage?: RunMetadataStorage;
+  durableRunStreams?: boolean;
+};
 
-  try {
-    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
-  } catch {
-    // Ignore storage access failures so gap recovery remains usable.
-  }
-}
-
-async function* recoverStreamReplayGaps({
-  client,
-  threadId,
-  expectedRunId,
-  initialStream,
-  resume,
-}: {
-  client: LangGraphClient;
-  threadId: string | null | undefined;
-  expectedRunId: () => string | undefined;
-  initialStream: AsyncIterable<StreamPart>;
-  resume: (runId: string, lastEventId: string) => AsyncIterable<StreamPart>;
-}): AsyncGenerator<StreamPart> {
-  let stream = initialStream;
-  let recoveryAttempts = 0;
-
-  while (true) {
-    let gap: StreamReplayGapData | undefined;
-    for await (const entry of stream) {
-      if (entry.event === "gap") {
-        gap = parseStreamReplayGap(entry.data);
-        break;
-      }
-      yield entry;
-    }
-
-    if (!gap) {
-      return;
-    }
-
-    const runId = expectedRunId() ?? gap.run_id;
-    if (!threadId || gap.run_id !== runId) {
-      throw new Error(
-        "Stream replay gap does not match the active thread run.",
-      );
-    }
-    if (recoveryAttempts >= MAX_STREAM_GAP_RECOVERIES) {
-      throw new StreamReplayGapError(gap, recoveryAttempts);
-    }
-    recoveryAttempts += 1;
-
-    // The SDK would otherwise ignore an unknown `gap` event and report a
-    // normal finish. Surface a custom control event to DeerFlow's hook, reload
-    // durable values, then explicitly follow only events newer than the
-    // retained tail captured by the server.
-    clearReconnectRun(threadId, runId);
-    yield {
-      event: "custom",
-      data: { type: "stream_replay_gap", ...gap },
-    };
-
-    const durableState = await client.threads
-      .getState(threadId)
-      .catch((error: unknown) => {
-        throw new StreamReplayGapError(gap, recoveryAttempts, error);
-      });
-    if (durableState.values != null) {
-      yield { event: "values", data: durableState.values };
-    }
-
-    rememberReconnectRun(threadId, runId);
-    stream = resume(runId, gap.latest_available_event_id);
-  }
-}
-
-async function* handleInactiveRunStream({
-  threadId,
-  expectedRunId,
-  stream,
-}: {
-  threadId: string | null | undefined;
-  expectedRunId: () => string | undefined;
-  stream: AsyncIterable<StreamPart>;
-}): AsyncGenerator<StreamPart> {
-  try {
-    yield* stream;
-  } catch (error) {
-    const runId = expectedRunId();
-    if (runId && isInactiveRunStreamError(error)) {
-      clearReconnectRun(threadId, runId);
-      return;
-    }
-    throw error;
-  }
-}
-
-function createCompatibleClient(isMock?: boolean): LangGraphClient {
-  if (isStaticWebsiteOnly() && !isMock) {
-    return createStaticClient();
-  }
-
-  const apiUrl = getLangGraphBaseURL(isMock);
+export function createCompatibleClient({
+  apiUrl: configuredApiUrl,
+  runMetadataStorage,
+  durableRunStreams = false,
+}: CompatibleClientOptions = {}): LangGraphClient {
+  const apiUrl = configuredApiUrl ?? getLangGraphBaseURL();
+  console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
     apiUrl,
-    onRequest: injectCsrfHeader,
+    onRequest: prepareSdkRequest,
   });
 
   const originalRunStream = client.runs.stream.bind(client.runs);
-  const originalJoinStream = client.runs.joinStream.bind(client.runs);
-  // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
-  // this return value with `for await`, so run creation still starts on first
-  // iteration rather than when `runs.stream()` is called.
-  client.runs.stream = async function* (threadId, assistantId, payload) {
-    const sanitizedPayload = sanitizeRunStreamOptions(payload);
-    const originalOnRunCreated = sanitizedPayload?.onRunCreated;
-    let runId: string | undefined;
-    const initialStream = originalRunStream(threadId, assistantId, {
-      ...sanitizedPayload,
-      onRunCreated(meta) {
-        runId = meta.run_id;
-        originalOnRunCreated?.(meta);
-      },
-    });
-
-    const recoveredStream = recoverStreamReplayGaps({
-      client,
+  client.runs.stream = ((threadId, assistantId, payload) =>
+    originalRunStream(
       threadId,
-      expectedRunId: () => runId,
-      initialStream,
-      resume: (resolvedRunId, lastEventId) => {
-        // Keep the recovery run id available to the shared inactive-stream
-        // handler even if the SDK omitted its onRunCreated callback.
-        runId = resolvedRunId;
-        return originalJoinStream(threadId, resolvedRunId, {
-          lastEventId,
-          signal: sanitizedPayload?.signal,
-          streamMode: sanitizedPayload?.streamMode,
-        });
-      },
-    });
-    yield* handleInactiveRunStream({
-      threadId,
-      expectedRunId: () => runId,
-      stream: recoveredStream,
-    });
-  } as typeof client.runs.stream;
+      assistantId,
+      sanitizeRunStreamOptions(payload),
+    )) as typeof client.runs.stream;
 
   const originalCancel = client.runs.cancel.bind(client.runs);
   client.runs.cancel = (async (threadId, runId, wait, action, options) => {
@@ -382,90 +264,41 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         // doesn't surface as an unhandled rejection, and clear the now-stale
         // reconnect key. clearReconnectRun only removes the key when it still
         // matches this runId, so a newer run's key is never touched.
-        clearReconnectRun(threadId, runId);
+        clearReconnectRun(threadId, runId, runMetadataStorage);
         return;
       }
       throw error;
     }
   }) as typeof client.runs.cancel;
 
+  const originalJoinStream = client.runs.joinStream.bind(client.runs);
   client.runs.joinStream = async function* (threadId, runId, options) {
-    // Short-circuit reconnects to runs that have already finished: otherwise a
-    // reload after the backend's stream bridge is reaped blocks forever on a
-    // drained condition variable, pinning ``isLoading`` true so the first
-    // post-reload message is routed to ``stop`` instead of ``submit``.
-    if (threadId && (await shouldSkipReconnect(client, threadId, runId))) {
-      clearReconnectRun(threadId, runId);
+    // Ephemeral bridges need this terminal preflight: after their buffers are
+    // reaped, joining a finished Run can block forever. Durable project
+    // streams deliberately bypass it because their persisted terminal frame
+    // is part of the UI's authoritative replay.
+    if (
+      !durableRunStreams &&
+      threadId &&
+      (await shouldSkipReconnect(client, threadId, runId))
+    ) {
+      clearReconnectRun(threadId, runId, runMetadataStorage);
       return;
     }
-    const sanitizedOptions = sanitizeRunStreamOptions(options);
-    yield* handleInactiveRunStream({
-      threadId,
-      expectedRunId: () => runId,
-      stream: recoverStreamReplayGaps({
-        client,
+    try {
+      yield* originalJoinStream(
         threadId,
-        expectedRunId: () => runId,
-        initialStream: originalJoinStream(threadId, runId, sanitizedOptions),
-        resume: (resolvedRunId, lastEventId) =>
-          originalJoinStream(threadId, resolvedRunId, {
-            ...sanitizedOptions,
-            lastEventId,
-          }),
-      }),
-    });
+        runId,
+        sanitizeRunStreamOptions(options),
+      );
+    } catch (error) {
+      if (isInactiveRunStreamError(error)) {
+        clearReconnectRun(threadId, runId, runMetadataStorage);
+        return;
+      }
+      throw error;
+    }
   } as typeof client.runs.joinStream;
-
-  return client;
-}
-
-function createStaticClient(): LangGraphClient {
-  const apiUrl =
-    typeof window === "undefined"
-      ? "http://localhost:3000"
-      : window.location.origin;
-  const client = new LangGraphClient({ apiUrl });
-
-  client.threads.search = (async (query) => {
-    return loadStaticDemoThreads(query);
-  }) as typeof client.threads.search;
-
-  client.threads.get = (async (threadId) => {
-    return loadStaticDemoThread(threadId);
-  }) as typeof client.threads.get;
-
-  client.threads.getState = (async (threadId) => {
-    return staticDemoThreadState(await loadStaticDemoThread(threadId));
-  }) as typeof client.threads.getState;
-
-  client.threads.getHistory = (async (threadId) => {
-    return [staticDemoThreadState(await loadStaticDemoThread(threadId))];
-  }) as typeof client.threads.getHistory;
-
-  client.threads.update = (async (threadId) => {
-    return loadStaticDemoThread(threadId);
-  }) as typeof client.threads.update;
-
-  client.runs.list = (async () => []) as typeof client.runs.list;
-  client.runs.stream = async function* () {
-    /* empty */
-  } as typeof client.runs.stream;
-  client.runs.joinStream = async function* () {
-    /* empty */
-  } as typeof client.runs.joinStream;
-
-  return client as LangGraphClient<AgentThreadState>;
-}
-
-const _clients = new Map<string, LangGraphClient>();
-export function getAPIClient(isMock?: boolean): LangGraphClient {
-  const cacheKey = isMock ? "mock" : "default";
-  let client = _clients.get(cacheKey);
-
-  if (!client) {
-    client = createCompatibleClient(isMock);
-    _clients.set(cacheKey, client);
-  }
 
   return client;
 }

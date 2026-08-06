@@ -5,14 +5,10 @@ import { useI18n } from "@/core/i18n/hooks";
 import type { AgentThreadState } from "@/core/threads";
 
 import { useThreadChat } from "./chats";
-import { FlipDisplay } from "./flip-display";
 
-export function ThreadTitle({
-  threadId,
+export function ThreadDocumentTitle({
   thread,
 }: {
-  className?: string;
-  threadId: string;
   thread: BaseStream<AgentThreadState>;
 }) {
   const { t } = useI18n();
@@ -39,12 +35,5 @@ export function ThreadTitle({
     thread.values,
   ]);
 
-  if (!thread.values?.title) {
-    return null;
-  }
-  return (
-    <FlipDisplay uniqueKey={threadId}>
-      {thread.values.title ?? "Untitled"}
-    </FlipDisplay>
-  );
+  return null;
 }

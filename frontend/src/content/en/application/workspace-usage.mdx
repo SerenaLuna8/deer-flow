@@ -1,13 +1,13 @@
 ---
 title: Workspace Usage
-description: The DeerFlow App workspace is a browser-based interface for having multi-turn conversations with the agent, tracking task progress, viewing artifacts, and managing files.
+description: The ActWeave App workspace is a browser-based interface for having multi-turn conversations with the agent, tracking task progress, viewing artifacts, and managing files.
 ---
 
 import { Callout } from "nextra/components";
 
 # Workspace Usage
 
-The DeerFlow App workspace is a browser-based interface for having multi-turn conversations with the agent, tracking task progress, viewing artifacts, and managing files.
+The ActWeave App workspace is a browser-based interface for having multi-turn conversations with the agent, tracking task progress, viewing artifacts, and managing files.
 
 ## Starting a conversation
 
@@ -21,7 +21,10 @@ To start a new thread, click **New Thread** in the sidebar or use the keyboard s
 
 ## Selecting a model
 
-Use the model picker in the input bar to choose which configured model to use for the current request. Models listed here correspond to the `models:` entries in your `config.yaml`.
+Use the model picker in the input bar to choose which active logical model to
+use for the current request. Platform administrators manage this list in
+**Admin → System Settings → Models**; ordinary users see only safe selector
+metadata, not provider settings or Credential references.
 
 The selected model applies to the next message only. You can switch models between messages in the same thread.
 
@@ -65,11 +68,22 @@ Each agent response in the conversation may contain:
 - **Tool results**: the output returned by each tool.
 - **Subagent output**: if the agent delegated a task, the subagent's progress appears inline.
 
-Tool calls and thinking steps are collapsed by default. Click to expand them.
+Complex tasks can pass through several thinking, tool-call, and tool-result
+cycles. During execution, every reasoning round remains available and the
+current round opens automatically. Once a complex task finishes, all reasoning,
+tool calls, and subagent steps move into one default-collapsed **Execution
+details · N steps** disclosure before the final answer. Every model call keeps
+an independent **Thought (X seconds)** disclosure in its original position
+among the tool calls; reasoning is never flattened into a generic execution
+step or replaced by the last pass. The terminal model call's reasoning appears
+exactly once as the last reasoning step in that process, while the answer and
+finalized file cards remain outside it. A direct answer with no preceding
+execution history keeps its standalone reasoning disclosure. Replay or reload
+reconstructs the same order, and `present_files` transition prose is not repeated.
 
 ## Understanding token usage
 
-If token usage display is enabled, DeerFlow shows one conversation-level total in
+If token usage display is enabled, ActWeave shows one conversation-level total in
 the header and optional per-turn or debug summaries in the message list.
 
 - **Header total**: the persisted thread-level total from the backend. While the
@@ -86,6 +100,12 @@ These totals may also differ from your provider's billing page. Common reasons
 include retries, failed requests, cached input tokens, reasoning tokens,
 provider-specific billing rules, and internal calls that do not appear as normal
 chat messages.
+
+Project administrators with usage access can also see a project-wide Token usage
+line chart on the **project overview**. It groups settled Runs from all project
+members into the latest 24 consecutive UTC hourly buckets by final job settlement
+time, zero-filling hours without usage; the current hour is a partial bucket. This
+is a different scope from the thread ledger shown in a conversation header.
 
 ## Switching agents
 

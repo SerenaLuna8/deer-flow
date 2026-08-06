@@ -1,0 +1,398 @@
+import { z } from "zod";
+
+import { assetSummarySchema } from "@/core/shared-assets/types";
+
+const uuidSchema = z.string().uuid();
+const timestampSchema = z.string().datetime({ offset: true });
+const checksumSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(255)
+  .refine((value) => !value.includes("\0"));
+export const SKILL_BUILDER_MAX_MESSAGE_CHARS = 8_000;
+export const SKILL_BUILDER_MAX_FILES = 128;
+export const SKILL_BUILDER_MAX_FILE_BYTES = 512 * 1024;
+export const SKILL_BUILDER_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+export const skillBuilderStatusSchema = z.enum([
+  "interviewing",
+  "generating",
+  "awaiting_clarification",
+  "draft_ready",
+  "validated",
+  "committing",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const skillBuilderProgressStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+]);
+
+export const skillBuilderProgressItemSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    label: z.string().trim().min(1),
+    status: skillBuilderProgressStatusSchema,
+  })
+  .strict();
+
+export const skillBuilderMessageSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    role: z.enum(["user", "assistant"]),
+    content: z.string(),
+    created_at: timestampSchema,
+  })
+  .strict();
+
+const clarificationOptionSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    label: z.string().trim().min(1),
+    value: z.string(),
+  })
+  .strict();
+
+export const skillBuilderClarificationRequestSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal("human_input_request"),
+    source: z.string().trim().min(1),
+    request_id: z.string().trim().min(1),
+    clarification_type: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    question: z.string().trim().min(1),
+    context: z.string().trim().min(1),
+    input_mode: z.enum(["free_text", "single_choice", "choice_with_other"]),
+    options: z.array(clarificationOptionSchema),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.input_mode !== "free_text" &&
+      (!value.options || value.options.length === 0)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Choice input requires at least one option",
+        path: ["options"],
+      });
+    }
+  });
+
+export const skillBuilderFilePathSchema = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine(
+    (path) =>
+      path === path.trim() &&
+      !path.startsWith("/") &&
+      !path.includes("\\") &&
+      !path.includes("\0") &&
+      path.normalize("NFC") === path &&
+      path
+        .split("/")
+        .every((part) => part !== "" && part !== "." && part !== ".."),
+    "Skill file path must be a safe relative POSIX path",
+  );
+
+export const skillBuilderFileSchema = z
+  .object({
+    path: skillBuilderFilePathSchema,
+    media_type: z.string().trim().min(1).max(255),
+    size_bytes: z.number().int().nonnegative(),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    encoding: z.literal("utf-8"),
+    content: z.string(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const contentBytes = utf8ByteLength(value.content);
+    if (contentBytes > SKILL_BUILDER_MAX_FILE_BYTES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill file exceeds the Builder byte limit",
+        path: ["content"],
+      });
+    }
+    if (contentBytes !== value.size_bytes) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill file size does not match its UTF-8 content",
+        path: ["size_bytes"],
+      });
+    }
+  });
+
+const skillBuilderFilesSchema = z
+  .array(skillBuilderFileSchema)
+  .max(SKILL_BUILDER_MAX_FILES)
+  .superRefine((files, context) => {
+    if (
+      files.reduce((total, file) => total + file.size_bytes, 0) >
+      SKILL_BUILDER_MAX_TOTAL_BYTES
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill candidate package exceeds the Builder byte limit",
+      });
+    }
+  });
+
+export const skillBuilderSecretRequirementSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    optional: z.boolean(),
+  })
+  .strict();
+
+export const skillBuilderValidationSchema = z
+  .object({
+    draft_checksum: checksumSchema,
+    validated_at: timestampSchema,
+    description: z.string(),
+    frontmatter: z.record(z.unknown()),
+    compatibility: z.string().nullable(),
+    secret_requirements: z.array(skillBuilderSecretRequirementSchema),
+    scan_decision: z.enum(["allow", "warn"]),
+    scan_rule_ids: z.array(z.string().trim().min(1)),
+    scan_summary: z.record(z.unknown()),
+  })
+  .strict();
+
+export const skillBuilderSessionSchema = z
+  .object({
+    id: uuidSchema,
+    project_id: uuidSchema,
+    owner_user_id: z.string().trim().min(1),
+    thread_id: uuidSchema,
+    slug: z.string().trim().min(1),
+    display_name: z.string().trim().min(1),
+    status: skillBuilderStatusSchema,
+    revision: z.number().int().positive(),
+    messages: z.array(skillBuilderMessageSchema),
+    active_clarification: skillBuilderClarificationRequestSchema.nullable(),
+    progress: z.array(skillBuilderProgressItemSchema),
+    files: skillBuilderFilesSchema,
+    draft_checksum: checksumSchema.nullable(),
+    validation: skillBuilderValidationSchema.nullable(),
+    error_code: z.string().trim().min(1).nullable(),
+    error_message: z.string().trim().min(1).nullable(),
+    created_skill_id: uuidSchema.nullable(),
+    created_at: timestampSchema,
+    updated_at: timestampSchema,
+  })
+  .strict();
+
+export const skillBuilderSessionSummarySchema = z
+  .object({
+    id: uuidSchema,
+    slug: z.string().trim().min(1),
+    display_name: z.string().trim().min(1),
+    status: skillBuilderStatusSchema,
+    updated_at: timestampSchema,
+  })
+  .strict();
+
+export const skillBuilderSessionResponseSchema = z
+  .object({
+    data: skillBuilderSessionSchema,
+    request_id: z.string().trim().min(1),
+  })
+  .strict();
+
+export const skillBuilderSessionListResponseSchema = z
+  .object({
+    data: z.array(skillBuilderSessionSummarySchema),
+    request_id: z.string().trim().min(1),
+  })
+  .strict();
+
+export const createSkillBuilderSessionInputSchema = z
+  .object({
+    slug: z.string().trim().min(1),
+    display_name: z.string().trim().min(1).max(120),
+    idempotency_key: idempotencyKeySchema,
+  })
+  .strict();
+
+export const skillBuilderMessageTurnSchema = z
+  .object({
+    kind: z.literal("message"),
+    message: z.string().trim().min(1).max(SKILL_BUILDER_MAX_MESSAGE_CHARS),
+  })
+  .strict();
+
+export const skillBuilderClarificationResponseSchema = z
+  .object({
+    version: z.literal(1),
+    kind: z.literal("human_input_response"),
+    source: z.string().trim().min(1),
+    request_id: z.string().trim().min(1),
+    response_kind: z.enum(["option", "text"]),
+    option_id: z.string().trim().min(1).optional(),
+    value: z.string().trim().min(1).max(SKILL_BUILDER_MAX_MESSAGE_CHARS),
+  })
+  .strict();
+
+export const skillBuilderClarificationTurnSchema = z
+  .object({
+    kind: z.literal("clarification"),
+    response: skillBuilderClarificationResponseSchema,
+  })
+  .strict();
+
+export const skillBuilderFileChangeSchema = z
+  .object({
+    op: z.enum(["create", "replace", "delete"]),
+    path: skillBuilderFilePathSchema,
+    content: z.string().optional(),
+    media_type: z.string().trim().min(1).max(255).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.op !== "delete" &&
+      (value.content === undefined || value.media_type === undefined)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Created and replaced files require content and media_type",
+      });
+    }
+    if (
+      value.op === "delete" &&
+      (value.content !== undefined || value.media_type !== undefined)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Deleted files accept only op and path",
+      });
+    }
+    if (
+      value.content !== undefined &&
+      utf8ByteLength(value.content) > SKILL_BUILDER_MAX_FILE_BYTES
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill file exceeds the Builder byte limit",
+        path: ["content"],
+      });
+    }
+  });
+
+export const skillBuilderDraftTurnSchema = z
+  .object({
+    kind: z.literal("draft_update"),
+    expected_draft_checksum: checksumSchema,
+    changes: z
+      .array(skillBuilderFileChangeSchema)
+      .min(1)
+      .max(SKILL_BUILDER_MAX_FILES)
+      .superRefine((changes, context) => {
+        if (
+          changes.reduce(
+            (total, change) =>
+              total +
+              (change.content === undefined
+                ? 0
+                : utf8ByteLength(change.content)),
+            0,
+          ) > SKILL_BUILDER_MAX_TOTAL_BYTES
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Skill draft changes exceed the Builder byte limit",
+          });
+        }
+      }),
+  })
+  .strict();
+
+export const skillBuilderTurnInputSchema = z
+  .object({
+    input: z.discriminatedUnion("kind", [
+      skillBuilderMessageTurnSchema,
+      skillBuilderClarificationTurnSchema,
+      skillBuilderDraftTurnSchema,
+    ]),
+    expected_revision: z.number().int().positive(),
+    idempotency_key: idempotencyKeySchema,
+  })
+  .strict();
+
+export const validateSkillBuilderSessionInputSchema = z
+  .object({
+    expected_revision: z.number().int().positive(),
+    expected_draft_checksum: checksumSchema,
+    idempotency_key: idempotencyKeySchema,
+  })
+  .strict();
+
+export const commitSkillBuilderSessionInputSchema =
+  validateSkillBuilderSessionInputSchema
+    .extend({
+      acknowledge_warnings: z.boolean(),
+    })
+    .strict();
+
+export const cancelSkillBuilderSessionInputSchema = z
+  .object({
+    expected_revision: z.number().int().positive(),
+    idempotency_key: idempotencyKeySchema,
+  })
+  .strict();
+
+export const skillBuilderCommitResponseSchema = z
+  .object({
+    data: z
+      .object({
+        session: skillBuilderSessionSchema,
+        skill: assetSummarySchema,
+      })
+      .strict(),
+    request_id: z.string().trim().min(1),
+  })
+  .strict();
+
+export type SkillBuilderStatus = z.infer<typeof skillBuilderStatusSchema>;
+export type SkillBuilderProgressItem = z.infer<
+  typeof skillBuilderProgressItemSchema
+>;
+export type SkillBuilderMessage = z.infer<typeof skillBuilderMessageSchema>;
+export type SkillBuilderFile = z.infer<typeof skillBuilderFileSchema>;
+export type SkillBuilderFileChange = z.infer<
+  typeof skillBuilderFileChangeSchema
+>;
+export type SkillBuilderValidation = z.infer<
+  typeof skillBuilderValidationSchema
+>;
+export type SkillBuilderSession = z.infer<typeof skillBuilderSessionSchema>;
+export type SkillBuilderSessionSummary = z.infer<
+  typeof skillBuilderSessionSummarySchema
+>;
+export type CreateSkillBuilderSessionInput = z.input<
+  typeof createSkillBuilderSessionInputSchema
+>;
+export type SkillBuilderTurnInput = z.input<typeof skillBuilderTurnInputSchema>;
+export type ValidateSkillBuilderSessionInput = z.input<
+  typeof validateSkillBuilderSessionInputSchema
+>;
+export type CommitSkillBuilderSessionInput = z.input<
+  typeof commitSkillBuilderSessionInputSchema
+>;
+export type CancelSkillBuilderSessionInput = z.input<
+  typeof cancelSkillBuilderSessionInputSchema
+>;

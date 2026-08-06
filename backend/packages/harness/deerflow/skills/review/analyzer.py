@@ -1,4 +1,4 @@
-"""Deterministic skill package analyzer."""
+"""Deterministic Skill package analyzer."""
 
 from __future__ import annotations
 
@@ -7,9 +7,12 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from deerflow.skills.frontmatter import ALLOWED_FRONTMATTER_PROPERTIES, split_skill_markdown
-from deerflow.skills.package_paths import is_eval_fixture_path, is_eval_fixture_skill_md
-from deerflow.skills.parser import parse_allowed_tools, parse_required_secrets
+import yaml
+
+from deerflow.skills.parser import (
+    parse_allowed_tools,
+    parse_required_secrets,
+)
 from deerflow.skills.review.digest import compute_package_digest
 from deerflow.skills.review.eval_schema import analyze_eval_manifests
 from deerflow.skills.review.models import (
@@ -20,12 +23,26 @@ from deerflow.skills.review.models import (
     sort_findings,
     summarize_findings,
 )
+from deerflow.skills.review.package_paths import (
+    is_eval_fixture_path,
+    is_eval_fixture_skill_md,
+)
 from deerflow.skills.review.resource_graph import build_resource_graph
 from deerflow.skills.skillscan.orchestrator import scan_skill_dir
+from deerflow.skills.validation import ALLOWED_FRONTMATTER_PROPERTIES
+
+_FRONTMATTER_RE = re.compile(
+    r"^---\s*\n(.*?)\n---\s*\n?",
+    re.DOTALL,
+)
 
 
-def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "deerflow") -> dict[str, Any]:
-    """Produce review-facts.v1 from a PackageSnapshot."""
+def analyze_skill_package(
+    snapshot: dict[str, Any],
+    *,
+    profile: ProfileName = "deerflow",
+) -> dict[str, Any]:
+    """Produce review-facts.v1 without executing package content."""
     findings: list[dict[str, Any]] = []
     analyzer_errors: list[dict[str, Any]] = []
     files = {str(entry["path"]): entry for entry in snapshot.get("files", [])}
@@ -33,7 +50,6 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
     skill_entries = [path for path in files if PurePosixPath(path).name == "SKILL.md"]
     root_skill = files.get("SKILL.md")
     declared_name = None
-    text_complete = not snapshot.get("truncated")
     not_assessed: list[str] = []
 
     if not root_skill:
@@ -52,11 +68,15 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
                 severity="blocker",
                 path="SKILL.md",
                 message="Root SKILL.md is not readable UTF-8 text.",
-                remediation="Store SKILL.md as UTF-8 Markdown with YAML frontmatter.",
+                remediation=("Store SKILL.md as UTF-8 Markdown with YAML frontmatter."),
             )
         )
     else:
-        declared_name = _analyze_skill_md(str(root_skill.get("content") or ""), profile=profile, findings=findings)
+        declared_name = _analyze_skill_md(
+            str(root_skill.get("content") or ""),
+            profile=profile,
+            findings=findings,
+        )
 
     for nested in sorted(path for path in skill_entries if path != "SKILL.md" and not is_eval_fixture_skill_md(path)):
         findings.append(
@@ -64,7 +84,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
                 "structure.nested-skill-md",
                 severity="blocker",
                 path=nested,
-                message="Nested SKILL.md files are not allowed in a single skill package.",
+                message=("Nested SKILL.md files are not allowed in one package."),
                 remediation="Keep exactly one SKILL.md at the package root.",
             )
         )
@@ -77,7 +97,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
                     severity="warning",
                     path=path,
                     message="Package contains a symlink entry.",
-                    remediation="Replace symlinks with ordinary files inside the skill package.",
+                    remediation=("Replace symlinks with ordinary in-package files."),
                     evidence=entry.get("target"),
                 )
             )
@@ -88,7 +108,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
                     severity="warning",
                     path=path,
                     message="Package contains a nested archive.",
-                    remediation="Unpack and review nested archives before packaging the skill.",
+                    remediation=("Unpack and review nested archives before packaging."),
                 )
             )
         if _is_hidden_sensitive_path(path):
@@ -98,41 +118,55 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
                     severity="warning",
                     path=path,
                     message="Package contains a hidden sensitive file.",
-                    remediation="Remove hidden credential or package-manager config files.",
+                    remediation=("Remove hidden credential or package-manager config."),
                 )
             )
 
     resource_graph, resource_findings = build_resource_graph(snapshot)
     findings.extend(resource_findings)
-
     evals, eval_findings = analyze_eval_manifests(snapshot)
     findings.extend(eval_findings)
 
     try:
         findings.extend(_scan_with_skillscan(snapshot))
     except Exception as exc:
-        analyzer_errors.append({"code": "skillscan_failed", "path": None, "message": type(exc).__name__})
+        analyzer_errors.append(
+            {
+                "code": "skillscan_failed",
+                "path": None,
+                "message": type(exc).__name__,
+            }
+        )
         not_assessed.append("skillscan")
 
     if snapshot.get("truncated"):
         not_assessed.append("full_package")
 
     findings = sort_findings(findings)
-    package_digest = compute_package_digest(snapshot)
+    snapshot_subject = snapshot.get("subject", {})
     subject = {
-        "display_ref": snapshot.get("subject", {}).get("display_ref"),
-        "source": snapshot.get("subject", {}).get("source"),
-        "category": snapshot.get("subject", {}).get("category"),
+        "display_ref": snapshot_subject.get("display_ref"),
+        "source": snapshot_subject.get("source"),
+        "category": snapshot_subject.get("category"),
         "declared_name": declared_name,
-        "package_digest": package_digest,
+        "package_digest": compute_package_digest(snapshot),
     }
+    for key in (
+        "skill_id",
+        "version_id",
+        "version_number",
+        "payload_checksum",
+    ):
+        if key in snapshot_subject:
+            subject[key] = snapshot_subject[key]
+
     return {
         "schema_version": FACTS_SCHEMA_VERSION,
         "subject": subject,
         "profile": profile,
         "completeness": {
             "package_enumerated": not any(error.get("code") == "root_not_found" for error in snapshot.get("reader_errors", [])),
-            "text_content_complete": text_complete,
+            "text_content_complete": not snapshot.get("truncated"),
             "truncated": bool(snapshot.get("truncated")),
             "not_assessed": sorted(set(not_assessed)),
         },
@@ -145,21 +179,25 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
     }
 
 
-def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict[str, Any]]) -> str | None:
-    parts, error = split_skill_markdown(content)
-    if error or parts is None:
+def _analyze_skill_md(
+    content: str,
+    *,
+    profile: ProfileName,
+    findings: list[dict[str, Any]],
+) -> str | None:
+    metadata, body, error = _split_skill_markdown(content)
+    if error or metadata is None or body is None:
         findings.append(
             make_finding(
                 "structure.invalid-frontmatter",
                 severity="blocker",
                 path="SKILL.md",
                 message=error or "Invalid frontmatter format.",
-                remediation="Use YAML frontmatter bounded by --- fences with name and description fields.",
+                remediation=("Use YAML frontmatter bounded by --- fences with name and description."),
             )
         )
         return None
 
-    metadata = parts.metadata
     unexpected = sorted(set(metadata) - ALLOWED_FRONTMATTER_PROPERTIES)
     if unexpected:
         findings.append(
@@ -167,8 +205,8 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 "structure.unknown-frontmatter-field",
                 severity="warning",
                 path="SKILL.md",
-                message=f"Unknown frontmatter field(s): {', '.join(unexpected)}",
-                remediation="Remove unsupported fields or add them to the shared DeerFlow frontmatter schema.",
+                message=(f"Unknown frontmatter field(s): {', '.join(unexpected)}"),
+                remediation=("Remove unsupported fields or add them to the shared schema."),
                 evidence=unexpected,
             )
         )
@@ -182,7 +220,7 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 severity="blocker",
                 path="SKILL.md",
                 message="Frontmatter is missing a non-empty name.",
-                remediation="Add a hyphen-case skill name.",
+                remediation="Add a hyphen-case Skill name.",
             )
         )
     elif not _valid_skill_name(declared_name):
@@ -191,8 +229,8 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 "structure.invalid-name",
                 severity="error",
                 path="SKILL.md",
-                message="Skill name must be hyphen-case using lowercase letters, digits, and hyphens.",
-                remediation="Rename the skill using lowercase hyphen-case.",
+                message=("Skill name must use lowercase letters, digits, and hyphens."),
+                remediation="Rename the Skill using lowercase hyphen-case.",
                 evidence=declared_name,
             )
         )
@@ -204,8 +242,8 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 "structure.missing-description",
                 severity="blocker",
                 path="SKILL.md",
-                message="Frontmatter is missing a non-empty description.",
-                remediation="Add a concise description that states what the skill does and when to invoke it.",
+                message=("Frontmatter is missing a non-empty description."),
+                remediation=("Add a concise description of what invokes the Skill."),
             )
         )
     elif len(description.strip()) > 1024:
@@ -214,20 +252,19 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 "structure.description-too-long",
                 severity="error",
                 path="SKILL.md",
-                message="Description exceeds DeerFlow's 1024 character limit.",
-                remediation="Shorten the description and move detailed guidance into the body.",
+                message="Description exceeds ActWeave's 1024 character limit.",
+                remediation=("Shorten the description and move detail into the body."),
             )
         )
 
-    body = parts.body.strip()
-    if not body:
+    if not body.strip():
         findings.append(
             make_finding(
                 "structure.empty-body",
                 severity="error",
                 path="SKILL.md",
-                message="SKILL.md has no instruction body after frontmatter.",
-                remediation="Add executable workflow instructions after the frontmatter.",
+                message="SKILL.md has no instruction body.",
+                remediation="Add workflow instructions after frontmatter.",
             )
         )
 
@@ -240,12 +277,15 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 severity="error",
                 path="SKILL.md",
                 message=str(exc),
-                remediation="Declare allowed-tools as a YAML list of non-empty strings.",
+                remediation="Declare allowed-tools as a YAML list.",
             )
         )
 
     try:
-        parse_required_secrets(metadata.get("required-secrets"), Path("SKILL.md"))
+        parse_required_secrets(
+            metadata.get("required-secrets"),
+            Path("SKILL.md"),
+        )
     except ValueError as exc:
         findings.append(
             make_finding(
@@ -269,12 +309,38 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
         )
 
     if profile == "agentskills":
-        _add_agentskills_findings(metadata, declared_name, findings)
-
+        _add_agentskills_findings(
+            metadata,
+            declared_name,
+            findings,
+        )
     return declared_name
 
 
-def _add_agentskills_findings(metadata: dict[str, Any], declared_name: str | None, findings: list[dict[str, Any]]) -> None:
+def _split_skill_markdown(
+    content: str,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
+        return None, None, "No YAML frontmatter found"
+    try:
+        metadata = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        return None, None, f"Invalid YAML in frontmatter: {exc}"
+    if not isinstance(metadata, dict):
+        return None, None, "Frontmatter must be a YAML dictionary"
+    return (
+        {str(key): value for key, value in metadata.items()},
+        content[match.end() :],
+        None,
+    )
+
+
+def _add_agentskills_findings(
+    metadata: dict[str, Any],
+    declared_name: str | None,
+    findings: list[dict[str, Any]],
+) -> None:
     description = metadata.get("description")
     if isinstance(description, str) and len(description.strip()) > 200:
         findings.append(
@@ -284,8 +350,8 @@ def _add_agentskills_findings(metadata: dict[str, Any], declared_name: str | Non
                 source="review-core",
                 profile="agentskills",
                 path="SKILL.md",
-                message="Description is longer than the Agent Skills recommended display length.",
-                remediation="Keep the description concise and move detail into the body.",
+                message=("Description is longer than the recommended display length."),
+                remediation=("Keep the description concise and move detail into the body."),
             )
         )
     if declared_name and len(declared_name) > 64:
@@ -296,27 +362,35 @@ def _add_agentskills_findings(metadata: dict[str, Any], declared_name: str | Non
                 source="review-core",
                 profile="agentskills",
                 path="SKILL.md",
-                message="Skill name is longer than the portability profile recommends.",
-                remediation="Use a shorter package name for cross-client portability.",
+                message=("Skill name is longer than the portability profile allows."),
+                remediation="Use a shorter cross-client package name.",
             )
         )
 
 
-def _scan_with_skillscan(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+def _scan_with_skillscan(
+    snapshot: dict[str, Any],
+) -> list[dict[str, Any]]:
     files = [entry for entry in snapshot.get("files", []) if entry.get("kind") == "text" and not is_eval_fixture_path(str(entry.get("path") or ""))]
     if not files:
         return []
-    with tempfile.TemporaryDirectory(prefix="skill-review-") as tmp:
-        root = Path(tmp)
+    with tempfile.TemporaryDirectory(prefix="skill-review-") as temp:
+        root = Path(temp)
         for entry in files:
-            rel = str(entry["path"])
-            target = root / rel
+            target = root / str(entry["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(entry.get("content") or ""), encoding="utf-8")
+            target.write_text(
+                str(entry.get("content") or ""),
+                encoding="utf-8",
+            )
         result = scan_skill_dir(root)
+
     findings: list[dict[str, Any]] = []
     for finding in result.get("findings", []):
-        severity = SKILLSCAN_SEVERITY_MAP.get(str(finding.get("severity")), "warning")
+        severity = SKILLSCAN_SEVERITY_MAP.get(
+            str(finding.get("severity")),
+            "warning",
+        )
         findings.append(
             make_finding(
                 str(finding.get("rule_id")),
@@ -338,7 +412,7 @@ def _scan_with_skillscan(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 source="skillscan",
                 severity="warning",
                 message="SkillScan reported an analyzer error.",
-                remediation="Inspect the referenced file and rerun the review.",
+                remediation="Inspect the package and rerun review.",
                 evidence=str(error),
             )
         )
@@ -350,10 +424,22 @@ def _valid_skill_name(name: str) -> bool:
 
 
 def _is_nested_archive(path: str) -> bool:
-    lowered = path.lower()
-    return lowered.endswith((".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".7z", ".rar", ".whl"))
+    return path.lower().endswith(
+        (
+            ".zip",
+            ".tar",
+            ".tar.gz",
+            ".tgz",
+            ".tar.bz2",
+            ".tbz2",
+            ".tar.xz",
+            ".txz",
+            ".7z",
+            ".rar",
+            ".whl",
+        )
+    )
 
 
 def _is_hidden_sensitive_path(path: str) -> bool:
-    parts = PurePosixPath(path).parts
-    return any(part in {".env", ".npmrc", ".pypirc", ".netrc"} for part in parts)
+    return any(part in {".env", ".npmrc", ".pypirc", ".netrc"} for part in PurePosixPath(path).parts)

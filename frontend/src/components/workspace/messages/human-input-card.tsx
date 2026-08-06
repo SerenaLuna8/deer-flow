@@ -3,10 +3,14 @@
 import {
   CheckCircle2Icon,
   CheckIcon,
+  ChevronDownIcon,
+  CircleDotIcon,
+  CircleIcon,
+  ListIcon,
   Loader2Icon,
   MessageCircleQuestionMarkIcon,
 } from "lucide-react";
-import { useId, useState, type KeyboardEvent } from "react";
+import { useId, useMemo, useState, type KeyboardEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,7 +45,7 @@ import { MarkdownContent } from "./markdown-content";
 export type HumanInputSubmitResult = boolean | void;
 
 export function shouldSubmitHumanInputTextOnKeyDown(
-  event: KeyboardEvent<HTMLTextAreaElement>,
+  event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
   isComposing = false,
 ) {
   return (
@@ -68,8 +72,6 @@ export function findMissingRequiredFields(
   fields: HumanInputField[],
   values: Record<string, HumanInputFormValue>,
 ) {
-  // Own-property reads only: field names like "toString" must never resolve
-  // to inherited Object.prototype members and satisfy required validation.
   return fields.filter(
     (field) =>
       field.required &&
@@ -95,7 +97,7 @@ function FormFieldInput({
   controlId: string;
   labelId: string;
   invalid: boolean;
-  errorId?: string;
+  errorId: string;
   onChange: (value: HumanInputFormValue) => void;
 }) {
   const stringValue = typeof value === "string" ? value : "";
@@ -104,12 +106,16 @@ function FormFieldInput({
     "aria-invalid": invalid || undefined,
     "aria-describedby": invalid ? errorId : undefined,
   };
+  const groupErrorAriaProps = {
+    "aria-invalid": invalid || undefined,
+    "aria-describedby": invalid ? errorId : undefined,
+  };
 
   if (field.type === "textarea") {
     return (
       <Textarea
         id={controlId}
-        className="min-h-20 resize-y text-sm"
+        className="min-h-24 resize-y rounded-xl px-4 py-3 text-[15px] shadow-none"
         disabled={disabled}
         placeholder={field.placeholder}
         value={stringValue}
@@ -128,7 +134,7 @@ function FormFieldInput({
       >
         <SelectTrigger
           id={controlId}
-          className="w-full"
+          className="h-12 w-full rounded-xl px-4 text-[15px] shadow-none"
           aria-labelledby={labelId}
           {...ariaProps}
         >
@@ -153,18 +159,19 @@ function FormFieldInput({
         className="flex flex-wrap gap-2"
         role="group"
         aria-labelledby={labelId}
-        aria-describedby={invalid ? errorId : undefined}
+        {...groupErrorAriaProps}
       >
         {(field.options ?? []).map((option) => {
           const selected = selectedValues.includes(option.value);
           return (
             <Button
               key={option.id}
-              className={cn(
-                "h-8 w-fit rounded-md px-2.5 text-left leading-5 whitespace-normal",
-                selected && "border-primary/40 bg-primary/10",
-              )}
               aria-pressed={selected}
+              className={cn(
+                "h-9 w-fit rounded-lg px-3 text-left leading-5 whitespace-normal shadow-none",
+                selected &&
+                  "border-ring bg-selection-subtle hover:bg-selection-subtle",
+              )}
               disabled={disabled}
               type="button"
               variant="outline"
@@ -177,14 +184,14 @@ function FormFieldInput({
               }}
             >
               <span
-                className={cn(
-                  "border-border flex size-3.5 shrink-0 items-center justify-center rounded-sm border",
-                  selected &&
-                    "border-primary bg-primary text-primary-foreground",
-                )}
                 aria-hidden
+                className={cn(
+                  "border-border flex size-4 shrink-0 items-center justify-center rounded border",
+                  selected &&
+                    "border-ring bg-selection text-selection-foreground",
+                )}
               >
-                {selected ? <CheckIcon className="size-2.5" /> : null}
+                {selected ? <CheckIcon className="size-3" /> : null}
               </span>
               {option.label}
             </Button>
@@ -197,7 +204,7 @@ function FormFieldInput({
   return (
     <Input
       id={controlId}
-      className="text-sm"
+      className="h-12 rounded-xl px-4 text-[15px] shadow-none"
       disabled={disabled}
       placeholder={field.placeholder}
       type={
@@ -213,6 +220,8 @@ function FormFieldInput({
     />
   );
 }
+
+export { FormFieldInput as HumanInputFormFieldInput };
 
 export function HumanInputCard({
   request,
@@ -231,6 +240,7 @@ export function HumanInputCard({
 }) {
   const { t } = useI18n();
   const [text, setText] = useState("");
+  const [selectedOptionId, setSelectedOptionId] = useState("");
   const [error, setError] = useState("");
   const [isComposing, setIsComposing] = useState(false);
   const [formValues, setFormValues] = useState<
@@ -247,11 +257,15 @@ export function HumanInputCard({
   const allowText =
     request.input_mode === "free_text" ||
     request.input_mode === "choice_with_other";
-  const options = request.options ?? [];
-  const fields = request.fields ?? [];
+  const options = useMemo(() => request.options ?? [], [request.options]);
+  const fields = useMemo(() => request.fields ?? [], [request.fields]);
   const readOnly = !onSubmit;
   const isDisabled =
     disabled || pending || Boolean(answeredResponse) || readOnly;
+  const selectedOption = useMemo(
+    () => options.find((option) => option.id === selectedOptionId) ?? null,
+    [options, selectedOptionId],
+  );
   const statusLabel = answeredResponse
     ? t.humanInput.answered
     : pending
@@ -272,47 +286,51 @@ export function HumanInputCard({
   };
 
   const handleOptionClick = (option: HumanInputOption) => {
-    void submitResponse(createHumanInputOptionResponse(request, option));
+    if (isDisabled) {
+      return;
+    }
+    setSelectedOptionId(option.id);
+    setText("");
+    setError("");
   };
 
   const handleFormValueChange = (name: string, value: HumanInputFormValue) => {
     const remaining = new Set(invalidFieldNames);
     remaining.delete(name);
     setInvalidFieldNames(remaining);
-    // Keep the error node mounted while other fields are still invalid —
-    // their aria-describedby must keep pointing at an existing element.
     if (remaining.size === 0) {
       setError("");
     }
     setFormValues((previous) => ({ ...previous, [name]: value }));
   };
 
-  const handleFormSubmit = (event: { preventDefault(): void }) => {
+  const handleSubmit = (event: { preventDefault(): void }) => {
     event.preventDefault();
-    const missing = findMissingRequiredFields(fields, formValues);
-    if (missing.length > 0) {
-      setInvalidFieldNames(new Set(missing.map((field) => field.name)));
-      setError(t.humanInput.requiredError);
+    if (isForm) {
+      const missing = findMissingRequiredFields(fields, formValues);
+      if (missing.length > 0) {
+        setInvalidFieldNames(new Set(missing.map((field) => field.name)));
+        setError(t.humanInput.requiredError);
+        return;
+      }
+      if (!buildHumanInputFormSummary(request, formValues).trim()) {
+        setError(t.humanInput.emptyError);
+        return;
+      }
+      void submitResponse(
+        createHumanInputTextResponse(
+          request,
+          buildHumanInputFormSubmissionValue(request, formValues),
+        ),
+      );
       return;
     }
-    // Per the request-side-only protocol scope, form answers are submitted as
-    // a readable v1 text response — no structured response kind is introduced.
-    // The submitted value carries a JSON block keyed by stable field names so
-    // the model can reconstruct the mapping unambiguously.
-    if (!buildHumanInputFormSummary(request, formValues).trim()) {
-      setError(t.humanInput.emptyError);
+    if (selectedOption) {
+      void submitResponse(
+        createHumanInputOptionResponse(request, selectedOption),
+      );
       return;
     }
-    void submitResponse(
-      createHumanInputTextResponse(
-        request,
-        buildHumanInputFormSubmissionValue(request, formValues),
-      ),
-    );
-  };
-
-  const handleTextSubmit = (event: { preventDefault(): void }) => {
-    event.preventDefault();
     const value = text.trim();
     if (!value) {
       setError(t.humanInput.emptyError);
@@ -321,57 +339,42 @@ export function HumanInputCard({
     void submitResponse(createHumanInputTextResponse(request, value));
   };
 
-  const handleTextKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleTextKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (shouldSubmitHumanInputTextOnKeyDown(event, isComposing)) {
-      event.preventDefault();
-      const value = text.trim();
-      if (!value) {
-        setError(t.humanInput.emptyError);
-        return;
-      }
-      void submitResponse(createHumanInputTextResponse(request, value));
+      handleSubmit(event);
     }
   };
 
-  const submitFooter = (
-    <div className="flex min-h-9 flex-wrap items-center justify-between gap-2">
-      {error ? (
-        <p className="text-destructive text-sm" id={formErrorId} role="alert">
-          {error}
-        </p>
-      ) : answeredResponse ? (
-        <p className="text-muted-foreground text-sm" aria-live="polite">
-          {t.humanInput.answeredValue(answeredResponse.value)}
-        </p>
-      ) : (
-        <span />
-      )}
-      <Button
-        className="min-w-24"
-        disabled={isDisabled}
-        type="submit"
-        variant="secondary"
+  if (answeredResponse) {
+    return (
+      <section
+        aria-label={t.humanInput.answered}
+        aria-live="polite"
+        className="border-border/80 bg-muted/35 overflow-hidden rounded-xl border"
+        data-human-input-state="answered"
+        data-testid="human-input-card"
       >
-        {pending ? <Loader2Icon className="size-4 animate-spin" /> : null}
-        {t.humanInput.submit}
-      </Button>
-    </div>
-  );
+        <details className="group">
+          <summary className="focus-visible:ring-ring flex cursor-pointer list-none items-center gap-3 px-4 py-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset [&::-webkit-details-marker]:hidden">
+            <CheckCircle2Icon
+              aria-hidden
+              className="text-success size-5 shrink-0"
+            />
+            <span className="min-w-0 flex-1 break-words">
+              {t.humanInput.answeredValue(answeredResponse.value)}
+            </span>
+            <ChevronDownIcon
+              aria-hidden
+              className="text-muted-foreground size-4 shrink-0 transition-transform group-open:rotate-180"
+            />
+          </summary>
 
-  return (
-    <section
-      aria-labelledby={titleId}
-      className="border-border bg-card/70 text-card-foreground rounded-lg border p-4 shadow-xs"
-      data-testid="human-input-card"
-    >
-      <div className="flex items-start gap-3">
-        <div className="bg-primary/10 text-primary mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md">
-          <MessageCircleQuestionMarkIcon className="size-4" />
-        </div>
-        <div className="min-w-0 flex-1 space-y-3">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="min-w-0 space-y-1">
-              <h2 id={titleId} className="text-sm leading-5 font-medium">
+          <div
+            className="border-border/70 space-y-5 border-t px-4 py-5 sm:px-6"
+            data-testid="human-input-answered-details"
+          >
+            <div className="space-y-2">
+              <h2 className="text-base leading-6 font-semibold">
                 {request.title ?? t.toolCalls.needYourHelp}
               </h2>
               {request.context ? (
@@ -383,204 +386,349 @@ export function HumanInputCard({
                 </div>
               ) : null}
             </div>
+
+            <div className="text-foreground text-[15px] leading-7">
+              <MarkdownContent content={request.question} isLoading={false} />
+            </div>
+
+            {options.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                  {t.humanInput.availableOptions}
+                </p>
+                <ul
+                  className="grid gap-2"
+                  aria-label={t.humanInput.availableOptions}
+                >
+                  {options.map((option) => {
+                    const selected =
+                      answeredResponse.response_kind === "option" &&
+                      answeredResponse.option_id === option.id;
+                    return (
+                      <li
+                        key={option.id}
+                        className={cn(
+                          "border-border/70 bg-background/70 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                          selected && "border-success/40 bg-success/5",
+                        )}
+                        data-human-input-option-selected={selected}
+                      >
+                        {selected ? (
+                          <CheckCircle2Icon
+                            aria-hidden
+                            className="text-success size-4 shrink-0"
+                          />
+                        ) : (
+                          <CircleIcon
+                            aria-hidden
+                            className="text-muted-foreground size-4 shrink-0"
+                          />
+                        )}
+                        <span className="min-w-0 flex-1 break-words">
+                          {option.label}
+                        </span>
+                        {selected ? (
+                          <span className="text-success text-xs font-medium">
+                            {t.humanInput.selected}
+                          </span>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
+
+            {fields.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                  {t.humanInput.requestedInformation}
+                </p>
+                <ul
+                  className="grid gap-2"
+                  aria-label={t.humanInput.requestedInformation}
+                >
+                  {fields.map((field) => (
+                    <li
+                      key={field.name}
+                      className="border-border/70 bg-background/70 rounded-lg border px-3 py-2 text-sm"
+                    >
+                      <span className="font-medium">{field.label}</span>
+                      {field.required ? (
+                        <span className="text-muted-foreground ml-1 text-xs">
+                          ({t.humanInput.requiredA11yLabel})
+                        </span>
+                      ) : null}
+                      {(field.options ?? []).length > 0 ? (
+                        <p className="text-muted-foreground mt-1 text-xs leading-5">
+                          {(field.options ?? [])
+                            .map((option) => option.label)
+                            .join(", ")}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            <div className="border-success/30 bg-success/5 rounded-lg border px-3 py-3">
+              <p className="text-success text-xs font-medium tracking-wide uppercase">
+                {t.humanInput.yourAnswer}
+              </p>
+              <p className="mt-1 text-sm leading-6 break-words whitespace-pre-wrap">
+                {answeredResponse.value}
+              </p>
+            </div>
+          </div>
+        </details>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="text-card-foreground overflow-hidden"
+      data-human-input-state="open"
+      data-testid="human-input-card"
+    >
+      <div
+        className="border-border/80 text-muted-foreground flex items-center gap-2 border-b pb-3 text-sm"
+        data-testid="human-input-progress"
+      >
+        <ListIcon aria-hidden className="size-4" />
+        <span>{t.humanInput.attentionCount(1)}</span>
+      </div>
+
+      <div className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-4 py-6 sm:grid-cols-[3.5rem_minmax(0,1fr)] sm:gap-5">
+        <div className="bg-muted text-foreground flex size-11 items-center justify-center rounded-xl sm:size-14">
+          <MessageCircleQuestionMarkIcon
+            aria-hidden
+            className="size-5 sm:size-6"
+          />
+        </div>
+
+        <div className="min-w-0 space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 space-y-2">
+              <h2 id={titleId} className="text-xl leading-7 font-semibold">
+                {request.title ?? t.toolCalls.needYourHelp}
+              </h2>
+              {request.context ? (
+                <div className="text-muted-foreground text-[15px] leading-6">
+                  <MarkdownContent
+                    content={request.context}
+                    isLoading={false}
+                  />
+                </div>
+              ) : null}
+            </div>
             {statusLabel ? (
               <Badge
-                className={cn(
-                  "h-6 rounded-md px-2",
-                  pending && "gap-1.5",
-                  answeredResponse &&
-                    "border-primary/20 bg-primary/10 text-primary",
-                )}
-                variant={answeredResponse ? "outline" : "secondary"}
+                className={cn("h-6 rounded-md px-2", pending && "gap-1.5")}
+                variant="secondary"
               >
                 {pending ? (
                   <Loader2Icon className="size-3 animate-spin" />
-                ) : null}
-                {answeredResponse ? (
-                  <CheckCircle2Icon className="size-3" />
                 ) : null}
                 {statusLabel}
               </Badge>
             ) : null}
           </div>
 
-          <div className="text-foreground text-sm leading-6">
+          <div className="text-foreground text-[15px] leading-7">
             <MarkdownContent content={request.question} isLoading={false} />
           </div>
 
-          {isForm ? (
-            <form className="space-y-4" onSubmit={handleFormSubmit}>
-              {fields.map((field, index) => {
-                const controlId = `${formFieldIdBase}-${index}`;
-                const labelId = `${controlId}-label`;
-                const fieldValue = readHumanInputFormValue(
-                  formValues,
-                  field.name,
-                );
-                const invalid = invalidFieldNames.has(field.name);
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            {isForm
+              ? fields.map((field, index) => {
+                  const controlId = `${formFieldIdBase}-${index}`;
+                  const labelId = `${controlId}-label`;
+                  const fieldValue = readHumanInputFormValue(
+                    formValues,
+                    field.name,
+                  );
+                  const invalid = invalidFieldNames.has(field.name);
 
-                if (field.type === "checkbox") {
-                  const checked = fieldValue === true;
-                  // Native checkbox: real role/checked semantics for assistive
-                  // technology instead of an aria-pressed button. No HTML
-                  // `required` attribute — native constraint validation would
-                  // intercept the form's custom submit handling.
+                  if (field.type === "checkbox") {
+                    return (
+                      <label
+                        key={field.name}
+                        className="flex w-fit cursor-pointer items-center gap-2 text-[15px] leading-6"
+                        htmlFor={controlId}
+                      >
+                        <input
+                          id={controlId}
+                          checked={fieldValue === true}
+                          className="accent-selection size-4"
+                          disabled={isDisabled}
+                          type="checkbox"
+                          aria-required={field.required || undefined}
+                          aria-invalid={invalid || undefined}
+                          aria-describedby={invalid ? formErrorId : undefined}
+                          onChange={(event) =>
+                            handleFormValueChange(
+                              field.name,
+                              event.target.checked,
+                            )
+                          }
+                        />
+                        {field.label}
+                        {field.required ? (
+                          <>
+                            <span className="text-destructive" aria-hidden>
+                              *
+                            </span>
+                            <span className="sr-only">
+                              {t.humanInput.requiredA11yLabel}
+                            </span>
+                          </>
+                        ) : null}
+                      </label>
+                    );
+                  }
+
                   return (
-                    <label
-                      key={field.name}
-                      className="flex w-fit cursor-pointer items-center gap-2 text-sm leading-5"
-                      htmlFor={controlId}
-                    >
-                      <input
-                        id={controlId}
-                        checked={checked}
-                        className="accent-primary size-4"
+                    <div key={field.name} className="space-y-2">
+                      <label
+                        className="text-[15px] leading-6 font-medium"
+                        htmlFor={controlId}
+                        id={labelId}
+                      >
+                        {field.label}
+                        {field.required ? (
+                          <>
+                            <span
+                              className="text-destructive ml-0.5"
+                              aria-hidden
+                            >
+                              *
+                            </span>
+                            <span className="sr-only">
+                              {t.humanInput.requiredA11yLabel}
+                            </span>
+                          </>
+                        ) : null}
+                      </label>
+                      <FormFieldInput
+                        controlId={controlId}
                         disabled={isDisabled}
-                        type="checkbox"
-                        aria-required={field.required || undefined}
-                        aria-invalid={invalid || undefined}
-                        aria-describedby={invalid ? formErrorId : undefined}
-                        onChange={(event) =>
-                          handleFormValueChange(
-                            field.name,
-                            event.target.checked,
-                          )
+                        errorId={formErrorId}
+                        field={field}
+                        invalid={invalid}
+                        labelId={labelId}
+                        selectPlaceholder={t.humanInput.selectPlaceholder}
+                        value={fieldValue}
+                        onChange={(value) =>
+                          handleFormValueChange(field.name, value)
                         }
                       />
-                      {field.label}
-                      {field.required ? (
-                        <>
-                          <span className="text-destructive" aria-hidden>
-                            *
-                          </span>
-                          <span className="sr-only">
-                            {t.humanInput.requiredA11yLabel}
-                          </span>
-                        </>
-                      ) : null}
-                    </label>
+                    </div>
                   );
-                }
+                })
+              : null}
 
-                return (
-                  <div key={field.name} className="space-y-1.5">
-                    <label
-                      className="text-sm leading-5 font-medium"
-                      htmlFor={controlId}
-                      id={labelId}
-                    >
-                      {field.label}
-                      {field.required ? (
-                        <>
-                          <span className="text-destructive ml-0.5" aria-hidden>
-                            *
-                          </span>
-                          <span className="sr-only">
-                            {t.humanInput.requiredA11yLabel}
-                          </span>
-                        </>
-                      ) : null}
-                    </label>
-                    <FormFieldInput
-                      controlId={controlId}
+            {!isForm && options.length > 0 ? (
+              <div
+                aria-label={request.question}
+                className="grid gap-3"
+                role="radiogroup"
+              >
+                {options.map((option) => {
+                  const selected = option.id === selectedOptionId;
+                  return (
+                    <Button
+                      key={option.id}
+                      aria-checked={selected}
+                      className={cn(
+                        "min-h-12 w-full justify-start rounded-xl px-4 py-3 text-left text-[15px] leading-6 whitespace-normal shadow-none",
+                        selected &&
+                          "border-ring bg-selection-subtle hover:bg-selection-subtle",
+                      )}
                       disabled={isDisabled}
-                      errorId={formErrorId}
-                      field={field}
-                      invalid={invalid}
-                      labelId={labelId}
-                      selectPlaceholder={t.humanInput.selectPlaceholder}
-                      value={fieldValue}
-                      onChange={(value) =>
-                        handleFormValueChange(field.name, value)
-                      }
-                    />
-                  </div>
-                );
-              })}
-              {submitFooter}
-            </form>
-          ) : null}
+                      role="radio"
+                      type="button"
+                      variant="outline"
+                      onClick={() => handleOptionClick(option)}
+                    >
+                      {selected ? (
+                        <CircleDotIcon
+                          aria-hidden
+                          className="text-ring size-5 shrink-0"
+                        />
+                      ) : (
+                        <CircleIcon
+                          aria-hidden
+                          className="text-muted-foreground/50 size-5 shrink-0"
+                        />
+                      )}
+                      <span className="min-w-0 wrap-break-word whitespace-pre-wrap">
+                        {option.label}
+                      </span>
+                    </Button>
+                  );
+                })}
+              </div>
+            ) : null}
 
-          {!isForm && options.length > 0 ? (
-            <div className="grid gap-2">
-              {options.map((option) => (
-                <Button
-                  key={option.id}
-                  className="min-h-11 w-full justify-start rounded-md px-3 py-2 text-left leading-5 whitespace-normal"
+            {allowText ? (
+              <>
+                <label className="sr-only" htmlFor={textInputId}>
+                  {t.humanInput.otherLabel}
+                </label>
+                <Input
+                  id={textInputId}
+                  aria-invalid={Boolean(error)}
+                  aria-describedby={error ? `${textInputId}-error` : undefined}
+                  className="h-12 rounded-xl px-4 text-[15px] shadow-none"
                   disabled={isDisabled}
-                  type="button"
-                  variant="outline"
-                  onClick={() => handleOptionClick(option)}
-                >
-                  <span className="min-w-0 wrap-break-word whitespace-pre-wrap">
-                    {option.label}
-                  </span>
-                </Button>
-              ))}
-            </div>
-          ) : null}
+                  placeholder={t.humanInput.otherPlaceholder}
+                  type="text"
+                  value={text}
+                  onChange={(event) => {
+                    setText(event.target.value);
+                    setSelectedOptionId("");
+                    if (error) {
+                      setError("");
+                    }
+                  }}
+                  onCompositionEnd={() => setIsComposing(false)}
+                  onCompositionStart={() => setIsComposing(true)}
+                  onKeyDown={handleTextKeyDown}
+                />
+              </>
+            ) : null}
 
-          {allowText ? (
-            <form className="space-y-2" onSubmit={handleTextSubmit}>
-              <label className="sr-only" htmlFor={textInputId}>
-                {t.humanInput.otherLabel}
-              </label>
-              <Textarea
-                id={textInputId}
-                aria-invalid={Boolean(error)}
-                aria-describedby={error ? `${textInputId}-error` : undefined}
-                className="min-h-20 resize-y text-sm"
-                disabled={isDisabled}
-                placeholder={t.humanInput.otherPlaceholder}
-                value={text}
-                onChange={(event) => {
-                  setText(event.target.value);
-                  if (error) {
-                    setError("");
-                  }
-                }}
-                onCompositionEnd={() => setIsComposing(false)}
-                onCompositionStart={() => setIsComposing(true)}
-                onKeyDown={handleTextKeyDown}
-              />
-              <div className="flex min-h-9 flex-wrap items-center justify-between gap-2">
+            <div className="flex min-h-10 flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0" aria-live="polite">
                 {error ? (
                   <p
                     className="text-destructive text-sm"
-                    id={`${textInputId}-error`}
+                    id={isForm ? formErrorId : `${textInputId}-error`}
+                    role={isForm ? "alert" : undefined}
                   >
                     {error}
                   </p>
-                ) : answeredResponse ? (
-                  <p
-                    className="text-muted-foreground text-sm"
-                    aria-live="polite"
-                  >
-                    {t.humanInput.answeredValue(answeredResponse.value)}
-                  </p>
                 ) : (
-                  <span />
+                  <p className="text-muted-foreground text-sm">
+                    {t.humanInput.changeBeforeSubmit}
+                  </p>
                 )}
-                <Button
-                  className="min-w-24"
-                  disabled={isDisabled}
-                  type="submit"
-                  variant="secondary"
-                >
-                  {pending ? (
-                    <Loader2Icon className="size-4 animate-spin" />
-                  ) : null}
-                  {t.humanInput.submit}
-                </Button>
               </div>
-            </form>
-          ) : null}
-
-          {!allowText && !isForm && answeredResponse ? (
-            <p className="text-muted-foreground text-sm" aria-live="polite">
-              {t.humanInput.answeredValue(answeredResponse.value)}
-            </p>
-          ) : null}
+              <Button
+                className="bg-selection text-selection-foreground hover:bg-selection/90 min-w-28 rounded-lg"
+                disabled={isDisabled}
+                type="submit"
+              >
+                {pending ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : null}
+                {t.humanInput.submit}
+              </Button>
+            </div>
+          </form>
         </div>
       </div>
     </section>

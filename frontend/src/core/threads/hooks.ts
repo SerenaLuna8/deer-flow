@@ -11,69 +11,123 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { z } from "zod";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import { useModels } from "@/core/models/hooks";
+import {
+  collectRunExecutionProfiles,
+  REASONING_EFFORTS,
+  type RunExecutionProfileRequest,
+  withRunExecutionProfileContext,
+} from "@/core/private-work/execution-profile";
+import {
+  buildRunExecutionProfileRequest,
+  resolveAgentExecutionModelSelection,
+} from "@/core/threads/agent-mode";
 
-import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
-import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
-import { getMessageRunId } from "../messages/run-duration";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
+import { isProjectRunTerminalFailure } from "../private-work/api-client";
+import {
+  compareEventSequences,
+  type EventSequence,
+} from "../private-work/event-sequence";
+import { usePrivateWorkAccess } from "../private-work/provider";
+import { privateWorkQueryKey } from "../private-work/query-keys";
+import {
+  runPrivateWorkAbortable,
+  type ProjectClientScope,
+  type ProjectPrivateWorkScope,
+} from "../private-work/types";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
-import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
+import { useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
+import { parseSubtaskTerminalEvent } from "../tasks/subtask-result";
 import type { UploadedFileInfo } from "../uploads";
-import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  promptInputFilePartToFile,
+  uploadFailureMessage,
+  uploadFiles,
+} from "../uploads";
 
 import {
   branchThreadFromTurn,
+  fetchRunMessagesPage,
   fetchThreadTokenUsage,
-  patchThreadMetadata,
-  type ThreadMetadataPatch,
+  type RunMessagesPageResponse,
 } from "./api";
+import { useCoalescedStreamMessages } from "./coalesce";
+import {
+  fetchThreadContextUsage,
+  threadContextUsageQueryKey,
+  type ThreadContextUsageResponse,
+} from "./context-usage";
+import {
+  buildRootThreadStreamOptions,
+  createDeferredThreadStreamDetach,
+  isRootStreamCallback,
+} from "./stream-events";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
   filterThreadSearchResults,
   type ThreadSearchParams,
 } from "./thread-search-query";
-import {
-  retainThreadTokenUsagePlaceholder,
-  threadTokenUsageQueryKey,
-} from "./token-usage";
+import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
   RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
-import { THREAD_PINNED_METADATA_KEY } from "./utils";
+
+export type ToolEndEvent = {
+  name: string;
+  data: unknown;
+};
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
+  agentModelRef?: string | null;
   isMock?: boolean;
+  privateWork?: ProjectPrivateWorkScope;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
+  onToolEnd?: (event: ToolEndEvent) => void;
 };
+
+function scopedThreadQueryKey(
+  scope: ProjectClientScope,
+  ...segments: readonly unknown[]
+) {
+  return privateWorkQueryKey(scope, ...segments);
+}
 
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  continueFromLatestCheckpoint?: boolean;
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Invoked exactly once after the upload and thread submission succeed. It
+   * never fires for a dropped concurrent send or a failed submission, so
+   * callers can safely clear recoverable one-time composer state.
    */
   onSent?: () => void;
 };
+
+export function buildThreadSubmitCheckpointOptions(
+  continueFromLatestCheckpoint: boolean | undefined,
+): { checkpoint: null } | Record<string, never> {
+  return continueFromLatestCheckpoint ? { checkpoint: null } : {};
+}
 
 type ThreadDeleteClient = {
   threads: {
@@ -111,34 +165,56 @@ export type PendingPreparedReplayMask = {
   replacementHumanMessageId?: string;
 };
 
-export function hasToolResult(messages: Message[], toolName: string): boolean {
-  const matchingToolCallIds = new Set<string>();
-  for (const message of messages) {
-    if (message.type !== "ai") {
-      continue;
-    }
-    for (const toolCall of message.tool_calls ?? []) {
-      if (toolCall.name === toolName && toolCall.id) {
-        matchingToolCallIds.add(toolCall.id);
-      }
-    }
-  }
+type PreparedReplayAttempt = {
+  replay: PendingPreparedReplayMask;
+  threadId: string;
+  createdRunId: string | null;
+  historyRefetchError: unknown | null;
+  status: "submitting" | "succeeded" | "failed";
+};
 
-  return messages.some(
-    (message) =>
-      message.type === "tool" &&
-      (message.name === toolName ||
-        matchingToolCallIds.has(message.tool_call_id)),
-  );
+export function canStartPreparedReplay({
+  threadId,
+  sendInFlight,
+  isThreadLoading,
+}: {
+  threadId: string | null | undefined;
+  sendInFlight: boolean;
+  isThreadLoading: boolean;
+}): boolean {
+  return Boolean(threadId) && !sendInFlight && !isThreadLoading;
+}
+
+export function getPreparedReplayStopRollback(
+  attempt: {
+    replay: PendingPreparedReplayMask;
+    createdRunId: string | null;
+    status: "submitting" | "succeeded" | "failed";
+  } | null,
+):
+  | {
+      replay: PendingPreparedReplayMask;
+      failedRunId: string | null;
+    }
+  | undefined {
+  if (attempt?.status !== "submitting") {
+    return undefined;
+  }
+  return {
+    replay: attempt.replay,
+    failedRunId: attempt.createdRunId,
+  };
 }
 
 export function buildThreadSubmitMessages({
   text,
+  messageId,
   additionalKwargs,
   additionalInputMessages = [],
   filesForSubmit = [],
 }: {
   text: string;
+  messageId: string;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   filesForSubmit?: FileInMessage[];
@@ -147,6 +223,7 @@ export function buildThreadSubmitMessages({
     ...additionalInputMessages,
     {
       type: "human",
+      id: messageId,
       content: [
         {
           type: "text",
@@ -161,12 +238,23 @@ export function buildThreadSubmitMessages({
   ];
 }
 
-// Stable identity for "no optimistic messages" so the merged-messages memo
-// below is not invalidated by a fresh empty array on every render.
-const EMPTY_MESSAGES: Message[] = [];
-const EMPTY_RUN_MESSAGES: RunMessage[] = [];
-const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
-const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
+export function uploadedFileInfoToMessage(
+  info: UploadedFileInfo,
+): FileInMessage {
+  if (!info.id) {
+    throw new TypeError("Uploaded file response is missing its opaque id");
+  }
+  if (!z.string().uuid().safeParse(info.id).success) {
+    throw new TypeError("Uploaded file response has an invalid opaque id");
+  }
+  return {
+    file_id: info.id,
+    filename: info.filename,
+    size: info.size,
+    path: info.virtual_path,
+    status: "uploaded",
+  };
+}
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -184,31 +272,129 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
 
+function messageRunId(message: Message): string | undefined {
+  const directRunId = Reflect.get(message, "run_id");
+  if (typeof directRunId === "string" && directRunId.length > 0) {
+    return directRunId;
+  }
+  const additionalRunId = message.additional_kwargs?.run_id;
+  return typeof additionalRunId === "string" && additionalRunId.length > 0
+    ? additionalRunId
+    : undefined;
+}
+
+export function filterMessagesBySupersededRunIds(
+  messages: Message[],
+  supersededRunIds: ReadonlySet<string>,
+): Message[] {
+  if (supersededRunIds.size === 0) {
+    return messages;
+  }
+  return messages.filter((message) => {
+    const runId = messageRunId(message);
+    return !runId || !supersededRunIds.has(runId);
+  });
+}
+
+export function resolveActiveRunIdForMessages(
+  messages: Message[],
+  isRunLoading: boolean,
+  explicitRunId: string | null,
+): string | null {
+  if (explicitRunId) {
+    return explicitRunId;
+  }
+  if (!isRunLoading) {
+    return null;
+  }
+  return (
+    [...messages]
+      .reverse()
+      .map(messageRunId)
+      .find((runId): runId is string => Boolean(runId)) ?? null
+  );
+}
+
 function messageIdentity(message: Message): string | undefined {
   if (
     "tool_call_id" in message &&
     typeof message.tool_call_id === "string" &&
     message.tool_call_id.length > 0
   ) {
-    return `tool:${message.tool_call_id}`;
+    const runId = messageRunId(message);
+    return runId
+      ? `run:${runId}\u0000tool:${message.tool_call_id}`
+      : `tool:${message.tool_call_id}`;
   }
   if (typeof message.id === "string" && message.id.length > 0) {
-    // DynamicContextMiddleware replaces the submitted HumanMessage(id=X) with
-    // a hidden SystemMessage(id=X) and the real HumanMessage(id=X__user).
-    // Treat those human copies as one UI message so a committed render ledger
-    // cannot retain X beside the later checkpoint copy X__user.
-    const messageId =
-      message.type === "human" &&
-      message.id.endsWith(INJECTED_USER_MESSAGE_ID_SUFFIX)
-        ? message.id.slice(0, -INJECTED_USER_MESSAGE_ID_SUFFIX.length) ||
-          message.id
-        : message.id;
-    return `message:${messageId}`;
+    return `message:${message.id}`;
   }
   return undefined;
 }
 
+function hasAcknowledgedOptimisticHuman(
+  optimisticMessages: Message[],
+  canonicalMessages: Message[],
+): boolean {
+  // DynamicContextMiddleware keeps the submitted id on its hidden reminder
+  // and moves the visible canonical user message to `<submitted-id>__user`.
+  // Match only this server-owned id relationship; equal text can be a distinct
+  // user turn and must never acknowledge an optimistic message.
+  const canonicalHumanIds = new Set(
+    canonicalMessages.flatMap((message) => {
+      const id = message.id;
+      return message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        typeof id === "string" &&
+        id.length > 0
+        ? [id]
+        : [];
+    }),
+  );
+  return optimisticMessages.some((message) => {
+    const id = message.id;
+    return (
+      message.type === "human" &&
+      typeof id === "string" &&
+      id.length > 0 &&
+      (canonicalHumanIds.has(id) || canonicalHumanIds.has(`${id}__user`))
+    );
+  });
+}
+
+function isRunAdmissionMessage(message: Message): boolean {
+  if (message.type !== "human") {
+    return false;
+  }
+  if (Reflect.get(message, "run_message_source") === "run_admission") {
+    return true;
+  }
+  const runId = messageRunId(message);
+  return Boolean(runId && message.id === `run-admission-${runId}`);
+}
+
+export function attachRunIdToNewMessages(
+  messages: Message[],
+  runId: string | null,
+  baselineMessageIds: ReadonlySet<string>,
+): Message[] {
+  if (!runId) return messages;
+  return messages.map((message) => {
+    const identity = messageIdentity(message);
+    const existingRunId = Reflect.get(message, "run_id");
+    if (
+      typeof existingRunId === "string" ||
+      !identity ||
+      baselineMessageIds.has(identity)
+    ) {
+      return message;
+    }
+    return { ...message, run_id: runId } as unknown as Message;
+  });
+}
+
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
+  const firstIndexByIdentity = new Map<string, number>();
   const lastIndexByIdentity = new Map<string, number>();
   const lastVisibleIndexByIdentity = new Map<string, number>();
 
@@ -218,9 +404,14 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   // independent tracing/task semantics should use a distinct id or a custom
   // stream/state channel instead of relying on message dedupe preservation.
   const preservedTurnDurations = new Map<string, number>();
+  const preservedReasoningDurations = new Map<string, number>();
+  const preservedRunIds = new Map<string, string>();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message);
     if (identity) {
+      if (!firstIndexByIdentity.has(identity)) {
+        firstIndexByIdentity.set(identity, index);
+      }
       lastIndexByIdentity.set(identity, index);
       if (!isHiddenFromUIMessage(message)) {
         lastVisibleIndexByIdentity.set(identity, index);
@@ -231,8 +422,32 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
           message.additional_kwargs.turn_duration as number,
         );
       }
+      const reasoningDuration =
+        message.additional_kwargs?.reasoning_duration_ms;
+      if (
+        typeof reasoningDuration === "number" &&
+        Number.isSafeInteger(reasoningDuration)
+      ) {
+        preservedReasoningDurations.set(identity, reasoningDuration);
+      }
+      const runId = Reflect.get(message, "run_id");
+      if (typeof runId === "string" && runId.length > 0) {
+        preservedRunIds.set(identity, runId);
+      }
     }
   });
+
+  const selectedMessageByIdentity = new Map<string, Message>();
+  for (const [identity, lastIndex] of lastIndexByIdentity) {
+    // Keep the latest visible payload, but render it in the first identity
+    // slot. A stale live duplicate must not move an older HumanMessage behind
+    // a later clarification request during asynchronous history hydration.
+    const selectedIndex = lastVisibleIndexByIdentity.get(identity) ?? lastIndex;
+    const selected = messages[selectedIndex];
+    if (selected) {
+      selectedMessageByIdentity.set(identity, selected);
+    }
+  }
 
   return messages
     .filter((message, index) => {
@@ -240,28 +455,47 @@ function dedupeMessagesByIdentity(messages: Message[]): Message[] {
       if (!identity) {
         return true;
       }
-      const visibleIndex = lastVisibleIndexByIdentity.get(identity);
-      if (visibleIndex !== undefined) {
-        return visibleIndex === index;
-      }
-      return lastIndexByIdentity.get(identity) === index;
+      return firstIndexByIdentity.get(identity) === index;
     })
     .map((message) => {
       const identity = messageIdentity(message);
-      if (
-        identity &&
+      if (!identity) return message;
+      const selectedMessage =
+        selectedMessageByIdentity.get(identity) ?? message;
+      const preserveDuration =
         preservedTurnDurations.has(identity) &&
-        message.additional_kwargs?.turn_duration === undefined
-      ) {
-        return {
-          ...message,
-          additional_kwargs: {
-            ...message.additional_kwargs,
-            turn_duration: preservedTurnDurations.get(identity),
-          },
-        } as Message;
+        selectedMessage.additional_kwargs?.turn_duration === undefined;
+      const preserveReasoningDuration =
+        preservedReasoningDurations.has(identity) &&
+        selectedMessage.additional_kwargs?.reasoning_duration_ms === undefined;
+      const preserveRunId =
+        preservedRunIds.has(identity) &&
+        typeof Reflect.get(selectedMessage, "run_id") !== "string";
+      if (!preserveDuration && !preserveReasoningDuration && !preserveRunId) {
+        return selectedMessage;
       }
-      return message;
+      return {
+        ...selectedMessage,
+        ...(preserveRunId ? { run_id: preservedRunIds.get(identity) } : {}),
+        ...(preserveDuration || preserveReasoningDuration
+          ? {
+              additional_kwargs: {
+                ...selectedMessage.additional_kwargs,
+                ...(preserveDuration
+                  ? {
+                      turn_duration: preservedTurnDurations.get(identity),
+                    }
+                  : {}),
+                ...(preserveReasoningDuration
+                  ? {
+                      reasoning_duration_ms:
+                        preservedReasoningDurations.get(identity),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      } as Message;
     });
 }
 
@@ -283,6 +517,231 @@ function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   });
 }
 
+function attachRunIdWithinKnownTurns(messages: Message[]): Message[] {
+  let currentRunId: string | undefined;
+
+  return messages.map((message) => {
+    const explicitRunId = messageRunId(message);
+    if (explicitRunId) {
+      currentRunId = explicitRunId;
+      return message;
+    }
+
+    if (message.type === "human" && !isHiddenFromUIMessage(message)) {
+      currentRunId = undefined;
+      return message;
+    }
+
+    if (!currentRunId) {
+      return message;
+    }
+    return { ...message, run_id: currentRunId } as unknown as Message;
+  });
+}
+
+function projectOriginalUserContent(message: Message): Message {
+  if (message.type !== "human") {
+    return message;
+  }
+  const originalContent = message.additional_kwargs?.original_user_content;
+  if (typeof originalContent !== "string") {
+    return message;
+  }
+  return {
+    ...message,
+    content: [{ type: "text", text: originalContent }],
+  } as Message;
+}
+
+function repairInjectedUserOrder(messages: Message[]): Message[] {
+  let repaired = [...messages];
+  const reminderIds = repaired.flatMap((message) => {
+    const id = message.id;
+    return typeof id === "string" &&
+      id.length > 0 &&
+      message.additional_kwargs?.hide_from_ui === true &&
+      message.additional_kwargs?.dynamic_context_reminder === true
+      ? [id]
+      : [];
+  });
+
+  for (const reminderId of reminderIds) {
+    const userId = `${reminderId}__user`;
+    const memoryId = `${reminderId}__memory`;
+    const injectedUser = repaired.find(
+      (message) => message.type === "human" && message.id === userId,
+    );
+    if (!injectedUser) {
+      continue;
+    }
+    const injectedMemory = repaired.filter(
+      (message) => message.id === memoryId,
+    );
+    const withoutInjected = repaired.filter(
+      (message) => message.id !== userId && message.id !== memoryId,
+    );
+    const reminderIndex = withoutInjected.findIndex(
+      (message) => message.id === reminderId,
+    );
+    if (reminderIndex < 0) {
+      continue;
+    }
+    withoutInjected.splice(
+      reminderIndex + 1,
+      0,
+      ...injectedMemory,
+      injectedUser,
+    );
+    repaired = withoutInjected;
+  }
+  return repaired;
+}
+
+function alignSanitizedHistoryUserIds(
+  historyMessages: Message[],
+  threadMessages: Message[],
+): Message[] {
+  const reminderIds = new Set(
+    threadMessages.flatMap((message) => {
+      const id = message.id;
+      return typeof id === "string" &&
+        message.additional_kwargs?.hide_from_ui === true &&
+        message.additional_kwargs?.dynamic_context_reminder === true
+        ? [id]
+        : [];
+    }),
+  );
+  const injectedUserIds = new Set(
+    threadMessages.flatMap((message) => {
+      const id = message.id;
+      if (
+        message.type !== "human" ||
+        typeof id !== "string" ||
+        !id.endsWith("__user")
+      ) {
+        return [];
+      }
+      const reminderId = id.slice(0, -"__user".length);
+      return reminderIds.has(reminderId) ? [id] : [];
+    }),
+  );
+
+  return historyMessages.map((message) => {
+    const projected = projectOriginalUserContent(message);
+    if (
+      projected.type !== "human" ||
+      typeof projected.id !== "string" ||
+      typeof projected.additional_kwargs?.original_user_content !== "string"
+    ) {
+      return projected;
+    }
+    const injectedId = `${projected.id}__user`;
+    return injectedUserIds.has(injectedId)
+      ? ({ ...projected, id: injectedId } as Message)
+      : projected;
+  });
+}
+
+export function mergeRunMessageRows(
+  previous: RunMessage[],
+  incoming: RunMessage[],
+  runsNewestFirst: Run[],
+): RunMessage[] {
+  const merged = dedupeRunMessagesByIdentity([...previous, ...incoming]);
+  const runOrder = new Map<string, number>();
+  [...runsNewestFirst]
+    .reverse()
+    .forEach((run, index) => runOrder.set(run.run_id, index));
+
+  let nextUnknownRunOrder = runOrder.size;
+  for (const message of merged) {
+    if (!runOrder.has(message.run_id)) {
+      runOrder.set(message.run_id, nextUnknownRunOrder);
+      nextUnknownRunOrder += 1;
+    }
+  }
+
+  return merged
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const runDifference =
+        (runOrder.get(left.message.run_id) ?? Number.MAX_SAFE_INTEGER) -
+        (runOrder.get(right.message.run_id) ?? Number.MAX_SAFE_INTEGER);
+      if (runDifference !== 0) {
+        return runDifference;
+      }
+
+      const leftSeq = left.message.seq;
+      const rightSeq = right.message.seq;
+      if (typeof leftSeq === "string" && typeof rightSeq === "string") {
+        return (
+          compareEventSequences(leftSeq, rightSeq) || left.index - right.index
+        );
+      }
+      if (typeof leftSeq === "string") {
+        return -1;
+      }
+      if (typeof rightSeq === "string") {
+        return 1;
+      }
+      return left.index - right.index;
+    })
+    .map(({ message }) => message);
+}
+
+export function getSupersededRunIds(
+  runs: Run[] | undefined,
+  pendingSupersededRunIds?: ReadonlySet<string>,
+) {
+  const ids = new Set(pendingSupersededRunIds ?? []);
+  for (const run of runs ?? []) {
+    if (run.status !== "success") {
+      continue;
+    }
+    const metadata = run.metadata;
+    if (metadata && typeof metadata === "object") {
+      const fromRunId = Reflect.get(metadata, "regenerate_from_run_id");
+      if (typeof fromRunId === "string" && fromRunId) {
+        ids.add(fromRunId);
+      }
+    }
+  }
+  return ids;
+}
+
+export function latestRunHasTerminalFailure(runs: Run[] | undefined) {
+  const status = runs?.[0]?.status as string | undefined;
+  return status === "error" || status === "failed" || status === "timeout";
+}
+
+export function rememberActiveRun(
+  runs: Run[] | undefined,
+  {
+    threadId,
+    runId,
+    createdAt,
+  }: {
+    threadId: string;
+    runId: string;
+    createdAt: string;
+  },
+): Run[] {
+  const existing = runs?.find((run) => run.run_id === runId);
+  const activeRun: Run =
+    existing ??
+    ({
+      run_id: runId,
+      thread_id: threadId,
+      assistant_id: "lead_agent",
+      created_at: createdAt,
+      updated_at: createdAt,
+      status: "running",
+      metadata: {},
+      multitask_strategy: null,
+    } satisfies Run);
+  return [activeRun, ...(runs ?? []).filter((run) => run.run_id !== runId)];
+}
+
 export function removeSetItems<T>(
   values: ReadonlySet<T>,
   itemsToRemove: Iterable<T>,
@@ -294,12 +753,149 @@ export function removeSetItems<T>(
   return next;
 }
 
+export function getRunMasksAfterPreparedReplayFailure(
+  current: ReadonlySet<string>,
+  replay: PendingPreparedReplayMask,
+  failedRunId?: string | null,
+) {
+  const next = removeSetItems(current, [replay.targetRunId]);
+  if (failedRunId) {
+    next.add(failedRunId);
+  }
+  return next;
+}
+
+export function getMessageMasksAfterPreparedReplayFailure(
+  current: ReadonlySet<string>,
+  replay: PendingPreparedReplayMask,
+) {
+  const next = removeSetItems(current, replay.supersededMessageIds);
+  if (replay.replacementHumanMessageId) {
+    next.add(replay.replacementHumanMessageId);
+  }
+  return next;
+}
+
+export function classifyPreparedReplaySdkError({
+  createdRunId,
+  callbackRunId,
+  error,
+  historyRefetchError,
+}: {
+  createdRunId: string | null;
+  callbackRunId: string | null;
+  error: unknown;
+  historyRefetchError: unknown | null;
+}):
+  | { kind: "rollback"; failedRunId: string | null }
+  | { kind: "history-refetch-failure"; error: unknown }
+  | { kind: "ignore-history-refetch-duplicate" }
+  | { kind: "ignore-unrelated-run" } {
+  if (!callbackRunId) {
+    // In @langchain/langgraph-sdk 1.9.27, an error before onRunCreated has no
+    // callback metadata. The same hook-level callback is also invoked without
+    // metadata when the SDK's post-stream state refetch fails. A Run ID already
+    // captured by onCreated is the reliable boundary between those two phases.
+    return createdRunId
+      ? { kind: "history-refetch-failure", error }
+      : { kind: "rollback", failedRunId: null };
+  }
+  if (callbackRunId !== createdRunId) {
+    return { kind: "ignore-unrelated-run" };
+  }
+  if (historyRefetchError !== null && Object.is(historyRefetchError, error)) {
+    // The SDK rethrows the same state-refetch error through StreamManager after
+    // first reporting it without metadata from useThreadHistory.
+    return { kind: "ignore-history-refetch-duplicate" };
+  }
+  return { kind: "rollback", failedRunId: callbackRunId };
+}
+
+function isInternalHistoryCaller(caller: unknown): boolean {
+  return (
+    typeof caller === "string" &&
+    (caller.startsWith("subagent:") || caller.startsWith("middleware:"))
+  );
+}
+
+function getAIToolCallIds(message: Message): string[] {
+  if (message.type !== "ai") {
+    return [];
+  }
+
+  const ids = new Set<string>();
+  const collectIds = (toolCalls: unknown) => {
+    if (!Array.isArray(toolCalls)) {
+      return;
+    }
+    for (const toolCall of toolCalls) {
+      if (!toolCall || typeof toolCall !== "object") {
+        continue;
+      }
+      const id = Reflect.get(toolCall, "id");
+      if (typeof id === "string" && id.length > 0) {
+        ids.add(id);
+      }
+    }
+  };
+
+  collectIds(Reflect.get(message, "tool_calls"));
+  collectIds(message.additional_kwargs?.tool_calls);
+  return [...ids];
+}
+
+function runToolCallKey(runId: string, toolCallId: string): string {
+  return `${runId}\u0000${toolCallId}`;
+}
+
+function filterVisibleHistoryRows(messageRows: RunMessage[]): RunMessage[] {
+  const hiddenToolCalls = new Set<string>();
+  const visibleToolCalls = new Set<string>();
+
+  for (const row of messageRows) {
+    if (row.content.type !== "ai") {
+      continue;
+    }
+    const internal = isInternalHistoryCaller(row.metadata.caller);
+    for (const toolCallId of getAIToolCallIds(row.content)) {
+      const key = runToolCallKey(row.run_id, toolCallId);
+      if (internal) {
+        hiddenToolCalls.add(key);
+        visibleToolCalls.delete(key);
+      } else if (!hiddenToolCalls.has(key)) {
+        visibleToolCalls.add(key);
+      }
+    }
+  }
+
+  return messageRows.filter((row) => {
+    if (row.content.type === "human") {
+      return (
+        row.metadata.source === "run_admission" ||
+        !isInternalHistoryCaller(row.metadata.caller)
+      );
+    }
+    if (row.content.type === "ai") {
+      return !isInternalHistoryCaller(row.metadata.caller);
+    }
+    if (row.content.type === "tool") {
+      const toolCallId = Reflect.get(row.content, "tool_call_id");
+      if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+        return false;
+      }
+      return visibleToolCalls.has(runToolCallKey(row.run_id, toolCallId));
+    }
+    return true;
+  });
+}
+
 export function buildVisibleHistoryMessages(
   messageRows: RunMessage[],
   supersededRunIds: ReadonlySet<string>,
+  appendedMessages: Message[],
 ) {
-  const visibleRows = messageRows.filter(
-    (message) => !supersededRunIds.has(message.run_id),
+  const visibleRows = filterVisibleHistoryRows(
+    messageRows.filter((message) => !supersededRunIds.has(message.run_id)),
   );
   return dedupeMessagesByIdentity([
     // Carry the owning run_id onto the content message so historical subtask
@@ -308,415 +904,332 @@ export function buildVisibleHistoryMessages(
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      ...(message.metadata.source === "run_admission"
+        ? { run_message_source: "run_admission" }
+        : {}),
     })),
+    ...appendedMessages,
   ]);
 }
 
-export type ThreadMessagesPageResponse = {
-  data: RunMessage[];
-  has_more: boolean;
-  next_before_seq: number | null;
-};
-
-function isValidThreadMessageSeq(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-}
-
-/**
- * Validate the sequence fields that history reconciliation and pagination use
- * as runtime identities. The static RunMessage type cannot protect this JSON
- * boundary from version skew or malformed responses.
- */
-export function parseThreadMessagesPageResponse(
-  value: unknown,
-): ThreadMessagesPageResponse {
-  if (typeof value !== "object" || value === null) {
-    throw new Error("Thread history returned an invalid response.");
-  }
-
-  const data = Reflect.get(value, "data");
-  const hasMore = Reflect.get(value, "has_more");
-  const nextBeforeSeq = Reflect.get(value, "next_before_seq");
-  if (!Array.isArray(data) || typeof hasMore !== "boolean") {
-    throw new Error("Thread history returned an invalid response.");
-  }
-
-  const seenSeqs = new Set<number>();
-  for (const row of data) {
-    const seq =
-      typeof row === "object" && row !== null
-        ? Reflect.get(row, "seq")
-        : undefined;
-    if (!isValidThreadMessageSeq(seq)) {
-      throw new Error("Thread history returned a row with an invalid seq.");
+export function findLatestUnloadedRunIndex(
+  runs: Run[],
+  loadedRunIds: ReadonlySet<string>,
+): number {
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    if (run && !loadedRunIds.has(run.run_id)) {
+      return i;
     }
-    if (seenSeqs.has(seq)) {
-      throw new Error("Thread history returned duplicate seq values.");
+  }
+  return -1;
+}
+
+export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;
+
+export function shouldAutoContinueOnEmptyRun(
+  fetchedMessageCount: number,
+  consecutiveEmptyLoads: number,
+  maxConsecutiveEmptyLoads: number = MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+): boolean {
+  return (
+    fetchedMessageCount === 0 &&
+    consecutiveEmptyLoads < maxConsecutiveEmptyLoads
+  );
+}
+
+export function runMessagesPageHasMore(result: RunMessagesPageResponse) {
+  return result.has_more;
+}
+
+export function getOldestRunMessageSeq(messages: RunMessage[]) {
+  let oldestSeq: EventSequence | null = null;
+  for (const message of messages) {
+    if (typeof message.seq !== "string") {
+      continue;
     }
-    seenSeqs.add(seq);
+    oldestSeq =
+      oldestSeq === null || compareEventSequences(message.seq, oldestSeq) < 0
+        ? message.seq
+        : oldestSeq;
   }
-
-  if (
-    (hasMore && !isValidThreadMessageSeq(nextBeforeSeq)) ||
-    (!hasMore && nextBeforeSeq !== null)
-  ) {
-    throw new Error(
-      "Thread history returned an invalid next_before_seq cursor.",
-    );
-  }
-
-  return value as ThreadMessagesPageResponse;
+  return oldestSeq;
 }
 
-export function getThreadHistoryNextPageParam(
-  lastPage: ThreadMessagesPageResponse,
-): number | undefined {
-  if (!lastPage.has_more) {
-    return undefined;
+export function getNextRunMessagesBeforeSeq(
+  result: RunMessagesPageResponse,
+): EventSequence | null | undefined {
+  if (!runMessagesPageHasMore(result)) {
+    return null;
   }
-  if (lastPage.next_before_seq === null) {
-    console.warn(
-      "Thread history returned has_more without next_before_seq; pagination cannot continue.",
-    );
-    return undefined;
-  }
-  return lastPage.next_before_seq;
-}
-
-export const threadHistoryQueryKey = (threadId: string) =>
-  ["thread-messages", threadId] as const;
-
-export function buildThreadMessagesPageUrl(
-  baseUrl: string,
-  threadId: string,
-  beforeSeq?: number,
-) {
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
-  const path = `/api/threads/${encodeURIComponent(threadId)}/messages/page`;
-  const url = new URL(
-    `${normalizedBaseUrl}${path}`,
-    typeof window !== "undefined" ? window.location.origin : "http://localhost",
-  );
-  if (beforeSeq !== undefined) {
-    url.searchParams.set("before_seq", String(beforeSeq));
-  }
-  return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
-}
-
-export function flattenThreadHistoryPages(
-  pages: ThreadMessagesPageResponse[],
-): RunMessage[] {
-  return dedupeRunMessagesByIdentity(
-    pages
-      .slice()
-      .reverse()
-      .flatMap((page) => page.data),
-  );
-}
-
-/**
- * Preserve rows that this client has already loaded while newest-first cursor
- * pages move forward during a long run.
- *
- * A background refetch recalculates every loaded page from the refreshed first
- * page. When older pages have not all been loaded yet, that can displace rows
- * which were visible a moment ago even though they still exist on the server.
- * Thread-global seq is the authoritative order; refreshed copies win without
- * moving their established position.
- */
-export function reconcileThreadHistoryRows(
-  previousRows: RunMessage[],
-  currentRows: RunMessage[],
-  isAuthoritativeComplete: boolean,
-): RunMessage[] {
-  const sourceRows = isAuthoritativeComplete
-    ? currentRows
-    : [...previousRows, ...currentRows];
-  if (sourceRows.some((row) => !isValidThreadMessageSeq(row.seq))) {
-    console.error(
-      "Thread history reconciliation received an invalid sequence value.",
-    );
-    // Never skip an invalid row or feed it into Map/Array.sort: either choice
-    // can silently lose or misorder messages. A failed refresh keeps the last
-    // known-good snapshot; an invalid first snapshot degrades to server order.
-    return previousRows.length > 0 ? previousRows : currentRows;
-  }
-
-  const rowsBySeq = new Map<number, RunMessage>();
-  for (const row of sourceRows) {
-    rowsBySeq.set(row.seq, row);
-  }
-
-  const reconciled = dedupeRunMessagesByIdentity(
-    [...rowsBySeq.values()].sort((left, right) => left.seq - right.seq),
-  );
-  if (
-    reconciled.length === previousRows.length &&
-    reconciled.every((row, index) => row === previousRows[index])
-  ) {
-    return previousRows;
-  }
-  return reconciled;
+  return getOldestRunMessageSeq(result.data) ?? undefined;
 }
 
 export function mergeMessages(
   historyMessages: Message[],
   threadMessages: Message[],
   optimisticMessages: Message[],
+  runsNewestFirst: Run[] = [],
 ): Message[] {
-  const savedTurnDurations = new Map<string, number>();
-  const savedRunIds = new Map<string, string>();
-  for (const msg of historyMessages) {
-    const identity = messageIdentity(msg);
-    const runId = getMessageRunId(msg);
-    if (identity && runId) {
-      savedRunIds.set(identity, runId);
+  // Only visible live messages should trim overlapping history. Hidden messages
+  // are UI control messages in this path, not observability records; any hidden
+  // message that must survive as task/tracing data should use custom events or a
+  // separate state channel instead of participating in this overlap heuristic.
+
+  // Materialized checkpoint state carries the owning run_id on each admitted
+  // HumanMessage, while its following AI/Tool messages can remain unscoped.
+  // Propagate that trusted turn boundary before comparing it with the
+  // run-scoped history journal. Otherwise the same ToolMessage has two
+  // identities (`run:<id>+tool:<id>` in history versus `tool:<id>` live),
+  // survives dedupe twice, and a partially hydrated latest clarification can
+  // appear before an older checkpoint HumanMessage.
+  const scopedThreadMessages = attachRunIdWithinKnownTurns(
+    repairInjectedUserOrder(threadMessages),
+  );
+  const projectedHistoryMessages = alignSanitizedHistoryUserIds(
+    historyMessages,
+    scopedThreadMessages,
+  );
+  const visibleOptimisticMessages = hasAcknowledgedOptimisticHuman(
+    optimisticMessages,
+    [...projectedHistoryMessages, ...scopedThreadMessages],
+  )
+    ? []
+    : optimisticMessages;
+  const threadMessageIds = new Set(
+    scopedThreadMessages
+      .filter((message) => !isHiddenFromUIMessage(message))
+      .map(messageIdentity)
+      .filter(isNonEmptyString),
+  );
+  const visibleLiveHumanRunIds = new Set(
+    scopedThreadMessages
+      .filter(
+        (message) =>
+          message.type === "human" && !isHiddenFromUIMessage(message),
+      )
+      .map(messageRunId)
+      .filter(isNonEmptyString),
+  );
+  const admissionMessages: Message[] = [];
+  const regularHistoryMessages = projectedHistoryMessages.filter((message) => {
+    if (!isRunAdmissionMessage(message)) {
+      return true;
     }
+    const identity = messageIdentity(message);
+    const runId = messageRunId(message);
+    if (
+      (identity && threadMessageIds.has(identity)) ||
+      (runId && visibleLiveHumanRunIds.has(runId))
+    ) {
+      return false;
+    }
+    admissionMessages.push(message);
+    return false;
+  });
+
+  const savedTurnDurations = new Map<string, number>();
+  const savedReasoningDurations = new Map<string, number>();
+  const savedRunIds = new Map<string, string>();
+  for (const msg of projectedHistoryMessages) {
+    const identity = messageIdentity(msg);
     if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
         identity,
         msg.additional_kwargs.turn_duration as number,
       );
     }
+    const reasoningDuration = msg.additional_kwargs?.reasoning_duration_ms;
+    if (
+      identity &&
+      typeof reasoningDuration === "number" &&
+      Number.isSafeInteger(reasoningDuration)
+    ) {
+      savedReasoningDurations.set(identity, reasoningDuration);
+    }
+    const runId = Reflect.get(msg, "run_id");
+    if (identity && typeof runId === "string" && runId.length > 0) {
+      savedRunIds.set(identity, runId);
+    }
   }
 
-  const canonical = dedupeMessagesByIdentity(historyMessages);
-  const live = dedupeMessagesByIdentity(threadMessages);
-  const canonicalByIdentity = new Map(
-    canonical.flatMap((message) => {
-      const identity = messageIdentity(message);
-      return identity ? [[identity, message] as const] : [];
-    }),
-  );
-  const replacementByIdentity = new Map<string, Message>();
-  // This uses the same identity-anchor weaving shape as
-  // resolveTransientHistoryBridge, but intentionally remains separate: live
-  // messages may replace canonical copies and identity-less entries survive.
-  const beforeAnchor = new Map<string, Message[]>();
-  let pending: Message[] = [];
-  let lastAnchorIdentity: string | undefined;
-  let hasSharedAnchor = false;
-
-  // A summarized checkpoint is not necessarily a contiguous history suffix:
-  // middleware may retain protected prompt/input messages at the front and a
-  // recent tail at the back. Treat every shared identity as an ordering anchor,
-  // replacing the canonical copy in place. New live messages are woven before
-  // the next shared anchor (or after the last one), so a protected early input
-  // can never be moved to the tail by global last-copy deduplication.
-  for (const message of live) {
-    const identity = messageIdentity(message);
-    const canonicalMessage = identity
-      ? canonicalByIdentity.get(identity)
-      : undefined;
-    if (!identity || !canonicalMessage) {
-      pending.push(message);
+  // The overlap is a contiguous suffix of historyMessages (newest history == oldest thread).
+  // Scan from the end: shrink cutoff while messages are already in thread, stop as soon as
+  // we hit one that isn't — everything before that point is non-overlapping.
+  let cutoff = regularHistoryMessages.length;
+  for (let i = regularHistoryMessages.length - 1; i >= 0; i--) {
+    const msg = regularHistoryMessages[i];
+    if (!msg) {
       continue;
     }
-
-    if (pending.length > 0 && hasSharedAnchor) {
-      beforeAnchor.set(identity, [
-        ...(beforeAnchor.get(identity) ?? []),
-        ...pending,
-      ]);
+    const identity = messageIdentity(msg);
+    if (identity && threadMessageIds.has(identity)) {
+      cutoff = i;
+    } else {
+      break;
     }
-    // A summarized checkpoint may start with a protected message whose true
-    // canonical position is separated from this anchor by unloaded pages.
-    // Suppress that ambiguous prefix instead of visually collapsing the gap.
-    pending = [];
-    hasSharedAnchor = true;
-    lastAnchorIdentity = identity;
-
-    // A hidden checkpoint control message must not replace a visible canonical
-    // user turn that happens to reuse its identity. In every other case the
-    // live checkpoint copy is fresher and replaces history without moving it.
-    if (
-      !isHiddenFromUIMessage(message) ||
-      isHiddenFromUIMessage(canonicalMessage)
-    ) {
-      replacementByIdentity.set(identity, message);
-    }
-  }
-
-  let canonicalAndLive: Message[];
-  if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...live];
-  } else {
-    canonicalAndLive = [];
-    for (const message of canonical) {
-      const identity = messageIdentity(message);
-      if (identity) {
-        canonicalAndLive.push(...(beforeAnchor.get(identity) ?? []));
-      }
-      const replacement = identity
-        ? replacementByIdentity.get(identity)
-        : undefined;
-      canonicalAndLive.push(replacement ?? message);
-    }
-    // A trailing live-only segment is known to come after the last shared
-    // anchor, but that anchor may not be the end of canonical history (for
-    // example, another client may have persisted newer rows). Preserve the
-    // canonical source order before appending the live tail.
-    canonicalAndLive.push(...pending);
   }
 
   const merged = dedupeMessagesByIdentity([
-    ...canonicalAndLive,
-    ...optimisticMessages,
+    ...regularHistoryMessages.slice(0, cutoff),
+    ...scopedThreadMessages,
+    ...visibleOptimisticMessages,
   ]);
+  const chronologicalRunOrder = new Map<string, number>();
+  [...runsNewestFirst]
+    .reverse()
+    .forEach((run, index) => chronologicalRunOrder.set(run.run_id, index));
+  const orderedAdmissionMessages = admissionMessages
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftOrder = chronologicalRunOrder.get(
+        messageRunId(left.message) ?? "",
+      );
+      const rightOrder = chronologicalRunOrder.get(
+        messageRunId(right.message) ?? "",
+      );
+      if (leftOrder === undefined || rightOrder === undefined) {
+        return left.index - right.index;
+      }
+      return leftOrder - rightOrder || left.index - right.index;
+    })
+    .map(({ message }) => message);
+
+  for (const admissionMessage of orderedAdmissionMessages) {
+    const identity = messageIdentity(admissionMessage);
+    if (
+      identity &&
+      merged.some((message) => messageIdentity(message) === identity)
+    ) {
+      continue;
+    }
+    const admissionRunOrder = chronologicalRunOrder.get(
+      messageRunId(admissionMessage) ?? "",
+    );
+    const insertionIndex =
+      admissionRunOrder === undefined
+        ? -1
+        : merged.findIndex((message) => {
+            const messageOrder = chronologicalRunOrder.get(
+              messageRunId(message) ?? "",
+            );
+            return (
+              // A Run-admission HumanMessage is the first message of its Run.
+              // This matters after compaction: the checkpoint can retain only
+              // the Run's tail while the complete journal still owns the
+              // admission row. Insert before the same Run as well as later
+              // Runs, otherwise the admission prompt is appended after its
+              // own AI/history rows on refresh.
+              messageOrder !== undefined && messageOrder >= admissionRunOrder
+            );
+          });
+    if (insertionIndex === -1) {
+      merged.push(admissionMessage);
+    } else {
+      merged.splice(insertionIndex, 0, admissionMessage);
+    }
+  }
 
   return merged.map((message) => {
     const identity = messageIdentity(message);
-    if (!identity) {
-      return message;
-    }
-    const shouldRestoreRunId =
-      savedRunIds.has(identity) && !getMessageRunId(message);
-    const shouldRestoreTurnDuration =
+    if (!identity) return message;
+    const preserveDuration =
       savedTurnDurations.has(identity) &&
       message.additional_kwargs?.turn_duration === undefined;
-    if (shouldRestoreRunId || shouldRestoreTurnDuration) {
-      return {
-        ...message,
-        ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
-        ...(shouldRestoreTurnDuration
-          ? {
-              additional_kwargs: {
-                ...message.additional_kwargs,
-                turn_duration: savedTurnDurations.get(identity),
-              },
-            }
-          : {}),
-      } as Message;
+    const preserveReasoningDuration =
+      savedReasoningDurations.has(identity) &&
+      message.additional_kwargs?.reasoning_duration_ms === undefined;
+    const preserveRunId =
+      savedRunIds.has(identity) &&
+      typeof Reflect.get(message, "run_id") !== "string";
+    if (!preserveDuration && !preserveReasoningDuration && !preserveRunId) {
+      return message;
     }
-    return message;
+    return {
+      ...message,
+      ...(preserveRunId ? { run_id: savedRunIds.get(identity) } : {}),
+      ...(preserveDuration || preserveReasoningDuration
+        ? {
+            additional_kwargs: {
+              ...message.additional_kwargs,
+              ...(preserveDuration
+                ? {
+                    turn_duration: savedTurnDurations.get(identity),
+                  }
+                : {}),
+              ...(preserveReasoningDuration
+                ? {
+                    reasoning_duration_ms:
+                      savedReasoningDurations.get(identity),
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    } as Message;
   });
 }
 
 /**
- * Keep messages from a locally submitted turn behind that turn's user input.
- * LangGraph `messages-tuple` events can publish the first AI/tool steps before
- * the `values` event containing the user message. Those steps are not part of
- * the pre-submit baseline, so move only that visible pending segment behind the
- * first new human message without disturbing established history or hidden
- * checkpoint controls. The caller keeps the baseline after stream completion
- * because the SDK may retain its transient event order until the next submit.
- */
-export function restoreLocalTurnMessageOrder(
-  messages: Message[],
-  baselineMessageIdentities: ReadonlySet<string>,
-): Message[] {
-  const pendingHumanIndex = messages.findIndex((message) => {
-    const identity = messageIdentity(message);
-    return (
-      message.type === "human" &&
-      !isHiddenFromUIMessage(message) &&
-      identity !== undefined &&
-      !baselineMessageIdentities.has(identity)
-    );
-  });
-  if (pendingHumanIndex <= 0) {
-    return messages;
-  }
-
-  const stablePrefix: Message[] = [];
-  const earlyPendingSteps: Message[] = [];
-  for (const message of messages.slice(0, pendingHumanIndex)) {
-    const identity = messageIdentity(message);
-    const isVisiblePendingStep =
-      (message.type === "ai" || message.type === "tool") &&
-      !isHiddenFromUIMessage(message) &&
-      identity !== undefined &&
-      !baselineMessageIdentities.has(identity);
-    if (isVisiblePendingStep) {
-      earlyPendingSteps.push(message);
-    } else {
-      stablePrefix.push(message);
-    }
-  }
-  if (earlyPendingSteps.length === 0) {
-    return messages;
-  }
-
-  return [
-    ...stablePrefix,
-    messages[pendingHumanIndex]!,
-    ...earlyPendingSteps,
-    ...messages.slice(pendingHumanIndex + 1),
-  ];
-}
-
-/**
- * Keep a run-scoped ledger of every visible message that reached a committed
- * UI frame. Live checkpoint windows can roll forward between two
- * summarization events; replacing this ledger with only the newest window
- * would make the intervening steps impossible to rescue at the next
- * RemoveMessage(ALL).
+ * Overlay the UI-safe thread projection without eagerly evaluating SDK
+ * getters.
  *
- * The newest visible copy wins by identity without moving its established
- * position. Explicitly superseded messages are removed so regeneration cannot
- * revive an answer that the UI intentionally hid.
+ * LangGraph's stream handle exposes enumerable getters such as `toolCalls`.
+ * During a `RemoveMessage(__remove_all__)` compaction transition its internal
+ * message array can briefly be sparse while message-tuple indexes are rebuilt.
+ * Object spread would invoke every enumerable getter immediately, and the SDK
+ * tool-call getter then reads `.type` from a sparse slot and crashes the page.
+ * Copying property descriptors preserves the lazy SDK surface while the three
+ * fields consumed by ActWeave use the already-normalized UI projection.
  */
-export function mergeRenderedMessageLedger(
-  previouslyRenderedMessages: Message[],
-  visibleMessages: Message[],
-  supersededMessageIds: ReadonlySet<string> = new Set<string>(),
-): Message[] {
-  const isEligible = (message: Message) =>
-    messageIdentity(message) !== undefined &&
-    (!message.id || !supersededMessageIds.has(message.id));
-  const retainedPrevious =
-    supersededMessageIds.size === 0
-      ? previouslyRenderedMessages.filter(
-          (message) => messageIdentity(message) !== undefined,
-        )
-      : previouslyRenderedMessages.filter(isEligible);
-  const eligibleVisibleMessages = visibleMessages.filter(isEligible);
-  if (retainedPrevious.length === 0) {
-    return eligibleVisibleMessages;
-  }
-  return mergeMessages(retainedPrevious, eligibleVisibleMessages, []);
+export function overlayThreadProjection<T extends object>(
+  thread: T,
+  overrides: Record<string, unknown>,
+): T {
+  const overrideDescriptors = Object.fromEntries(
+    Object.entries(overrides).map(([key, value]) => [
+      key,
+      {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: false,
+      },
+    ]),
+  );
+  return Object.create(Object.getPrototypeOf(thread), {
+    ...Object.getOwnPropertyDescriptors(thread),
+    ...overrideDescriptors,
+  }) as T;
 }
 
 /**
  * Derive the live turns that context summarization is about to drop and that
- * therefore need a short-lived visual bridge until run-event history catches up.
+ * therefore must be re-archived into history.
  *
  * Summarization emits `RemoveMessage(ALL)` + a hidden summary + the retained
- * tail. Everything in the current live thread that is absent from the retained
- * visible window is being removed; we keep those (minus the summary control
- * messages already tracked) so the UI can still show the full conversation
- * (#3825). Comparing identities instead of slicing at the first retained
- * message also handles a protected early input followed by a recent tail.
+ * tail. Everything in the current live thread before the first retained visible
+ * message is being removed; we keep those (minus the summary control messages
+ * already tracked) so the UI can still show the full conversation (#3825).
  */
-export function computeSummarizationTransientMessages(
+export function computeSummarizationMovedMessages(
   currentMessages: Message[],
   summarizationMessages: Message[],
   summarizedMessageIds: ReadonlySet<string>,
-  previouslyRenderedMessages: Message[] = EMPTY_MESSAGES,
 ): Message[] {
-  const retainedVisibleIdentities = new Set(
-    summarizationMessages
-      .filter((message) => message.type !== "remove")
-      .filter((message) => !isHiddenFromUIMessage(message))
-      .map(messageIdentity)
-      .filter(isNonEmptyString),
-  );
+  const firstRetainedVisibleIdentity = summarizationMessages
+    .filter((message) => message.type !== "remove")
+    .filter((message) => !isHiddenFromUIMessage(message))
+    .map(messageIdentity)
+    .find(isNonEmptyString);
 
-  // Updates can outrun React while the SDK applies RemoveMessage(ALL). In that
-  // case currentMessages may already be the retained post-compaction window
-  // even though the previous committed UI frame still showed the removed
-  // processing steps. Use that frame as the chronological base, then overlay
-  // fresher live copies. This rescues only messages the user actually saw and
-  // preserves the unloaded-history-gap protection in the bridge resolver.
-  const captureMessages =
-    previouslyRenderedMessages.length > 0
-      ? mergeMessages(previouslyRenderedMessages, currentMessages, [])
-      : currentMessages;
   const moved: Message[] = [];
-  for (const message of captureMessages) {
-    const identity = messageIdentity(message);
-    if (identity && retainedVisibleIdentities.has(identity)) {
-      continue;
+  for (const message of currentMessages) {
+    if (
+      firstRetainedVisibleIdentity &&
+      messageIdentity(message) === firstRetainedVisibleIdentity
+    ) {
+      break;
     }
     if (!summarizedMessageIds.has(message.id ?? "")) {
       moved.push(message);
@@ -726,250 +1239,66 @@ export function computeSummarizationTransientMessages(
 }
 
 /**
- * Overlay messages rescued from context summarization on top of the
+ * Overlay the messages rescued from context summarization on top of the
  * (possibly stale) visible history so the merged view never drops them.
  *
  * Background (#3825): after summarization the backend removes every live
- * message (`RemoveMessage(ALL)`) while canonical run events can still be
- * waiting for the journal flush/refetch lifecycle. Reading the captured turns
- * from a synchronous transient buffer keeps the merge correct during that gap.
+ * message (`RemoveMessage(ALL)`) and `onUpdateEvent` re-archives the removed
+ * messages into history through an async `setState`. The live thread messages
+ * are owned by the LangGraph SDK external store while the archived history is
+ * React state, so a render can observe the post-summary (shrunk) thread before
+ * the archive `setState` commits — leaving the rescued messages in neither
+ * merge input. Reading them from a synchronous buffer here keeps the merge
+ * correct at every render regardless of how the two state channels interleave.
  *
- * Canonical history is cursor-paginated from newest to oldest. A rescued turn
- * can therefore be older than the first row in the currently loaded page even
- * though both came from the same pre-compression checkpoint. ``bridgeOrder``
- * retains identities that canonical history has already confirmed so missing
- * rescued turns can be inserted next to an overlapping anchor instead of being
- * blindly appended after the newest page. Canonical copies always win.
+ * The rescued messages are the oldest live turns, so they follow whatever the
+ * already-loaded history holds. Only messages still missing from history are
+ * appended: once history absorbs a rescued message, its live copy stays
+ * authoritative (the buffered copy is an older snapshot and must never overwrite
+ * it), and ordering is preserved.
  */
-export function resolveTransientHistoryBridge(
+export function resolvePreservedHistory(
   visibleHistory: Message[],
-  transientMessages: Message[],
-  bridgeOrder: readonly string[] = transientMessages
-    .map(messageIdentity)
-    .filter(isNonEmptyString),
-  previouslyRenderedOrder: readonly string[] = EMPTY_MESSAGE_IDENTITIES,
+  pendingArchivedMessages: Message[],
 ): Message[] {
-  if (transientMessages.length === 0) {
+  if (pendingArchivedMessages.length === 0) {
     return visibleHistory;
   }
   const presentIdentities = new Set(
     visibleHistory.map(messageIdentity).filter(isNonEmptyString),
   );
-  const missing = transientMessages.filter((message) => {
+  const missing = pendingArchivedMessages.filter((message) => {
     const identity = messageIdentity(message);
     // Identity-less messages are intentionally skipped: without a stable
     // identity they cannot be matched against history to drain or dedupe, so
-    // overlaying them would risk a permanent duplicate. Canonical history will
-    // surface them after the run journal is flushed and the page refetches.
+    // overlaying them would risk a permanent duplicate. They are still archived
+    // through appendMessages and surface via the normal history path instead.
     return identity !== undefined && !presentIdentities.has(identity);
   });
   if (missing.length === 0) {
     return visibleHistory;
   }
-
-  const missingByIdentity = new Map(
-    missing.flatMap((message) => {
-      const identity = messageIdentity(message);
-      return identity ? [[identity, message] as const] : [];
-    }),
-  );
-  // This mirrors mergeMessages' identity-anchor weaving shape, but transient
-  // messages never replace canonical copies and identity-less entries are
-  // intentionally excluded to avoid permanent duplicates.
-  const beforeAnchor = new Map<string, Message[]>();
-  const emittedMissingIdentities = new Set<string>();
-  const previouslyRenderedIndex = new Map(
-    previouslyRenderedOrder.map((identity, index) => [identity, index]),
-  );
-  let pending: Message[] = [];
-  let lastAnchorIdentity: string | undefined;
-  let hasCanonicalAnchor = false;
-
-  for (const identity of bridgeOrder) {
-    if (presentIdentities.has(identity)) {
-      if (pending.length > 0) {
-        if (hasCanonicalAnchor) {
-          beforeAnchor.set(identity, [
-            ...(beforeAnchor.get(identity) ?? []),
-            ...pending,
-          ]);
-        } else {
-          const anchorRenderIndex = previouslyRenderedIndex.get(identity);
-          if (anchorRenderIndex !== undefined) {
-            const safeRenderedPrefix = pending
-              .filter((message) => {
-                const pendingIdentity = messageIdentity(message);
-                const renderIndex = pendingIdentity
-                  ? previouslyRenderedIndex.get(pendingIdentity)
-                  : undefined;
-                return (
-                  renderIndex !== undefined && renderIndex < anchorRenderIndex
-                );
-              })
-              .sort((left, right) => {
-                const leftIndex =
-                  previouslyRenderedIndex.get(messageIdentity(left) ?? "") ??
-                  Number.MAX_SAFE_INTEGER;
-                const rightIndex =
-                  previouslyRenderedIndex.get(messageIdentity(right) ?? "") ??
-                  Number.MAX_SAFE_INTEGER;
-                return leftIndex - rightIndex;
-              });
-            if (safeRenderedPrefix.length > 0) {
-              beforeAnchor.set(identity, safeRenderedPrefix);
-            }
-          }
-        }
-      }
-      // The prefix before the first loaded anchor has no trustworthy position:
-      // cursor pages containing its intervening history may not be loaded yet.
-      // The sole exception is a prefix whose exact relative position was
-      // already committed to the previous UI frame.
-      pending = [];
-      hasCanonicalAnchor = true;
-      lastAnchorIdentity = identity;
-      continue;
-    }
-    const message = missingByIdentity.get(identity);
-    if (message && !emittedMissingIdentities.has(identity)) {
-      pending.push(message);
-      emittedMissingIdentities.add(identity);
-    }
-  }
-
-  // No bridge identity overlaps canonical history. This is the original
-  // persistence-gap case: loaded history is older and the rescued live turns
-  // belong after it.
-  if (!lastAnchorIdentity) {
-    return [...visibleHistory, ...missing];
-  }
-
-  // A candidate added before its ordering snapshot (or carrying an identity
-  // absent from that snapshot) cannot be anchored. Keep it in capture order at
-  // the trailing edge of the anchored bridge rather than dropping it.
-  for (const message of missing) {
-    const identity = messageIdentity(message);
-    if (identity && !emittedMissingIdentities.has(identity)) {
-      pending.push(message);
-      emittedMissingIdentities.add(identity);
-    }
-  }
-
-  const resolved: Message[] = [];
-  for (const message of visibleHistory) {
-    const identity = messageIdentity(message);
-    if (identity) {
-      resolved.push(...(beforeAnchor.get(identity) ?? []));
-    }
-    resolved.push(message);
-    if (identity === lastAnchorIdentity) {
-      resolved.push(...pending);
-    }
-  }
-  return resolved;
-}
-
-export function mergeTransientHistoryBridge(
-  currentBridge: Message[],
-  capturedMessages: Message[],
-): Message[] {
-  const merged = dedupeMessagesByIdentity(currentBridge);
-  const indexByIdentity = new Map<string, number>();
-  merged.forEach((message, index) => {
-    const identity = messageIdentity(message);
-    if (identity) {
-      indexByIdentity.set(identity, index);
-    }
-  });
-
-  for (const captured of dedupeMessagesByIdentity(capturedMessages)) {
-    const identity = messageIdentity(captured);
-    const existingIndex = identity ? indexByIdentity.get(identity) : undefined;
-    if (existingIndex === undefined) {
-      if (identity) {
-        indexByIdentity.set(identity, merged.length);
-      }
-      merged.push(captured);
-      continue;
-    }
-
-    const existing = merged[existingIndex];
-    if (
-      existing &&
-      (!isHiddenFromUIMessage(captured) || isHiddenFromUIMessage(existing))
-    ) {
-      // Refresh the buffered snapshot without moving its first-known
-      // chronological position. Repeated compression can recapture protected
-      // prefix messages before a newer tail.
-      merged[existingIndex] = captured;
-    }
-  }
-  return merged;
+  return [...visibleHistory, ...missing];
 }
 
 /**
- * Preserve the complete checkpoint-relative identity order independently from
- * bridge candidates. Confirmed candidates are pruned from the render buffer,
- * but their identities remain useful as non-rendering pagination anchors.
- */
-export function mergeTransientHistoryBridgeOrder(
-  currentOrder: readonly string[],
-  capturedMessages: Message[],
-): readonly string[] {
-  const capturedOrder = dedupeMessagesByIdentity(capturedMessages)
-    .map(messageIdentity)
-    .filter(isNonEmptyString);
-  // Clone lazily and return the input when nothing is appended: this runs per
-  // render while the bridge is active, and a fresh array would invalidate the
-  // coalesced render memo on every chunk (#4409 Phase 1).
-  let merged: string[] | null = null;
-  const seen = new Set(currentOrder);
-  for (const identity of capturedOrder) {
-    if (!seen.has(identity)) {
-      seen.add(identity);
-      (merged ??= [...currentOrder]).push(identity);
-    }
-  }
-  return merged ?? currentOrder;
-}
-
-export function resolveThreadTransientHistoryBridge(
-  visibleHistory: Message[],
-  transientMessages: Message[],
-  bridgeThreadId: string | null,
-  currentThreadId: string | null | undefined,
-  bridgeOrder?: readonly string[],
-  previouslyRenderedOrder?: readonly string[],
-): Message[] {
-  if (!bridgeThreadId || bridgeThreadId !== currentThreadId) {
-    return visibleHistory;
-  }
-  return resolveTransientHistoryBridge(
-    visibleHistory,
-    transientMessages,
-    bridgeOrder,
-    previouslyRenderedOrder,
-  );
-}
-
-/**
- * Drop transient-buffer entries that canonical history has already
+ * Drop the archive-buffer entries that the canonical history state has already
  * absorbed. This keeps the buffer a transient bridge across the async gap
  * rather than a second long-lived source of truth — otherwise a stale copy
  * could resurrect a message that history later filtered out (e.g. a superseded
  * or regenerated run).
  */
-export function pruneConfirmedTransientMessages(
-  transientMessages: Message[],
+export function pruneConfirmedArchivedMessages(
+  pendingArchivedMessages: Message[],
   visibleHistory: Message[],
 ): Message[] {
-  if (transientMessages.length === 0) {
-    return transientMessages;
+  if (pendingArchivedMessages.length === 0) {
+    return pendingArchivedMessages;
   }
   const confirmedIdentities = new Set(
     visibleHistory.map(messageIdentity).filter(isNonEmptyString),
   );
-  return transientMessages.filter((message) => {
+  return pendingArchivedMessages.filter((message) => {
     const identity = messageIdentity(message);
     return !identity || !confirmedIdentities.has(identity);
   });
@@ -985,16 +1314,6 @@ function getMessagesAfterBaseline(
   });
 }
 
-/**
- * Human-message baseline for a prepared replay (regenerate / edit).
- *
- * A replay masks the turn it supersedes, so those messages leave the live
- * message list the moment the mask is applied. Baselining on the pre-mask count
- * means the replacement only ever restores the count instead of exceeding it,
- * and the optimistic copy is never recognised as confirmed. That matters for
- * the first turn of a thread, where the runtime re-keys the replacement message
- * so identity comparison cannot stand in for the count either.
- */
 export function countHumanMessagesExcludingSuperseded(
   messages: Message[],
   supersededMessageIds: readonly string[],
@@ -1018,24 +1337,6 @@ export function getVisibleOptimisticMessages(
     return [];
   }
   return optimisticMessages;
-}
-
-export function areOptimisticMessagesConfirmed(
-  optimisticMessages: Message[],
-  persistedMessages: Message[],
-): boolean {
-  const optimisticIdentities = optimisticMessages
-    .map(messageIdentity)
-    .filter(isNonEmptyString);
-  if (optimisticIdentities.length === 0) {
-    return false;
-  }
-  const persistedIdentities = new Set(
-    persistedMessages.map(messageIdentity).filter(isNonEmptyString),
-  );
-  return optimisticIdentities.every((identity) =>
-    persistedIdentities.has(identity),
-  );
 }
 
 export function getSummarizationMiddlewareMessages(
@@ -1062,143 +1363,14 @@ export function getSummarizationMiddlewareMessages(
   return undefined;
 }
 
-export const STREAM_RENDER_COALESCE_MS = 80;
-
-export type CoalesceDecision =
-  | { action: "flush-now" }
-  | { action: "schedule"; delayMs: number }
-  | { action: "wait" };
-
-/**
- * Decide how an incoming stream update reaches the rendered snapshot: flush
- * immediately once a full interval has elapsed (leading edge), otherwise
- * schedule exactly one trailing flush for the interval remainder. Unlike a
- * debounce, the delay never extends past the interval, so a dense stream can
- * never starve rendering.
- */
-export function decideCoalesce(
-  nowMs: number,
-  lastFlushMs: number,
-  intervalMs: number,
-  hasPendingTimer: boolean,
-): CoalesceDecision {
-  if (nowMs - lastFlushMs >= intervalMs) {
-    return { action: "flush-now" };
-  }
-  if (hasPendingTimer) {
-    return { action: "wait" };
-  }
-  return { action: "schedule", delayMs: intervalMs - (nowMs - lastFlushMs) };
-}
-
-/**
- * While a run is streaming, expose the messages array as a snapshot that
- * updates at most once per interval instead of once per SSE chunk, so the
- * merge/group/render pipeline runs per frame budget rather than per token
- * (#4409 Phase 1). When the stream is idle the latest array passes straight
- * through, keeping non-stream updates immediate.
- */
-function sameMessageArray(a: Message[], b: Message[]): boolean {
-  return (
-    a === b ||
-    (a.length === b.length && a.every((message, index) => message === b[index]))
-  );
-}
-
-export function useCoalescedStreamMessages(
-  messages: Message[],
-  isStreaming: boolean,
-  intervalMs: number = STREAM_RENDER_COALESCE_MS,
-): Message[] {
-  // `null` means "no snapshot belongs to the current stream": the live array is
-  // returned until the leading-edge flush lands, so a snapshot left over from an
-  // earlier stream can never be painted. This hook outlives thread switches (the
-  // chat page deliberately avoids re-mounting, see its `onStart` comment), so a
-  // retained snapshot would otherwise be another thread's messages.
-  const [snapshot, setSnapshot] = useState<Message[] | null>(null);
-  const latestRef = useRef(messages);
-  latestRef.current = messages;
-  // Monotonic clock: a wall-clock step (NTP, sleep/wake) between two reads
-  // would otherwise be added to the remaining interval and stall the flush for
-  // the length of the jump. -Infinity means "never flushed", so the first
-  // update of a stream always takes the leading edge.
-  const lastFlushRef = useRef(Number.NEGATIVE_INFINITY);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Every publication goes through the shallow-equality guard: inputs whose
-  // identity churns without content change (the SDK getter mints fresh arrays)
-  // must not re-trigger renders, or this effect would setState-loop.
-  const publish = useCallback(() => {
-    setSnapshot((previous) =>
-      previous !== null && sameMessageArray(previous, latestRef.current)
-        ? previous
-        : latestRef.current,
-    );
-  }, []);
-
-  const clearPendingFlush = useCallback(() => {
-    if (timerRef.current !== null) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!isStreaming) {
-      clearPendingFlush();
-      // Drop the flush baseline so the leading edge is per stream rather than
-      // per hook instance: a run starting within one interval of the previous
-      // one must not have its first frame deferred. Dropping the snapshot with
-      // it costs one render per stream end, versus one per idle message change
-      // if the snapshot were instead kept in sync while nothing reads it.
-      lastFlushRef.current = Number.NEGATIVE_INFINITY;
-      setSnapshot((previous) => (previous === null ? previous : null));
-      return;
-    }
-    const now = performance.now();
-    const decision = decideCoalesce(
-      now,
-      lastFlushRef.current,
-      intervalMs,
-      timerRef.current !== null,
-    );
-    if (decision.action === "flush-now") {
-      // A trailing timer can still be armed here: timers fire late under
-      // main-thread load, which is exactly when a chunk overtakes one. Leaving
-      // it would publish a second time and slip the next interval forward.
-      clearPendingFlush();
-      lastFlushRef.current = now;
-      publish();
-    } else if (decision.action === "schedule") {
-      timerRef.current = setTimeout(() => {
-        timerRef.current = null;
-        // Read the clock again: timers fire late under load, and the next
-        // interval must start from the real flush.
-        lastFlushRef.current = performance.now();
-        publish();
-      }, decision.delayMs);
-    }
-  }, [messages, isStreaming, intervalMs, publish, clearPendingFlush]);
-
-  useEffect(
-    () => () => {
-      if (timerRef.current !== null) {
-        clearTimeout(timerRef.current);
-      }
-    },
-    [],
-  );
-
-  return isStreaming && snapshot !== null ? snapshot : messages;
-}
-
 export function upsertThreadInSearchCache(
   queryClient: QueryClient,
   thread: AgentThread,
+  scope: ProjectClientScope,
 ) {
   queryClient.setQueriesData(
     {
-      queryKey: ["threads", "search"],
+      queryKey: scopedThreadQueryKey(scope, "threads", "search"),
       exact: false,
     },
     (oldData: Array<AgentThread> | undefined) => {
@@ -1237,10 +1409,14 @@ export function upsertThreadInSearchCache(
 export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
+  scope: ProjectClientScope,
 ) {
   queryClient.setQueriesData(
     {
-      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      queryKey: scopedThreadQueryKey(
+        scope,
+        ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      ),
       exact: false,
     },
     (oldData: InfiniteData<AgentThread[]> | undefined) => {
@@ -1288,25 +1464,45 @@ export function invalidateStoppedThreadCaches(
   queryClient: QueryClient,
   threadId: string | null | undefined,
   isMock = false,
+  scope: ProjectClientScope,
 ) {
-  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
   void queryClient.invalidateQueries({
-    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+    queryKey: scopedThreadQueryKey(scope, "threads", "search"),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(scope, ...INFINITE_THREADS_QUERY_KEY_PREFIX),
   });
 
   if (!threadId || isMock) {
     return;
   }
 
-  void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
   void queryClient.invalidateQueries({
-    queryKey: threadHistoryQueryKey(threadId),
+    queryKey: scopedThreadQueryKey(scope, "thread", threadId),
   });
   void queryClient.invalidateQueries({
-    queryKey: ["thread", "metadata", threadId, isMock],
+    queryKey: scopedThreadQueryKey(
+      scope,
+      "thread",
+      "metadata",
+      threadId,
+      isMock,
+    ),
   });
   void queryClient.invalidateQueries({
-    queryKey: threadTokenUsageQueryKey(threadId),
+    queryKey: scopedThreadQueryKey(
+      scope,
+      ...threadTokenUsageQueryKey(threadId),
+    ),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(
+      scope,
+      ...threadContextUsageQueryKey(threadId),
+    ),
+  });
+  void queryClient.invalidateQueries({
+    queryKey: scopedThreadQueryKey(scope, "uploads", "list", threadId),
   });
 }
 
@@ -1316,12 +1512,13 @@ function scheduleStoppedThreadFinalizationRefetch(
   queryClient: QueryClient,
   threadId: string | null | undefined,
   isMock = false,
+  scope: ProjectClientScope,
 ) {
   if (isMock) {
     return;
   }
   globalThis.setTimeout(() => {
-    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock, scope);
   }, STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS);
 }
 
@@ -1330,12 +1527,18 @@ export async function stopThreadAndInvalidateCaches(
   stop: () => Promise<void> | void,
   threadId: string | null | undefined,
   isMock = false,
+  scope: ProjectClientScope,
 ) {
   try {
     await stop();
   } finally {
-    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
-    scheduleStoppedThreadFinalizationRefetch(queryClient, threadId, isMock);
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock, scope);
+    scheduleStoppedThreadFinalizationRefetch(
+      queryClient,
+      threadId,
+      isMock,
+      scope,
+    );
   }
 }
 
@@ -1409,12 +1612,52 @@ export function useThreadStream({
   threadId,
   displayThreadId,
   context,
+  agentModelRef,
   isMock,
+  privateWork: explicitPrivateWork,
   onSend,
   onStart,
   onFinish,
+  onToolEnd,
 }: ThreadStreamOptions) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const { t } = useI18n();
+  const { models: executionModels } = useModels({ enabled: !isMock });
+  const executionModelSelection = useMemo(
+    () =>
+      resolveAgentExecutionModelSelection(
+        executionModels,
+        context.model_name,
+        agentModelRef,
+        context.model_selection_explicit === true,
+      ),
+    [
+      agentModelRef,
+      context.model_name,
+      context.model_selection_explicit,
+      executionModels,
+    ],
+  );
+  const executionModel = executionModelSelection.model;
+  const executionProfile = useMemo<RunExecutionProfileRequest>(
+    () =>
+      buildRunExecutionProfileRequest({
+        mode: context.mode,
+        modeSelectionExplicit: context.mode_selection_explicit === true,
+        modelName: context.model_name,
+        modelSelectionExplicit: context.model_selection_explicit === true,
+        agentModelRef,
+        model: executionModel,
+      }),
+    [
+      context.mode,
+      context.mode_selection_explicit,
+      context.model_name,
+      context.model_selection_explicit,
+      agentModelRef,
+      executionModel,
+    ],
+  );
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -1437,31 +1680,47 @@ export function useThreadStream({
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
+  const messagesRef = useRef<Message[]>([]);
+  const currentRunIdRef = useRef<string | null>(null);
+  const currentRunThreadIdRef = useRef<string | null>(null);
+  const currentRunBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  const runBaselinePreparedRef = useRef(false);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
-  const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
-    null,
-  );
+  const preparedReplayAttemptRef = useRef<PreparedReplayAttempt | null>(null);
+  const [ignoredReplayHistoryError, setIgnoredReplayHistoryError] = useState<{
+    error: unknown;
+  } | null>(null);
   const listeners = useRef({
     onSend,
     onStart,
     onFinish,
+    onToolEnd,
   });
 
   const {
     messages: history,
+    runs: historyRuns,
     hasMore: hasMoreHistory,
     loadMore: loadMoreHistory,
     loading: isHistoryLoading,
+    error: historyError,
+    retry: retryHistory,
+    appendMessages,
   } = useThreadHistory(onStreamThreadId ?? "", {
     enabled: !isMock,
     pendingSupersededRunIds,
+    privateWork,
   });
+  const runExecutionProfiles = useMemo(
+    () => collectRunExecutionProfiles(historyRuns ?? []),
+    [historyRuns],
+  );
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onSend, onStart, onFinish };
-  }, [onSend, onStart, onFinish]);
+    listeners.current = { onSend, onStart, onFinish, onToolEnd };
+  }, [onSend, onStart, onFinish, onToolEnd]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -1477,6 +1736,16 @@ export function useThreadStream({
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
+    if (!runBaselinePreparedRef.current) {
+      currentRunBaselineMessageIdsRef.current = new Set(
+        messagesRef.current
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
+      );
+    }
+    currentRunIdRef.current = _runId;
+    currentRunThreadIdRef.current = _threadId;
+    runBaselinePreparedRef.current = false;
     setOptimisticThreadId((currentOptimisticThreadId) => {
       const currentView = currentViewThreadIdRef.current;
       if (
@@ -1507,9 +1776,7 @@ export function useThreadStream({
   }, []);
 
   const queryClient = useQueryClient();
-  const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
-
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
       if (!replay) {
@@ -1521,61 +1788,112 @@ export function useThreadStream({
       setPendingSupersededMessageIds((current) =>
         removeSetItems(current, replay.supersededMessageIds),
       );
-      if (pendingPreparedReplayRef.current === replay) {
-        pendingPreparedReplayRef.current = null;
+    },
+    [],
+  );
+  const rollbackPreparedReplayFailure = useCallback(
+    (replay: PendingPreparedReplayMask | null, failedRunId?: string | null) => {
+      if (!replay) {
+        return;
       }
+      setPendingSupersededRunIds((current) =>
+        getRunMasksAfterPreparedReplayFailure(current, replay, failedRunId),
+      );
+      setPendingSupersededMessageIds((current) =>
+        getMessageMasksAfterPreparedReplayFailure(current, replay),
+      );
     },
     [],
   );
 
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    client: privateWork.client,
     assistantId: "lead_agent",
     threadId: onStreamThreadId,
-    reconnectOnMount: true,
+    reconnectOnMount: privateWork.reconnectOnMount,
     fetchStateHistory: { limit: 1 },
-    // Batch stream updates received in the same macrotask without adding a
-    // fixed debounce interval that could delay a continuously active stream.
-    // Coalesce same-tick stream events into one React notification. Only the
-    // boolean tier is safe: the SDK's numeric tier is a trailing debounce that
-    // starves UI updates while chunks keep arriving faster than the window.
-    // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      const replayAttempt = preparedReplayAttemptRef.current;
+      if (
+        replayAttempt?.status === "submitting" &&
+        replayAttempt.threadId === meta.thread_id
+      ) {
+        replayAttempt.createdRunId = meta.run_id;
+      }
+      setIgnoredReplayHistoryError(null);
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
-      upsertThreadInSearchCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
-        },
-        interrupts: {},
+      const runQueryKey = scopedThreadQueryKey(
+        privateWork.scope,
+        "thread",
+        meta.thread_id,
+      );
+      queryClient.setQueryData<Run[]>(runQueryKey, (runs) =>
+        rememberActiveRun(runs, {
+          threadId: meta.thread_id,
+          runId: meta.run_id,
+          createdAt: now,
+        }),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: runQueryKey,
+        exact: true,
       });
-      upsertThreadInInfiniteCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
+      upsertThreadInSearchCache(
+        queryClient,
+        {
+          thread_id: meta.thread_id,
+          created_at: now,
+          updated_at: now,
+          state_updated_at: now,
+          metadata: context.agent_name
+            ? { agent_name: context.agent_name }
+            : {},
+          status: "busy",
+          values: {
+            title: t.pages.newChat,
+            messages: [],
+            artifacts: [],
+          },
+          interrupts: {},
         },
-        interrupts: {},
-      });
+        privateWork.scope,
+      );
+      upsertThreadInInfiniteCache(
+        queryClient,
+        {
+          thread_id: meta.thread_id,
+          created_at: now,
+          updated_at: now,
+          state_updated_at: now,
+          metadata: context.agent_name
+            ? { agent_name: context.agent_name }
+            : {},
+          status: "busy",
+          values: {
+            title: t.pages.newChat,
+            messages: [],
+            artifacts: [],
+          },
+          interrupts: {},
+        },
+        privateWork.scope,
+      );
       if (context.agent_name && !isMock) {
-        void getAPIClient()
-          .threads.update(meta.thread_id, {
+        void privateWork.client.threads
+          .update(meta.thread_id, {
             metadata: { agent_name: context.agent_name },
           })
           .catch(() => ({}));
+      }
+    },
+    onLangChainEvent(event) {
+      if (event.event === "on_tool_end") {
+        listeners.current.onToolEnd?.({
+          name: event.name,
+          data: event.data,
+        });
       }
     },
     onUpdateEvent(data) {
@@ -1589,23 +1907,24 @@ export function useThreadStream({
             summarizedRef.current?.add(m.id ?? "");
           }
         }
-        const transientMessages = computeSummarizationTransientMessages(
-          messagesRef.current,
-          _messages,
-          summarizedRef.current ?? new Set<string>(),
-          renderedMessageSnapshotRef.current.threadId === threadIdRef.current
-            ? renderedMessageSnapshotRef.current.messages
-            : EMPTY_MESSAGES,
+        const _movedMessages = attachRunIdToNewMessages(
+          computeSummarizationMovedMessages(
+            messagesRef.current,
+            _messages,
+            summarizedRef.current ?? new Set<string>(),
+          ),
+          currentRunIdRef.current,
+          currentRunBaselineMessageIdsRef.current,
         );
-        transientHistoryOrderRef.current = mergeTransientHistoryBridgeOrder(
-          transientHistoryOrderRef.current,
-          transientMessages,
-        );
-        transientHistoryBridgeRef.current = mergeTransientHistoryBridge(
-          transientHistoryBridgeRef.current,
-          transientMessages,
-        );
-        transientHistoryThreadIdRef.current = threadIdRef.current;
+        // Buffer the rescued messages synchronously so the merge can keep
+        // displaying them immediately, even though appendMessages below only
+        // updates the archived-history state asynchronously (#3825).
+        pendingArchivedMessagesRef.current = dedupeMessagesByIdentity([
+          ...pendingArchivedMessagesRef.current,
+          ..._movedMessages,
+        ]);
+        pendingArchiveThreadIdRef.current = threadIdRef.current;
+        appendMessages(_movedMessages);
         messagesRef.current = [];
       }
 
@@ -1616,7 +1935,11 @@ export function useThreadStream({
         if (update && "title" in update && update.title) {
           void queryClient.setQueriesData(
             {
-              queryKey: ["threads", "search"],
+              queryKey: scopedThreadQueryKey(
+                privateWork.scope,
+                "threads",
+                "search",
+              ),
               exact: false,
             },
             (oldData: Array<AgentThread> | undefined) => {
@@ -1637,7 +1960,10 @@ export function useThreadStream({
           const nextTitle: string = update.title;
           void queryClient.setQueriesData(
             {
-              queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+              queryKey: scopedThreadQueryKey(
+                privateWork.scope,
+                ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+              ),
               exact: false,
             },
             (oldData: InfiniteData<AgentThread[]> | undefined) =>
@@ -1658,41 +1984,28 @@ export function useThreadStream({
         }
       }
     },
-    onCustomEvent(event: unknown) {
-      // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
-      // task_* events, so the per-branch re-narrowing below reads this single
-      // source of truth instead of re-checking the object shape each time.
-      const eventType =
-        typeof event === "object" && event !== null && "type" in event
-          ? (event as { type: unknown }).type
-          : undefined;
+    onCustomEvent(event: unknown, callbackOptions) {
+      if (!isRootStreamCallback(callbackOptions)) return;
 
-      if (eventType === "stream_replay_gap") {
-        setOptimisticMessages([]);
-        setOptimisticThreadId(null);
-        setLiveMessagesThreadId(null);
-        setPendingSupersededRunIds(new Set());
-        setPendingSupersededMessageIds(new Set());
-        messagesRef.current = [];
-        transientHistoryBridgeRef.current = [];
-        transientHistoryOrderRef.current = [];
-        transientHistoryThreadIdRef.current = null;
-        summarizedRef.current = new Set<string>();
-        pendingUsageBaselineMessageIdsRef.current = new Set();
-        localTurnOrderBaselineIdentitiesRef.current = null;
-        tasksRef.current = {};
-        setTasks({});
-        invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
-        toast.warning(t.conversation.streamReplayGap);
+      const terminalUpdate = parseSubtaskTerminalEvent(event);
+      if (terminalUpdate) {
+        updateSubtask({
+          ...terminalUpdate,
+          statusSource: "custom_event",
+          ...(terminalUpdate.status === "failed" && !terminalUpdate.error
+            ? { error: t.subtasks.failed }
+            : {}),
+        });
         return;
       }
 
-      const taskUpdate = taskEventToSubtaskUpdate(event);
-      if (taskUpdate) {
-        updateSubtask(taskUpdate);
-      }
-
-      if (eventType === "task_running") {
+      const lifecycleUpdate = taskEventToSubtaskUpdate(event);
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "task_running"
+      ) {
         const e = event as {
           type: "task_running";
           task_id: string;
@@ -1703,130 +2016,203 @@ export function useThreadStream({
         // latestMessage for the collapsed-header tool-call hint, and append the
         // normalized step (assistant turn or tool output) to the timeline.
         updateSubtask({
+          ...(lifecycleUpdate ?? {}),
           id: e.task_id,
+          status: "in_progress",
+          statusSource: "custom_event",
           latestMessage: e.message,
           steps: [messageToStep(e.message, e.message_index ?? 0)],
         });
         return;
       }
+      if (lifecycleUpdate) {
+        updateSubtask(lifecycleUpdate);
+        return;
+      }
 
-      if (eventType === "llm_retry") {
-        const e = event as { type: "llm_retry"; message?: unknown };
-        if (typeof e.message === "string" && e.message.trim()) {
-          toast(e.message);
-        }
+      if (
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "llm_retry" &&
+        "message" in event &&
+        typeof event.message === "string" &&
+        event.message.trim()
+      ) {
+        const e = event as { type: "llm_retry"; message: string };
+        toast(e.message);
       }
     },
-    onError(error) {
-      setOptimisticMessages([]);
-      setOptimisticThreadId(null);
-      setLiveMessagesThreadId(null);
-      pendingPreparedReplayRef.current = null;
-      setPendingSupersededRunIds(new Set());
-      setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+    onError(error, callbackOptions) {
+      const replayAttempt = preparedReplayAttemptRef.current;
+      const decision =
+        replayAttempt?.status === "submitting"
+          ? classifyPreparedReplaySdkError({
+              createdRunId: replayAttempt.createdRunId,
+              callbackRunId: callbackOptions?.run_id ?? null,
+              error,
+              historyRefetchError: replayAttempt.historyRefetchError,
+            })
+          : null;
+      const leavesReplayProjectionIntact =
+        decision?.kind === "history-refetch-failure" ||
+        decision?.kind === "ignore-history-refetch-duplicate" ||
+        decision?.kind === "ignore-unrelated-run";
+
+      if (decision?.kind === "rollback" && replayAttempt) {
+        replayAttempt.status = "failed";
+        rollbackPreparedReplayFailure(
+          replayAttempt.replay,
+          decision.failedRunId,
+        );
+      } else if (
+        decision?.kind === "history-refetch-failure" &&
+        replayAttempt
+      ) {
+        replayAttempt.historyRefetchError = error;
+        setIgnoredReplayHistoryError({ error });
+      }
+
+      if (!leavesReplayProjectionIntact) {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
+      }
+      if (decision?.kind !== "ignore-history-refetch-duplicate") {
+        toast.error(
+          isProjectRunTerminalFailure(error)
+            ? t.conversation.runFailedDescription
+            : getStreamErrorMessage(error),
+        );
+      }
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: threadHistoryQueryKey(threadIdRef.current),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
-        });
-      }
+      invalidateStoppedThreadCaches(
+        queryClient,
+        threadIdRef.current,
+        isMock,
+        privateWork.scope,
+      );
     },
-    onFinish(state) {
+    onFinish(state, callbackOptions) {
+      const replayAttempt = preparedReplayAttemptRef.current;
+      if (
+        replayAttempt?.status === "submitting" &&
+        replayAttempt.createdRunId === callbackOptions?.run_id
+      ) {
+        replayAttempt.status = "succeeded";
+      }
+      setIgnoredReplayHistoryError(null);
       listeners.current.onFinish?.(state.values);
-      pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
+      invalidateStoppedThreadCaches(
+        queryClient,
+        threadIdRef.current,
+        isMock,
+        privateWork.scope,
+      );
     },
   });
+  const deferredStreamDetachRef = useRef<ReturnType<
+    typeof createDeferredThreadStreamDetach
+  > | null>(null);
+  deferredStreamDetachRef.current ??= createDeferredThreadStreamDetach();
+  const deferredStreamDetach = deferredStreamDetachRef.current;
+  const switchStreamThread = thread.switchThread;
+  useEffect(() => {
+    deferredStreamDetach.retain();
+    return () => {
+      deferredStreamDetach.defer(() => {
+        // switchThread clears/aborts the local SDK projection only. Unlike
+        // stop(), it never sends a backend Run cancellation.
+        switchStreamThread(null);
+      });
+    };
+  }, [deferredStreamDetach, switchStreamThread]);
 
   const stopThread = useCallback(async () => {
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
-    const pendingReplay = pendingPreparedReplayRef.current;
+    const replayAttempt = preparedReplayAttemptRef.current;
+    const replayRollback = getPreparedReplayStopRollback(replayAttempt);
     await stopThreadAndInvalidateCaches(
       queryClient,
       () => thread.stop(),
       stoppedThreadId,
       isMock,
+      privateWork.scope,
     );
-    if (pendingReplay) {
+    if (replayAttempt && replayRollback) {
+      replayAttempt.status = "failed";
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
-      clearPreparedReplayMasks(pendingReplay);
+      rollbackPreparedReplayFailure(
+        replayRollback.replay,
+        replayRollback.failedRunId,
+      );
+      if (preparedReplayAttemptRef.current === replayAttempt) {
+        preparedReplayAttemptRef.current = null;
+      }
     }
   }, [
-    clearPreparedReplayMasks,
     displayThreadId,
     isMock,
+    privateWork.scope,
     queryClient,
+    rollbackPreparedReplayFailure,
     thread,
     threadId,
   ]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
-  const persistedMessages = useMemo(() => {
-    if (!hasVisibleStreamState) {
-      return EMPTY_MESSAGES;
-    }
-    const filtered = thread.messages.filter(
-      (message) => !message.id || !pendingSupersededMessageIds.has(message.id),
-    );
-    // The SDK getter mints a fresh [] on every read while the stream has no
-    // values; normalize to a stable identity so downstream effects keyed on
-    // this array cannot re-fire (and setState-loop) on idle renders.
-    return filtered.length === 0 ? EMPTY_MESSAGES : filtered;
-  }, [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages]);
+  const persistedMessages = useMemo(
+    () =>
+      hasVisibleStreamState
+        ? thread.messages.filter(
+            (message) =>
+              !message.id || !pendingSupersededMessageIds.has(message.id),
+          )
+        : [],
+    [hasVisibleStreamState, pendingSupersededMessageIds, thread.messages],
+  );
+  const renderMessages = useCoalescedStreamMessages(
+    persistedMessages,
+    thread.isLoading,
+  );
   const visibleHistory = useMemo(
-    () => (threadId ? history : []),
-    [history, threadId],
+    () =>
+      threadId
+        ? history.filter(
+            (message) =>
+              !message.id || !pendingSupersededMessageIds.has(message.id),
+          )
+        : [],
+    [history, pendingSupersededMessageIds, threadId],
   );
   const humanMessageCount = persistedMessages.filter(
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
-  const messagesRef = useRef<Message[]>([]);
-  // Non-null only after a turn submitted by this mounted client. Keep it after
-  // finish/stop/error because the SDK can retain its transient event order in
-  // the settled frame. The next local submit replaces it and a thread switch or
-  // replay gap clears it. An empty set is meaningful for a new thread and must
-  // not be confused with a reconnect that has no local turn anchor.
-  const localTurnOrderBaselineIdentitiesRef = useRef<Set<string> | null>(null);
-  // Current-stream lifecycle bridge for messages removed from the checkpoint
-  // tail before the canonical run-event page refetch observes the journal
-  // flush. It is never appended into useThreadHistory's persisted pages.
-  const transientHistoryBridgeRef = useRef<Message[]>([]);
-  // Full identity order of each captured checkpoint. Confirmed bridge entries
-  // are pruned from the message buffer, but remain here as non-rendering
-  // anchors so an older rescue can be placed before a newest-first page.
-  const transientHistoryOrderRef = useRef<readonly string[]>([]);
-  const transientHistoryThreadIdRef = useRef<string | null>(null);
-  // The run-scoped committed display ledger supplies message objects when a
-  // compaction replacement outruns React or several rolling checkpoint windows
-  // pass between compactions. The merged order separately anchors those
-  // objects against canonical history.
-  const renderedMessageSnapshotRef = useRef<{
-    threadId: string | null;
-    messages: Message[];
-    order: readonly string[];
-  }>({
-    threadId: null,
-    messages: EMPTY_MESSAGES,
-    order: EMPTY_MESSAGE_IDENTITIES,
-  });
+  // Synchronous bridge for messages rescued from context summarization. The
+  // archived-history `setState` (via appendMessages) lands on a different
+  // schedule than the live thread external store, so the merge reads this buffer
+  // to avoid dropping rescued messages in the render window before history
+  // catches up (#3825).
+  const pendingArchivedMessagesRef = useRef<Message[]>([]);
+  // The thread the rescue buffer belongs to, captured when onUpdateEvent fills
+  // it. The merge only overlays the buffer when this matches the viewed
+  // `threadId`, so a previous thread's rescued messages can never flash into
+  // another thread or the new-chat screen (#3825).
+  const pendingArchiveThreadIdRef = useRef<string | null>(null);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
@@ -1843,36 +2229,30 @@ export function useThreadStream({
     startedRef.current = false;
     sendInFlightRef.current = false;
     messagesRef.current = [];
-    transientHistoryBridgeRef.current = [];
-    transientHistoryOrderRef.current = [];
-    transientHistoryThreadIdRef.current = null;
-    renderedMessageSnapshotRef.current = {
-      threadId: null,
-      messages: EMPTY_MESSAGES,
-      order: EMPTY_MESSAGE_IDENTITIES,
-    };
+    currentRunIdRef.current = null;
+    currentRunThreadIdRef.current = null;
+    currentRunBaselineMessageIdsRef.current = new Set();
+    runBaselinePreparedRef.current = false;
+    pendingArchivedMessagesRef.current = [];
+    pendingArchiveThreadIdRef.current = null;
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
-    localTurnOrderBaselineIdentitiesRef.current = null;
-    pendingPreparedReplayRef.current = null;
+    preparedReplayAttemptRef.current = null;
+    setIgnoredReplayHistoryError(null);
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
 
-  // Release entries individually once canonical history confirms their stable
-  // identities. Keep unconfirmed entries across failure/refetch within this
-  // page lifecycle so a temporary persistence gap cannot hide a turn.
+  // Release archive-buffer entries once the canonical history state has absorbed
+  // them, so the synchronous bridge stays transient and never resurrects a
+  // message that history later filters out (e.g. a superseded run) (#3825).
   useEffect(() => {
-    transientHistoryBridgeRef.current = pruneConfirmedTransientMessages(
-      transientHistoryBridgeRef.current,
+    pendingArchivedMessagesRef.current = pruneConfirmedArchivedMessages(
+      pendingArchivedMessagesRef.current,
       visibleHistory,
     );
-    if (transientHistoryBridgeRef.current.length === 0) {
-      transientHistoryOrderRef.current = [];
-      transientHistoryThreadIdRef.current = null;
-    }
   }, [visibleHistory]);
 
   useEffect(() => {
@@ -1908,26 +2288,29 @@ export function useThreadStream({
   // after individual "messages-tuple" events for AI messages).
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
+  const optimisticHumanAcknowledged = hasAcknowledgedOptimisticHuman(
+    optimisticMessages,
+    [...visibleHistory, ...persistedMessages],
+  );
   useEffect(() => {
     if (optimisticMessageCount === 0) return;
 
     const newHumanMsgArrived = humanMessageCount > prevHumanMsgCountRef.current;
 
-    if (!hasHumanOptimistic || newHumanMsgArrived) {
-      setOptimisticMessages([]);
-      setOptimisticThreadId(null);
-    }
-  }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
-
-  useEffect(() => {
     if (
-      optimisticMessageCount > 0 &&
-      areOptimisticMessagesConfirmed(optimisticMessages, persistedMessages)
+      !hasHumanOptimistic ||
+      newHumanMsgArrived ||
+      optimisticHumanAcknowledged
     ) {
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
-  }, [optimisticMessageCount, optimisticMessages, persistedMessages]);
+  }, [
+    hasHumanOptimistic,
+    humanMessageCount,
+    optimisticHumanAcknowledged,
+    optimisticMessageCount,
+  ]);
 
   const sendMessage = useCallback(
     async (
@@ -1941,11 +2324,8 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
-
       const text = message.text.trim();
+      const humanMessageId = `human-${crypto.randomUUID()}`;
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -1955,9 +2335,12 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      localTurnOrderBaselineIdentitiesRef.current = new Set(
-        pendingUsageBaselineMessageIdsRef.current,
+      currentRunBaselineMessageIdsRef.current = new Set(
+        persistedMessages
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
       );
+      runBaselinePreparedRef.current = true;
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -1978,7 +2361,7 @@ export function useThreadStream({
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
         });
@@ -2027,17 +2410,15 @@ export function useThreadStream({
             }
 
             if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+              const uploadResponse = await runPrivateWorkAbortable(
+                privateWork,
+                (signal) => uploadFiles(threadId, files, privateWork, signal),
+              );
               uploadedFileInfo = uploadResponse.files;
 
               // Update optimistic human message with uploaded status + paths
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
-                }),
+                uploadedFileInfoToMessage,
               );
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
@@ -2054,10 +2435,12 @@ export function useThreadStream({
               });
             }
           } catch (error) {
-            const errorMessage =
-              error instanceof Error
-                ? error.message
-                : "Failed to upload files.";
+            const errorMessage = uploadFailureMessage(error, {
+              tooLarge: t.uploads.serverTooLarge,
+              storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+              preflightRejected: t.uploads.preflightRejected,
+              fallback: t.uploads.uploadFailed,
+            });
             toast.error(errorMessage);
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
@@ -2070,18 +2453,14 @@ export function useThreadStream({
 
         // Build files metadata for submission (included in additional_kwargs)
         const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
-            size: info.size,
-            path: info.virtual_path,
-            status: "uploaded" as const,
-          }),
+          uploadedFileInfoToMessage,
         );
 
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
               text,
+              messageId: humanMessageId,
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
               filesForSubmit,
@@ -2089,42 +2468,39 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
-            // No streamSubgraphs: subtask progress arrives via root-namespace
-            // custom events, while subgraph frames would leak a delegated
-            // subagent's values/messages into the thread view (#4399).
-            streamResumable: true,
-            config: {
-              recursion_limit: 1000,
-            },
-            context: {
-              ...extraContext,
-              ...context,
-              thinking_enabled: context.mode !== "flash",
-              is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
-              reasoning_effort:
-                context.reasoning_effort ??
-                (context.mode === "ultra"
-                  ? "high"
-                  : context.mode === "pro"
-                    ? "medium"
-                    : context.mode === "thinking"
-                      ? "low"
-                      : undefined),
-              thread_id: threadId,
-            },
+            ...buildThreadSubmitCheckpointOptions(
+              options?.continueFromLatestCheckpoint,
+            ),
+            ...buildRootThreadStreamOptions(),
+            context: withRunExecutionProfileContext(
+              {
+                ...extraContext,
+                ...context,
+                thread_id: threadId,
+              },
+              executionProfile,
+            ),
           },
         );
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        options?.onSent?.();
         void queryClient.invalidateQueries({
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
         });
       } catch (error) {
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
         setIsUploading(false);
-        localTurnOrderBaselineIdentitiesRef.current = null;
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -2132,11 +2508,17 @@ export function useThreadStream({
     },
     [
       thread,
+      t.uploads.preflightRejected,
+      t.uploads.serverTooLarge,
+      t.uploads.storageQuotaExceeded,
+      t.uploads.uploadFailed,
       t.uploads.uploadingFiles,
       context,
+      executionProfile,
       queryClient,
       humanMessageCount,
       persistedMessages,
+      privateWork,
     ],
   );
 
@@ -2152,7 +2534,17 @@ export function useThreadStream({
       getSupersededMessageIds: (prepared: TPrepared) => string[];
       getOptimisticMessages?: (prepared: TPrepared) => Message[];
     }) => {
-      if (sendInFlightRef.current || !threadId) {
+      // The SDK reports both its initial state-load failure and a replay
+      // admission failure through the same metadata-less onError callback.
+      // Do not open a replay attribution window until the initial state request
+      // has settled, so those two error sources cannot be confused.
+      if (
+        !canStartPreparedReplay({
+          threadId,
+          sendInFlight: sendInFlightRef.current,
+          isThreadLoading: thread.isThreadLoading,
+        })
+      ) {
         return false;
       }
       sendInFlightRef.current = true;
@@ -2162,34 +2554,47 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      localTurnOrderBaselineIdentitiesRef.current = new Set(
-        pendingUsageBaselineMessageIdsRef.current,
+      currentRunBaselineMessageIdsRef.current = new Set(
+        persistedMessages
+          .map(messageIdentity)
+          .filter((id): id is string => Boolean(id)),
       );
+      runBaselinePreparedRef.current = true;
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
-      let preparedSupersededRunId: string | null = null;
-      let preparedSupersededMessageIds: string[] = [];
+      let pendingReplay: PendingPreparedReplayMask | null = null;
+      let replayAttempt: PreparedReplayAttempt | null = null;
+      setIgnoredReplayHistoryError(null);
 
       try {
         const prepared = await prepare();
-        preparedSupersededRunId = prepared.target_run_id;
-        preparedSupersededMessageIds = getSupersededMessageIds(prepared);
+        if (privateWork.isActive && !privateWork.isActive()) {
+          throw new Error("The active project changed before replay started.");
+        }
+        const supersededMessageIds = getSupersededMessageIds(prepared);
         prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
           persistedMessages,
-          preparedSupersededMessageIds,
+          supersededMessageIds,
         );
         const replacementHumanMessageId =
           "replacement_human_message_id" in prepared &&
           typeof prepared.replacement_human_message_id === "string"
             ? prepared.replacement_human_message_id
             : undefined;
-        const pendingReplay: PendingPreparedReplayMask = {
+        pendingReplay = {
           kind: replacementHumanMessageId ? "edit" : "regenerate",
           targetRunId: prepared.target_run_id,
-          supersededMessageIds: preparedSupersededMessageIds,
+          supersededMessageIds,
           replacementHumanMessageId,
         };
-        pendingPreparedReplayRef.current = pendingReplay;
+        replayAttempt = {
+          replay: pendingReplay,
+          threadId,
+          createdRunId: null,
+          historyRefetchError: null,
+          status: "submitting",
+        };
+        preparedReplayAttemptRef.current = replayAttempt;
         setPendingSupersededRunIds((current) => {
           const next = new Set(current);
           next.add(prepared.target_run_id);
@@ -2197,7 +2602,7 @@ export function useThreadStream({
         });
         setPendingSupersededMessageIds((current) => {
           const next = new Set(current);
-          for (const id of preparedSupersededMessageIds) {
+          for (const id of supersededMessageIds) {
             next.add(id);
           }
           return next;
@@ -2213,54 +2618,61 @@ export function useThreadStream({
           threadId,
           checkpoint: prepared.checkpoint,
           metadata: prepared.metadata,
-          // No streamSubgraphs — same contract as the main submit path (#4399).
-          streamResumable: true,
-          config: {
-            recursion_limit: 1000,
-          },
-          context: {
-            ...context,
-            thinking_enabled: context.mode !== "flash",
-            is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode === "ultra",
-            reasoning_effort:
-              context.reasoning_effort ??
-              (context.mode === "ultra"
-                ? "high"
-                : context.mode === "pro"
-                  ? "medium"
-                  : context.mode === "thinking"
-                    ? "low"
-                    : undefined),
-            thread_id: threadId,
-          },
+          ...buildRootThreadStreamOptions(),
+          context: withRunExecutionProfileContext(
+            {
+              ...context,
+              thread_id: threadId,
+            },
+            executionProfile,
+          ),
         });
-        void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        if (replayAttempt.status === "failed") {
+          if (preparedReplayAttemptRef.current === replayAttempt) {
+            preparedReplayAttemptRef.current = null;
+          }
+          return false;
+        }
+        replayAttempt.status = "succeeded";
+        if (preparedReplayAttemptRef.current === replayAttempt) {
+          preparedReplayAttemptRef.current = null;
+        }
         void queryClient.invalidateQueries({
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(privateWork.scope, "thread", threadId),
         });
         void queryClient.invalidateQueries({
-          queryKey: threadHistoryQueryKey(threadId),
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
         });
         void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadId),
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...threadTokenUsageQueryKey(threadId),
+          ),
         });
         return true;
       } catch (error) {
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
-        localTurnOrderBaselineIdentitiesRef.current = null;
-        if (preparedSupersededRunId) {
-          const supersededRunId = preparedSupersededRunId;
-          pendingPreparedReplayRef.current = null;
-          setPendingSupersededRunIds((current) =>
-            removeSetItems(current, [supersededRunId]),
-          );
-          setPendingSupersededMessageIds((current) =>
-            removeSetItems(current, preparedSupersededMessageIds),
-          );
+        runBaselinePreparedRef.current = false;
+        if (pendingReplay) {
+          clearPreparedReplayMasks(pendingReplay);
+        }
+        if (replayAttempt) {
+          replayAttempt.status = "failed";
+        }
+        if (preparedReplayAttemptRef.current === replayAttempt) {
+          preparedReplayAttemptRef.current = null;
         }
         toast.error(getStreamErrorMessage(error));
         return false;
@@ -2268,7 +2680,16 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [
+      clearPreparedReplayMasks,
+      context,
+      executionProfile,
+      humanMessageCount,
+      persistedMessages,
+      privateWork,
+      queryClient,
+      thread,
+    ],
   );
 
   const regenerateMessage = useCallback(
@@ -2282,29 +2703,31 @@ export function useThreadStream({
       }
       return submitPreparedReplay({
         threadId,
-        prepare: async () => {
-          const response = await fetch(
-            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
-              threadId,
-            )}/runs/regenerate/prepare`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
+        prepare: () =>
+          runPrivateWorkAbortable(privateWork, async (signal) => {
+            const response = await fetch(
+              `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
+                threadId,
+              )}/runs/regenerate/prepare`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify({ message_id: messageId }),
+                signal,
               },
-              credentials: "include",
-              body: JSON.stringify({ message_id: messageId }),
-            },
-          );
-          if (!response.ok) {
-            throw new Error(await readResponseErrorMessage(response));
-          }
-          return (await response.json()) as RegeneratePrepareResponse;
-        },
+            );
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as RegeneratePrepareResponse;
+          }),
         getSupersededMessageIds: () => supersededMessageIds,
       });
     },
-    [submitPreparedReplay],
+    [privateWork, submitPreparedReplay],
   );
 
   const editAndRegenerateMessage = useCallback(
@@ -2318,33 +2741,35 @@ export function useThreadStream({
       }
       return submitPreparedReplay<EditRegeneratePrepareResponse>({
         threadId,
-        prepare: async () => {
-          const response = await fetch(
-            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
-              threadId,
-            )}/runs/edit-regenerate/prepare`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
+        prepare: () =>
+          runPrivateWorkAbortable(privateWork, async (signal) => {
+            const response = await fetch(
+              `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
+                threadId,
+              )}/runs/edit-regenerate/prepare`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                credentials: "include",
+                body: JSON.stringify({
+                  human_message_id: humanMessageId,
+                  replacement_text: replacementText,
+                }),
+                signal,
               },
-              credentials: "include",
-              body: JSON.stringify({
-                human_message_id: humanMessageId,
-                replacement_text: replacementText,
-              }),
-            },
-          );
-          if (!response.ok) {
-            throw new Error(await readResponseErrorMessage(response));
-          }
-          return (await response.json()) as EditRegeneratePrepareResponse;
-        },
+            );
+            if (!response.ok) {
+              throw new Error(await readResponseErrorMessage(response));
+            }
+            return (await response.json()) as EditRegeneratePrepareResponse;
+          }),
         getSupersededMessageIds: (prepared) => prepared.source_message_ids,
         getOptimisticMessages: (prepared) => prepared.input.messages ?? [],
       });
     },
-    [submitPreparedReplay],
+    [privateWork, submitPreparedReplay],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
@@ -2352,124 +2777,75 @@ export function useThreadStream({
   if (persistedMessages.length >= messagesRef.current.length) {
     messagesRef.current = persistedMessages;
   }
-
-  // Render-facing coalesced snapshot. Refs, counters and usage tracking keep
-  // consuming the per-chunk array above so lifecycle semantics (optimistic
-  // clearing, summarization capture, token-usage baselines) are unchanged.
-  const renderMessages = useCoalescedStreamMessages(
-    persistedMessages,
-    thread.isLoading,
-  );
-
-  const rawVisibleOptimisticMessages = getVisibleOptimisticMessages(
+  const visibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
     prevHumanMsgCountRef.current,
     humanMessageCount,
   );
-  const visibleOptimisticMessages =
-    rawVisibleOptimisticMessages.length === 0
-      ? EMPTY_MESSAGES
-      : rawVisibleOptimisticMessages;
 
-  const transientHistoryOrder =
-    transientHistoryBridgeRef.current.length > 0 &&
-    transientHistoryThreadIdRef.current === threadId
-      ? mergeTransientHistoryBridgeOrder(
-          transientHistoryOrderRef.current,
-          persistedMessages,
-        )
-      : transientHistoryOrderRef.current;
-  const previouslyRenderedOrder =
-    renderedMessageSnapshotRef.current.threadId === threadId
-      ? renderedMessageSnapshotRef.current.order
-      : EMPTY_MESSAGE_IDENTITIES;
-
-  // Commit the extended non-rendering order skeleton after React commits this
-  // render. The local value above keeps this render correctly anchored without
-  // mutating a ref during render.
-  useEffect(() => {
-    if (
-      transientHistoryBridgeRef.current.length > 0 &&
-      transientHistoryThreadIdRef.current === threadId
-    ) {
-      transientHistoryOrderRef.current = mergeTransientHistoryBridgeOrder(
-        transientHistoryOrderRef.current,
-        persistedMessages,
-      );
+  // Overlay the summarization rescue buffer only onto the history of the thread
+  // it was captured from. visibleHistory is gated on `threadId`, so comparing the
+  // same prop keeps the buffer from flashing into another thread or the new-chat
+  // screen, and reading it here (instead of clearing a ref during render) is
+  // concurrent-mode safe (#3825).
+  const rescueBuffer = pendingArchivedMessagesRef.current;
+  const effectiveHistory =
+    rescueBuffer.length > 0 && pendingArchiveThreadIdRef.current === threadId
+      ? resolvePreservedHistory(visibleHistory, rescueBuffer)
+      : visibleHistory;
+  const activeRunId = resolveActiveRunIdForMessages(
+    persistedMessages,
+    thread.isLoading,
+    currentRunThreadIdRef.current === threadId ? currentRunIdRef.current : null,
+  );
+  const runBaselineMessageIds = new Set(
+    currentRunBaselineMessageIdsRef.current,
+  );
+  for (const message of effectiveHistory) {
+    const identity = messageIdentity(message);
+    if (identity) {
+      runBaselineMessageIds.add(identity);
     }
-  }, [persistedMessages, threadId]);
-
-  // The transient-bridge refs mutate in lockstep with stream/history updates
-  // already captured by these deps, and resolveTransientHistoryBridge is
-  // idempotent for entries canonical history has absorbed, so memoizing on the
-  // coalesced snapshot cannot pin a stale bridge.
-  const mergedMessages = useMemo(() => {
-    const effectiveHistory = resolveThreadTransientHistoryBridge(
-      visibleHistory,
-      transientHistoryBridgeRef.current,
-      transientHistoryThreadIdRef.current,
-      threadId,
-      transientHistoryOrder,
-      previouslyRenderedOrder,
-    );
-    const merged = mergeMessages(
-      effectiveHistory,
-      renderMessages,
-      visibleOptimisticMessages,
-    );
-    const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
-    return localTurnOrderBaseline === null
-      ? merged
-      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
-  }, [
-    previouslyRenderedOrder,
+  }
+  const runScopedPersistedMessages = attachRunIdToNewMessages(
     renderMessages,
-    threadId,
-    transientHistoryOrder,
-    visibleHistory,
+    activeRunId,
+    runBaselineMessageIds,
+  );
+  const visibleRunScopedPersistedMessages = filterMessagesBySupersededRunIds(
+    runScopedPersistedMessages,
+    pendingSupersededRunIds,
+  );
+  const mergedMessages = mergeMessages(
+    effectiveHistory,
+    visibleRunScopedPersistedMessages,
     visibleOptimisticMessages,
-  ]);
-  useEffect(() => {
-    const visibleMergedMessages = mergedMessages.filter(
-      (message) =>
-        !isHiddenFromUIMessage(message) && !message.id?.startsWith("opt-"),
-    );
-    const previousLedger =
-      thread.isLoading &&
-      renderedMessageSnapshotRef.current.threadId === threadId
-        ? renderedMessageSnapshotRef.current.messages
-        : EMPTY_MESSAGES;
-    const renderedMessageLedger = mergeRenderedMessageLedger(
-      previousLedger,
-      visibleMergedMessages,
-      pendingSupersededMessageIds,
-    );
-    renderedMessageSnapshotRef.current = {
-      threadId: threadId ?? null,
-      messages: renderedMessageLedger,
-      order: renderedMessageLedger
-        .map(messageIdentity)
-        .filter(isNonEmptyString),
-    };
-  }, [mergedMessages, pendingSupersededMessageIds, thread.isLoading, threadId]);
+    historyRuns,
+  );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
         persistedMessages,
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
+  const projectedThreadError =
+    ignoredReplayHistoryError !== null &&
+    Object.is(thread.error, ignoredReplayHistoryError.error)
+      ? undefined
+      : thread.error;
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
-  const mergedThread = {
-    ...thread,
+  const mergedThread = overlayThreadProjection(thread, {
+    error: projectedThreadError,
     stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
-  } as typeof thread;
+  });
 
   return {
     thread: mergedThread,
+    boundThreadId: onStreamThreadId ?? null,
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
@@ -2478,120 +2854,249 @@ export function useThreadStream({
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    historyError,
+    retryHistory,
+    runExecutionProfiles,
+    hasTerminalRunFailure: latestRunHasTerminalFailure(historyRuns),
   } as const;
 }
 
 type ThreadHistoryOptions = {
   enabled?: boolean;
   pendingSupersededRunIds?: ReadonlySet<string>;
+  privateWork?: ProjectPrivateWorkScope;
 };
 
 export function useThreadHistory(
   threadId: string,
-  { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
+  {
+    enabled = true,
+    pendingSupersededRunIds,
+    privateWork: explicitPrivateWork,
+  }: ThreadHistoryOptions = {},
 ) {
-  const historyQuery = useInfiniteQuery<
-    ThreadMessagesPageResponse,
-    Error,
-    InfiniteData<ThreadMessagesPageResponse>,
-    ReturnType<typeof threadHistoryQueryKey>,
-    number | null
-  >({
-    queryKey: threadHistoryQueryKey(threadId),
-    enabled: enabled && Boolean(threadId),
-    initialPageParam: null,
-    queryFn: async ({ pageParam, signal }) => {
-      const url = buildThreadMessagesPageUrl(
-        getBackendBaseURL(),
-        threadId,
-        pageParam ?? undefined,
-      );
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        signal,
-      });
-      if (!response.ok) {
-        throw new Error(
-          await readResponseErrorMessage(
-            response,
-            "Failed to load thread history.",
-          ),
-        );
-      }
-      return parseThreadMessagesPageResponse(await response.json());
-    },
-    getNextPageParam: getThreadHistoryNextPageParam,
-  });
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const runs = useThreadRuns(threadId, { enabled }, privateWork);
+  const threadIdRef = useRef(threadId);
+  const runsRef = useRef(runs.data ?? []);
+  const indexRef = useRef(-1);
+  const loadingRef = useRef(false);
+  const pendingLoadRef = useRef(false);
+  const loadingRunIdRef = useRef<string | null>(null);
+  const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const runBeforeSeqRef = useRef<Map<string, EventSequence>>(new Map());
+  const loadGenerationRef = useRef(0);
+  const [loading, setLoading] = useState(false);
+  const [messageLoadError, setMessageLoadError] = useState<Error | null>(null);
+  const [messageRows, setMessageRows] = useState<RunMessage[]>([]);
+  const [appendedMessages, setAppendedMessages] = useState<Message[]>([]);
 
-  const currentMessageRows = useMemo(
-    () => flattenThreadHistoryPages(historyQuery.data?.pages ?? []),
-    [historyQuery.data?.pages],
-  );
-  const [retainedHistory, setRetainedHistory] = useState<{
-    threadId: string;
-    rows: RunMessage[];
-  }>({ threadId, rows: EMPTY_RUN_MESSAGES });
-  const previousRows =
-    retainedHistory.threadId === threadId
-      ? retainedHistory.rows
-      : EMPTY_RUN_MESSAGES;
-  const pages = historyQuery.data?.pages ?? [];
-  const isAuthoritativeComplete =
-    historyQuery.isSuccess &&
-    !historyQuery.isFetching &&
-    pages.length > 0 &&
-    pages.at(-1)?.has_more === false;
-  const messageRows = useMemo(
-    () =>
-      reconcileThreadHistoryRows(
-        previousRows,
-        currentMessageRows,
-        isAuthoritativeComplete,
-      ),
-    [currentMessageRows, isAuthoritativeComplete, previousRows],
-  );
-
-  useEffect(() => {
-    setRetainedHistory((current) => {
-      if (current.threadId === threadId && current.rows === messageRows) {
-        return current;
-      }
-      return { threadId, rows: messageRows };
-    });
-  }, [messageRows, threadId]);
+  const supersededRunIds = useMemo(() => {
+    return getSupersededRunIds(runs.data, pendingSupersededRunIds);
+  }, [pendingSupersededRunIds, runs.data]);
 
   const messages = useMemo(() => {
     return buildVisibleHistoryMessages(
       messageRows,
-      pendingSupersededRunIds ?? new Set<string>(),
+      supersededRunIds,
+      appendedMessages,
     );
-  }, [messageRows, pendingSupersededRunIds]);
+  }, [appendedMessages, messageRows, supersededRunIds]);
 
-  useEffect(() => {
-    if (historyQuery.error) {
-      console.error(historyQuery.error);
-      toast.error("Failed to load thread history.");
+  const loadMessages = useCallback(async () => {
+    if (!enabled) {
+      return;
     }
-  }, [historyQuery.error]);
+    const loadGeneration = loadGenerationRef.current;
+    if (loadingRef.current) {
+      const pendingRunIndex = findLatestUnloadedRunIndex(
+        runsRef.current,
+        loadedRunIdsRef.current,
+      );
+      const pendingRun = runsRef.current[pendingRunIndex];
+      if (pendingRun && pendingRun.run_id !== loadingRunIdRef.current) {
+        pendingLoadRef.current = true;
+      }
+      return;
+    }
+    if (runsRef.current.length === 0) {
+      return;
+    }
 
+    loadingRef.current = true;
+    setMessageLoadError(null);
+    setLoading(true);
+
+    try {
+      let consecutiveEmptyLoads = 0;
+      do {
+        pendingLoadRef.current = false;
+
+        const nextRunIndex = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+        indexRef.current = nextRunIndex;
+
+        const run = runsRef.current[nextRunIndex];
+        if (!run) {
+          indexRef.current = -1;
+          return;
+        }
+
+        const requestThreadId = threadIdRef.current;
+        loadingRunIdRef.current = run.run_id;
+        const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
+        const result = await runPrivateWorkAbortable(privateWork, (signal) =>
+          fetchRunMessagesPage(
+            privateWork.apiBaseURL,
+            requestThreadId,
+            run.run_id,
+            beforeSeq,
+            signal,
+          ),
+        );
+        if (
+          loadGenerationRef.current !== loadGeneration ||
+          threadIdRef.current !== requestThreadId
+        ) {
+          return;
+        }
+        const _messages = result.data;
+        setMessageRows((prev) =>
+          mergeRunMessageRows(prev, _messages, runsRef.current),
+        );
+        const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
+        if (typeof nextBeforeSeq === "string") {
+          runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
+          pendingLoadRef.current = true;
+        } else if (nextBeforeSeq === undefined) {
+          throw new Error(
+            `Run ${run.run_id} returned a non-advancing message page.`,
+          );
+        } else {
+          runBeforeSeqRef.current.delete(run.run_id);
+          loadedRunIdsRef.current.add(run.run_id);
+          if (
+            shouldAutoContinueOnEmptyRun(
+              filterVisibleHistoryRows(_messages).length,
+              consecutiveEmptyLoads,
+            )
+          ) {
+            consecutiveEmptyLoads += 1;
+            pendingLoadRef.current = true;
+          } else {
+            consecutiveEmptyLoads = 0;
+          }
+        }
+        indexRef.current = findLatestUnloadedRunIndex(
+          runsRef.current,
+          loadedRunIdsRef.current,
+        );
+      } while (pendingLoadRef.current);
+    } catch (err) {
+      pendingLoadRef.current = false;
+      if (loadGenerationRef.current === loadGeneration) {
+        setMessageLoadError(
+          err instanceof Error
+            ? err
+            : new Error("Failed to load thread history."),
+        );
+      }
+    } finally {
+      if (loadGenerationRef.current === loadGeneration) {
+        loadingRef.current = false;
+        loadingRunIdRef.current = null;
+        setLoading(false);
+      }
+    }
+  }, [enabled, privateWork]);
+  useEffect(() => {
+    const threadChanged = threadIdRef.current !== threadId;
+    threadIdRef.current = threadId;
+
+    if (!enabled || threadChanged) {
+      loadGenerationRef.current += 1;
+      runsRef.current = [];
+      indexRef.current = -1;
+      pendingLoadRef.current = false;
+      loadingRunIdRef.current = null;
+      loadedRunIdsRef.current = new Set();
+      runBeforeSeqRef.current = new Map();
+      loadingRef.current = false;
+      setLoading(false);
+      setMessageLoadError(null);
+      setMessageRows([]);
+      setAppendedMessages([]);
+    }
+
+    if (!enabled) {
+      return;
+    }
+
+    if (runs.data && runs.data.length > 0) {
+      runsRef.current = runs.data ?? [];
+      indexRef.current = findLatestUnloadedRunIndex(
+        runs.data,
+        loadedRunIdsRef.current,
+      );
+    }
+    void loadMessages();
+  }, [enabled, threadId, runs.data, loadMessages]);
+
+  const appendMessages = useCallback((_messages: Message[]) => {
+    setAppendedMessages((prev) => {
+      return dedupeMessagesByIdentity([...prev, ..._messages]);
+    });
+  }, []);
+  const hasThreadId = Boolean(threadId);
+  const hasUnloadedRuns = Boolean(
+    runs.data?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
+  );
+  const isRunsLoading =
+    enabled &&
+    hasThreadId &&
+    (runs.isLoading || (runs.isFetching && !runs.data));
+  const isRunsUnresolved =
+    enabled && hasThreadId && !runs.data && !runs.isError;
+  const historyError = messageLoadError ?? runs.error;
+  const hasMore =
+    enabled &&
+    hasThreadId &&
+    historyError === null &&
+    (indexRef.current >= 0 || hasUnloadedRuns);
+  const runsFailed = runs.isError;
+  const refetchRuns = runs.refetch;
+  const retryHistory = useCallback(() => {
+    if (runsFailed) {
+      void refetchRuns();
+      return;
+    }
+    void loadMessages();
+  }, [loadMessages, refetchRuns, runsFailed]);
   return {
+    runs: runs.data,
     messages,
-    loading: historyQuery.isLoading || historyQuery.isFetchingNextPage,
-    hasMore: Boolean(historyQuery.hasNextPage),
-    loadMore: historyQuery.fetchNextPage,
+    loading: loading || isRunsLoading || isRunsUnresolved,
+    appendMessages,
+    hasMore,
+    loadMore: loadMessages,
+    error: historyError,
+    retry: retryHistory,
   };
 }
 
 export function useThreads(
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+  queryOptions: { enabled?: boolean } = {},
 ) {
-  const apiClient = getAPIClient();
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const options = buildThreadsSearchQueryOptions(privateWork.client, params);
   return useQuery<AgentThread[]>({
-    ...buildThreadsSearchQueryOptions(apiClient, params),
+    ...options,
+    queryKey: scopedThreadQueryKey(privateWork.scope, ...options.queryKey),
+    ...{ enabled: queryOptions.enabled },
   });
 }
 
@@ -2636,6 +3141,7 @@ export async function fetchInfiniteThreadsPage(
   params: InfiniteThreadsParams,
   pageParam: number,
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<AgentThread[]> {
   const threads: AgentThread[] = [];
   let offset = pageParam;
@@ -2645,6 +3151,7 @@ export async function fetchInfiniteThreadsPage(
     const currentLimit = pageSize - threads.length;
     const response = (await apiClient.threads.search<AgentThreadState>({
       ...params,
+      ...(signal ? { signal } : {}),
       limit: currentLimit,
       offset,
     })) as AgentThread[];
@@ -2708,70 +3215,15 @@ export function filterInfiniteThreadsCache(
   };
 }
 
-function mergeThreadMetadata(
-  thread: AgentThread,
-  metadata: ThreadMetadataPatch,
-): AgentThread {
-  return {
-    ...thread,
-    metadata: {
-      ...(thread.metadata ?? {}),
-      ...metadata,
-    },
-  };
-}
-
-function setThreadMetadataInCaches(
-  queryClient: QueryClient,
-  threadId: string,
-  metadata: ThreadMetadataPatch,
-) {
-  queryClient.setQueriesData(
-    {
-      queryKey: ["threads", "search"],
-      exact: false,
-    },
-    (oldData: Array<AgentThread> | undefined) => {
-      if (!oldData) {
-        return oldData;
-      }
-      return oldData.map((thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadMetadata(thread, metadata)
-          : thread,
-      );
-    },
-  );
-  queryClient.setQueriesData(
-    {
-      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      exact: false,
-    },
-    (oldData: InfiniteData<AgentThread[]> | undefined) =>
-      mapInfiniteThreadsCache(oldData, (thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadMetadata(thread, metadata)
-          : thread,
-      ),
-  );
-  queryClient.setQueriesData(
-    {
-      queryKey: ["thread", "metadata", threadId],
-      exact: false,
-    },
-    (oldData: AgentThread | null | undefined) =>
-      oldData ? mergeThreadMetadata(oldData, metadata) : oldData,
-  );
-}
-
 export function useInfiniteThreads(
   params: InfiniteThreadsParams = {
     sortBy: "updated_at",
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
-  const apiClient = getAPIClient();
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useInfiniteQuery<
     AgentThread[],
     Error,
@@ -2779,14 +3231,19 @@ export function useInfiniteThreads(
     readonly unknown[],
     number
   >({
-    queryKey: [...INFINITE_THREADS_QUERY_KEY_PREFIX, params],
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      params,
+    ),
     initialPageParam: 0,
-    queryFn: async ({ pageParam }) =>
+    queryFn: async ({ pageParam, signal }) =>
       fetchInfiniteThreadsPage(
-        apiClient,
+        privateWork.client,
         params,
         pageParam,
         INFINITE_THREADS_PAGE_SIZE,
+        signal,
       ),
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
@@ -2794,21 +3251,231 @@ export function useInfiniteThreads(
   });
 }
 
+export const THREAD_RUNS_PAGE_SIZE = 1000;
+export const THREAD_RUNS_MAX_PAGES = 1000;
+export const THREAD_RUNS_MAX_OFFSET = 100_000;
+
+const PRIVATE_RUN_METADATA_KEYS = new Set([
+  "project_id",
+  "owner_user_id",
+  "user_id",
+]);
+const PRIVATE_RUN_METADATA_KEY_PARTS = [
+  "secret",
+  "token",
+  "password",
+  "credential",
+  "ciphertext",
+  "private_key",
+  "key_id",
+  "nonce",
+  "storage_locator",
+] as const;
+const THREAD_RUN_METADATA_MAX_NODES = 10_000;
+
+function isPrivateRunMetadataKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return (
+    PRIVATE_RUN_METADATA_KEYS.has(normalized) ||
+    PRIVATE_RUN_METADATA_KEY_PARTS.some((part) => normalized.includes(part))
+  );
+}
+
+const threadRunMetadataSchema = z
+  .record(z.unknown())
+  .superRefine((metadata, context) => {
+    const pending: Array<{
+      path: Array<string | number>;
+      value: unknown;
+    }> = [{ path: [], value: metadata }];
+    const visited = new Set<object>();
+    let visitedNodes = 0;
+
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (!current || current.value === null) {
+        continue;
+      }
+      if (typeof current.value !== "object") {
+        continue;
+      }
+      if (visited.has(current.value)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Run metadata must be an acyclic JSON object.",
+          path: current.path,
+        });
+        return;
+      }
+      visited.add(current.value);
+      visitedNodes += 1;
+      if (visitedNodes > THREAD_RUN_METADATA_MAX_NODES) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Run metadata exceeds the validation safety limit.",
+          path: current.path,
+        });
+        return;
+      }
+
+      if (Array.isArray(current.value)) {
+        current.value.forEach((value, index) => {
+          pending.push({ path: [...current.path, index], value });
+        });
+        continue;
+      }
+
+      for (const [key, value] of Object.entries(current.value)) {
+        const path = [...current.path, key];
+        if (isPrivateRunMetadataKey(key)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Run metadata contains private authority data.",
+            path,
+          });
+          continue;
+        }
+        pending.push({ path, value });
+      }
+    }
+  });
+
+const runExecutionProfileSchema = z
+  .object({
+    model_name: z.string().min(1),
+    thinking_enabled: z.boolean(),
+    reasoning_effort: z.enum(REASONING_EFFORTS).nullable(),
+    supports_vision: z.boolean(),
+  })
+  .strict();
+
+const threadRunSchema = z
+  .object({
+    run_id: z.string().min(1),
+    thread_id: z.string().min(1),
+    assistant_id: z.string().min(1).nullable(),
+    created_at: z.string().min(1),
+    updated_at: z.string().min(1),
+    status: z.enum([
+      "pending",
+      "running",
+      "error",
+      "success",
+      "timeout",
+      "interrupted",
+    ]),
+    metadata: threadRunMetadataSchema,
+    multitask_strategy: z.enum(["reject", "interrupt", "rollback", "enqueue"]),
+    error: z.string().nullable(),
+    model_name: z.string().min(1).nullable(),
+    execution_profile: runExecutionProfileSchema.nullable(),
+  })
+  .strict();
+
+const threadRunPageSchema = z.array(threadRunSchema).max(THREAD_RUNS_PAGE_SIZE);
+
+type ThreadRunsListClient = {
+  runs: {
+    list: (
+      threadId: string,
+      options?: {
+        limit?: number;
+        offset?: number;
+        signal?: AbortSignal;
+      },
+    ) => Promise<unknown>;
+  };
+};
+
+export async function fetchAllThreadRuns(
+  apiClient: ThreadRunsListClient,
+  threadId: string,
+  pageSize: number = THREAD_RUNS_PAGE_SIZE,
+  signal?: AbortSignal,
+): Promise<Run[]> {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+    throw new RangeError("Thread Run page size must be between 1 and 1000.");
+  }
+
+  const runs: Run[] = [];
+  const seenRunIds = new Set<string>();
+  let offset = 0;
+  let pageCount = 0;
+
+  while (true) {
+    signal?.throwIfAborted();
+    if (pageCount >= THREAD_RUNS_MAX_PAGES) {
+      throw new Error("Thread Run pagination exceeded the page safety limit.");
+    }
+    if (offset > THREAD_RUNS_MAX_OFFSET) {
+      throw new Error(
+        "Thread Run pagination exceeded the offset safety limit.",
+      );
+    }
+
+    const rawPage = await apiClient.runs.list(threadId, {
+      limit: pageSize,
+      offset,
+      ...(signal ? { signal } : {}),
+    });
+    signal?.throwIfAborted();
+    const page = threadRunPageSchema.parse(rawPage);
+    pageCount += 1;
+    if (page.length > pageSize) {
+      throw new Error(
+        "Thread Run pagination returned more rows than requested.",
+      );
+    }
+
+    const seenCountBeforePage = seenRunIds.size;
+    for (const run of page) {
+      if (!seenRunIds.has(run.run_id)) {
+        seenRunIds.add(run.run_id);
+        // Gateway runs intentionally use a nullable assistant_id and expose
+        // two public diagnostic fields beyond the SDK's narrower Run type.
+        runs.push(run as unknown as Run);
+      }
+    }
+
+    if (page.length < pageSize) {
+      return runs;
+    }
+    if (seenRunIds.size === seenCountBeforePage) {
+      throw new Error("Thread Run pagination returned a non-advancing page.");
+    }
+    if (pageCount >= THREAD_RUNS_MAX_PAGES) {
+      throw new Error("Thread Run pagination exceeded the page safety limit.");
+    }
+    if (page.length > THREAD_RUNS_MAX_OFFSET - offset) {
+      throw new Error(
+        "Thread Run pagination exceeded the offset safety limit.",
+      );
+    }
+    offset += page.length;
+  }
+}
+
 export function useThreadRuns(
   threadId?: string,
   { enabled = true }: { enabled?: boolean } = {},
+  explicitPrivateWork?: ProjectPrivateWorkScope,
 ) {
-  const apiClient = getAPIClient();
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run[]>({
-    queryKey: ["thread", threadId],
-    queryFn: async () => {
+    queryKey: scopedThreadQueryKey(privateWork.scope, "thread", threadId),
+    queryFn: async ({ signal }) => {
       if (!threadId) {
         return [];
       }
-      const response = await apiClient.runs.list(threadId);
-      return response;
+      return fetchAllThreadRuns(
+        privateWork.client,
+        threadId,
+        undefined,
+        signal,
+      );
     },
     enabled: enabled && Boolean(threadId),
+    retry: false,
     refetchOnWindowFocus: false,
   });
 }
@@ -2818,17 +3485,28 @@ export function useThreadMetadata(
   {
     enabled = true,
     isMock = false,
-  }: { enabled?: boolean; isMock?: boolean } = {},
+    privateWork: explicitPrivateWork,
+  }: {
+    enabled?: boolean;
+    isMock?: boolean;
+    privateWork?: ProjectPrivateWorkScope;
+  } = {},
 ) {
-  const apiClient = getAPIClient(isMock);
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<AgentThread | null>({
-    queryKey: ["thread", "metadata", threadId, isMock],
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      "thread",
+      "metadata",
+      threadId,
+      isMock,
+    ),
     queryFn: async () => {
       if (!threadId) {
         return null;
       }
       try {
-        const response = await apiClient.threads.get(threadId);
+        const response = await privateWork.client.threads.get(threadId);
         return response as AgentThread;
       } catch (error) {
         if (isThreadMissingError(error)) {
@@ -2845,27 +3523,59 @@ export function useThreadMetadata(
 
 export function useThreadTokenUsage(
   threadId?: string | null,
-  { enabled = true }: { enabled?: boolean } = {},
+  {
+    enabled = true,
+    privateWork: explicitPrivateWork,
+  }: { enabled?: boolean; privateWork?: ProjectPrivateWorkScope } = {},
 ) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<ThreadTokenUsageResponse | null>({
-    queryKey: threadTokenUsageQueryKey(threadId),
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...threadTokenUsageQueryKey(threadId),
+    ),
     queryFn: async () => {
       if (!threadId) {
         return null;
       }
-      return fetchThreadTokenUsage(threadId);
+      return fetchThreadTokenUsage(threadId, privateWork);
     },
     enabled: enabled && Boolean(threadId),
     retry: false,
     refetchOnWindowFocus: false,
-    // Keep same-thread data visible during refetches without carrying usage
-    // from the previous route into a newly selected thread.
-    placeholderData: (previous) =>
-      retainThreadTokenUsagePlaceholder(previous, threadId),
   });
 }
 
-export function useBranchThread() {
+export function useThreadContextUsage(
+  threadId?: string | null,
+  {
+    enabled = true,
+    privateWork: explicitPrivateWork,
+  }: { enabled?: boolean; privateWork?: ProjectPrivateWorkScope } = {},
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  return useQuery<ThreadContextUsageResponse | null>({
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      ...threadContextUsageQueryKey(threadId),
+    ),
+    queryFn: async ({ signal }) => {
+      if (!threadId) {
+        return null;
+      }
+      return fetchThreadContextUsage(threadId, {
+        apiBaseURL: privateWork.apiBaseURL,
+        signal,
+      });
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useBranchThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({
@@ -2878,89 +3588,70 @@ export function useBranchThread() {
       messageId: string;
       messageIds?: string[];
       title?: string;
-    }) => branchThreadFromTurn(threadId, { messageId, messageIds, title }),
+    }) =>
+      branchThreadFromTurn(
+        threadId,
+        { messageId, messageIds, title },
+        privateWork,
+      ),
     onSuccess(response, { threadId }) {
       void queryClient.invalidateQueries({
-        queryKey: ["thread", "metadata", response.thread_id],
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          "thread",
+          "metadata",
+          response.thread_id,
+        ),
       });
       void queryClient.invalidateQueries({
-        queryKey: ["thread", "metadata", threadId],
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          "thread",
+          "metadata",
+          threadId,
+        ),
       });
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        queryKey: scopedThreadQueryKey(privateWork.scope, "threads", "search"),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+        ),
       });
     },
   });
 }
 
-export function usePinThread() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async ({
-      threadId,
-      pinned,
-    }: {
-      threadId: string;
-      pinned: boolean;
-    }) =>
-      patchThreadMetadata(threadId, {
-        [THREAD_PINNED_METADATA_KEY]: pinned,
-      }),
-    onSuccess(response, { threadId, pinned }) {
-      setThreadMetadataInCaches(queryClient, threadId, {
-        ...(response.metadata ?? {}),
-        [THREAD_PINNED_METADATA_KEY]: pinned,
-      });
-    },
-    onSettled() {
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
-    },
-  });
-}
-
-export function useRunDetail(threadId: string, runId: string) {
-  const apiClient = getAPIClient();
+export function useRunDetail(
+  threadId: string,
+  runId: string,
+  explicitPrivateWork?: ProjectPrivateWorkScope,
+) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   return useQuery<Run>({
-    queryKey: ["thread", threadId, "run", runId],
+    queryKey: scopedThreadQueryKey(
+      privateWork.scope,
+      "thread",
+      threadId,
+      "run",
+      runId,
+    ),
     queryFn: async () => {
-      const response = await apiClient.runs.get(threadId, runId);
+      const response = await privateWork.client.runs.get(threadId, runId);
       return response;
     },
     refetchOnWindowFocus: false,
   });
 }
 
-async function deleteLocalThreadData(threadId: string) {
-  const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
-    {
-      method: "DELETE",
-    },
-  );
-
-  // A 404 means the thread is already gone — the desired end state. The prior
-  // `apiClient.threads.delete` call hits the same gateway handler (nginx
-  // rewrites /api/langgraph/threads/* to /api/threads/*) and removes the
-  // thread_meta row, so this second delete's ownership guard 404s. Treat it as
-  // success to keep the delete idempotent.
-  if (!response.ok && response.status !== 404) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: "Failed to delete local thread data." }));
-    throw new Error(error.detail ?? "Failed to delete local thread data.");
-  }
-}
-
-async function deleteThreadEverywhere(
+export async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
+  _privateWork: ProjectPrivateWorkScope,
 ) {
   await apiClient.threads.delete(threadId);
-  await deleteLocalThreadData(threadId);
 }
 
 export async function findSidecarThreadIdsForParent(
@@ -3005,6 +3696,7 @@ export async function findSidecarThreadIdsForParent(
 async function deleteSidecarThreadsForParent(
   apiClient: ThreadDeleteClient,
   parentThreadId: string,
+  privateWork: ProjectPrivateWorkScope,
 ) {
   let sidecarThreadIds: string[];
   try {
@@ -3022,7 +3714,7 @@ async function deleteSidecarThreadsForParent(
 
   const results = await Promise.allSettled(
     sidecarThreadIds.map((threadId) =>
-      deleteThreadEverywhere(apiClient, threadId),
+      deleteThreadEverywhere(apiClient, threadId, privateWork),
     ),
   );
 
@@ -3048,9 +3740,10 @@ async function deleteSidecarThreadsForParent(
   });
 }
 
-export function useDeleteThread() {
+export function useDeleteThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient() as ThreadDeleteClient;
+  const apiClient = privateWork.client as ThreadDeleteClient;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -3062,17 +3755,21 @@ export function useDeleteThread() {
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
+        privateWork,
       );
-      await apiClient.threads.delete(threadId);
+      await deleteThreadEverywhere(apiClient, threadId, privateWork);
       onRemoteDeleted?.();
-      await deleteLocalThreadData(threadId);
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {
       const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
           exact: false,
         },
         (oldData: Array<AgentThread> | undefined) => {
@@ -3084,7 +3781,10 @@ export function useDeleteThread() {
       );
       queryClient.setQueriesData(
         {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
           exact: false,
         },
         (oldData: InfiniteData<AgentThread[]> | undefined) =>
@@ -3096,17 +3796,23 @@ export function useDeleteThread() {
     },
 
     onSettled() {
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        queryKey: scopedThreadQueryKey(privateWork.scope, "threads", "search"),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: scopedThreadQueryKey(
+          privateWork.scope,
+          ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+        ),
       });
     },
   });
 }
 
-export function useRenameThread() {
+export function useRenameThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
+  const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient();
+  const apiClient = privateWork.client;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -3122,7 +3828,11 @@ export function useRenameThread() {
     onSuccess(_, { threadId, title }) {
       queryClient.setQueriesData(
         {
-          queryKey: ["threads", "search"],
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "threads",
+            "search",
+          ),
           exact: false,
         },
         (oldData: Array<AgentThread>) => {
@@ -3142,7 +3852,10 @@ export function useRenameThread() {
       );
       queryClient.setQueriesData(
         {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+          ),
           exact: false,
         },
         (oldData: InfiniteData<AgentThread[]> | undefined) =>

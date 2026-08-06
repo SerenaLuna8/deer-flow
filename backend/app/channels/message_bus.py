@@ -5,19 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from app.channels.instance_authority import ChannelInstanceAuthorityGuard
+from app.channels.instance_identity import normalize_channel_instance_id
+from deerflow.runtime.private_scope import PrivateResourceScope
+
 logger = logging.getLogger(__name__)
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
-# Adapter-owned bytes may use this transient key while crossing the channel
-# boundary. ChannelManager consumes and removes it before persisting metadata.
-INBOUND_FILE_CONTENT_KEY = "_content"
+_PROVIDER_DELIVERY_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 
 
 # ---------------------------------------------------------------------------
@@ -43,16 +45,30 @@ class InboundMessage:
         text: The message text.
         msg_type: Whether this is a regular chat message or a command.
         thread_ts: Optional platform thread identifier (for threaded replies).
-        topic_id: Conversation topic identifier used to map to a DeerFlow thread.
+        topic_id: Conversation topic identifier used to map to an ActWeave thread.
             Messages sharing the same ``topic_id`` within a ``chat_id`` will
-            reuse the same DeerFlow thread.  When ``None``, each message
+            reuse the same ActWeave thread.  When ``None``, each message
             creates a new thread (one-shot Q&A).
-        connection_id: Optional DeerFlow channel connection id. When present,
+        connection_id: Optional ActWeave channel connection id. When present,
             conversation mapping is scoped by the connection instead of the
             legacy global ``channel_name:chat_id[:topic_id]`` key.
-        owner_user_id: DeerFlow user id that owns the channel connection.
+        owner_user_id: ActWeave user id that owns the channel connection.
             Platform user ids stay in ``user_id``.
+        private_scope: Server-resolved project/owner coordinates used only for
+            scoped channel-conversation persistence. Executable inbound work
+            re-resolves current membership and never treats this as authority.
+        project_id: Optional project id copied from a server-side connection
+            lookup for routing display only. It is not private-work authority;
+            the inbound resolver re-resolves project and owner from persistence.
         workspace_id: Optional external workspace/guild/team id.
+        resolved_conversation_id: Server-generated pseudonymous conversation
+            coordinate used for private persistence. The raw chat id remains
+            transient for provider replies.
+        resolved_topic_id: Server-generated pseudonymous topic coordinate used
+            for private persistence.
+        provider_delivery_id: Provider-stable message/delivery identifier.
+            It is not project authority; project-scoped dedupe combines it
+            with the persisted connection and conversation coordinates.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -62,15 +78,55 @@ class InboundMessage:
     chat_id: str
     user_id: str
     text: str
+    channel_instance_id: str | None = None
     msg_type: InboundMessageType = InboundMessageType.CHAT
     thread_ts: str | None = None
     topic_id: str | None = None
     connection_id: str | None = None
     owner_user_id: str | None = None
+    private_scope: PrivateResourceScope | None = None
+    project_id: str | None = None
     workspace_id: str | None = None
+    resolved_conversation_id: str | None = None
+    resolved_topic_id: str | None = None
+    provider_delivery_id: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        self.channel_instance_id = normalize_channel_instance_id(
+            self.channel_name,
+            self.channel_instance_id,
+        )
+
+
+def extract_provider_delivery_id(message: InboundMessage) -> str | None:
+    """Return the provider's stable delivery/message identifier when present."""
+
+    if isinstance(message.provider_delivery_id, str):
+        explicit = message.provider_delivery_id.strip()
+        if explicit:
+            return explicit
+
+    metadata = message.metadata
+    candidates: list[Any] = [
+        *(metadata.get(key) for key in _PROVIDER_DELIVERY_METADATA_KEYS),
+    ]
+    raw_message = metadata.get("raw_message")
+    if isinstance(raw_message, dict):
+        candidates.extend(raw_message.get(key) for key in _PROVIDER_DELIVERY_METADATA_KEYS)
+    github = metadata.get("github")
+    if isinstance(github, dict):
+        candidates.append(github.get("delivery_id"))
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        normalized = str(candidate).strip()
+        if normalized:
+            return normalized
+    return None
 
 
 @dataclass
@@ -101,15 +157,21 @@ class OutboundMessage:
     Attributes:
         channel_name: Target channel name (used for routing).
         chat_id: Target chat/conversation identifier.
-        thread_id: DeerFlow thread ID that produced this response.
+        thread_id: ActWeave thread ID that produced this response.
         text: The response text.
         artifacts: List of artifact paths produced by the agent.
         is_final: Whether this is the final message in the response stream.
         thread_ts: Optional platform thread identifier for threaded replies.
         metadata: Arbitrary extra data.
-        connection_id: Optional DeerFlow channel connection id used for
+        connection_id: Optional ActWeave channel connection id used for
             connection-specific outbound credentials.
-        owner_user_id: DeerFlow user id that owns the channel connection.
+        owner_user_id: ActWeave user id that owns the channel connection.
+        private_scope: Server-resolved project/owner coordinates for scoped
+            outbound persistence lookups.
+        resolved_conversation_id: Server-generated pseudonymous conversation
+            coordinate used for guest persistence.
+        resolved_topic_id: Server-generated pseudonymous topic coordinate used
+            for guest persistence.
         created_at: Unix timestamp.
     """
 
@@ -117,14 +179,24 @@ class OutboundMessage:
     chat_id: str
     thread_id: str
     text: str
+    channel_instance_id: str | None = None
     artifacts: list[str] = field(default_factory=list)
     attachments: list[ResolvedAttachment] = field(default_factory=list)
     is_final: bool = True
     thread_ts: str | None = None
     connection_id: str | None = None
     owner_user_id: str | None = None
+    private_scope: PrivateResourceScope | None = None
+    resolved_conversation_id: str | None = None
+    resolved_topic_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+
+    def __post_init__(self) -> None:
+        self.channel_instance_id = normalize_channel_instance_id(
+            self.channel_name,
+            self.channel_instance_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -142,22 +214,93 @@ class MessageBus:
     via registered callbacks.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        instance_authority_guard: ChannelInstanceAuthorityGuard | None = None,
+    ) -> None:
         self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self._outbound_listeners: list[OutboundCallback] = []
+        self._instance_authority_guard = instance_authority_guard
+        self._managed_instances: set[str] = set()
+        self._instance_side_effect_guards: dict[
+            str,
+            Callable[[], Awaitable[bool]],
+        ] = {}
+
+    @property
+    def instance_authority_guard(self) -> ChannelInstanceAuthorityGuard | None:
+        return self._instance_authority_guard
+
+    def set_instance_side_effect_guard(
+        self,
+        channel_instance_id: str,
+        guard: Callable[[], Awaitable[bool]],
+    ) -> None:
+        if not isinstance(channel_instance_id, str) or not channel_instance_id:
+            raise ValueError("channel_instance_id is required")
+        self._managed_instances.add(channel_instance_id)
+        self._instance_side_effect_guards[channel_instance_id] = guard
+
+    def clear_instance_side_effect_guard(self, channel_instance_id: str) -> None:
+        self._managed_instances.add(channel_instance_id)
+        self._instance_side_effect_guards.pop(channel_instance_id, None)
+
+    async def is_instance_side_effect_allowed(
+        self,
+        channel_instance_id: str,
+        *,
+        provider: str | None = None,
+    ) -> bool:
+        if channel_instance_id in self._managed_instances:
+            guard = self._instance_side_effect_guards.get(channel_instance_id)
+            if guard is None:
+                return False
+            try:
+                if not await guard():
+                    return False
+            except Exception:
+                return False
+        if provider is None or self._instance_authority_guard is None:
+            return True
+        return await self._instance_authority_guard.allows(
+            provider,
+            channel_instance_id,
+        )
+
+    async def _side_effect_allowed(
+        self,
+        provider: str,
+        channel_instance_id: str,
+    ) -> bool:
+        return await self.is_instance_side_effect_allowed(
+            channel_instance_id,
+            provider=provider,
+        )
 
     # -- inbound -----------------------------------------------------------
 
-    async def publish_inbound(self, msg: InboundMessage) -> None:
+    async def publish_inbound(self, msg: InboundMessage) -> bool:
         """Enqueue an inbound message from a channel."""
+        if not await self._side_effect_allowed(
+            msg.channel_name,
+            msg.channel_instance_id,
+        ):
+            logger.info(
+                "[Bus] managed inbound dropped without a live lease: channel=%s, instance=%s",
+                msg.channel_name,
+                msg.channel_instance_id,
+            )
+            return False
         await self._inbound_queue.put(msg)
         logger.info(
-            "[Bus] inbound enqueued: channel=%s, chat_id=%s, type=%s, queue_size=%d",
+            "[Bus] inbound enqueued: channel=%s, instance=%s, type=%s, queue_size=%d",
             msg.channel_name,
-            msg.chat_id,
+            msg.channel_instance_id,
             msg.msg_type.value,
             self._inbound_queue.qsize(),
         )
+        return True
 
     async def get_inbound(self) -> InboundMessage:
         """Block until the next inbound message is available."""
@@ -177,12 +320,22 @@ class MessageBus:
         """Remove a previously registered outbound callback."""
         self._outbound_listeners = [cb for cb in self._outbound_listeners if cb != callback]
 
-    async def publish_outbound(self, msg: OutboundMessage) -> None:
+    async def publish_outbound(self, msg: OutboundMessage) -> bool:
         """Dispatch an outbound message to all registered listeners."""
-        logger.info(
-            "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
+        if not await self._side_effect_allowed(
             msg.channel_name,
-            msg.chat_id,
+            msg.channel_instance_id,
+        ):
+            logger.info(
+                "[Bus] managed outbound dropped without a live lease: channel=%s, instance=%s",
+                msg.channel_name,
+                msg.channel_instance_id,
+            )
+            return False
+        logger.info(
+            "[Bus] outbound dispatching: channel=%s, instance=%s, listeners=%d, text_len=%d",
+            msg.channel_name,
+            msg.channel_instance_id,
             len(self._outbound_listeners),
             len(msg.text),
         )
@@ -191,3 +344,4 @@ class MessageBus:
                 await callback(msg)
             except Exception:
                 logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
+        return True

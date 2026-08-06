@@ -149,10 +149,7 @@ def _safe_public_url(value: object) -> str:
     if not isinstance(value, str):
         return ""
     url = value.strip()
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
+    parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         return ""
 

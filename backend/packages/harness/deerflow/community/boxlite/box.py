@@ -1,11 +1,11 @@
-"""``BoxliteBox`` — DeerFlow :class:`Sandbox` backed by a BoxLite micro-VM.
+"""``BoxliteBox`` — ActWeave :class:`Sandbox` backed by a BoxLite micro-VM.
 
-DeerFlow's ``Sandbox`` contract is synchronous; BoxLite's SDK is async-native and
+ActWeave's ``Sandbox`` contract is synchronous; BoxLite's SDK is async-native and
 its box handles are event-loop-affine. The provider (:mod:`.provider`) owns one
 private asyncio loop on a daemon thread and injects a ``run`` callable that
 marshals each coroutine onto it via ``run_coroutine_threadsafe`` — so every op
 runs on the loop the box was started on, and stays safe no matter which
-``asyncio.to_thread`` worker DeerFlow invokes us from.
+``asyncio.to_thread`` worker ActWeave invokes us from.
 
 Every operation is a shell command run inside the box (``cat`` / ``find`` /
 ``grep`` / chunked ``base64``), parsed with the shared ``deerflow.sandbox.search``
@@ -24,8 +24,21 @@ import shlex
 import threading
 from typing import TYPE_CHECKING, TypeVar
 
+from deerflow.community.remote_file_authority import (
+    PRIVATE_GUEST_REQUEST_ENV,
+    PRIVATE_GUEST_SCRIPT,
+    RemotePrivateFileAuthority,
+    decode_guest_response,
+    encode_guest_request,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.sandbox import (
+    Sandbox,
+    SandboxAtomicWriter,
+    SandboxBinaryReader,
+    _validate_extra_env,
+)
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 if TYPE_CHECKING:
@@ -48,7 +61,7 @@ class BoxliteBox(Sandbox):
     """Adapter that delegates to a running BoxLite ``SimpleBox``.
 
     Args:
-        id: DeerFlow-side sandbox id (the BoxLite box id).
+        id: ActWeave-side sandbox id (the BoxLite box id).
         box: A started async ``SimpleBox``. The provider owns its lifecycle; this
             adapter stops it on :meth:`close`.
         run: Runs a coroutine on the provider's private loop, returning its result
@@ -90,6 +103,10 @@ class BoxliteBox(Sandbox):
         self._on_terminal_failure = on_terminal_failure
         self._lock = threading.Lock()
         self._closed = False
+        self._private_files = RemotePrivateFileAuthority(
+            execute=self._execute_private_guest,
+            resolve_path=self._resolve_path,
+        )
 
     @classmethod
     def _is_terminal_box_failure(cls, error: Exception) -> bool:
@@ -115,7 +132,10 @@ class BoxliteBox(Sandbox):
                 if self._closed:
                     raise RuntimeError("sandbox has been closed")
                 box = self._box
-            return self._run(box.exec(*argv, env=env, timeout=timeout), timeout=timeout)
+            return self._run(
+                box.exec(*argv, env=env, timeout=timeout),
+                timeout=timeout,
+            )
         except Exception as e:
             if self._on_terminal_failure is not None and self._is_terminal_box_failure(e):
                 try:
@@ -130,7 +150,13 @@ class BoxliteBox(Sandbox):
         env: dict[str, str] | None = None,
         timeout: float | None = None,
     ):
-        return self._exec("sh", "-lc", script, env=env, timeout=timeout)
+        return self._exec(
+            "sh",
+            "-lc",
+            script,
+            env=env,
+            timeout=timeout,
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -141,6 +167,17 @@ class BoxliteBox(Sandbox):
             self._run(self._box.stop())
         except Exception as e:
             logger.warning("Error stopping BoxLite box %s: %s", self.id, e)
+
+    def close_private(self) -> None:
+        """Stop a private VM, preserving retryability when stop fails."""
+
+        with self._lock:
+            if self._closed:
+                return
+            box = self._box
+        self._run(box.stop())
+        with self._lock:
+            self._closed = True
 
     @property
     def is_closed(self) -> bool:
@@ -161,7 +198,7 @@ class BoxliteBox(Sandbox):
 
     def _resolve_path(self, path: str) -> str:
         # The provider materialises the /mnt/user-data prefix on the box rootfs,
-        # so DeerFlow's virtual paths are used as-is; we only reject traversal.
+        # so ActWeave's virtual paths are used as-is; we only reject traversal.
         return self._guard_traversal(path)
 
     # ── command execution ───────────────────────────────────────────────
@@ -174,7 +211,7 @@ class BoxliteBox(Sandbox):
     ) -> str:
         """Run ``command`` through a shell in the box and return its output.
 
-        DeerFlow passes a bash command *string*; BoxLite's ``exec`` takes argv, so
+        ActWeave passes a bash command *string*; BoxLite's ``exec`` takes argv, so
         it runs through ``sh -lc``. Per-call ``env`` is layered over the static
         config environment and scoped to this command only.
 
@@ -205,12 +242,7 @@ class BoxliteBox(Sandbox):
 
     # ── file operations ─────────────────────────────────────────────────
 
-    def read_file(
-        self,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> str:
+    def read_file(self, path: str) -> str:
         resolved = self._resolve_path(path)
         try:
             r = self._exec("cat", "--", resolved)
@@ -219,13 +251,50 @@ class BoxliteBox(Sandbox):
             return f"Error: {e}"
         if r.exit_code not in (0, None):
             return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
-        content = r.stdout or ""
-        if start_line is None and end_line is None:
-            return content
-        lines = content.splitlines()
-        start = start_line or 1
-        end = end_line if end_line is not None else len(lines)
-        return "\n".join(lines[start - 1 : end])
+        return r.stdout or ""
+
+    def _execute_private_guest(
+        self,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        """Run fixed secure-I/O code through argv, with JSON/base64 in env."""
+
+        encoded = encode_guest_request(request)
+        result = self._exec(
+            "python3",
+            "-c",
+            PRIVATE_GUEST_SCRIPT,
+            env={PRIVATE_GUEST_REQUEST_ENV: encoded},
+        )
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        if result.exit_code not in (0, None) or (stderr and not stdout):
+            raise OSError("BoxLite private file helper returned no result")
+        return decode_guest_response(stdout)
+
+    def list_secure_files(self, root: str, *, max_entries: int):
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.list_secure_files(root, max_entries=max_entries)
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_regular_reader(path)
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_atomic_writer(path)
+
+    def remove_path(self, path: str) -> None:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        boundary.remove_path(path)
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)
@@ -336,10 +405,10 @@ class BoxliteBox(Sandbox):
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
-        # busybox+GNU-portable flags: -r recursive, -H always print the filename
-        # (including when path is a single file), -n line numbers, -I skip
-        # binary, -E/-F regex vs fixed. --include and -m are omitted for busybox
-        # portability; glob-scoping and the result cap are applied in Python.
+        # busybox+GNU-portable flags: -r recursive, -H always print the
+        # filename (including for a single-file root), -n line numbers, and -I
+        # skip binary. --include and -m are omitted for busybox portability;
+        # glob-scoping and the result cap are applied in Python below.
         flags = ["-r", "-H", "-n", "-I"]
         if not case_sensitive:
             flags.append("-i")

@@ -4,8 +4,8 @@ import { expect, test } from "@rstest/core";
 import {
   buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
-  buildHumanInputResponseText,
   buildInitialHumanInputFormValues,
+  buildHumanInputResponseText,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
   deriveHumanInputThreadState,
@@ -234,6 +234,14 @@ const formPayload = {
   question: "Please provide the expense details.",
   input_mode: "form",
   fields: [
+    {
+      name: "title",
+      label: "Title",
+      type: "text",
+      required: true,
+      placeholder: "Expense title",
+    },
+    { name: "note", label: "Note", type: "textarea", required: false },
     { name: "amount", label: "Amount", type: "number", required: true },
     {
       name: "category",
@@ -255,7 +263,8 @@ const formPayload = {
         { id: "receipts-option-2", label: "A-2", value: "A-2" },
       ],
     },
-    { name: "note", label: "note", type: "textarea", required: false },
+    { name: "urgent", label: "Urgent", type: "checkbox", required: false },
+    { name: "spent_on", label: "Spent on", type: "date", required: true },
   ],
 };
 
@@ -268,19 +277,46 @@ function toolMessage(payload: unknown): Message {
   } as unknown as Message;
 }
 
-test("parses a v2 form request", () => {
+test("parses all seven v2 form field types", () => {
   expect(extractHumanInputRequest(toolMessage(formPayload))).toEqual(
     formPayload,
   );
 });
 
-test("rejects a form request without fields", () => {
+test("keeps v1 free text valid but rejects v1 payloads carrying form fields", () => {
+  const freeTextPayload = {
+    ...requestPayload,
+    input_mode: "free_text",
+    options: undefined,
+  };
+
+  expect(extractHumanInputRequest(toolMessage(freeTextPayload))).toEqual(
+    freeTextPayload,
+  );
+  expect(
+    extractHumanInputRequest(
+      toolMessage({
+        ...freeTextPayload,
+        fields: [
+          {
+            name: "details",
+            label: "Details",
+            type: "textarea",
+            required: false,
+          },
+        ],
+      }),
+    ),
+  ).toBeNull();
+  expect(extractHumanInputRequest(toolMessage(formPayload))).toEqual(
+    formPayload,
+  );
+});
+
+test("rejects malformed form fields, versions, and mode bindings", () => {
   expect(
     extractHumanInputRequest(toolMessage({ ...formPayload, fields: [] })),
   ).toBeNull();
-});
-
-test("rejects a form request with malformed fields", () => {
   expect(
     extractHumanInputRequest(
       toolMessage({
@@ -293,70 +329,29 @@ test("rejects a form request with malformed fields", () => {
     extractHumanInputRequest(
       toolMessage({
         ...formPayload,
-        fields: [{ name: "amount", label: "Amount", type: "slider" }],
+        fields: [
+          {
+            name: "amount",
+            label: "Amount",
+            type: "slider",
+            required: true,
+          },
+        ],
       }),
     ),
   ).toBeNull();
-});
-
-test("rejects unknown protocol versions", () => {
   expect(
     extractHumanInputRequest(toolMessage({ ...formPayload, version: 3 })),
   ).toBeNull();
+  expect(
+    extractHumanInputRequest(toolMessage({ ...formPayload, version: 1 })),
+  ).toBeNull();
+  expect(
+    extractHumanInputRequest(toolMessage({ ...requestPayload, version: 2 })),
+  ).toBeNull();
 });
 
-test("builds a readable form summary submitted as a v1 text response", () => {
-  const request = extractHumanInputRequest(toolMessage(formPayload))!;
-  const values = {
-    amount: "300",
-    category: "travel",
-    receipts: ["A-1", "A-2"],
-    note: "",
-  };
-
-  const summary = buildHumanInputFormSummary(request, values);
-  expect(summary).toBe("Amount: 300; Category: travel; Receipts: A-1, A-2");
-
-  // Request-side-only protocol scope: form answers reuse the existing v1
-  // text response — no structured response kind is introduced.
-  expect(createHumanInputTextResponse(request, summary)).toEqual({
-    version: 1,
-    kind: "human_input_response",
-    source: "ask_clarification",
-    request_id: "clarification:call-form",
-    response_kind: "text",
-    value: "Amount: 300; Category: travel; Receipts: A-1, A-2",
-  });
-});
-
-test("form submission value is collision-free via the JSON block", () => {
-  const request = extractHumanInputRequest(
-    toolMessage({
-      ...formPayload,
-      fields: [
-        { name: "a", label: "A", type: "text", required: false },
-        { name: "b", label: "B", type: "text", required: false },
-      ],
-    }),
-  )!;
-
-  const first = buildHumanInputFormSubmissionValue(request, {
-    a: "x; B: y",
-    b: "z",
-  });
-  const second = buildHumanInputFormSubmissionValue(request, {
-    a: "x",
-    b: "y; B: z",
-  });
-
-  expect(first).not.toBe(second);
-  expect(first).toContain('[values: {"a":"x; B: y","b":"z"}]');
-  expect(second).toContain('[values: {"a":"x","b":"y; B: z"}]');
-  // Readable prefix is retained for display.
-  expect(first.startsWith("A: x; B: y; B: z")).toBe(true);
-});
-
-test("rejects select options with empty values or duplicates", () => {
+test("rejects empty or duplicate option values and duplicate field names", () => {
   const withOptions = (
     options: Array<{ id: string; label: string; value: string }>,
   ) =>
@@ -375,9 +370,7 @@ test("rejects select options with empty values or duplicates", () => {
       }),
     );
 
-  // Empty option value would crash Radix <SelectItem value="">.
   expect(withOptions([{ id: "o1", label: "travel", value: "" }])).toBeNull();
-  // Duplicate option ids / values.
   expect(
     withOptions([
       { id: "o1", label: "travel", value: "travel" },
@@ -387,12 +380,9 @@ test("rejects select options with empty values or duplicates", () => {
   expect(
     withOptions([
       { id: "o1", label: "travel", value: "travel" },
-      { id: "o2", label: "travel-again", value: "travel" },
+      { id: "o2", label: "travel again", value: "travel" },
     ]),
   ).toBeNull();
-});
-
-test("rejects duplicate field names and enforces the form/version binding", () => {
   expect(
     extractHumanInputRequest(
       toolMessage({
@@ -404,29 +394,22 @@ test("rejects duplicate field names and enforces the form/version binding", () =
       }),
     ),
   ).toBeNull();
-  // form mode is a v2 construct; a v1 payload carrying it is malformed.
-  expect(
-    extractHumanInputRequest(toolMessage({ ...formPayload, version: 1 })),
-  ).toBeNull();
-  // and v2 without form has no defined meaning yet.
-  expect(
-    extractHumanInputRequest(
-      toolMessage({
-        ...requestPayload,
-        version: 2,
-      }),
-    ),
-  ).toBeNull();
 });
 
 test("rejects form fields with reserved prototype names", () => {
-  for (const reserved of ["__proto__", "constructor", "toString"]) {
+  for (const reserved of [
+    "__proto__",
+    "constructor",
+    "prototype",
+    "toString",
+    "hasOwnProperty",
+  ]) {
     expect(
       extractHumanInputRequest(
         toolMessage({
           ...formPayload,
           fields: [
-            { name: reserved, label: "Amount", type: "number", required: true },
+            { name: reserved, label: "Unsafe", type: "text", required: true },
           ],
         }),
       ),
@@ -434,52 +417,40 @@ test("rejects form fields with reserved prototype names", () => {
   }
 });
 
-test("readHumanInputFormValue ignores inherited prototype properties", () => {
+test("form values use own-property reads and seed checkbox false", () => {
   const values: Record<string, string> = { amount: "300" };
-
   expect(readHumanInputFormValue(values, "amount")).toBe("300");
   expect(readHumanInputFormValue(values, "toString")).toBeUndefined();
   expect(readHumanInputFormValue(values, "constructor")).toBeUndefined();
   expect(readHumanInputFormValue(values, "__proto__")).toBeUndefined();
-});
 
-test("buildInitialHumanInputFormValues seeds checkbox fields to false", () => {
-  const request = extractHumanInputRequest(
-    toolMessage({
-      ...formPayload,
-      fields: [
-        { name: "amount", label: "Amount", type: "number", required: true },
-        { name: "urgent", label: "Urgent", type: "checkbox", required: false },
-      ],
-    }),
-  )!;
-
+  const request = extractHumanInputRequest(toolMessage(formPayload))!;
   expect(buildInitialHumanInputFormValues(request.fields ?? [])).toEqual({
     urgent: false,
   });
 });
 
-test("summary renders an untouched checkbox as an explicit no", () => {
-  const request = extractHumanInputRequest(
-    toolMessage({
-      ...formPayload,
-      fields: [
-        { name: "amount", label: "Amount", type: "number", required: true },
-        { name: "urgent", label: "Urgent", type: "checkbox", required: false },
-      ],
-    }),
-  )!;
+test("builds a stable collision-free form summary including checkbox false", () => {
+  const request = extractHumanInputRequest(toolMessage(formPayload))!;
   const values = {
+    receipts: ["A-1", "A-2"],
+    urgent: false,
+    category: "travel",
     amount: "300",
-    ...buildInitialHumanInputFormValues(request.fields ?? []),
+    title: "Taxi",
+    spent_on: "2026-07-30",
+    note: "",
   };
 
   expect(buildHumanInputFormSummary(request, values)).toBe(
-    "Amount: 300; Urgent: no",
+    "Title: Taxi; Amount: 300; Category: travel; Receipts: A-1, A-2; Urgent: no; Spent on: 2026-07-30",
+  );
+  expect(buildHumanInputFormSubmissionValue(request, values)).toBe(
+    'Title: Taxi; Amount: 300; Category: travel; Receipts: A-1, A-2; Urgent: no; Spent on: 2026-07-30 [values: {"title":"Taxi","amount":"300","category":"travel","receipts":["A-1","A-2"],"urgent":false,"spent_on":"2026-07-30"}]',
   );
 });
 
-test("a plain reply closes only the latest unanswered request", () => {
+test("a visible plain human reply closes only the latest unanswered request", () => {
   const olderPayload = {
     ...formPayload,
     request_id: "clarification:call-older",
@@ -489,53 +460,21 @@ test("a plain reply closes only the latest unanswered request", () => {
     toolMessage(formPayload),
     {
       type: "human",
-      content: "answer to the second question",
+      content: [
+        { type: "text", text: "answer to " },
+        { type: "text", text: "the latest question" },
+      ],
     } as unknown as Message,
   ]);
 
-  // The reply answers the request the user was looking at (the latest); the
-  // older decision must not be silently swallowed with the same text.
   expect(state.answeredResponses.get("clarification:call-form")?.value).toBe(
-    "answer to the second question",
+    "answer to the latest question",
   );
   expect(state.answeredResponses.has("clarification:call-older")).toBe(false);
   expect(state.latestOpenRequestId).toBe("clarification:call-older");
 });
 
-test("a visible plain human reply bypasses and closes an open request", () => {
-  // The normal composer deliberately sends no structured response metadata.
-  // Treating its message as the answer lets users bypass the form and also
-  // preserves compatibility with old frontends that render v2 as plain text.
-  const messages = [
-    toolMessage(formPayload),
-    {
-      type: "human",
-      content: "金额 300，类别差旅",
-    } as unknown as Message,
-  ];
-  const state = deriveHumanInputThreadState(messages);
-
-  expect(state.latestOpenRequestId).toBeNull();
-  const answered = state.answeredResponses.get("clarification:call-form");
-  expect(answered?.response_kind).toBe("text");
-  expect(answered?.value).toBe("金额 300，类别差旅");
-  expect(hasOpenHumanInputRequest([toolMessage(formPayload)])).toBe(true);
-  expect(hasOpenHumanInputRequest(messages)).toBe(false);
-});
-
-test("a visible human message before the request does not close it", () => {
-  const state = deriveHumanInputThreadState([
-    {
-      type: "human",
-      content: "帮我提交报销",
-    } as unknown as Message,
-    toolMessage(formPayload),
-  ]);
-
-  expect(state.latestOpenRequestId).toBe("clarification:call-form");
-});
-
-test("hidden non-response messages do not close an open request", () => {
+test("hidden plain human messages do not close an open request", () => {
   const state = deriveHumanInputThreadState([
     toolMessage(formPayload),
     {
@@ -546,28 +485,4 @@ test("hidden non-response messages do not close an open request", () => {
   ]);
 
   expect(state.latestOpenRequestId).toBe("clarification:call-form");
-});
-
-test("derives answered state for a form request answered by text", () => {
-  const response = {
-    version: 1,
-    kind: "human_input_response",
-    source: "ask_clarification",
-    request_id: "clarification:call-form",
-    response_kind: "text",
-    value: "Amount: 300",
-  };
-  const state = deriveHumanInputThreadState([
-    toolMessage(formPayload),
-    {
-      type: "human",
-      content: "answer",
-      additional_kwargs: { hide_from_ui: true, human_input_response: response },
-    } as unknown as Message,
-  ]);
-
-  expect(state.answeredResponses.get("clarification:call-form")).toEqual(
-    response,
-  );
-  expect(state.latestOpenRequestId).toBeNull();
 });

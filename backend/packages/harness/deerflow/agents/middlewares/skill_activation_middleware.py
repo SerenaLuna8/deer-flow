@@ -7,6 +7,7 @@ import hashlib
 import html
 import logging
 import posixpath
+import secrets
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -17,21 +18,23 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.runtime.events.catalog import (
-    MIDDLEWARE_SKILL_ACTIVATION_TAG,
-    MIDDLEWARE_SKILL_SECRETS_TAG,
-)
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
+    ACTIVE_SECRET_SOURCES_CONTEXT_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
+    SKILL_SECRET_PROVIDER_CONTEXT_KEY,
     extract_request_secrets,
+    extract_skill_scoped_secrets,
     read_slash_skill_source_path,
     write_slash_skill_source_path,
 )
+from deerflow.runtime.skill_context_authority import (
+    read_verified_skill_source_paths,
+)
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
-from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
-from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
 
@@ -42,23 +45,20 @@ logger = logging.getLogger(__name__)
 
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
 _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
+_SLASH_SKILL_ACTIVATION_MARKER_VERSION = 1
 
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
 # never values) so unchanged bindings are not re-recorded each call.
 # The shared slash-source context contract holds the latest slash activation,
 # ONLY the activated skill's canonical container path (never its declared
-# secrets — those are read from the live registry on each call, #3938). The
+# secrets — those are read from the exact Run registry on each call). The
 # injection set is recomputed every model call, but a slash-activated skill must
 # stay bound for the rest of the run — the model's tool loop issues many model
-# calls after the single activation call (#3861 semantics).
-# _SLASH_SKILL_ACTIVATION_RUN_KEY: identity of the slash message already activated
-# in this run, so the reminder injection + skill disk read + "activate" audit event
-# fire once per user slash command instead of on every model call. The reminder is
-# added via request.override(messages=...) for a single model call and never
-# persisted to graph state, so the 2nd..Nth model call of a turn rebuilds
-# request.messages from state without it — the run context is the only signal that
-# survives the tool loop. All three live in secret_context so they are covered by
-# REDACTED_CONTEXT_KEYS in one place.
+# calls after the single activation call (#3861 semantics). Both live in
+# secret_context so they are covered by REDACTED_CONTEXT_KEYS in one place.
+# _SLASH_SKILL_ACTIVATION_RUN_KEY records the authenticated private Run/message
+# identity whose read, reminder, and activation audit already fired. It never
+# suppresses the per-call secret-binding recomputation.
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,41 +97,32 @@ class SkillActivationMiddleware(AgentMiddleware):
         available_skills: set[str] | None = None,
         app_config: AppConfig | None = None,
         user_id: str | None = None,
-        slash_source_owner_token: str,
+        runtime_skills: tuple[Skill, ...] | None = None,
+        runtime_skills_root: Path | None = None,
+        runtime_skills_container_path: str | None = None,
+        slash_source_owner_token: str | None = None,
     ) -> None:
         super().__init__()
-        if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
+        if slash_source_owner_token is not None and (not isinstance(slash_source_owner_token, str) or not slash_source_owner_token):
             raise ValueError("slash_source_owner_token must be a non-empty string")
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._app_config = app_config
         self._user_id = user_id
-        self._slash_source_owner_token = slash_source_owner_token
-
-    def _storage(self) -> SkillStorage:
-        if self._user_id is not None:
-            return get_or_new_user_skill_storage(self._user_id, app_config=self._app_config)
-        if self._app_config is not None:
-            return get_or_new_skill_storage(app_config=self._app_config)
-        return get_or_new_skill_storage()
+        self._runtime_skills = tuple(runtime_skills or ())
+        self._runtime_skills_root = runtime_skills_root
+        self._runtime_skills_container_path = runtime_skills_container_path
+        self._slash_source_owner_token = slash_source_owner_token or secrets.token_urlsafe(24)
 
     @staticmethod
-    def _read_skill_content(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
+    def _read_skill_content(skill_file: Path, skills_root: Path) -> str:
         if skill_file.name != SKILL_MD_FILE:
             raise ValueError(f"Expected {SKILL_MD_FILE}, got {skill_file.name}")
-        # Use the storage's path validation if available — UserScopedSkillStorage
-        # stores custom skills in a per-user directory that is not a sub-path of
-        # the global skills root, so the simple relative_to check would reject them.
-        # Fall back to the relative_to check when the storage is a mock (e.g. tests)
-        # that doesn't implement validate_skill_file_path.
-        if storage is not None and hasattr(storage, "validate_skill_file_path"):
-            resolved_file = storage.validate_skill_file_path(skill_file)
-        else:
-            resolved_file = skill_file.resolve()
-            resolved_root = skills_root.resolve()
-            try:
-                resolved_file.relative_to(resolved_root)
-            except ValueError as exc:
-                raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
+        resolved_file = skill_file.resolve()
+        resolved_root = skills_root.resolve()
+        try:
+            resolved_file.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError("Resolved skill file must stay within the run Skill root.") from exc
         if not resolved_file.is_file():
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
@@ -141,8 +132,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         if reference is None:
             return None
 
-        storage = self._storage()
-        skills = storage.load_skills(enabled_only=False)
+        skills = list(self._runtime_skills)
         skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
         if skill is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not installed.")
@@ -155,20 +145,27 @@ class SkillActivationMiddleware(AgentMiddleware):
             text,
             skills,
             available_skills=self._available_skills,
-            container_base_path=storage.get_container_root(),
+            container_base_path=(self._runtime_skills_container_path or str(self._runtime_skills_root or DEFAULT_SKILLS_CONTAINER_PATH)),
         )
         if resolved is None:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")
 
         try:
-            skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path(), storage=storage)
+            if self._runtime_skills_root is None:
+                raise ValueError("run Skill root is unavailable")
+            skills_root = self._runtime_skills_root
+            skill_content = self._read_skill_content(
+                resolved.skill.skill_file,
+                skills_root,
+            )
         except (OSError, ValueError):
             logger.exception("Failed to read slash-activated skill %s", resolved.skill.name)
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be loaded safely. Please check the skill installation.")
 
         content_hash = hashlib.sha256(skill_content.encode("utf-8")).hexdigest()
-        # CUSTOM skills are editable; PUBLIC and LEGACY are read-only
-        editable = resolved.skill.category == SkillCategory.CUSTOM
+        # Persisted run-exact project Skills are immutable even though their
+        # isolated filesystem layout uses the CUSTOM category directory.
+        editable = resolved.skill.category == SkillCategory.CUSTOM and not resolved.skill.runtime_read_only
         return _ActivationResolution(
             activation=_Activation(
                 skill_name=resolved.skill.name,
@@ -225,41 +222,77 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         return is_slash_skill_activation_reminder(previous)
 
     @staticmethod
-    def _activation_run_key(target: HumanMessage) -> str:
-        """Stable identity for a user slash message, used to activate once per run.
-
-        Prefers the message id (LangGraph assigns and preserves a stable id once a
-        message is in graph state); falls back to a digest of the genuine user text
-        so an id-less message still dedupes within a run. A new user slash message
-        (new id / new text) yields a new key, so it is not suppressed.
-        """
-        if target.id:
-            return target.id
-        content = get_original_user_content_text(target.content, target.additional_kwargs)
-        return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-    @staticmethod
     def _run_context(request: ModelRequest) -> dict | None:
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
         return context if isinstance(context, dict) else None
 
     @staticmethod
-    def _already_activated(run_context: dict | None, run_key: str) -> bool:
-        """Whether ``run_key`` was already recorded as activated earlier in this run.
+    def _activation_message_key(target: HumanMessage) -> str:
+        if isinstance(target.id, str) and target.id:
+            return f"id:{target.id}"
+        content = get_original_user_content_text(
+            target.content,
+            target.additional_kwargs,
+        )
+        return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-        Sibling to ``_has_existing_activation_for_target``: that helper catches an
-        activation reminder still present in the scanned ``messages`` window; this
-        one catches a prior activation recorded on ``run_context`` whose reminder
-        already fell out of that window (the tool-loop case — see
-        ``_SLASH_SKILL_ACTIVATION_RUN_KEY``). ``run_key`` is computed once by the
-        caller (``_find_activation_target``) and reused as-is at the write site in
-        ``_prepare_model_request``, so the same key is always used to check and to
-        record — this helper only ever checks membership, never computes the key.
+    def _activation_run_marker(
+        self,
+        run_context: dict | None,
+        target: HumanMessage,
+    ) -> dict[str, object] | None:
+        """Build an authenticated private Run/message identity.
+
+        Run-once deduplication is intentionally unavailable without the exact
+        Worker-issued private scope and run id. In that degraded case activation
+        continues normally on every model call rather than trusting partial or
+        caller-shaped identity.
         """
-        return isinstance(run_context, dict) and run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY) == run_key
 
-    def _find_activation_target(self, messages: list, *, run_context: dict | None = None) -> tuple[int, HumanMessage, _ActivationResolution, str] | None:
+        if not isinstance(run_context, dict):
+            return None
+        private_scope = run_context.get("private_scope")
+        run_id = run_context.get("run_id")
+        if type(private_scope) is not PrivateResourceScope:
+            return None
+        project_id = private_scope.project_id
+        owner_user_id = private_scope.owner_user_id
+        if not isinstance(project_id, str) or not project_id or not isinstance(owner_user_id, str) or not owner_user_id or type(private_scope.membership_version) is not int or not isinstance(run_id, str) or not run_id:
+            return None
+        return {
+            "version": _SLASH_SKILL_ACTIVATION_MARKER_VERSION,
+            "owner_token": self._slash_source_owner_token,
+            "project_id": project_id,
+            "owner_user_id": owner_user_id,
+            "run_id": run_id,
+            "message_key": self._activation_message_key(target),
+        }
+
+    @staticmethod
+    def _already_activated(
+        run_context: dict | None,
+        marker: dict[str, object] | None,
+    ) -> bool:
+        if not isinstance(run_context, dict) or marker is None:
+            return False
+        recorded = run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY)
+        return type(recorded) is dict and recorded == marker
+
+    def _find_activation_target(
+        self,
+        messages: list,
+        *,
+        run_context: dict | None = None,
+    ) -> (
+        tuple[
+            int,
+            HumanMessage,
+            _ActivationResolution,
+            dict[str, object] | None,
+        ]
+        | None
+    ):
         if not messages:
             return None
 
@@ -272,22 +305,15 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
         if self._has_existing_activation_for_target(messages, target_index, target):
             return None
-        # This exact slash message may have already activated earlier in the run.
-        # The message scan above cannot catch it because the reminder lives only in
-        # a per-call request override, never in state — the run context is the
-        # durable signal (see _already_activated / _SLASH_SKILL_ACTIVATION_RUN_KEY).
-        # Skipping here avoids the redundant skill disk read, reminder re-injection,
-        # and duplicate "activate" audit. run_key is computed once here and threaded
-        # through to the write site in _prepare_model_request.
-        run_key = self._activation_run_key(target)
-        if self._already_activated(run_context, run_key):
+        marker = self._activation_run_marker(run_context, target)
+        if self._already_activated(run_context, marker):
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
         resolution = self._resolve_activation(content)
         if resolution is None:
             return None
-        return target_index, target, resolution, run_key
+        return target_index, target, resolution, marker
 
     @staticmethod
     def _record_activation(request: ModelRequest, activation: _Activation, *, hook: str) -> None:
@@ -298,7 +324,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                MIDDLEWARE_SKILL_ACTIVATION_TAG,
+                "skill_activation",
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="activate",
@@ -310,15 +336,18 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 },
             )
         except Exception:
-            logger.warning("Failed to record slash skill activation audit event", exc_info=True)
+            logger.debug("Failed to record slash skill activation audit event", exc_info=True)
 
     def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
         run_context = self._run_context(request)
-        target_and_resolution = self._find_activation_target(list(request.messages), run_context=run_context)
+        target_and_resolution = self._find_activation_target(
+            list(request.messages),
+            run_context=run_context,
+        )
         if target_and_resolution is None:
             return None, None
 
-        target_index, target, resolution, run_key = target_and_resolution
+        target_index, target, resolution, marker = target_and_resolution
         if resolution.failure_message:
             return AIMessage(content=resolution.failure_message), None
 
@@ -333,21 +362,12 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.container_file_path,
             activation.content_hash,
         )
-        self._record_activation(request, activation, hook=hook)
-        # Mark this slash message as activated for the run so the tool loop's later
-        # model calls skip the redundant re-activation (#3861: one activation call,
-        # many follow-up model calls). A new user slash message keys differently and
-        # still activates. Overwrite (`=`), not append/accumulate, is intentional:
-        # _find_activation_target only ever considers the latest real user message as
-        # an activation target, so there is nothing earlier in the run worth
-        # remembering once a new activation replaces it — do not "fix" this into a
-        # set. run_key is the same value already checked in _find_activation_target
-        # (computed once there, threaded through here) rather than recomputed.
-        if run_context is not None:
-            run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = run_key
         activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
+        if run_context is not None and marker is not None:
+            run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = marker
+        self._record_activation(request, activation, hook=hook)
         return request.override(messages=messages), activation
 
     def _handle_model_request(self, request: ModelRequest, *, hook: str) -> ModelRequest | AIMessage:
@@ -370,19 +390,27 @@ Follow this skill before choosing a general workflow. Load supporting resources 
           ``_resolve_activation``), and deliberately NOT re-validated per call:
           slash is a run-scoped commitment made by the user, and it dies with
           the run anyway;
-        - skills the model loaded earlier in the thread (``ThreadState.skill_context``),
-          re-validated against the live registry on each call: enabled,
+        - exact Skill entry files successfully read during this private Run,
+          recorded as middleware-authenticated runtime evidence and
+          re-validated against the admitted registry on each call: enabled,
           runtime-allowed for this agent, and not opted out via
-          ``secrets-autonomous: false``. Slash activation is exempt from the
-          opt-out — it is the explicit-ceremony path.
+          ``secrets-autonomous: false``. Durable ``ThreadState.skill_context``
+          is observational only and is never a secret-binding authority.
+          Slash activation is exempt from the opt-out because it is the
+          explicit-ceremony path.
 
         The set is recomputed and REPLACED each call, so a skill evicted from
         skill_context, or a caller that stops supplying a value, loses its
-        injection on the next call automatically. Injected values always come
-        from the caller's request (``context.secrets``) — never the host
-        environment, which ``env_policy.build_sandbox_env`` scrubs before
-        injection — so a skill can never harvest a host platform credential.
-        Secret *values* are never logged; the audit journal records names only.
+        injection on the next call automatically. Injected values come from the
+        exact admitted Skill-path carrier supplied by the private Worker,
+        falling back to the legacy caller request carrier
+        (``context.secrets``) only when that Skill has no scoped entry. They
+        never come from the host environment, which
+        ``env_policy.build_sandbox_env`` scrubs before injection. Secret
+        *values* are never logged; the audit journal records names only. If
+        autonomous Skills claim the same env name with incompatible bindings,
+        that name fails closed. The current explicit slash Skill takes
+        deterministic precedence for names it declares.
         """
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
@@ -391,8 +419,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
         # The slash source records the canonical container path plus a
         # middleware-chain-local owner token — never declared secrets. Both
-        # consumers authenticate the source and resolve the live registry skill
-        # by path, so caller-mergeable context cannot forge an activation.
+        # consumers authenticate the source and resolve the exact run registry
+        # Skill by path, so caller-mergeable context cannot forge activation.
         if activation is not None:
             write_slash_skill_source_path(
                 context,
@@ -401,28 +429,98 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             )
 
         request_secrets = extract_request_secrets(context)
-        sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
-        if request_secrets:
+        skill_scoped_secrets = extract_skill_scoped_secrets(context)
+        private_provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if "private_scope" in context else None
+        sources: list[tuple[str, str, tuple[SecretRequirement, ...], bool]] = []
+        if request_secrets or skill_scoped_secrets or callable(private_provider):
             registry = self._load_skill_registry_by_path()
             if registry is not None:
+                # Verified read sources are collected first. An explicit slash
+                # activation is the current user-selected Skill and therefore
+                # takes precedence if two active Skills declare the same env
+                # name with different scoped values.
+                verified_paths = read_verified_skill_source_paths(
+                    context,
+                    owner_token=self._slash_source_owner_token,
+                )
+                if verified_paths is None:
+                    logger.warning("Verified Skill read evidence is malformed or unauthenticated; suppressing autonomous secret binding")
+                else:
+                    sources.extend(
+                        self._verified_read_secret_sources(
+                            verified_paths,
+                            registry,
+                        )
+                    )
+
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
-                slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
+                slash_path = read_slash_skill_source_path(
+                    context,
+                    owner_token=self._slash_source_owner_token,
+                )
                 slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
-                    sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
-                sources.extend(self._in_context_secret_sources(request, registry))
+                    sources.append((slash_skill.name, posixpath.normpath(slash_path), tuple(slash_skill.required_secrets), True))
 
+        if callable(private_provider):
+            # Private Skill Credential values are deliberately absent during
+            # model calls.  Persist only the validated name/path activation plan
+            # so the async bash boundary can select values from a freshly
+            # revalidated one-command carrier.
+            context[ACTIVE_SECRET_SOURCES_CONTEXT_KEY] = tuple(
+                (
+                    skill_name,
+                    skill_path,
+                    tuple(requirement.name for requirement in requirements),
+                    is_explicit,
+                )
+                for skill_name, skill_path, requirements, is_explicit in sources
+            )
+            context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+            return
+
+        context.pop(ACTIVE_SECRET_SOURCES_CONTEXT_KEY, None)
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
         missing: dict[str, list[str]] = {}
-        for skill_name, requirements in sources:
+        claims: dict[str, list[tuple[str, str | None, bool, bool]]] = {}
+        for skill_name, skill_path, requirements, is_explicit in sources:
+            source_secrets = skill_scoped_secrets[skill_path] if skill_path in skill_scoped_secrets else request_secrets
             for req in requirements:
-                if req.name in request_secrets:
-                    injected[req.name] = request_secrets[req.name]
+                if req.name in source_secrets:
+                    claims.setdefault(req.name, []).append((skill_name, source_secrets[req.name], True, is_explicit))
+                else:
+                    claims.setdefault(req.name, []).append((skill_name, None, False, is_explicit))
+                    if not req.optional:
+                        missing.setdefault(skill_name, []).append(req.name)
+
+        conflicts: dict[str, list[str]] = {}
+        for secret_name, secret_claims in claims.items():
+            explicit_claims = [claim for claim in secret_claims if claim[3]]
+            if explicit_claims:
+                # At most one slash Skill is current. Its declaration reserves
+                # this env name even when its value is absent, preventing a
+                # loaded autonomous Skill's value from crossing into it.
+                skill_name, value, supplied, _ = explicit_claims[-1]
+                if supplied:
+                    injected[secret_name] = value or ""
                     bound_skills.add(skill_name)
-                elif not req.optional:
-                    missing.setdefault(skill_name, []).append(req.name)
+                continue
+
+            skill_names = sorted({claim[0] for claim in secret_claims})
+            supplied_values = {claim[1] for claim in secret_claims if claim[2]}
+            all_supplied = all(claim[2] for claim in secret_claims)
+            if len(skill_names) > 1 and (not all_supplied or len(supplied_values) > 1):
+                # A flat subprocess env cannot safely represent two active
+                # autonomous Skills that claim the same name with different
+                # (or partially missing) scoped bindings. Drop that name rather
+                # than expose one Skill's Credential to another.
+                conflicts[secret_name] = skill_names
+                continue
+            if all_supplied and supplied_values:
+                injected[secret_name] = next(iter(supplied_values)) or ""
+                bound_skills.update(skill_names)
 
         if injected:
             context[ACTIVE_SECRETS_CONTEXT_KEY] = injected
@@ -433,55 +531,49 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             "skills": sorted(bound_skills),
             "secrets": sorted(injected),
             "missing": {name: sorted(values) for name, values in sorted(missing.items())},
+            "conflicts": {name: values for name, values in sorted(conflicts.items())},
         }
         previous = context.get(_SECRETS_BINDING_AUDIT_KEY)
         if previous == audit_state:
             return
-        if previous is None and not injected and not missing:
+        if previous is None and not injected and not missing and not conflicts:
             return
         context[_SECRETS_BINDING_AUDIT_KEY] = audit_state
         for skill_name, names in sorted(missing.items()):
             logger.warning(
-                "Skill %s is active but required secrets are missing from the request context: %s",
+                "Skill %s is active but required secrets are missing from the runtime carrier: %s",
                 skill_name,
                 ", ".join(names),
             )
+        for secret_name, skill_names in sorted(conflicts.items()):
+            logger.warning(
+                "Active Skills have conflicting runtime bindings for secret %s; injection was suppressed for: %s",
+                secret_name,
+                ", ".join(skill_names),
+            )
         self._record_secret_binding(context, audit_state, hook=hook)
 
-    def _load_skill_registry_by_path(self) -> dict[str, Skill] | None:
-        """Load the live skill registry keyed by normalized container file path.
+    def _load_skill_registry_by_path(self) -> dict[str, Skill]:
+        """Build the exact Run registry keyed by normalized container path.
 
-        Reloaded every call on purpose (not cached): load_skills re-reads the
-        enabled state from extensions_config so an operator disabling a skill
-        revokes its secret binding on the very next model call. A cache keyed on
-        file mtimes would miss enable/disable toggles (which do not touch
-        SKILL.md) and keep injecting after a disable — trading the
-        immediate-revocation security property for speed. The cost is gated: the
-        only caller runs this only when the caller supplied secrets.
+        ``runtime_skills`` is materialized from the immutable PostgreSQL Run
+        snapshot. No global or file-backed Skill storage is consulted.
 
         Paths are normalized so a non-canonical ``container_path`` config (e.g. a
         trailing slash) still matches the canonical path captured in
-        ``skill_context`` (#3938). Returns ``None`` if the registry can't load —
-        both the slash and in-context sources then bind nothing for that call
-        (fail closed). This is a deliberate availability-for-security trade-off:
-        a transient registry read failure mid-run drops the injection for that
-        call rather than trusting stale caller-supplied data.
+        ``skill_context``. An unavailable exact registry is represented by an
+        empty mapping, so both slash and in-context sources fail closed.
         """
-        try:
-            storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
-            container_root = storage.get_container_root()
-        except Exception:
-            logger.exception("Failed to load skills while resolving secret bindings")
-            return None
-        return {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
+        if not self._runtime_skills or not self._runtime_skills_container_path:
+            return {}
+        return {posixpath.normpath(skill.get_container_file_path(self._runtime_skills_container_path)): skill for skill in self._runtime_skills}
 
     def _resolve_registry_skill(self, registry: dict[str, Skill], path: object, *, require_autonomous: bool) -> Skill | None:
-        """Resolve a container path to a live registry skill eligible for secret
+        """Resolve a path to an exact runtime Skill eligible for secret
         binding, or ``None``.
 
         Match strictly by normalized container file path — never by name. A
-        by-name fallback would be a confused deputy: DeerFlow lets a custom skill
+        by-name fallback would be a confused deputy: ActWeave lets a custom skill
         shadow a same-named public/legacy one (load_skills de-dupes by name,
         custom wins), so a reference to public/foo could bind the custom foo's
         secrets. A path that does not resolve simply binds nothing (the safe
@@ -504,30 +596,20 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
         return skill
 
-    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill]) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
-        """Map ``ThreadState.skill_context`` entries to declared-secret sources.
-
-        Entries are references to skills the model actually loaded in this
-        thread. Each is re-validated against the live registry so a skill that
-        was disabled, uninstalled, opted out, or removed from the agent's
-        allowlist after being read stops binding immediately.
-        """
-        state = getattr(request, "state", None) or {}
-        try:
-            entries = state.get("skill_context") or []
-        except AttributeError:
-            return []
-
-        sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
+    def _verified_read_secret_sources(
+        self,
+        paths: tuple[str, ...],
+        registry: dict[str, Skill],
+    ) -> list[tuple[str, str, tuple[SecretRequirement, ...], bool]]:
+        """Map authenticated Run-scoped reads to declared-secret sources."""
+        sources: list[tuple[str, str, tuple[SecretRequirement, ...], bool]] = []
         seen: set[str] = set()
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            skill = self._resolve_registry_skill(registry, entry.get("path"), require_autonomous=True)
+        for path in paths:
+            skill = self._resolve_registry_skill(registry, path, require_autonomous=True)
             if skill is None or skill.name in seen:
                 continue
             seen.add(skill.name)
-            sources.append((skill.name, tuple(skill.required_secrets)))
+            sources.append((skill.name, posixpath.normpath(path), tuple(skill.required_secrets), False))
         return sources
 
     @staticmethod
@@ -537,14 +619,14 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                MIDDLEWARE_SKILL_SECRETS_TAG,
+                "skill_secrets",
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="bind_secrets",
                 changes=audit_state,
             )
         except Exception:
-            logger.warning("Failed to record skill secret binding audit event", exc_info=True)
+            logger.debug("Failed to record skill secret binding audit event", exc_info=True)
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:

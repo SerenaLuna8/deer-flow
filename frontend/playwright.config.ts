@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
+const useSystemChrome = process.env.PLAYWRIGHT_USE_SYSTEM_CHROME === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -10,6 +11,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? "github" : "html",
+  outputDir: "test-results/core-production",
   timeout: 30_000,
 
   use: {
@@ -21,7 +23,10 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        ...(useSystemChrome ? { channel: "chrome" } : {}),
+      },
     },
   ],
 
@@ -29,13 +34,17 @@ export default defineConfig({
     ? undefined
     : {
         command:
-          "./node_modules/.bin/next build && ./node_modules/.bin/next start",
+          "./node_modules/.bin/next build --webpack && ./node_modules/.bin/next start",
         url: baseURL,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
         env: {
           SKIP_ENV_VALIDATION: "1",
           DEER_FLOW_AUTH_DISABLED: "1",
+          // Deterministic browser tests mock Gateway requests in the page.
+          // Keep server-component capability lookups isolated from any
+          // unrelated Gateway process that may already own port 8001.
+          DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: "http://127.0.0.1:9",
         },
       },
 });

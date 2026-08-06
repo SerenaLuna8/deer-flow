@@ -1,5 +1,5 @@
 {{/*
-Common helpers for the DeerFlow chart.
+Common helpers for the ActWeave chart.
 */}}
 
 {{- define "deer-flow.name" -}}
@@ -37,7 +37,7 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/* Fully-qualified image refs for the three DeerFlow images.
+{{/* Fully-qualified image refs for the three ActWeave images.
      When `image.registry` is empty, omit the prefix so the ref is
      `deer-flow-gateway:latest` (local-image mode, imagePullPolicy: Never). */}}
 {{- define "deer-flow.gatewayImage" -}}
@@ -64,15 +64,10 @@ imagePullSecrets:
 {{- printf "%s-home" (include "deer-flow.fullname" .) -}}
 {{- end -}}
 
-{{/* Name of the Secret holding provider/channel keys. */}}
-{{- define "deer-flow.providerSecret" -}}
-{{- if .Values.existingSecret -}}{{- .Values.existingSecret -}}
-{{- else -}}{{- printf "%s-provider" (include "deer-flow.fullname" .) -}}{{- end -}}
-{{- end -}}
-
 {{/* Name of the Secret holding generated app secrets (auth token, better-auth). */}}
 {{- define "deer-flow.appSecret" -}}
-{{- printf "%s-app" (include "deer-flow.fullname" .) -}}
+{{- if .Values.existingAppSecret -}}{{- .Values.existingAppSecret -}}
+{{- else -}}{{- printf "%s-app" (include "deer-flow.fullname" .) -}}{{- end -}}
 {{- end -}}
 
 {{/* Name of the postgres StatefulSet/Service. */}}
@@ -92,30 +87,6 @@ imagePullSecrets:
 {{- else -}}{{- include "deer-flow.postgresFullname" . -}}{{- end -}}
 {{- end -}}
 
-{{/* Name of the redis StatefulSet/Service. */}}
-{{- define "deer-flow.redisFullname" -}}
-{{- printf "%s-redis" (include "deer-flow.fullname" .) -}}
-{{- end -}}
-
-{{/* Name of the Secret holding the redis stream-bridge URL (key `redis-url`,
-     plus `redis-password` in bundled mode when a password is set). Resolution:
-       1. redis.external.existingSecret (user-managed, key=redis-url)
-       2. redis.existingSecret          (user-managed, bundled image)
-       3. chart-managed secret `<release>-redis`
-     Only #3 is created by this chart; #1/#2 must exist already. */}}
-{{- define "deer-flow.redisUrlSecret" -}}
-{{- if .Values.redis.external.existingSecret -}}{{- .Values.redis.external.existingSecret -}}
-{{- else if .Values.redis.existingSecret -}}{{- .Values.redis.existingSecret -}}
-{{- else -}}{{- include "deer-flow.redisFullname" . -}}{{- end -}}
-{{- end -}}
-
-{{/* Whether any redis stream-bridge backend is configured (bundled StatefulSet,
-     external URL, or a user-managed Secret). Drives the env injection in the
-     gateway deployment. */}}
-{{- define "deer-flow.redisConfigured" -}}
-{{- or .Values.redis.enabled .Values.redis.external.redisUrl .Values.redis.external.existingSecret .Values.redis.existingSecret -}}
-{{- end -}}
-
 {{/* SHA256 checksums of the ConfigMaps. Mount these as pod-template
      annotations: ConfigMaps mounted via subPath do NOT receive live updates,
      so a `helm upgrade` that only changes a ConfigMap would leave pods on stale
@@ -125,12 +96,72 @@ imagePullSecrets:
 {{- include (print $.Template.BasePath "/configmap-config.yaml") . | sha256sum -}}
 {{- end -}}
 
-{{- define "deer-flow.extensionsChecksum" -}}
-{{- include (print $.Template.BasePath "/configmap-extensions.yaml") . | sha256sum -}}
-{{- end -}}
-
 {{- define "deer-flow.nginxChecksum" -}}
 {{- include (print $.Template.BasePath "/configmap-nginx.yaml") . | sha256sum -}}
+{{- end -}}
+
+{{/*
+Environment shared by the three backend process roles.  The values live in
+separate keys even when the chart generates them in one Secret: JWT signing,
+audit correlation, credential encryption, internal calls, proxy attestation,
+and Provisioner control are independent trust domains and must never reuse key
+material.
+
+This is a closed platform-secret contract. Model definitions and provider
+Credentials are PostgreSQL-backed and must not be broadcast through envFrom.
+*/}}
+{{- define "deer-flow.backendSecretEnv" -}}
+- name: AUTH_JWT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: AUTH_JWT_SECRET
+- name: DEER_FLOW_AUDIT_ACTIVE_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_AUDIT_ACTIVE_KEY_ID
+- name: DEER_FLOW_AUDIT_KEYRING_JSON
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_AUDIT_KEYRING_JSON
+- name: DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID
+- name: DEER_FLOW_CREDENTIAL_KEYRING_JSON
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_CREDENTIAL_KEYRING_JSON
+- name: DEER_FLOW_INTERNAL_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_INTERNAL_AUTH_TOKEN
+- name: DEER_FLOW_PROXY_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: DEER_FLOW_PROXY_AUTH_TOKEN
+- name: PROVISIONER_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.appSecret" . }}
+      key: PROVISIONER_API_KEY
+{{- end -}}
+
+{{- define "deer-flow.backendDatabaseEnv" -}}
+{{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+{{- if $pgConfigured }}
+- name: DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "deer-flow.databaseUrlSecret" . }}
+      key: database-url
+{{- end }}
 {{- end -}}
 
 {{/* Percent-encode a string for safe interpolation into a URL userinfo

@@ -1,4 +1,4 @@
-"""Private runtime context keys shared across DeerFlow runtime components."""
+"""Internal runtime-context keys shared by Worker and Agent middleware."""
 
 from typing import Final
 

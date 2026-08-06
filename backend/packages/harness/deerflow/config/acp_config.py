@@ -19,7 +19,7 @@ class ACPAgentConfig(BaseModel):
     auto_approve_permissions: bool = Field(
         default=False,
         description=(
-            "When True, DeerFlow automatically approves all ACP permission requests from this agent "
+            "When True, ActWeave automatically approves all ACP permission requests from this agent "
             "(allow_once preferred over allow_always). When False (default), all permission requests "
             "are denied — the agent must be configured to operate without requesting permissions."
         ),
@@ -27,13 +27,14 @@ class ACPAgentConfig(BaseModel):
     timeout_seconds: int = Field(
         default=1800,
         ge=1,
-        description=(
-            "Maximum time in seconds to wait for the agent to respond to a single invoke_acp_agent "
-            "call before the invocation is aborted and the subprocess is terminated. Mirrors "
-            "subagents.timeout_seconds (default: 1800 = 30 minutes) — without this backstop, an ACP "
-            "agent subprocess that hangs after initialize/new_session blocks the tool call, and "
-            "therefore the whole agent turn, indefinitely."
-        ),
+        le=86400,
+        description=("Maximum duration for the ACP request lifecycle (spawn, initialize, session creation, and prompt)."),
+    )
+    cleanup_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=30,
+        description=("Independent hard limit for ACP connection shutdown and subprocess reaping after success, failure, timeout, or cancellation."),
     )
 
 

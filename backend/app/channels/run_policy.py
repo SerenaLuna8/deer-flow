@@ -29,9 +29,7 @@ class ChannelRunPolicy:
     ``recursion_limit`` for autonomous long runs, suppression of
     ``ask_clarification`` (no human is synchronously present), a
     credentials provider that mints platform tokens for the agent, and
-    an opt-out from the per-sender bound-identity gate (authenticity is
-    enforced at the webhook route by HMAC, and there is no equivalent
-    of a per-user ``/connect`` handshake to perform).
+    a channel-specific execution mode.
 
     Declaring all four on one dataclass keeps the channel's run
     behavior in a single discoverable place and turns "add a new
@@ -54,15 +52,6 @@ class ChannelRunPolicy:
             after ``_resolve_run_params``. Exceptions are caught and
             logged so a credential failure degrades gracefully (agent
             runs read-only) instead of dropping the delivery.
-        requires_bound_identity: When False, the manager skips the
-            per-sender bound-identity gate (``_get_bound_identity_rejection``)
-            for this channel even when ``channel_connections.enabled`` is
-            on. Webhook-authenticated channels (GitHub) have no
-            per-sender ``/connect`` handshake — authenticity is enforced
-            by HMAC at the webhook route, and the binding from "sender"
-            to DeerFlow user is encoded in the agent's ``config.yaml``
-            ownership, not in the channel-connections table. Defaults to
-            True (the safe default for an interactive IM channel).
         fire_and_forget: When True, the manager schedules the run with
             ``runs.create`` (returns immediately once the run is
             ``pending``) instead of ``runs.wait`` (which keeps an HTTP
@@ -76,38 +65,12 @@ class ChannelRunPolicy:
             fires. Defaults to False (the safe default for an
             interactive IM channel that depends on the manager to
             publish the agent's reply).
-        serialize_thread_runs: When True, the manager serializes
-            same-thread inbound turns for this channel instead of
-            surfacing the runtime's generic busy-thread error. This is
-            useful for chat surfaces like Feishu topics where rapid
-            follow-up messages should queue behind the active turn while
-            unrelated DeerFlow threads continue concurrently. Defaults
-            to False so existing channels keep the runtime's native
-            multitask behavior unless they opt in explicitly.
-        buffer_followups_on_busy: When True, a ``ConflictError`` on the
-            ``fire_and_forget`` dispatch path (see
-            :meth:`ChannelManager._handle_chat_on_thread`) does more than
-            log + reply with the generic busy message: the triggering
-            message is appended to a per-thread follow-up buffer, and a
-            background watcher subscribes to the active run's
-            ``StreamBridge`` stream so it can coalesce the buffer into a
-            follow-up run as soon as that run ends. This targets
-            ``fire_and_forget`` channels whose ``send`` is otherwise the
-            only feedback a busy sender gets (e.g. GitHub, where ``send``
-            is log-only) — without it, a concurrent comment is silently
-            dropped from the sender's point of view. Defaults to False so
-            channels that have not opted in keep the exact old
-            silent-drop-with-log behavior; see
-            ``app.gateway.github.run_policy`` for GitHub's opt-in.
     """
 
     is_interactive: bool = True
     default_recursion_limit: int | None = None
     credentials_provider: Callable[[InboundMessage, dict[str, Any]], Awaitable[None]] | None = None
-    requires_bound_identity: bool = True
     fire_and_forget: bool = False
-    serialize_thread_runs: bool = False
-    buffer_followups_on_busy: bool = False
 
 
 # Channel name → policy. Channels absent from this map fall through to

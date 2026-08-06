@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 
 from langchain.chat_models import BaseChatModel
 from langchain_openai.chat_models.base import BaseChatOpenAI
@@ -9,6 +10,21 @@ from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
+
+_AGENT_MODEL_SETTING_FIELDS = frozenset(
+    {
+        "temperature",
+        "max_tokens",
+    }
+)
+_AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
+    "max_tokens",
+    "max_output_tokens",
+)
+
+
+class AgentModelSettingsUnsupported(ValueError):
+    """The exact provider cannot honor immutable Agent sampling settings."""
 
 
 def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
@@ -33,32 +49,27 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
 
 
 def _declares_api_base(model_class: type) -> bool:
-    """Whether *model_class* declares ``api_base`` as its own constructor field.
+    """Return whether a provider declares ``api_base`` as its own field."""
 
-    ``langchain_deepseek:ChatDeepSeek`` (and therefore ``PatchedChatDeepSeek``) does, so for it
-    ``api_base`` is the canonical endpoint key and must be passed through untouched. Every other
-    ``BaseChatOpenAI`` subclass inherits only ``openai_api_base`` (alias ``base_url``).
-    """
     return "api_base" in getattr(model_class, "model_fields", {})
 
 
-def _normalize_openai_base_url(model_class: type, model_settings_from_config: dict) -> None:
+def _normalize_openai_base_url(
+    model_class: type,
+    model_settings_from_config: dict,
+) -> None:
     """Map the common ``api_base`` alias to ``base_url`` for OpenAI-compatible clients.
 
-    ``BaseChatOpenAI`` subclasses accept the OpenAI endpoint override as ``base_url`` (with
-    ``openai_api_base`` as a legacy alias). Several providers in ``config.example.yaml`` use
-    ``api_base`` for *other* model classes, so users frequently copy ``api_base`` onto such a model
-    by mistake. Because ``ModelConfig`` is ``extra="allow"``, the bad key is not caught at
-    config-load time — it is forwarded to the constructor, which does not reject it but transfers it
-    into ``model_kwargs``; that is then spread into every ``Completions.create()`` call and rejected
-    by the OpenAI SDK at *request* time with an opaque ``unexpected keyword argument 'api_base'``
-    error (and the endpoint override is silently dropped). Rename it here so the model works as the
-    user intended.
-
-    Gated on ``issubclass(model_class, BaseChatOpenAI)`` rather than a class-path allowlist, so any
-    OpenAI-compatible subclass is covered automatically — the divert-and-crash behaviour is a
-    property of the base class, not of the two paths that used to be listed. Classes that declare
-    ``api_base`` themselves are skipped: there the key is canonical, not a typo.
+    ``BaseChatOpenAI`` subclasses accept the OpenAI endpoint override as
+    ``base_url`` (with ``openai_api_base`` as a legacy alias). Some provider
+    adapters use ``api_base`` for other model classes, so an administrator may
+    copy ``api_base`` into an OpenAI-compatible model setting by mistake.
+    Because ``ModelConfig`` is
+    ``extra="allow"``, the bad key is not caught at config-load time — it is forwarded to the
+    constructor, which does not reject it but transfers it into ``model_kwargs``; that is then
+    spread into every ``Completions.create()`` call and rejected by the OpenAI SDK at *request*
+    time with an opaque ``unexpected keyword argument 'api_base'`` error (and the endpoint override
+    is silently dropped). Rename it here so the model works as the user intended.
     """
     if not issubclass(model_class, BaseChatOpenAI) or _declares_api_base(model_class):
         return
@@ -73,7 +84,11 @@ def _normalize_openai_base_url(model_class: type, model_settings_from_config: di
     logger.debug("Normalized model config key 'api_base' -> 'base_url' for OpenAI-compatible client.")
 
 
-def _warn_unknown_model_settings(model_class, model_name: str, model_settings_from_config: dict) -> None:
+def _warn_unknown_model_settings(
+    model_class,
+    model_name: str,
+    model_settings_from_config: dict,
+) -> None:
     """Warn about config keys the OpenAI client will silently divert into ``model_kwargs``.
 
     ``ModelConfig`` is ``extra="allow"``, so a typo'd key (e.g. ``maxx_tokens``) is not caught at
@@ -83,14 +98,9 @@ def _warn_unknown_model_settings(model_class, model_name: str, model_settings_fr
     opaque ``unexpected keyword argument`` error that is very hard to trace back to a config typo.
 
     This turns that latent failure into an explicit, actionable log line at model-build time. It is
-    **scoped to the OpenAI-compatible family** — that is where the ``model_kwargs``
-    divert-and-crash behavior occurs and where the known field/alias set is accurate. The family is
-    ``issubclass(model_class, BaseChatOpenAI)``: the divert is implemented in that base class, so
-    every subclass inherits it. Other providers (e.g. ``ChatAnthropic``) route extra kwargs
-    differently and would false-positive against this allow-list, so they are intentionally left
-    alone. Best-effort and non-fatal: it only fires when the class exposes a pydantic
-    ``model_fields`` schema, treats both field names and their aliases as valid, and allow-lists the
-    standard passthrough kwargs the factory injects and the OpenAI client accepts.
+    scoped to the ``BaseChatOpenAI`` family, where the divert-and-crash behavior
+    is implemented. Other providers route extra kwargs differently and would
+    false-positive. The warning logs key names only, never their values.
     """
     if not issubclass(model_class, BaseChatOpenAI):
         return
@@ -126,42 +136,29 @@ def _warn_unknown_model_settings(model_class, model_name: str, model_settings_fr
 # Default chunk-gap budget for OpenAI-compatible streaming responses.
 #
 # langchain-openai raises ``StreamChunkTimeoutError`` after this many seconds
-# without receiving a chunk. Its own default is 120s, which is too aggressive for
+# without receiving a chunk. Its own default is 60s, which is too aggressive for
 # reasoning models (DeepSeek-R1, Doubao-thinking, GPT-5) whose first chunk can
 # legitimately take 90~150s. We default to 240s so the streaming layer rarely
 # trips on long thinking pauses; the LLMErrorHandlingMiddleware still retries
-# (budget=2) if a real stall happens. Users can override per-model in config.yaml.
+# (budget=2) if a real stall happens. Platform administrators can override
+# this per model in the PostgreSQL-backed System Settings catalog.
 _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS: float = 240.0
 
 
-def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_config: dict) -> None:
+def _apply_stream_chunk_timeout_default(
+    model_class: type,
+    model_settings_from_config: dict,
+) -> None:
     """Inject a generous ``stream_chunk_timeout`` for OpenAI-compatible clients.
 
-    ``stream_chunk_timeout`` is a field of langchain-openai's ``BaseChatOpenAI``, so
-    it is accepted by ``ChatOpenAI`` and by every DeerFlow provider that subclasses
-    it: ``PatchedChatOpenAI`` plus the self-hosted / reasoning adapters
-    ``VllmChatModel``, ``MindIEChatModel``, ``PatchedChatDeepSeek``,
-    ``PatchedChatMiMo``, ``PatchedChatStepFun`` and ``PatchedChatMiniMax``. We gate on
-    ``issubclass(model_class, BaseChatOpenAI)`` rather than an explicit class-path
-    allowlist so any OpenAI-compatible subclass inherits the default (and honors an
-    explicit override) automatically. Issue #3189 was reported against ``mimo-v2.5``
-    (``PatchedChatMiMo``); the original fix (#3195) matched only ``ChatOpenAI`` /
-    ``PatchedChatOpenAI``, so those subclasses kept langchain-openai's aggressive
-    built-in chunk-gap timeout and — worse — silently discarded a user's explicit
-    ``stream_chunk_timeout``.
+    The ``stream_chunk_timeout`` field is declared by ``BaseChatOpenAI`` and
+    inherited by every compatible provider. Other providers must not receive it.
 
-    Behaviour:
-
-    * ``BaseChatOpenAI`` subclass: an explicit value in ``config.yaml`` is preserved.
+    * ``BaseChatOpenAI`` subclass: an explicit database-backed model setting is preserved.
       An explicit ``null`` is dropped upstream by ``model_dump(exclude_none=True)``
       and therefore treated as "unset", so the default is injected.
-    * Any other client (e.g. ``ChatAnthropic``): drop the key so it is never
-      forwarded to a constructor that does not declare it. The kwarg is not a
-      declared field of these clients: depending on the client it is either
-      silently dropped (``ChatAnthropic`` declares ``extra="ignore"``) or, for
-      other OpenAI-style clients, diverted into ``model_kwargs`` and rejected
-      at request time. Either way the user's intent is lost, so we drop it
-      proactively instead.
+    * Non-OpenAI path: drop the key so it is never forwarded to an incompatible
+      constructor (which would raise ``TypeError: unexpected keyword argument``).
     """
     if not issubclass(model_class, BaseChatOpenAI):
         model_settings_from_config.pop("stream_chunk_timeout", None)
@@ -171,23 +168,106 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
+def _provider_model_field_names(model_class: type[BaseChatModel]) -> set[str]:
+    names: set[str] = set()
+    for name, field in getattr(model_class, "model_fields", {}).items():
+        names.add(name)
+        alias = getattr(field, "alias", None)
+        if isinstance(alias, str):
+            names.add(alias)
+    return names
+
+
+def model_supports_temperature(
+    name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+) -> bool:
+    """Return whether the configured provider declares a temperature field."""
+
+    config = app_config or get_app_config()
+    if name is None:
+        name = config.models[0].name
+    model_config = config.get_model_config(name)
+    if model_config is None:
+        raise ValueError(f"Model {name} not found in config") from None
+    model_class = resolve_class(model_config.use, BaseChatModel)
+    return "temperature" in _provider_model_field_names(model_class)
+
+
+def _validated_agent_model_overrides(
+    model_class: type[BaseChatModel],
+    model_name: str,
+    overrides: Mapping[str, object] | None,
+) -> dict[str, float | int]:
+    """Validate and map the bounded Agent-version sampling surface.
+
+    A canonical Agent ``max_tokens`` setting maps only to a field explicitly
+    declared by the selected provider class.  This prevents an immutable
+    version from silently forwarding an unsupported key into a provider
+    request body.
+    """
+
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, Mapping):
+        raise AgentModelSettingsUnsupported(
+            "Agent model overrides must be a mapping",
+        )
+    unknown = set(overrides) - _AGENT_MODEL_SETTING_FIELDS
+    if unknown:
+        raise AgentModelSettingsUnsupported(
+            f"Unsupported Agent model setting: {sorted(unknown)[0]}",
+        )
+    supported_fields = _provider_model_field_names(model_class)
+    mapped: dict[str, float | int] = {}
+    for key, value in overrides.items():
+        if key == "temperature":
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not 0 <= value <= 2:
+                raise AgentModelSettingsUnsupported(
+                    "Agent model setting temperature must be between 0 and 2",
+                )
+            if "temperature" not in supported_fields:
+                raise AgentModelSettingsUnsupported(
+                    f"Model {model_name} does not support Agent model setting temperature",
+                )
+            mapped["temperature"] = value
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 200_000:
+            raise AgentModelSettingsUnsupported(
+                "Agent model setting max_tokens must be an integer between 1 and 200000",
+            )
+        provider_field = next(
+            (candidate for candidate in _AGENT_MAX_TOKENS_PROVIDER_FIELDS if candidate in supported_fields),
+            None,
+        )
+        if provider_field is None:
+            raise AgentModelSettingsUnsupported(
+                f"Model {model_name} does not support Agent model setting max_tokens",
+            )
+        mapped[provider_field] = value
+    return mapped
+
+
+def create_chat_model(
+    name: str | None = None,
+    thinking_enabled: bool = False,
+    *,
+    app_config: AppConfig | None = None,
+    attach_tracing: bool = True,
+    model_overrides: Mapping[str, object] | None = None,
+    **kwargs,
+) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
         name: The name of the model to create. If None, the first model in the config will be used.
         thinking_enabled: Enable the model's extended-thinking mode when supported.
         app_config: Explicit application config; falls back to the cached global if omitted.
-        model_overrides: Optional per-caller sampling overrides (e.g. a custom
-            agent's ``temperature`` / ``max_tokens``) layered on top of the
-            model profile. ``None`` values are ignored so an unset override
-            never clobbers a profile value. Applied before the thinking / Codex
-            transforms so provider-specific normalization (e.g. Codex dropping
-            ``max_tokens``) still governs an overridden value.
         attach_tracing: When True (default), attach tracing callbacks (Langfuse,
             LangSmith) directly to the model instance. Standalone callers — anything
             that invokes the model outside a LangGraph run that already wires tracing
-            at the invocation root (``MemoryUpdater``, ad-hoc utilities, etc.) — keep
+            at the invocation root (ad-hoc utilities, background jobs, etc.) — keep
             this default so the model-level callback still produces traces. Callers
             that already attach tracing at the graph root (``make_lead_agent``, the
             in-graph ``TitleMiddleware``) MUST pass ``attach_tracing=False``; otherwise
@@ -195,6 +275,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             the model) and ``session_id`` / ``user_id`` metadata never reach the trace
             because the model becomes a nested observation whose ``langfuse_*`` keys
             get stripped.
+        model_overrides: Exact per-Agent sampling defaults. Only
+            ``temperature`` and canonical ``max_tokens`` are accepted, and
+            each is mapped only when the selected provider declares support.
 
     Returns:
         A chat model instance.
@@ -219,23 +302,17 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
-            # Runtime/UI metadata used to size the context indicator. Provider
-            # clients do not accept this as a model-constructor argument.
-            "context_window",
             # Presentation-only metadata (consumed by the console's cost
             # display) — must never reach the provider client, which would
             # forward unknown kwargs into the completion request payload.
             "pricing",
         },
     )
-    # Layer per-caller sampling overrides (e.g. a custom agent's temperature /
-    # max_tokens) on top of the profile. Ignore None so an unset override never
-    # clobbers a configured profile value. Applied here — before the thinking
-    # and Codex transforms below — so provider-specific normalization (Codex
-    # dropping max_tokens, thinking disable-paths) still governs the merged
-    # value exactly as it would a profile-native one.
-    if model_overrides:
-        model_settings_from_config.update({key: value for key, value in model_overrides.items() if value is not None})
+    agent_model_overrides = _validated_agent_model_overrides(
+        model_class,
+        name,
+        model_overrides,
+    )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
     has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
@@ -245,7 +322,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         effective_wte = {**effective_wte, "thinking": merged_thinking}
     if thinking_enabled and has_thinking_settings:
         if not model_config.supports_thinking:
-            raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
+            raise ValueError(f"Model {name} does not support thinking. A platform administrator must enable `supports_thinking` for its version in System Settings.") from None
         if effective_wte:
             model_settings_from_config.update(effective_wte)
     if not thinking_enabled:
@@ -271,9 +348,22 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+    elif "reasoning_effort" in kwargs:
+        # The frontend supplies a per-run effort. Let it override the model
+        # default instead of passing the same constructor argument twice.
+        model_settings_from_config.pop("reasoning_effort", None)
+
+    # Apply exact Agent/request sampling values only after every global model
+    # profile and thinking-mode merge. This preserves the public precedence
+    # contract: request > exact Agent version > global configuration.
+    if agent_model_overrides:
+        if "max_tokens" in agent_model_overrides or "max_output_tokens" in agent_model_overrides:
+            model_settings_from_config.pop("max_tokens", None)
+            model_settings_from_config.pop("max_output_tokens", None)
+        model_settings_from_config.update(agent_model_overrides)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
-    # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
+    # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_class, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
 
@@ -281,14 +371,26 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     from deerflow.models.openai_codex_provider import CodexChatModel
 
     if issubclass(model_class, CodexChatModel):
+        if model_overrides is not None and model_overrides.get("max_tokens") is not None:
+            raise AgentModelSettingsUnsupported(
+                f"Model {name} does not support Agent model setting max_tokens",
+            )
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
+        model_settings_from_config.pop("max_output_tokens", None)
 
-        # Use explicit reasoning_effort from frontend if provided (low/medium/high)
+        # Use explicit reasoning_effort from the admitted Run when provided.
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
             model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
+        elif explicit_effort and explicit_effort in (
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ):
             model_settings_from_config["reasoning_effort"] = explicit_effort
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"

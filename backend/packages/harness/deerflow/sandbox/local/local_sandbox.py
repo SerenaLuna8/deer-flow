@@ -5,18 +5,26 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import threading
+import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import (
+    PRIVATE_FILE_IO_CHUNK_SIZE,
+    Sandbox,
+    SandboxFileInfo,
+    _validate_extra_env,
+)
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
 logger = logging.getLogger(__name__)
@@ -72,6 +80,390 @@ class PathMapping:
     container_path: str
     local_path: str
     read_only: bool = False
+
+
+class _LocalBinaryReader:
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def read(self, size: int) -> bytes:
+        if not 0 < size <= PRIVATE_FILE_IO_CHUNK_SIZE:
+            raise ValueError("Private sandbox reads must be bounded to 1 MiB")
+        return os.read(self._fd, size)
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+
+def _open_private_directory(path: str, *, dir_fd: int | None = None) -> int:
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError(errno.ENOTSUP, "Anchored private file IO is unsupported")
+    fd = os.open(
+        path,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=dir_fd,
+    )
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.ENOTDIR, "Private path component is not a directory")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _walk_private_directory(
+    root_fd: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool = False,
+) -> int:
+    current_fd = os.dup(root_fd)
+    try:
+        for part in parts:
+            try:
+                next_fd = _open_private_directory(part, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                next_fd = _open_private_directory(part, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _open_private_absolute_directory(path: str) -> int:
+    """Open one absolute directory without following any path component."""
+
+    absolute = PurePosixPath(path)
+    if not absolute.is_absolute() or any(part in {"", ".", ".."} for part in absolute.parts[1:]):
+        raise OSError(errno.EINVAL, "Invalid private mapping root", path)
+    filesystem_fd = _open_private_directory(os.path.sep)
+    try:
+        return _walk_private_directory(
+            filesystem_fd,
+            tuple(absolute.parts[1:]),
+        )
+    finally:
+        os.close(filesystem_fd)
+
+
+def _clear_private_directory(directory_fd: int) -> None:
+    """Remove directory contents without ever following a filesystem link."""
+
+    for name in os.listdir(directory_fd):
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(entry.st_mode):
+            child_fd = _open_private_directory(name, dir_fd=directory_fd)
+            try:
+                if not _same_inode(entry, os.fstat(child_fd)):
+                    raise OSError(
+                        errno.ESTALE,
+                        "Private projection directory changed during reset",
+                        name,
+                    )
+                _clear_private_directory(child_fd)
+            finally:
+                os.close(child_fd)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(current.st_mode) or not _same_inode(entry, current):
+                raise OSError(
+                    errno.ESTALE,
+                    "Private projection directory changed during reset",
+                    name,
+                )
+            os.rmdir(name, dir_fd=directory_fd)
+            continue
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+            raise OSError(
+                errno.EPERM,
+                "Private projection reset rejects links and special files",
+                name,
+            )
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or not _same_inode(entry, current):
+            raise OSError(
+                errno.ESTALE,
+                "Private projection file changed during reset",
+                name,
+            )
+        os.unlink(name, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def reset_private_projection_root(base_dir: Path, relative_root: str) -> None:
+    """Create and empty one private run projection through anchored dirfds.
+
+    Every absolute and relative ancestor is opened with ``O_NOFOLLOW``.  The
+    four mutable projection directories are retained but emptied in place, so
+    a rollback/error run cannot leak stale host state into the next run.
+    """
+
+    relative_parts = PurePosixPath(relative_root).parts
+    if not relative_root or PurePosixPath(relative_root).is_absolute() or any(part in {"", ".", ".."} for part in relative_parts):
+        raise OSError(errno.EINVAL, "Invalid private projection root")
+
+    absolute_base = Path(base_dir).absolute()
+    absolute_parts = tuple(part for part in absolute_base.parts if part != absolute_base.anchor)
+    filesystem_fd = _open_private_directory(absolute_base.anchor or os.path.sep)
+    try:
+        base_fd = _walk_private_directory(filesystem_fd, absolute_parts, create=True)
+    finally:
+        os.close(filesystem_fd)
+
+    try:
+        thread_fd = _walk_private_directory(
+            base_fd,
+            tuple(relative_parts),
+            create=True,
+        )
+        try:
+            user_data_fd = _walk_private_directory(
+                thread_fd,
+                ("user-data",),
+                create=True,
+            )
+            try:
+                for name in ("workspace", "uploads", "outputs"):
+                    projection_fd = _walk_private_directory(
+                        user_data_fd,
+                        (name,),
+                        create=True,
+                    )
+                    try:
+                        _clear_private_directory(projection_fd)
+                    finally:
+                        os.close(projection_fd)
+            finally:
+                os.close(user_data_fd)
+
+            acp_fd = _walk_private_directory(
+                thread_fd,
+                ("acp-workspace",),
+                create=True,
+            )
+            try:
+                _clear_private_directory(acp_fd)
+            finally:
+                os.close(acp_fd)
+        finally:
+            os.close(thread_fd)
+    finally:
+        os.close(base_fd)
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _verify_private_parent(
+    open_root: Callable[[], int],
+    parent_parts: tuple[str, ...],
+    root_fd: int,
+    parent_fd: int,
+    display_path: str,
+) -> None:
+    check_root_fd = open_root()
+    try:
+        if not _same_inode(os.fstat(check_root_fd), os.fstat(root_fd)):
+            raise OSError(errno.ESTALE, "Private sandbox root changed", display_path)
+        check_parent_fd = _walk_private_directory(check_root_fd, parent_parts)
+        try:
+            if not _same_inode(os.fstat(check_parent_fd), os.fstat(parent_fd)):
+                raise OSError(
+                    errno.ESTALE,
+                    "Private sandbox path ancestor changed",
+                    display_path,
+                )
+        finally:
+            os.close(check_parent_fd)
+    finally:
+        os.close(check_root_fd)
+
+
+class _LocalAtomicWriter:
+    def __init__(
+        self,
+        *,
+        open_root: Callable[[], int],
+        parent_parts: tuple[str, ...],
+        root_fd: int,
+        parent_fd: int,
+        temp_name: str,
+        target_name: str,
+        display_path: str,
+        fd: int,
+    ) -> None:
+        self._open_root = open_root
+        self._parent_parts = parent_parts
+        self._root_fd = root_fd
+        self._parent_fd = parent_fd
+        self._temp_name = temp_name
+        self._target_name = target_name
+        self._display_path = display_path
+        self._fd = fd
+        self._finished = False
+        self._published_stat: os.stat_result | None = None
+        self._rollback_parent_fd = -1
+
+    def write(self, content: bytes) -> None:
+        if self._finished or not isinstance(content, bytes) or not 0 < len(content) <= PRIVATE_FILE_IO_CHUNK_SIZE:
+            raise ValueError("Private sandbox writes must be bounded to 1 MiB")
+        view = memoryview(content)
+        while view:
+            written = os.write(self._fd, view)
+            view = view[written:]
+
+    def commit(self) -> None:
+        if self._finished:
+            raise OSError(errno.EBADF, "Atomic writer is closed")
+        try:
+            temp_fd_stat = os.fstat(self._fd)
+            if not stat.S_ISREG(temp_fd_stat.st_mode) or temp_fd_stat.st_nlink != 1:
+                raise OSError(
+                    errno.EPERM,
+                    "Atomic staging target must be one regular link",
+                    self._display_path,
+                )
+            os.fsync(self._fd)
+            try:
+                temp_entry_stat = os.stat(
+                    self._temp_name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                raise OSError(
+                    errno.ESTALE,
+                    "Atomic staging entry changed",
+                    self._display_path,
+                ) from None
+            if not _same_inode(temp_entry_stat, temp_fd_stat):
+                raise OSError(
+                    errno.ESTALE,
+                    "Atomic staging entry changed",
+                    self._display_path,
+                )
+            try:
+                target_stat = os.stat(
+                    self._target_name,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                target_stat = None
+            if target_stat is not None and (not stat.S_ISREG(target_stat.st_mode) or target_stat.st_nlink != 1):
+                raise OSError(
+                    errno.ELOOP,
+                    "Atomic target must be one regular link",
+                    self._display_path,
+                )
+            _verify_private_parent(
+                self._open_root,
+                self._parent_parts,
+                self._root_fd,
+                self._parent_fd,
+                self._display_path,
+            )
+            self._rollback_parent_fd = os.dup(self._parent_fd)
+            self._published_stat = temp_fd_stat
+            os.replace(
+                self._temp_name,
+                self._target_name,
+                src_dir_fd=self._parent_fd,
+                dst_dir_fd=self._parent_fd,
+            )
+            os.fsync(self._parent_fd)
+            fd = self._fd
+            self._fd = -1
+            os.close(fd)
+            parent_fd = self._parent_fd
+            self._parent_fd = -1
+            os.close(parent_fd)
+            root_fd = self._root_fd
+            self._root_fd = -1
+            os.close(root_fd)
+            self._published_stat = None
+            self._finished = True
+            rollback_parent_fd = self._rollback_parent_fd
+            self._rollback_parent_fd = -1
+            try:
+                os.close(rollback_parent_fd)
+            except OSError:
+                pass
+        except BaseException:
+            self.abort()
+            raise
+
+    def abort(self) -> None:
+        if self._finished:
+            return
+        if self._fd >= 0:
+            fd = self._fd
+            self._fd = -1
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            cleanup_parent_fd = self._parent_fd if self._parent_fd >= 0 else self._rollback_parent_fd
+            if cleanup_parent_fd >= 0:
+                if self._published_stat is not None:
+                    try:
+                        target_stat = os.stat(
+                            self._target_name,
+                            dir_fd=cleanup_parent_fd,
+                            follow_symlinks=False,
+                        )
+                        if stat.S_ISREG(target_stat.st_mode) and target_stat.st_nlink == 1 and _same_inode(target_stat, self._published_stat):
+                            os.unlink(
+                                self._target_name,
+                                dir_fd=cleanup_parent_fd,
+                            )
+                            try:
+                                os.fsync(cleanup_parent_fd)
+                            except OSError:
+                                pass
+                    except FileNotFoundError:
+                        pass
+                    finally:
+                        self._published_stat = None
+                try:
+                    os.unlink(self._temp_name, dir_fd=cleanup_parent_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            if self._parent_fd >= 0:
+                parent_fd = self._parent_fd
+                self._parent_fd = -1
+                try:
+                    os.close(parent_fd)
+                except OSError:
+                    pass
+            if self._root_fd >= 0:
+                root_fd = self._root_fd
+                self._root_fd = -1
+                try:
+                    os.close(root_fd)
+                except OSError:
+                    pass
+            if self._rollback_parent_fd >= 0:
+                rollback_parent_fd = self._rollback_parent_fd
+                self._rollback_parent_fd = -1
+                try:
+                    os.close(rollback_parent_fd)
+                except OSError:
+                    pass
+            self._finished = True
 
 
 class ResolvedPath(NamedTuple):
@@ -189,9 +581,63 @@ class LocalSandbox(Sandbox):
         """
         super().__init__(id)
         self.path_mappings = path_mappings or []
+        self._private_mapping_fds: dict[PathMapping, int] | None = None
+        self._private_mapping_closed = False
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
+
+    def anchor_private_mappings(self) -> None:
+        """Pin every mapping root to its acquire-time inode for one private lease."""
+
+        if self._private_mapping_fds is not None:
+            raise OSError(errno.EBUSY, "Private mapping roots are already anchored")
+        if self._private_mapping_closed:
+            raise OSError(errno.EBADF, "Private mapping roots are closed")
+        opened: dict[PathMapping, int] = {}
+        try:
+            for mapping in self.path_mappings:
+                opened[mapping] = _open_private_absolute_directory(mapping.local_path)
+        except BaseException:
+            for fd in opened.values():
+                os.close(fd)
+            raise
+        self._private_mapping_fds = opened
+
+    def close_private_file_authority(self) -> None:
+        """Release opaque handles and every root fd owned by a private lease."""
+
+        super().close_private_file_authority()
+        anchors = self._private_mapping_fds
+        self._private_mapping_fds = None
+        self._private_mapping_closed = True
+        if anchors is not None:
+            for fd in anchors.values():
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def _open_private_mapping_root(self, mapping: PathMapping) -> int:
+        anchors = self._private_mapping_fds
+        if anchors is None:
+            if self._private_mapping_closed:
+                raise OSError(errno.EBADF, "Private mapping root is closed", mapping.container_path)
+            return _open_private_absolute_directory(mapping.local_path)
+        anchor_fd = anchors.get(mapping)
+        if anchor_fd is None:
+            raise OSError(errno.EBADF, "Private mapping root is closed", mapping.container_path)
+        check_fd = _open_private_absolute_directory(mapping.local_path)
+        try:
+            if not _same_inode(os.fstat(anchor_fd), os.fstat(check_fd)):
+                raise OSError(
+                    errno.ESTALE,
+                    "Private mapping root changed after acquire",
+                    mapping.container_path,
+                )
+        finally:
+            os.close(check_fd)
+        return os.dup(anchor_fd)
 
     # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
     # sorted views and compiled path-rewrite patterns below are stable for the
@@ -221,21 +667,6 @@ class LocalSandbox(Sandbox):
     @cached_property
     def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
         """Compiled matchers for local paths in command output (longest local path first)."""
-        # The rule — segment boundary plus path tail — is owned by
-        # ``deerflow.sandbox.path_patterns`` and shared with
-        # ``sandbox.tools._compiled_mask_patterns``, the other site that rewrites host
-        # paths back to virtual ones. Its rationale (why the boundary class is
-        # text-oriented rather than shell-oriented like ``_command_pattern``, why ``$``
-        # is load-bearing) lives with the owner rather than in a second copy here, which
-        # is what let the two drift before (#4035 added the boundary here and missed
-        # that site; #4053 added it there).
-        #
-        # What is specific to this site: without the boundary the regex yields the bare
-        # root, which then *equals* the mount root and so satisfies
-        # ``_reverse_resolve_path``'s own ``+ "/"`` guard — the sibling is rewritten to a
-        # container path that forward resolution refuses to map back. And bases stay
-        # separator-*sensitive*: they come from ``Path.resolve()`` and already carry the
-        # platform's separator, so relaxing them would widen what this masks.
         return [build_output_mask_pattern(self._resolved_local_paths[m]) for m in self._mappings_by_local_specificity]
 
     @cached_property
@@ -295,6 +726,294 @@ class LocalSandbox(Sandbox):
 
         return None
 
+    def _secure_private_path(self, path: str, *, create_parents: bool = False) -> Path:
+        match = self._find_path_mapping(path)
+        if match is None:
+            raise OSError(errno.EACCES, "Path is outside the sandbox", path)
+        mapping, relative = match
+        if mapping.read_only:
+            raise OSError(errno.EROFS, "Read-only file system", path)
+        parts = Path(relative.replace("\\", "/")).parts
+        if not relative or any(part in {"", ".", ".."} for part in parts):
+            raise OSError(errno.EACCES, "Unsafe sandbox path", path)
+        root = Path(mapping.local_path)
+        root.mkdir(parents=True, exist_ok=True)
+        current = root
+        for part in parts[:-1]:
+            current = current / part
+            try:
+                mode = current.lstat().st_mode
+            except FileNotFoundError:
+                if not create_parents:
+                    raise OSError(errno.ENOENT, "Parent directory does not exist", path) from None
+                current.mkdir()
+                mode = current.lstat().st_mode
+            if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+                raise OSError(errno.ELOOP, "Unsafe sandbox path ancestor", path)
+        target = current / parts[-1]
+        root_resolved = root.resolve()
+        parent_resolved = target.parent.resolve()
+        if parent_resolved != root_resolved and root_resolved not in parent_resolved.parents:
+            raise OSError(errno.EACCES, "Path escapes sandbox mapping", path)
+        return target
+
+    def _private_path_parts(
+        self,
+        path: str,
+        *,
+        write: bool,
+        allow_root: bool = False,
+    ) -> tuple[PathMapping, tuple[str, ...]]:
+        match = self._find_path_mapping(path)
+        if match is None:
+            raise OSError(errno.EACCES, "Path is outside the sandbox", path)
+        mapping, relative = match
+        if write and mapping.read_only:
+            raise OSError(errno.EROFS, "Read-only file system", path)
+        if "\\" in relative:
+            raise OSError(errno.EACCES, "Unsafe sandbox path", path)
+        parts = PurePosixPath(relative).parts if relative else ()
+        if (not allow_root and not parts) or any(part in {"", ".", ".."} for part in parts):
+            raise OSError(errno.EACCES, "Unsafe sandbox path", path)
+        return mapping, tuple(parts)
+
+    def _open_private_parent(
+        self,
+        path: str,
+        *,
+        write: bool,
+        create_parents: bool = False,
+    ) -> tuple[PathMapping, tuple[str, ...], int, int, str]:
+        mapping, parts = self._private_path_parts(path, write=write)
+        root_fd = self._open_private_mapping_root(mapping)
+        try:
+            parent_parts = parts[:-1]
+            parent_fd = _walk_private_directory(
+                root_fd,
+                parent_parts,
+                create=create_parents,
+            )
+        except BaseException:
+            os.close(root_fd)
+            raise
+        return mapping, parent_parts, root_fd, parent_fd, parts[-1]
+
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+    ) -> Iterator[SandboxFileInfo]:
+        if type(max_entries) is not int or max_entries < 1:
+            raise ValueError("Secure scan entry limit must be positive")
+        mapping, parts = self._private_path_parts(
+            root,
+            write=False,
+            allow_root=True,
+        )
+
+        def iterate() -> Iterator[SandboxFileInfo]:
+            mapping_root_fd = self._open_private_mapping_root(mapping)
+            base_fd = -1
+            stack: list[tuple[int, str, Iterator[os.DirEntry[str]]]] = []
+            seen = 0
+            try:
+                try:
+                    base_fd = _walk_private_directory(mapping_root_fd, parts)
+                except FileNotFoundError:
+                    return
+                stack.append((base_fd, root, os.scandir(base_fd)))
+                while stack:
+                    directory_fd, virtual_directory, names = stack[-1]
+                    try:
+                        directory_entry = next(names)
+                    except StopIteration:
+                        finished_fd, _, finished_names = stack.pop()
+                        close_names = getattr(finished_names, "close", None)
+                        if callable(close_names):
+                            close_names()
+                        if finished_fd != base_fd:
+                            os.close(finished_fd)
+                        continue
+                    name = directory_entry.name
+                    virtual_path = f"{virtual_directory.rstrip('/')}/{name}"
+                    info = os.stat(
+                        name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(info.st_mode):
+                        kind = "symlink"
+                    elif stat.S_ISDIR(info.st_mode):
+                        kind = "directory"
+                    elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                        kind = "regular"
+                    else:
+                        kind = "other"
+                    seen += 1
+                    if seen > max_entries:
+                        raise OSError(
+                            errno.EFBIG,
+                            "Secure scan entry limit exceeded",
+                            root,
+                        )
+                    yield SandboxFileInfo(
+                        path=virtual_path,
+                        size=info.st_size,
+                        file_type=kind,
+                    )
+                    if kind == "directory":
+                        child_fd = _open_private_directory(name, dir_fd=directory_fd)
+                        if not _same_inode(info, os.fstat(child_fd)):
+                            os.close(child_fd)
+                            raise OSError(
+                                errno.ESTALE,
+                                "Secure scan directory changed",
+                                virtual_path,
+                            )
+                        try:
+                            child_names = os.scandir(child_fd)
+                        except BaseException:
+                            os.close(child_fd)
+                            raise
+                        stack.append(
+                            (
+                                child_fd,
+                                virtual_path,
+                                child_names,
+                            )
+                        )
+                check_root_fd = self._open_private_mapping_root(mapping)
+                try:
+                    if not _same_inode(os.fstat(mapping_root_fd), os.fstat(check_root_fd)):
+                        raise OSError(errno.ESTALE, "Secure scan root changed", root)
+                    check_base_fd = _walk_private_directory(check_root_fd, parts)
+                    try:
+                        if not _same_inode(os.fstat(base_fd), os.fstat(check_base_fd)):
+                            raise OSError(errno.ESTALE, "Secure scan root changed", root)
+                    finally:
+                        os.close(check_base_fd)
+                finally:
+                    os.close(check_root_fd)
+            finally:
+                while stack:
+                    directory_fd, _, names = stack.pop()
+                    close_names = getattr(names, "close", None)
+                    if callable(close_names):
+                        close_names()
+                    if directory_fd != base_fd:
+                        os.close(directory_fd)
+                if base_fd >= 0:
+                    os.close(base_fd)
+                os.close(mapping_root_fd)
+
+        return iterate()
+
+    def open_regular_reader(self, path: str) -> _LocalBinaryReader:
+        mapping, parent_parts, root_fd, parent_fd, target_name = self._open_private_parent(path, write=False)
+        fd = -1
+        try:
+            fd = os.open(
+                target_name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_fd,
+            )
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise OSError(errno.EINVAL, "Private authority reads require regular files", path)
+            entry_stat = os.stat(
+                target_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if not _same_inode(file_stat, entry_stat):
+                raise OSError(errno.ESTALE, "Private authority file changed", path)
+            _verify_private_parent(
+                lambda: self._open_private_mapping_root(mapping),
+                parent_parts,
+                root_fd,
+                parent_fd,
+                path,
+            )
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            raise
+        finally:
+            os.close(parent_fd)
+            os.close(root_fd)
+        return _LocalBinaryReader(fd)
+
+    def open_atomic_writer(self, path: str) -> _LocalAtomicWriter:
+        mapping, parent_parts, root_fd, parent_fd, target_name = self._open_private_parent(
+            path,
+            write=True,
+            create_parents=True,
+        )
+        try:
+            try:
+                target_stat = os.stat(
+                    target_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                target_stat = None
+            if target_stat is not None and (not stat.S_ISREG(target_stat.st_mode) or target_stat.st_nlink != 1):
+                raise OSError(errno.ELOOP, "Atomic target must be one regular link", path)
+            while True:
+                temp_name = f".deerflow-private-{uuid.uuid4().hex}"
+                try:
+                    fd = os.open(
+                        temp_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                    break
+                except FileExistsError:
+                    continue
+            return _LocalAtomicWriter(
+                open_root=lambda: self._open_private_mapping_root(mapping),
+                parent_parts=parent_parts,
+                root_fd=root_fd,
+                parent_fd=parent_fd,
+                temp_name=temp_name,
+                target_name=target_name,
+                display_path=path,
+                fd=fd,
+            )
+        except BaseException:
+            os.close(parent_fd)
+            os.close(root_fd)
+            raise
+
+    def remove_path(self, path: str) -> None:
+        mapping, parent_parts, root_fd, parent_fd, target_name = self._open_private_parent(path, write=True)
+        try:
+            try:
+                info = os.stat(
+                    target_name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise OSError(errno.EPERM, "Refusing to remove a non-regular path", path)
+            _verify_private_parent(
+                lambda: self._open_private_mapping_root(mapping),
+                parent_parts,
+                root_fd,
+                parent_fd,
+                path,
+            )
+            os.unlink(target_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+            os.close(root_fd)
+
     def _resolve_path_with_mapping(self, path: str) -> ResolvedPath:
         """
         Resolve container path to actual local path using mappings.
@@ -344,19 +1063,8 @@ class LocalSandbox(Sandbox):
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
             local_path_resolved = self._resolved_local_paths[mapping]
-            # ``Path.resolve()`` always renders with the native separator
-            # (backslash on Windows), regardless of the forward-slash
-            # normalization above, so the containment check must compare with
-            # ``os.sep`` here too -- mirroring ``_is_read_only_path`` -- instead
-            # of a hardcoded "/". A hardcoded "/" can never match a
-            # backslash-joined nested path on Windows, so every nested path
-            # silently fell through to the "no mapping found" branch below and
-            # leaked the raw host path (real username, full directory tree).
             if path_str == local_path_resolved or path_str.startswith(local_path_resolved + os.sep):
-                # Replace the local path prefix with container path. Container
-                # paths are always POSIX-style, so the extracted relative
-                # portion (native-separated on Windows) is normalized to
-                # forward slashes before being spliced in.
+                # Replace the local path prefix with container path
                 relative = path_str[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
                 resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
                 return resolved
@@ -661,14 +1369,8 @@ class LocalSandbox(Sandbox):
             # 2. It is NOT already present in the result (was skipped by list_dir)
             if mapping.container_path.startswith(container_path + "/"):
                 child_rel = mapping.container_path[len(container_path) + 1 :]
-                # Only direct children (no further slashes), e.g. "public", "custom".
-                # Compare the mapping's full container path -- not the bare child
-                # name -- against existing_dirs, which holds full paths (e.g.
-                # "/mnt/user-data/workspace"). Comparing the bare name here would
-                # never match, so an already-listed mount (the common case: real
-                # nested workspace/uploads/outputs subdirectories under
-                # /mnt/user-data) would be appended a second time.
-                if "/" not in child_rel and mapping.container_path.rstrip("/") not in existing_dirs:
+                # Only direct children (no further slashes), e.g. "public", "custom"
+                if "/" not in child_rel and child_rel not in existing_dirs:
                     # Verify the host path exists so we don't add phantom entries
                     try:
                         if Path(mapping.local_path).resolve().is_dir():
@@ -678,29 +1380,11 @@ class LocalSandbox(Sandbox):
 
         return sorted(result)
 
-    def read_file(
-        self,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> str:
+    def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)
-        should_slice = start_line is not None or end_line is not None
         try:
             with open(resolved_path, encoding="utf-8") as f:
-                if not should_slice:
-                    content = f.read()
-
-                start = max(start_line or 1, 1)
-                if should_slice:
-                    selected: list[str] = []
-                    for line_number, line in enumerate(f, start=1):
-                        if line_number < start:
-                            continue
-                        if end_line is not None and line_number > end_line:
-                            break
-                        selected.append(line.rstrip("\r\n"))
-                    content = "\n".join(selected)
+                content = f.read()
             # Only reverse-resolve paths in files that were previously written
             # by write_file (agent-authored content). User-uploaded files,
             # external tool output, and other non-agent content should not be

@@ -1,4 +1,4 @@
-# DeerFlow Helm chart values
+# ActWeave Helm chart values
 #
 # Copy to my-values.yaml, edit, and install with:
 #   helm install deer-flow deploy/helm/deer-flow -n deer-flow --create-namespace -f my-values.yaml
@@ -6,7 +6,7 @@
 # -- Target namespace (also used as the K8s sandbox namespace for provisioner-spawned Pods).
 namespace: deer-flow
 
-# -- Image registry & tag for the three DeerFlow images you build+push.
+# -- Image registry & tag for the three ActWeave images you build+push.
 #    Required: set `registry` to your registry (e.g. ghcr.io/yourorg).
 image:
   registry: ""              # REQUIRED, e.g. ghcr.io/yourorg
@@ -25,21 +25,7 @@ image:
 
 # -- Gateway (backend) deployment.
 gateway:
-  replicas: 1               # Safe default. Postgres + the Redis stream bridge are
-                            # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
-  # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
-  # shutdown work: channel stop (~5s) + memory queue drain
-  # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
-  # to 30s, which SIGKILLs the memory drain mid-flight and silently re-introduces
-  # the memory loss that shutdown_flush is fixing. Raise this when you raise the
-  # memory timeout. See gateway-deployment.yaml + README "Graceful shutdown".
-  terminationGracePeriodSeconds: 45
-  # preStop hook sleep (seconds) before SIGTERM, so the Service/ingress
-  # deregisters the pod and in-flight HTTP requests drain before graceful
-  # shutdown begins (which runs the memory queue drain). 0 disables the hook.
-  # Counts against terminationGracePeriodSeconds.
-  preStopSleepSeconds: 5
+  replicas: 1
   resources:
     requests:
       cpu: 200m
@@ -47,6 +33,36 @@ gateway:
     limits:
       cpu: "2"
       memory: 2Gi
+
+# -- Independent durable-job Worker. Gateway only admits Runs; every Agent
+#    graph is executed by this process. Scale replicas against provider limits
+#    and PostgreSQL capacity.
+worker:
+  replicas: 1
+  # Must exceed worker.shutdown_grace_seconds plus the bounded Memory flush
+  # window and a small cancellation buffer.
+  terminationGracePeriodSeconds: 75
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# -- Optional Automation Scheduler. The chart projects this flag into the
+#    shared AppConfig, so Deployment admission and scheduler.enabled cannot
+#    drift. Keep one replica: PostgreSQL grants one process-lifetime owner.
+scheduler:
+  enabled: false
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
 
 # -- Frontend (Next.js) deployment.
 frontend:
@@ -94,38 +110,33 @@ provisioner:
       memory: 512Mi
   # -- AIO-compatible sandbox container image used for sandbox Pods.
   sandboxImage: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
-  # -- Service type for per-sandbox Services. `ClusterIP` (default) exposes
-  #    sandboxes only inside the cluster via Service DNS - correct for the
-  #    in-cluster gateway and avoids binding the code-execution surface on
-  #    every node's interfaces. `NodePort` is the Docker-Compose/hybrid escape
-  #    hatch (used when the gateway is not in K8s); pair with `nodeHost`.
-  sandboxServiceType: "ClusterIP"
-  # -- Host the gateway uses to reach sandbox NodePorts. Only consulted when
-  #    `sandboxServiceType: NodePort`. Empty (default) falls back to the
-  #    provisioner pod's node IP via the Kubernetes downward API, which routes
-  #    on most clusters because a NodePort is exposed on every node. Set
-  #    explicitly only when pod->node-IP traffic is blocked by your
-  #    CNI/network policy. In Docker Compose this is `host.docker.internal`.
+  # -- Per-sandbox Service type. ClusterIP is the secure in-cluster default.
+  #    NodePort is only for an explicitly hybrid topology where the Worker runs
+  #    outside Kubernetes.
+  sandboxServiceType: ClusterIP
+  # -- Host the Worker uses to reach sandbox NodePorts. Consulted only when
+  #    sandboxServiceType=NodePort. Empty uses the Provisioner pod's node IP.
   nodeHost: ""
   # -- Sandbox container port (must match the sandboxImage's listening port).
   sandboxPort: 8080
 
-# -- PostgreSQL database. Bundled mode (default) deploys a single-instance
-#    postgres StatefulSet; set `enabled: false` to use an external managed DB.
-#    The gateway reads DATABASE_URL from the resolved Secret and config.yaml
-#    references it as $DATABASE_URL in database.postgres_url.
+# -- PostgreSQL database. External, explicitly pre-initialized PostgreSQL is the
+#    safe default. The chart never creates, migrates or repairs application
+#    schema. Bundled mode is an opt-in empty database for controlled evaluation;
+#    initialize it through the repository's sole `make setup-db` workflow before
+#    starting application replicas.
 postgresql:
-  # -- Deploy a bundled postgres StatefulSet. Disable to use an external DB.
-  enabled: true
+  # -- Deploy a bundled empty postgres StatefulSet (opt-in).
+  enabled: false
   image:
     repository: postgres
     tag: "16"
   auth:
     database: deerflow
-    username: deerflow
+    username: postgres
     # -- Password auto-generated (32 chars, persisted across upgrades) when
     #    empty. Ignored if existingSecret is set.
-    password: ""
+    password: "aBz@8pcKDggs"
   # -- Use an existing Secret (key `database-url`, plus `postgres-password`
   #    in bundled mode) instead of generating one. Skips Secret creation.
   existingSecret: ""
@@ -153,53 +164,8 @@ postgresql:
     #    / Vault / Sealed Secrets so the DSN never appears in values files.
     existingSecret: ""
 
-# -- Redis stream bridge. The gateway stores per-run SSE events in Redis Streams
-#    so live run events reach a client connected to any gateway pod (cross-pod
-#    SSE delivery + reconnect replay, PR #3191). Bundled mode (default) deploys
-#    a single-instance redis StatefulSet; set `enabled: false` to use an external
-#    managed Redis. The gateway reads DEER_FLOW_STREAM_BRIDGE_REDIS_URL from the
-#    resolved Secret; config.yaml's stream_bridge.type is `redis` by default.
-redis:
-  # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
-  enabled: true
-  image:
-    repository: redis
-    tag: "7-alpine"
-  auth:
-    # -- Empty (default) = no auth, matching the compose deployment (ClusterIP
-    #    isolation only). Set a password to enable AUTH; the DSN becomes
-    #    redis://:<password>@host:6379/0. Ignored if existingSecret is set.
-    password: ""
-  # -- Use an existing Secret (key `redis-url`, plus `redis-password` if auth)
-  #    instead of generating one. Skips Secret creation.
-  existingSecret: ""
-  primary:
-    resources:
-      requests:
-        cpu: 50m
-        memory: 64Mi
-      limits:
-        cpu: "1"
-        memory: 512Mi
-    persistence:
-      enabled: true
-      storageClass: ""           # "" = cluster default
-      accessMode: ReadWriteOnce  # RWX (NFS) only needed if redis itself is HA
-      size: 5Gi
-  # -- External redis (used when `enabled: false`). Provide either a full
-  #    `redisUrl` (chart wraps it into a Secret for you) or an `existingSecret`
-  #    you manage (key `redis-url`).
-  external:
-    # -- Full URL, e.g. redis://:pass@myredis.example:6379/0. Chart writes it
-    #    into the Secret so it never touches the gateway env directly.
-    redisUrl: ""
-    # -- Secret you manage (key `redis-url`). Use with External Secrets / Vault
-    #    / Sealed Secrets so the URL never appears in values files.
-    existingSecret: ""
-
-# -- Persistent volume for runtime state (.deer-flow): sqlite DB, memory,
-#    custom agents, and per-thread user-data. Also mounted (PVC mode) into
-#    provisioner-spawned sandbox Pods.
+# -- Persistent volume for sandbox scratch space and per-thread object bytes.
+#    Project metadata, Memory and durable streams remain in PostgreSQL.
 persistence:
   home:
     enabled: true
@@ -215,16 +181,11 @@ skills:
   existingClaim: ""
   configMap: ""
 
-# -- Provider/channel/search secrets injected as env vars into the gateway.
-#    Reference them from config.yaml as $VAR. Example:
-#      secrets:
-#        OPENAI_API_KEY: "sk-..."
-#        FEISHU_APP_ID: "cli_xxx"
-#        FEISHU_APP_SECRET: "xxx"
-#        GITHUB_TOKEN: "ghp_xxx"
-secrets: {}
-# -- Use an existing Secret instead of creating one from `secrets` above.
-existingSecret: ""
+# -- Optional pre-created application Secret. It must contain every key emitted
+#    by templates/secret-app.yaml: independent JWT, Better Auth, audit HMAC,
+#    credential encryption, internal auth, proxy attestation and Provisioner
+#    control keys. Missing keys fail closed at Pod startup.
+existingAppSecret: ""
 
 # -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
 ingress:
@@ -237,55 +198,22 @@ ingress:
     secretName: ""
     # hosts: []   # defaults to [ingress.host]
 
-# -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
+# -- ActWeave config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 31
+  config_version: 35
   log_level: info
+  logging:
+    enhance:
+      enabled: false
+      format: text
 
-  models: []
-  # Example (uncomment & set the matching secret in `secrets`):
-  #   - name: gpt-4
-  #     display_name: GPT-4
-  #     use: langchain_openai:ChatOpenAI
-  #     model: gpt-4
-  #     api_key: $OPENAI_API_KEY
-  #     request_timeout: 600.0
-
-  sandbox:
-    use: deerflow.community.aio_sandbox:AioSandboxProvider
-    provisioner_url: http://provisioner:8002
-    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-    port: 8080
-    replicas: 3
-
-  database:
-    # PostgreSQL is the default backend (bundled StatefulSet, or external).
-    # DATABASE_URL is injected from the postgres Secret; $DATABASE_URL is
-    # resolved by the harness before the config is instantiated.
-    backend: postgres
-    postgres_url: $DATABASE_URL
-    pool_recycle: 300
-    command_timeout: 30
-
-  # The LangGraph Store (cross-thread memory + thread list) reads this legacy
-  # `checkpointer:` section — it does NOT fall back to `database:` the way the
-  # checkpointer does. Point it at the same postgres so the Store is shared
-  # across gateway pods (required for multi-replica operation).
-  checkpointer:
-    type: postgres
-    connection_string: $DATABASE_URL
-
-  # Stream bridge: `redis` (default) stores per-run SSE events in Redis Streams
-  # so live run events reach a client on any gateway pod (cross-pod SSE delivery
-  # + reconnect replay, PR #3191). The URL is read from the
-  # DEER_FLOW_STREAM_BRIDGE_REDIS_URL env var injected from the redis Secret.
-  # Set `type: memory` (and disable the redis chart) for single-pod-only mode.
-  stream_bridge:
-    type: redis
-
-  memory:
-    storage_path: memory.json
+  auth:
+    trusted_proxies:
+      - 127.0.0.1/32
+      - ::1/128
+    local:
+      allow_insecure_persistent_cookie: false
 
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash
@@ -336,6 +264,66 @@ config: |
       group: bash
       use: deerflow.sandbox.tools:bash_tool
 
-# -- DeerFlow extensions_config.json content (MCP servers + skill state).
-extensionsConfig: |
-  {"mcpServers":{},"skills":{}}
+  mcp_security:
+    project_remote_allowed_networks:
+      - 127.0.0.0/8
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - ::1/128
+      - fc00::/7
+    require_egress_proxy: false
+    egress_proxy_url: null
+    discovery_timeout_seconds: 15
+    tool_call_timeout_seconds: 60
+
+  tool_output:
+    storage_subdir: .tool-results
+  uploads:
+    pdf_converter: auto
+
+  sandbox:
+    use: deerflow.community.aio_sandbox:AioSandboxProvider
+    provisioner_url: http://provisioner:8002
+    provisioner_api_key: $PROVISIONER_API_KEY
+    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+    port: 8080
+    replicas: 3
+    allow_host_bash: false
+    bash_output_max_chars: 20000
+    read_file_output_max_chars: 50000
+    ls_output_max_chars: 20000
+    bash_command_timeout: 600
+
+  skills:
+    container_path: /mnt/skills
+  summarization:
+    summary_prompt: null
+
+  database:
+    # PostgreSQL is required and must be initialized explicitly before runtime.
+    url: $DATABASE_URL
+    pool_size: 5
+    max_overflow: 10
+    pool_timeout_seconds: 30
+    statement_timeout_seconds: 30
+    checkpoint_channel_mode: full
+    checkpoint_delta:
+      snapshot_frequency: 10
+
+  # scheduler.enabled is projected from the top-level Helm value so the
+  # Deployment and process cannot disagree.
+  scheduler:
+    enabled: false
+    poll_interval_seconds: 5
+    max_concurrent_runs: 3
+    min_once_delay_seconds: 60
+  worker:
+    enabled: true
+    poll_interval_seconds: 0.5
+    lease_seconds: 90
+    heartbeat_seconds: 20
+    max_concurrent_jobs: 4
+    shutdown_grace_seconds: 30
+    retry_initial_seconds: 2
+    retry_max_seconds: 300

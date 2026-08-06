@@ -131,16 +131,14 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
     """Render structured metadata for a list of matched skills."""
     blocks: list[str] = []
     for s in skills:
-        mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
+        mutability = "[run exact, read-only]" if s.runtime_read_only else "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
         tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
         location = s.get_container_file_path(container_base_path)
-        # name/description/allowed-tools come from untrusted ``.skill`` frontmatter;
-        # escape so a value cannot forge a framework tag in the describe_skill output.
         name = html.escape(s.name, quote=False)
         description = html.escape(s.description, quote=False)
         tools = html.escape(tools_line, quote=False)
-        loc = html.escape(location, quote=False)
-        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {loc}")
+        escaped_location = html.escape(location, quote=False)
+        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {escaped_location}")
     return "\n\n".join(blocks)
 
 

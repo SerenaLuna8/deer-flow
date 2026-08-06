@@ -1,232 +1,395 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import Any
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
+from datetime import UTC, datetime
 
-from sqlalchemy import and_, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
-from deerflow.utils.time import coerce_iso
+from deerflow.runtime.private_scope import PrivateResourceScope
 
-TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTaskCreate:
+    task_id: str
+    thread_id: str | None
+    context_mode: str
+    agent_asset_id: uuid.UUID
+    agent_scope: str
+    title: str
+    prompt: str
+    schedule_type: str
+    schedule_spec: dict[str, object]
+    timezone: str
+    next_run_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTaskPatch:
+    title: str | None = None
+    prompt: str | None = None
+    schedule_spec: dict[str, object] | None = None
+    timezone: str | None = None
+    next_run_at: datetime | None = None
+    status: str | None = None
+
+
+_TASK_PATCH_FIELDS = frozenset(field.name for field in fields(ScheduledTaskPatch))
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledTaskRecord:
+    id: str
+    project_id: uuid.UUID
+    owner_user_id: str
+    thread_id: str | None
+    context_mode: str
+    agent_asset_id: uuid.UUID
+    agent_scope: str
+    title: str
+    prompt: str
+    schedule_type: str
+    schedule_spec: dict[str, object]
+    timezone: str
+    status: str
+    overlap_policy: str
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+    last_outcome: str | None
+    last_error_code: str | None
+    run_count: int
+    version: int
+    frozen_at: datetime | None
+    deleted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ScheduledTaskRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._sf = session_factory
+    """Session-bound definition repository with mandatory private scope."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
 
     @staticmethod
-    def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
-        data = row.to_dict()
-        for key in (
-            "created_at",
-            "updated_at",
-            "next_run_at",
-            "last_run_at",
-            "lease_expires_at",
-        ):
-            if data.get(key) is not None:
-                data[key] = coerce_iso(data[key])
-        return data
+    def coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
+        if type(scope) is not PrivateResourceScope:
+            raise TypeError("PrivateResourceScope is required")
+        try:
+            return uuid.UUID(scope.project_id), str(uuid.UUID(scope.owner_user_id))
+        except (TypeError, ValueError):
+            raise TypeError("PrivateResourceScope is invalid") from None
+
+    @classmethod
+    def predicates(cls, scope: PrivateResourceScope):
+        project_id, owner_user_id = cls.coordinates(scope)
+        return (
+            ScheduledTaskRow.project_id == project_id,
+            ScheduledTaskRow.owner_user_id == owner_user_id,
+        )
+
+    @staticmethod
+    def record(row: ScheduledTaskRow) -> ScheduledTaskRecord:
+        return ScheduledTaskRecord(
+            id=row.id,
+            project_id=row.project_id,
+            owner_user_id=row.owner_user_id,
+            thread_id=row.thread_id,
+            context_mode=row.context_mode,
+            agent_asset_id=row.agent_asset_id,
+            agent_scope=row.agent_scope,
+            title=row.title,
+            prompt=row.prompt,
+            schedule_type=row.schedule_type,
+            schedule_spec=dict(row.schedule_spec or {}),
+            timezone=row.timezone,
+            status=row.status,
+            overlap_policy=row.overlap_policy,
+            next_run_at=row.next_run_at,
+            last_run_at=row.last_run_at,
+            last_outcome=row.last_outcome,
+            last_error_code=row.last_error_code,
+            run_count=row.run_count,
+            version=row.version,
+            frozen_at=row.frozen_at,
+            deleted_at=row.deleted_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _validate_page(limit: int, offset: int) -> None:
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
 
     async def create(
         self,
-        *,
-        task_id: str,
-        user_id: str,
-        thread_id: str | None,
-        context_mode: str,
-        assistant_id: str | None,
-        title: str,
-        prompt: str,
-        schedule_type: str,
-        schedule_spec: dict[str, Any],
-        timezone: str,
-        next_run_at: datetime | None,
-    ) -> dict[str, Any]:
+        scope: PrivateResourceScope,
+        request: ScheduledTaskCreate,
+    ) -> ScheduledTaskRecord:
+        project_id, owner_user_id = self.coordinates(scope)
         now = datetime.now(UTC)
         row = ScheduledTaskRow(
-            id=task_id,
-            user_id=user_id,
-            thread_id=thread_id,
-            context_mode=context_mode,
-            assistant_id=assistant_id,
-            title=title,
-            prompt=prompt,
-            schedule_type=schedule_type,
-            schedule_spec=schedule_spec,
-            timezone=timezone,
-            next_run_at=next_run_at,
+            id=request.task_id,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            thread_id=request.thread_id,
+            context_mode=request.context_mode,
+            agent_asset_id=request.agent_asset_id,
+            agent_scope=request.agent_scope,
+            title=request.title,
+            prompt=request.prompt,
+            schedule_type=request.schedule_type,
+            schedule_spec=dict(request.schedule_spec),
+            timezone=request.timezone,
+            status="enabled",
+            overlap_policy="skip",
+            next_run_at=request.next_run_at,
+            run_count=0,
+            version=1,
             created_at=now,
             updated_at=now,
         )
-        async with self._sf() as session:
-            session.add(row)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+        self.session.add(row)
+        await self.session.flush()
+        return self.record(row)
 
-    async def get(self, task_id: str, *, user_id: str) -> dict[str, Any] | None:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return None
-            return self._row_to_dict(row)
+    async def get(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+    ) -> ScheduledTaskRecord | None:
+        row = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRow).where(
+                    ScheduledTaskRow.id == task_id,
+                    ScheduledTaskRow.deleted_at.is_(None),
+                    *self.predicates(scope),
+                )
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
 
-    async def list_by_user(self, user_id: str) -> list[dict[str, Any]]:
-        stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
+    async def lock_active(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+    ) -> ScheduledTaskRecord | None:
+        row = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    ScheduledTaskRow.deleted_at.is_(None),
+                    ScheduledTaskRow.frozen_at.is_(None),
+                    *self.predicates(scope),
+                )
+                .with_for_update(of=ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def lock_for_automation_outcome(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+    ) -> ScheduledTaskRecord | None:
+        """Lock a definition while a durable occurrence outcome is applied.
+
+        Frozen and soft-deleted definitions still own their historical
+        occurrences, so completion settlement must not filter them out.
+        """
+
+        row = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    *self.predicates(scope),
+                )
+                .with_for_update(of=ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def record_automation_outcome(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        *,
+        outcome: str,
+        error_code: str | None,
+        occurred_at: datetime,
+        terminal_status: str | None,
+    ) -> ScheduledTaskRecord | None:
+        """Record one terminal occurrence without consuming the user CAS version."""
+
+        values: dict[str, object] = {
+            "last_run_at": occurred_at,
+            "last_outcome": outcome,
+            "last_error_code": error_code,
+            "run_count": ScheduledTaskRow.run_count + 1,
+            "updated_at": occurred_at,
+        }
+        if terminal_status is not None:
+            values["status"] = terminal_status
+            values["next_run_at"] = None
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    *self.predicates(scope),
+                )
+                .values(**values)
+                .returning(ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def advance_after_reservation(
+        self,
+        scope: PrivateResourceScope,
+        task_id: str,
+        *,
+        expected_next_run_at: datetime,
+        next_run_at: datetime | None,
+        updated_at: datetime,
+    ) -> ScheduledTaskRecord | None:
+        """Advance scheduler authority without changing the user CAS version."""
+
+        row = (
+            await self.session.execute(
+                sa.update(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.id == task_id,
+                    ScheduledTaskRow.status == "enabled",
+                    ScheduledTaskRow.next_run_at == expected_next_run_at,
+                    ScheduledTaskRow.frozen_at.is_(None),
+                    ScheduledTaskRow.deleted_at.is_(None),
+                    *self.predicates(scope),
+                )
+                .values(next_run_at=next_run_at, updated_at=updated_at)
+                .returning(ScheduledTaskRow)
+            )
+        ).scalar_one_or_none()
+        return None if row is None else self.record(row)
+
+    async def list(
+        self,
+        scope: PrivateResourceScope,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[ScheduledTaskRecord, ...]:
+        self._validate_page(limit, offset)
+        rows = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.deleted_at.is_(None),
+                    *self.predicates(scope),
+                )
+                .order_by(
+                    ScheduledTaskRow.created_at.desc(),
+                    ScheduledTaskRow.id.desc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars()
+        return tuple(self.record(row) for row in rows)
+
+    async def list_by_thread(
+        self,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[ScheduledTaskRecord, ...]:
+        self._validate_page(limit, offset)
+        rows = (
+            await self.session.execute(
+                sa.select(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.thread_id == thread_id,
+                    ScheduledTaskRow.deleted_at.is_(None),
+                    *self.predicates(scope),
+                )
+                .order_by(
+                    ScheduledTaskRow.created_at.desc(),
+                    ScheduledTaskRow.id.desc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars()
+        return tuple(self.record(row) for row in rows)
 
     async def update(
         self,
+        scope: PrivateResourceScope,
         task_id: str,
         *,
-        user_id: str,
-        updates: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return None
-            for key, value in updates.items():
-                if hasattr(row, key):
-                    setattr(row, key, value)
-            row.updated_at = datetime.now(UTC)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
-
-    async def delete(self, task_id: str, *, user_id: str) -> bool:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return False
-            await session.delete(row)
-            await session.commit()
-            return True
-
-    async def claim_due_tasks(
-        self,
-        *,
-        now: datetime,
-        lease_owner: str,
-        lease_seconds: int,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        lease_expires_at = now + timedelta(seconds=lease_seconds)
-        stmt = (
-            select(ScheduledTaskRow)
+        expected_version: int,
+        values: Mapping[str, object],
+    ) -> ScheduledTaskRecord | None:
+        if set(values) - _TASK_PATCH_FIELDS:
+            raise ValueError("values contain non-patchable scheduled-task fields")
+        statement = (
+            sa.update(ScheduledTaskRow)
             .where(
-                ScheduledTaskRow.next_run_at.is_not(None),
-                ScheduledTaskRow.next_run_at <= now,
-                or_(
-                    and_(
-                        ScheduledTaskRow.status == "enabled",
-                        or_(
-                            ScheduledTaskRow.lease_expires_at.is_(None),
-                            ScheduledTaskRow.lease_expires_at < now,
-                        ),
-                    ),
-                    # A task stuck in "running" with an expired lease means the
-                    # claiming process died between claim and dispatch; it must
-                    # stay reclaimable or the task is dead forever.
-                    and_(
-                        ScheduledTaskRow.status == "running",
-                        ScheduledTaskRow.lease_expires_at.is_not(None),
-                        ScheduledTaskRow.lease_expires_at < now,
-                    ),
-                ),
+                ScheduledTaskRow.id == task_id,
+                ScheduledTaskRow.version == expected_version,
+                ScheduledTaskRow.deleted_at.is_(None),
+                *self.predicates(scope),
             )
-            .order_by(ScheduledTaskRow.next_run_at.asc(), ScheduledTaskRow.id.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
+            .values(
+                **dict(values),
+                version=ScheduledTaskRow.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(ScheduledTaskRow)
         )
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            rows = list(result.scalars())
-            for row in rows:
-                row.lease_owner = lease_owner
-                row.lease_expires_at = lease_expires_at
-                row.status = "running"
-                row.updated_at = datetime.now(UTC)
-            await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        return None if row is None else self.record(row)
 
-    async def update_after_launch(
+    async def soft_delete(
         self,
+        scope: PrivateResourceScope,
         task_id: str,
         *,
-        status: str,
-        next_run_at: datetime | None,
-        last_run_at: datetime | None,
-        last_run_id: str | None,
-        last_thread_id: str | None,
-        last_error: str | None,
-        increment_run_count: bool,
-        protect_terminal: bool = False,
-    ) -> None:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None:
-                return
-            if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
-                # A fast-failing run can reach handle_run_completion (which
-                # finalizes a `once` task) before this launch-path write
-                # commits; keep the hook's status/error and only record the
-                # launch bookkeeping.
-                pass
-            else:
-                row.status = status
-                row.last_error = last_error
-            row.next_run_at = next_run_at
-            row.last_run_at = last_run_at
-            row.last_run_id = last_run_id
-            row.last_thread_id = last_thread_id
-            if increment_run_count:
-                row.run_count += 1
-            row.lease_owner = None
-            row.lease_expires_at = None
-            row.updated_at = datetime.now(UTC)
-            await session.commit()
-
-    async def list_by_user_and_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRow)
+        expected_version: int,
+        deleted_at: datetime,
+    ) -> bool:
+        result = await self.session.execute(
+            sa.update(ScheduledTaskRow)
             .where(
-                ScheduledTaskRow.user_id == user_id,
-                ScheduledTaskRow.thread_id == thread_id,
+                ScheduledTaskRow.id == task_id,
+                ScheduledTaskRow.version == expected_version,
+                ScheduledTaskRow.deleted_at.is_(None),
+                *self.predicates(scope),
             )
-            .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+            .values(
+                deleted_at=deleted_at,
+                status="paused",
+                next_run_at=None,
+                version=ScheduledTaskRow.version + 1,
+                updated_at=deleted_at,
+            )
         )
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
+        return result.rowcount == 1
 
-    async def cancel_stuck_once_tasks(self, *, error: str) -> int:
-        """Reconcile ``once`` tasks orphaned in ``running`` by a process crash.
 
-        A launched ``once`` task stays ``running`` until the in-process
-        completion hook moves it to a terminal status; its lease was cleared at
-        launch, so the claim query's expired-lease reclaim branch never sees
-        it. After a crash the hook is gone and the task would be stuck forever.
-        Tasks still holding a lease are left alone — they were claimed but not
-        launched, and expired-lease reclaim recovers them safely.
-        """
-        stmt = select(ScheduledTaskRow).where(
-            ScheduledTaskRow.schedule_type == "once",
-            ScheduledTaskRow.status == "running",
-            ScheduledTaskRow.lease_expires_at.is_(None),
-        )
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            rows = list(result.scalars())
-            now = datetime.now(UTC)
-            for row in rows:
-                row.status = "cancelled"
-                row.last_error = error
-                row.updated_at = now
-            await session.commit()
-            return len(rows)
+__all__ = [
+    "ScheduledTaskCreate",
+    "ScheduledTaskPatch",
+    "ScheduledTaskRecord",
+    "ScheduledTaskRepository",
+]

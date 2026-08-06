@@ -11,15 +11,16 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
-# Resolve config.yaml location: env var > backend/ > repo root
-if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    CONFIG="$DEER_FLOW_CONFIG_PATH"
-elif [ -f "$REPO_ROOT/backend/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/backend/config.yaml"
-elif [ -f "$REPO_ROOT/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/config.yaml"
+# Resolve config.yaml location: explicit environment path > repository root.
+if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
+    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+        exit 1
+    fi
+    CONFIG_DIR="$(cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" && pwd -P)"
+    CONFIG="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
 else
-    CONFIG=""
+    CONFIG="$REPO_ROOT/config.yaml"
 fi
 
 if [ ! -f "$EXAMPLE" ]; then
@@ -27,10 +28,10 @@ if [ ! -f "$EXAMPLE" ]; then
     exit 1
 fi
 
-if [ -z "$CONFIG" ]; then
+if [ ! -f "$CONFIG" ]; then
     echo "No config.yaml found — creating from example..."
     cp "$EXAMPLE" "$REPO_ROOT/config.yaml"
-    echo "OK config.yaml created. Please review and set your API keys."
+    echo "OK config.yaml created. Review the process settings, then configure models and Credentials at /admin/settings/models after startup."
     exit 0
 fi
 
@@ -49,6 +50,7 @@ import sys, shutil, copy, re
 from pathlib import Path
 
 import yaml
+from deerflow.config.app_config import DATABASE_RUNTIME_YAML_PATH_TOMBSTONES
 
 config_path = Path(os.environ['CONFIG_WIN_PATH'])
 example_path = Path(os.environ['EXAMPLE_WIN_PATH'])
@@ -74,6 +76,8 @@ print()
 # Each migration targets a specific version upgrade.
 # 'replacements': list of (old_string, new_string) applied to the raw YAML text.
 #   This handles value changes that a dict merge cannot catch.
+# 'remove_keys': removed top-level application sections to delete from old configs.
+# 'remove_paths': removed nested application fields to delete from old configs.
 
 MIGRATIONS = {
     1: {
@@ -85,6 +89,42 @@ MIGRATIONS = {
             ('src.tools.', 'deerflow.tools.'),
         ],
     },
+    24: {
+        'description': 'Remove the retired database backup and restore configuration',
+        'remove_keys': ['recovery'],
+    },
+    25: {
+        'description': 'Remove configuration fields no longer consumed by the project-first runtime',
+        'remove_keys': ['skill_evolution', 'skill_scan'],
+        'remove_paths': [
+            'uploads.max_files',
+            'uploads.max_file_size',
+            'uploads.max_total_size',
+            'uploads.auto_convert_documents',
+            'scheduler.lease_seconds',
+            'worker.default_max_attempts',
+            'quotas.max_member_limit',
+            'quotas.max_storage_bytes_limit',
+            'quotas.max_concurrent_run_limit',
+            'quotas.max_mcp_calls_daily_limit',
+        ],
+    },
+    32: {
+        'description': 'Reject the unsupported legacy generic authorization provider configuration',
+        'remove_keys': ['authorization'],
+    },
+    33: {
+        'description': 'Move model configuration to PostgreSQL-backed system settings',
+        'remove_keys': ['models'],
+    },
+    34: {
+        'description': 'Move live agent, registration and quota policy leaves to PostgreSQL system settings',
+        'remove_paths': sorted(DATABASE_RUNTIME_YAML_PATH_TOMBSTONES),
+    },
+    35: {
+        'description': 'Replace exact project MCP endpoints with bounded CIDR network policy',
+        'migrate_mcp_endpoint_policy': True,
+    },
     # Future migrations go here:
     # 2: {
     #     'description': '...',
@@ -94,6 +134,9 @@ MIGRATIONS = {
 
 # Apply migrations in order for versions (user_version, example_version]
 migrated = []
+keys_to_remove = []
+paths_to_remove = []
+migrate_mcp_endpoint_policy = False
 for version in range(user_version + 1, example_version + 1):
     migration = MIGRATIONS.get(version)
     if not migration:
@@ -103,14 +146,70 @@ for version in range(user_version + 1, example_version + 1):
         if old in raw_text:
             raw_text = raw_text.replace(old, new)
             migrated.append(f'{old} -> {new}')
+    keys_to_remove.extend(migration.get('remove_keys', []))
+    paths_to_remove.extend(migration.get('remove_paths', []))
+    migrate_mcp_endpoint_policy = migrate_mcp_endpoint_policy or migration.get('migrate_mcp_endpoint_policy', False)
 
 # Re-parse after text migrations
 user = yaml.safe_load(raw_text) or {}
+if migrate_mcp_endpoint_policy:
+    if 'mcp_security' not in user:
+        user['mcp_security'] = {}
+    mcp_security = user['mcp_security']
+    if not isinstance(mcp_security, dict):
+        print('✗ Cannot migrate mcp_security because the existing value is not a mapping.')
+        print('  Configure mcp_security.project_remote_allowed_networks explicitly.')
+        print('  No files were changed.')
+        sys.exit(1)
+    if 'project_remote_allowed_endpoints' in mcp_security:
+        retired_endpoints = mcp_security['project_remote_allowed_endpoints']
+        if retired_endpoints != []:
+            print('✗ Cannot migrate nonempty mcp_security.project_remote_allowed_endpoints to CIDR policy automatically.')
+            print('  Remove the retired endpoint list and configure mcp_security.project_remote_allowed_networks explicitly.')
+            print('  No files were changed.')
+            sys.exit(1)
+        mcp_security.pop('project_remote_allowed_endpoints')
+        migrated.append('mcp_security.project_remote_allowed_endpoints=[] -> project_remote_allowed_networks=[] (deny all)')
+    if 'project_remote_allowed_networks' not in mcp_security:
+        mcp_security['project_remote_allowed_networks'] = []
+        migrated.append('v34 implicit project MCP deny-all -> project_remote_allowed_networks=[]')
+removed = []
+for key in keys_to_remove:
+    if key in user:
+        user.pop(key)
+        removed.append(key)
+
+for field_path in paths_to_remove:
+    parts = field_path.split('.')
+    parent = user
+    ancestors = []
+    for part in parts[:-1]:
+        if not isinstance(parent, dict) or part not in parent:
+            break
+        ancestors.append((parent, part))
+        parent = parent[part]
+    else:
+        key = parts[-1]
+        if isinstance(parent, dict) and key in parent:
+            parent.pop(key)
+            removed.append(field_path)
+            for container, child_key in reversed(ancestors):
+                child = container.get(child_key)
+                if isinstance(child, dict) and not child:
+                    container.pop(child_key)
+                else:
+                    break
 
 if migrated:
     print(f'Applied {len(migrated)} migration(s):')
     for m in migrated:
         print(f'  ~ {m}')
+    print()
+
+if removed:
+    print(f'Removed {len(removed)} retired field(s):')
+    for key in removed:
+        print(f'  - {key}')
     print()
 
 # ── Merge missing fields ─────────────────────────────────────────────────
@@ -146,7 +245,7 @@ if added:
     for a in added:
         print(f'  + {a}')
 
-if not migrated and not added:
+if not migrated and not removed and not added:
     print('No changes needed (version bumped only).')
 
 print()

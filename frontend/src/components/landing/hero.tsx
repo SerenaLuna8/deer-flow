@@ -9,7 +9,7 @@ import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import Galaxy from "@/components/ui/galaxy";
-import { env } from "@/env";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
 const HERO_WORDS = [
@@ -32,7 +32,7 @@ export function Hero({ className }: { className?: string }) {
   return (
     <div
       className={cn(
-        "relative flex size-full flex-col items-center justify-center",
+        "flex size-full flex-col items-center justify-center",
         className,
       )}
     >
@@ -47,7 +47,7 @@ export function Hero({ className }: { className?: string }) {
         />
       </div>
       <FlickeringGrid
-        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        className="absolute inset-0 z-0 translate-y-8 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
         squareSize={4}
         gridGap={4}
         color={"white"}
@@ -56,13 +56,16 @@ export function Hero({ className }: { className?: string }) {
       />
       <div className="container-md relative z-10 mx-auto flex min-h-[92svh] flex-col items-center justify-center px-4 pt-20 pb-14">
         <h1 className="text-center text-5xl leading-tight font-bold break-words md:text-6xl">
-          DeerFlow
+          ActWeave
         </h1>
-        <div className="mt-3 flex w-full max-w-full min-w-0 items-center justify-center gap-x-2 text-center text-2xl font-semibold md:text-4xl">
+        <p className="text-muted-foreground mt-3 text-center text-base tracking-[0.08em] sm:text-lg">
+          Weave intelligence into action.
+        </p>
+        <div className="mt-4 flex w-full max-w-full min-w-0 items-center justify-center gap-x-2 text-center text-2xl font-semibold md:text-4xl">
           <HeroWordRotate words={HERO_WORDS} />
           <span className="whitespace-nowrap">SuperAgent</span>
         </div>
-        {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY && (
+        {isStaticWebsiteOnly() && (
           <a
             href="https://byteplus.com"
             target="_blank"

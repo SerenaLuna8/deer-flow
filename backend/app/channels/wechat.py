@@ -8,7 +8,6 @@ import binascii
 import hashlib
 import json
 import logging
-import math
 import mimetypes
 import secrets
 import tempfile
@@ -26,7 +25,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.instance_identity import persisted_channel_instance_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.private_work.errors import PrivateWorkError
 
 logger = logging.getLogger(__name__)
 
@@ -582,30 +583,13 @@ class WechatChannel(Channel):
 
                 self._update_longpoll_timeout(data)
 
-                # Each message is isolated in its own try/except: one message that
-                # fails to process (e.g. an attachment that fails to decrypt) must
-                # not abort the whole batch and strand every message after it.
-                for raw_message in data.get("msgs", []):
-                    try:
-                        await self._handle_update(raw_message)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        message_id = raw_message.get("message_id") or raw_message.get("msg_id") if isinstance(raw_message, dict) else None
-                        logger.exception(
-                            "[WeChat] failed to handle inbound message message_id=%s; skipping it and continuing with the rest of the batch",
-                            message_id,
-                        )
-
-                # The cursor is advanced only after the whole batch has been
-                # attempted (not before the loop above), so a hard crash mid-batch
-                # leaves it unmoved -- the worst case on restart is re-fetching and
-                # re-processing this batch, not silently skipping past messages
-                # that were never actually handled.
                 next_buf = data.get("get_updates_buf")
                 if isinstance(next_buf, str) and next_buf != self._get_updates_buf:
                     self._get_updates_buf = next_buf
                     await asyncio.to_thread(self._save_state)
+
+                for raw_message in data.get("msgs", []):
+                    await self._handle_update(raw_message)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -645,6 +629,7 @@ class WechatChannel(Channel):
             return
 
         thread_ts = context_token or str(raw_message.get("client_id") or raw_message.get("msg_id") or "").strip() or None
+        provider_delivery_id = str(raw_message.get("message_id") or raw_message.get("msg_id") or "").strip()
 
         if context_token:
             self._context_tokens_by_chat[chat_id] = context_token
@@ -657,6 +642,7 @@ class WechatChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT,
             thread_ts=thread_ts,
+            provider_delivery_id=provider_delivery_id or None,
             files=files,
             metadata={
                 "context_token": context_token,
@@ -679,29 +665,51 @@ class WechatChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, *, chat_id: str, context_token: str, code: str) -> bool:
-        if self._connection_repo is None or not code:
-            return False
-
-        state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
-        if state is None:
-            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+        if not await self._has_instance_authority():
             return True
+        connection_service = self.config.get("connection_service")
+        if (self._connection_repo is None and connection_service is None) or not code:
+            return False
 
         if not chat_id:
             await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
             return True
 
-        await self._connection_repo.upsert_connection(
-            owner_user_id=state["owner_user_id"],
-            provider="wechat",
-            external_account_id=chat_id,
-            workspace_id=chat_id,
-            metadata={
-                "context_token": context_token,
-            },
-            status="connected",
-        )
-        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        metadata = {"context_token": context_token}
+        if connection_service is not None:
+            try:
+                await connection_service.complete_callback(
+                    "wechat",
+                    code,
+                    chat_id,
+                    chat_id,
+                    channel_instance_id=self.channel_instance_id,
+                    metadata=metadata,
+                    status="connected",
+                )
+            except PrivateWorkError:
+                await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+                return True
+        else:
+            instance_id = persisted_channel_instance_id("wechat", self.channel_instance_id)
+            state = await self._connection_repo.consume_oauth_state(
+                provider="wechat",
+                channel_instance_id=instance_id,
+                state=code,
+            )
+            if state is None:
+                await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+                return True
+            await self._connection_repo.upsert_connection(
+                owner_user_id=state["owner_user_id"],
+                provider="wechat",
+                channel_instance_id=instance_id,
+                external_account_id=chat_id,
+                workspace_id=chat_id,
+                metadata=metadata,
+                status="connected",
+            )
+        await self._send_connection_reply(chat_id, context_token, "WeChat connected to ActWeave.")
         return True
 
     async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:
@@ -1082,7 +1090,9 @@ class WechatChannel(Channel):
         if stored_path is None:
             return None
 
-        mime_type = detected_image[1] if detected_image else mimetypes.guess_type(filename)[0] or "image/jpeg"
+        # The fallback filename is always .jpg, so avoid the lazy stdlib
+        # mime-types database initialization (filesystem IO) on the event loop.
+        mime_type = detected_image[1] if detected_image else "image/jpeg"
         return {
             "type": "image",
             "filename": stored_path.name,
@@ -1457,10 +1467,9 @@ class WechatChannel(Channel):
     @staticmethod
     def _coerce_float(value: Any, default: float) -> float:
         try:
-            parsed = float(value)
-        except (OverflowError, TypeError, ValueError):
+            return float(value)
+        except (TypeError, ValueError):
             return default
-        return parsed if math.isfinite(parsed) and parsed > 0 else default
 
     @staticmethod
     def _coerce_int(value: Any, default: int) -> int:

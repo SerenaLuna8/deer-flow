@@ -5,16 +5,16 @@ Messages (frontend display) and execution traces (debugging/audit) go
 through the same interface, distinguished by the ``category`` field.
 
 Implementations:
-- MemoryRunEventStore: in-memory dict (development, tests)
-- DbRunEventStore: SQLAlchemy ORM-backed persistence
-- JsonlRunEventStore: JSONL file persistence for local/debug use
+- DbRunEventStore: PostgreSQL implementation
+- Future: DB-backed store (SQLAlchemy ORM), JSONL file store
 """
 
 from __future__ import annotations
 
 import abc
+from collections.abc import Iterable, Mapping
 
-from deerflow.runtime.user_context import AUTO, _AutoSentinel
+from deerflow.runtime.private_scope import PrivateResourceScope
 
 
 class RunEventStore(abc.ABC):
@@ -25,8 +25,7 @@ class RunEventStore(abc.ABC):
     2. seq is strictly increasing within the same thread
     3. list_messages() only returns category="message" events
     4. list_events() returns all events for the specified run
-    5. Returned dicts contain the required RunEvent envelope fields; backends
-       may add documented fields such as DbRunEventStore.user_id
+    5. Returned dicts match the RunEvent field structure
     """
 
     @abc.abstractmethod
@@ -40,35 +39,21 @@ class RunEventStore(abc.ABC):
         content: str | dict = "",
         metadata: dict | None = None,
         created_at: str | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> dict:
         """Write an event, auto-assign seq, return the complete record."""
 
     @abc.abstractmethod
-    async def put_batch(self, events: list[dict]) -> list[dict]:
+    async def put_batch(
+        self,
+        events: list[dict],
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> list[dict]:
         """Batch-write events. Used by RunJournal flush buffer.
 
         Each dict's keys match put()'s keyword arguments.
         Returns complete records with seq assigned.
-        """
-
-    @abc.abstractmethod
-    async def put_if_absent(
-        self,
-        *,
-        thread_id: str,
-        run_id: str,
-        event_type: str,
-        category: str,
-        content: str | dict = "",
-        metadata: dict | None = None,
-        created_at: str | None = None,
-    ) -> tuple[dict, bool]:
-        """Write one event unless this run already has the same event type.
-
-        The check and write must be serialized with ordinary writers for the
-        thread. Returns ``(record, created)``. This is the durability primitive
-        used by terminal run receipts, whose recovery path may safely retry
-        after a worker crash.
         """
 
     @abc.abstractmethod
@@ -79,7 +64,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
-        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a thread, ordered by seq ascending.
 
@@ -87,9 +72,6 @@ class RunEventStore(abc.ABC):
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
-
-        ``user_id`` may be passed explicitly by request-independent callers;
-        user-scoped backends must apply it according to their isolation model.
         """
 
     @abc.abstractmethod
@@ -102,6 +84,7 @@ class RunEventStore(abc.ABC):
         task_id: str | None = None,
         limit: int = 500,
         after_seq: int | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
@@ -121,6 +104,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        scope: PrivateResourceScope | None = None,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
 
@@ -131,27 +115,76 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def count_messages(self, thread_id: str, *, scope: PrivateResourceScope | None = None) -> int:
+        """Count displayable messages (category=message) in a thread."""
+
     async def get_last_visible_ai_seq_by_run(
         self,
         thread_id: str,
-        run_ids: set[str],
+        run_ids: Iterable[str],
         *,
-        user_id: str | None | _AutoSentinel = AUTO,
+        scope: PrivateResourceScope | None = None,
     ) -> dict[str, int]:
-        """Return each run's last non-middleware AI message sequence.
+        """Resolve each Run's last visible lead-AI sequence.
 
-        ``user_id`` follows the same explicit-caller semantics as
-        :meth:`list_messages`.
+        Stores may override this with a grouped query. The bounded fallback is
+        intentionally based on the public scoped message reader so non-SQL
+        implementations retain the same semantics.
         """
 
-    @abc.abstractmethod
-    async def count_messages(self, thread_id: str) -> int:
-        """Count displayable messages (category=message) in a thread."""
+        result: dict[str, int] = {}
+        for run_id in {value for value in run_ids if isinstance(value, str) and value}:
+            before_seq: int | None = None
+            while True:
+                rows = await self.list_messages_by_run(
+                    thread_id,
+                    run_id,
+                    limit=200,
+                    before_seq=before_seq,
+                    scope=scope,
+                )
+                for row in reversed(rows):
+                    content = row.get("content")
+                    metadata = row.get("metadata")
+                    caller = metadata.get("caller") if isinstance(metadata, Mapping) else None
+                    additional_kwargs = content.get("additional_kwargs") if isinstance(content, Mapping) else None
+                    if (
+                        isinstance(content, Mapping)
+                        and content.get("type") in {"ai", "assistant"}
+                        and not (isinstance(caller, str) and caller.startswith(("middleware:", "subagent:")))
+                        and not (isinstance(additional_kwargs, Mapping) and additional_kwargs.get("hide_from_ui") is True)
+                        and type(row.get("seq")) is int
+                    ):
+                        result[run_id] = row["seq"]
+                        break
+                if run_id in result or len(rows) < 200:
+                    break
+                first_seq = rows[0].get("seq") if rows else None
+                if type(first_seq) is not int or first_seq <= 0:
+                    break
+                before_seq = first_seq
+        return result
 
     @abc.abstractmethod
-    async def delete_by_thread(self, thread_id: str) -> int:
+    async def delete_by_thread(self, thread_id: str, *, scope: PrivateResourceScope | None = None) -> int:
         """Delete all events for a thread. Return the number of deleted events."""
 
     @abc.abstractmethod
-    async def delete_by_run(self, thread_id: str, run_id: str) -> int:
+    async def delete_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        scope: PrivateResourceScope | None = None,
+    ) -> int:
         """Delete all events for a specific run. Return the number of deleted events."""
+
+    async def append_stream_frame(self, *args, **kwargs):
+        """Append one durable SSE frame inside a caller-owned transaction."""
+
+        raise NotImplementedError("durable stream frames require a database event store")
+
+    async def list_stream_frames(self, *args, **kwargs):
+        """Read scoped durable SSE frames after a thread cursor."""
+
+        raise NotImplementedError("durable stream frames require a database event store")

@@ -2,21 +2,35 @@ from __future__ import annotations
 
 import errno
 import logging
+import posixpath
 import re
 import shlex
 import threading
 
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
+from deerflow.community.remote_file_authority import (
+    PRIVATE_GUEST_REQUEST_ENV,
+    PRIVATE_GUEST_SCRIPT,
+    RemotePrivateFileAuthority,
+    decode_guest_response,
+    encode_guest_request,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.sandbox import (
+    Sandbox,
+    SandboxAtomicWriter,
+    SandboxBinaryReader,
+    _validate_extra_env,
+)
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
 
 _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
-# Where DeerFlow's ``/mnt/user-data`` virtual prefix is materialised inside
+# Where ActWeave's ``/mnt/user-data`` virtual prefix is materialised inside
 # the e2b sandbox.  e2b code-interpreter templates default to ``/home/user``
 # as the working directory.
 DEFAULT_E2B_HOME_DIR = "/home/user"
@@ -34,10 +48,10 @@ def _is_sandbox_gone_error(exc: BaseException) -> bool:
 
 
 class E2BSandbox(Sandbox):
-    """DeerFlow Sandbox adapter that delegates to an e2b cloud sandbox.
+    """ActWeave Sandbox adapter that delegates to an e2b cloud sandbox.
 
     Args:
-        id: DeerFlow-side sandbox id (used as cache key in the provider).
+        id: ActWeave-side sandbox id (used as cache key in the provider).
         client: A live ``e2b_code_interpreter.Sandbox`` (sync) instance.
             The caller owns the connection and is responsible for ``kill()``;
             this wrapper only calls ``close()`` on its host-side HTTP client
@@ -53,6 +67,8 @@ class E2BSandbox(Sandbox):
         client: E2BClientSandbox,
         *,
         home_dir: str = DEFAULT_E2B_HOME_DIR,
+        execution_user: str | None = None,
+        read_only_roots: tuple[str, ...] = (),
     ) -> None:
         super().__init__(id)
         self._client = client
@@ -60,6 +76,12 @@ class E2BSandbox(Sandbox):
         self._lock = threading.Lock()
         self._closed = False
         self._dead = False
+        self._execution_user = execution_user
+        self._read_only_roots = tuple(sorted(root.rstrip("/") for root in read_only_roots))
+        self._private_files = RemotePrivateFileAuthority(
+            execute=self._execute_private_guest,
+            resolve_path=self._resolve_path,
+        )
 
     # ── Properties / lifecycle ───────────────────────────────────────────
 
@@ -73,8 +95,8 @@ class E2BSandbox(Sandbox):
 
     @property
     def sandbox_id(self) -> str:
-        """e2b-side sandbox id (different from DeerFlow's ``self.id`` cache key)."""
-        return getattr(self._client, "sandbox_id", None) or self.id
+        """e2b-side sandbox id (different from ActWeave's ``self.id`` cache key)."""
+        return getattr(self._client, "sandbox_id", self.id)
 
     def close(self) -> None:
         with self._lock:
@@ -99,7 +121,7 @@ class E2BSandbox(Sandbox):
                 return
 
     def _resolve_path(self, path: str) -> str:
-        """Map DeerFlow virtual paths into the e2b sandbox filesystem.
+        """Map ActWeave virtual paths into the e2b sandbox filesystem.
 
         ``VIRTUAL_PATH_PREFIX`` (``/mnt/user-data``) is rewritten under
         :attr:`home_dir`, mirroring how ``LocalContainerBackend`` bind-mounts
@@ -117,6 +139,18 @@ class E2BSandbox(Sandbox):
             tail = normalised[len(VIRTUAL_PATH_PREFIX) :].lstrip("/")
             return f"{self._home_dir}/{tail}".rstrip("/") if tail else self._home_dir
         return normalised
+
+    def _reject_read_only_write(self, path: str) -> None:
+        normalized = posixpath.normpath(self._resolve_path(path))
+        for root in self._read_only_roots:
+            resolved_root = posixpath.normpath(self._resolve_path(root))
+            if normalized == resolved_root or normalized.startswith(f"{resolved_root}/"):
+                raise PermissionError(f"Private mount is read-only: {root}")
+
+    def _execution_user_kwargs(self) -> dict[str, str]:
+        if self._execution_user is None:
+            return {}
+        return {"user": self._execution_user}
 
     def execute_command(
         self,
@@ -153,6 +187,9 @@ class E2BSandbox(Sandbox):
                     kwargs["envs"] = env
                 if timeout is not None:
                     kwargs["timeout"] = timeout
+                if self._execution_user is not None:
+                    kwargs["user"] = self._execution_user
+                    command = f"setpriv --no-new-privs -- sh -lc {shlex.quote(command)}"
                 result = client.commands.run(command, **kwargs)
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
@@ -195,7 +232,7 @@ class E2BSandbox(Sandbox):
                 return False
             client = self._client
         try:
-            client.commands.run("true")
+            client.commands.run("true", **self._execution_user_kwargs())
             return True
         except Exception as e:
             if _is_sandbox_gone_error(e):
@@ -205,26 +242,72 @@ class E2BSandbox(Sandbox):
             logger.warning("e2b sandbox ping raised non-fatal error: %s", e)
             return True
 
-    def read_file(
-        self,
-        path: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
-    ) -> str:
+    def read_file(self, path: str) -> str:
         resolved = self._resolve_path(path)
         try:
-            content = self._client.files.read(resolved)
-            if start_line is None and end_line is None:
-                return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
-            text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
-            lines = text.splitlines()
-            start = start_line or 1
-            end = end_line if end_line is not None else len(lines)
-            content = "\n".join(lines[start - 1 : end])
-            return content
+            content = self._client.files.read(
+                resolved,
+                **self._execution_user_kwargs(),
+            )
+            if isinstance(content, bytes):
+                return content.decode("utf-8", errors="replace")
+            return content if content is not None else ""
         except Exception as e:
             logger.error("Failed to read file %s in e2b sandbox: %s", resolved, e)
             return f"Error: {e}"
+
+    def _execute_private_guest(
+        self,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        """Run fixed descriptor-anchored guest code with structured env data."""
+
+        command = f"python3 -c {shlex.quote(PRIVATE_GUEST_SCRIPT)}"
+        encoded = encode_guest_request(request)
+        with self._lock:
+            client = self._client
+            if client is None:
+                raise OSError("Sandbox client has been closed")
+            try:
+                result = client.commands.run(
+                    command,
+                    envs={PRIVATE_GUEST_REQUEST_ENV: encoded},
+                    **self._execution_user_kwargs(),
+                )
+            except Exception as exc:
+                if _is_sandbox_gone_error(exc):
+                    self._dead = True
+                raise OSError("e2b private file helper failed") from exc
+        stdout = getattr(result, "stdout", "") or ""
+        stderr = getattr(result, "stderr", "") or ""
+        exit_code = getattr(result, "exit_code", 0)
+        if exit_code not in (0, None) or (stderr and not stdout):
+            raise OSError("e2b private file helper returned no result")
+        return decode_guest_response(stdout)
+
+    def list_secure_files(self, root: str, *, max_entries: int):
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.list_secure_files(root, max_entries=max_entries)
+
+    def open_regular_reader(self, path: str) -> SandboxBinaryReader:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_regular_reader(path)
+
+    def open_atomic_writer(self, path: str) -> SandboxAtomicWriter:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        return boundary.open_atomic_writer(path)
+
+    def remove_path(self, path: str) -> None:
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        boundary.remove_path(path)
 
     def download_file(self, path: str) -> bytes:
         normalised = path.replace("\\", "/")
@@ -257,10 +340,18 @@ class E2BSandbox(Sandbox):
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
             try:
-                data = client.files.read(resolved, format="stream")
+                data = client.files.read(
+                    resolved,
+                    format="stream",
+                    **self._execution_user_kwargs(),
+                )
             except TypeError:
                 try:
-                    data = client.files.read(resolved, format="bytes")
+                    data = client.files.read(
+                        resolved,
+                        format="bytes",
+                        **self._execution_user_kwargs(),
+                    )
                 except Exception as e:
                     logger.error("Failed to download file %s from e2b sandbox: %s", resolved, e)
                     raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
@@ -328,7 +419,10 @@ class E2BSandbox(Sandbox):
             if client is None:
                 return []
             try:
-                result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
+                result = client.commands.run(
+                    f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500",
+                    **self._execution_user_kwargs(),
+                )
                 output = getattr(result, "stdout", "") or ""
                 return [line.strip() for line in output.splitlines() if line.strip()]
             except Exception as e:
@@ -337,6 +431,7 @@ class E2BSandbox(Sandbox):
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)
+        self._reject_read_only_write(path)
         with self._lock:
             client = self._client
             if client is None:
@@ -345,19 +440,30 @@ class E2BSandbox(Sandbox):
                 if append:
                     existing = ""
                     try:
-                        existing = client.files.read(resolved) or ""
+                        existing = (
+                            client.files.read(
+                                resolved,
+                                **self._execution_user_kwargs(),
+                            )
+                            or ""
+                        )
                         if isinstance(existing, bytes):
                             existing = existing.decode("utf-8", errors="replace")
                     except Exception:
                         existing = ""
                     content = (existing or "") + content
-                client.files.write(resolved, content)
+                client.files.write(
+                    resolved,
+                    content,
+                    **self._execution_user_kwargs(),
+                )
             except Exception as e:
                 logger.error("Failed to write file %s in e2b sandbox: %s", resolved, e)
                 raise
 
     def update_file(self, path: str, content: bytes) -> None:
         resolved = self._resolve_path(path)
+        self._reject_read_only_write(path)
         with self._lock:
             client = self._client
             if client is None:
@@ -365,7 +471,11 @@ class E2BSandbox(Sandbox):
             try:
                 # e2b's ``files.write`` accepts either ``str`` or ``bytes`` —
                 # passing bytes preserves binary content losslessly.
-                client.files.write(resolved, content)
+                client.files.write(
+                    resolved,
+                    content,
+                    **self._execution_user_kwargs(),
+                )
             except Exception as e:
                 logger.error("Failed to update file %s in e2b sandbox: %s", resolved, e)
                 raise
@@ -387,7 +497,10 @@ class E2BSandbox(Sandbox):
             try:
                 hard_limit = max(max_results * 4, max_results + 50)
                 cmd = f"find {shlex.quote(resolved)} \\( " + " -o ".join(f"-type {t}" for t in types.split(",")) + f" \\) -print 2>/dev/null | head -{hard_limit}"
-                result = client.commands.run(cmd)
+                result = client.commands.run(
+                    cmd,
+                    **self._execution_user_kwargs(),
+                )
                 output = getattr(result, "stdout", "") or ""
             except Exception as e:
                 logger.error("Failed to glob in e2b sandbox: %s", e)
@@ -438,13 +551,6 @@ class E2BSandbox(Sandbox):
         else:
             flags.append("-E")
         if glob is not None:
-            # ``grep --include`` only matches by basename, at any depth -- it
-            # cannot express a directory-scoping prefix like ``src/`` in
-            # ``src/*.js``. Pass just the basename portion as a coarse
-            # pre-filter (a superset of the true match set: every file
-            # ``path_matches`` can accept also satisfies this basename
-            # pattern) and enforce the real directory scope below via
-            # ``path_matches``, the same helper ``glob()`` uses.
             include_pattern = glob.split("/")[-1] or glob
             flags.append(f"--include={include_pattern}")
 
@@ -459,7 +565,10 @@ class E2BSandbox(Sandbox):
             if client is None:
                 return [], False
             try:
-                result = client.commands.run(cmd)
+                result = client.commands.run(
+                    cmd,
+                    **self._execution_user_kwargs(),
+                )
                 output = getattr(result, "stdout", "") or ""
             except Exception as e:
                 logger.error("Failed to grep in e2b sandbox: %s", e)
@@ -467,7 +576,6 @@ class E2BSandbox(Sandbox):
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-
         matches: list[GrepMatch] = []
         truncated = False
         for raw in output.splitlines():
@@ -481,14 +589,14 @@ class E2BSandbox(Sandbox):
                 continue
             if should_ignore_path(file_path):
                 continue
-            if glob is not None:
-                # Restrict to the caller's real directory scope -- the
-                # ``--include`` flag above only pre-filtered by basename.
-                if file_path != root and not file_path.startswith(root_prefix):
-                    continue
-                rel_path = file_path.rsplit("/", 1)[-1] if file_path == root else file_path[len(root) :].lstrip("/")
-                if not path_matches(glob, rel_path):
-                    continue
+            if file_path == root:
+                rel_path = posixpath.basename(file_path)
+            elif file_path.startswith(root_prefix):
+                rel_path = file_path[len(root_prefix) :]
+            else:
+                continue
+            if glob is not None and not path_matches(glob, rel_path):
+                continue
             matches.append(
                 GrepMatch(
                     path=file_path,

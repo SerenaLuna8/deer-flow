@@ -1,3 +1,5 @@
+from importlib import import_module
+
 from .config import SubagentConfig
 from .registry import get_available_subagent_names, get_subagent_config, list_subagents
 
@@ -13,11 +15,11 @@ __all__ = [
 
 def __getattr__(name: str):
     if name in {"SubagentExecutor", "SubagentResult"}:
-        from .executor import SubagentExecutor, SubagentResult
+        executor = import_module("deerflow.subagents.executor")
 
         exports = {
-            "SubagentExecutor": SubagentExecutor,
-            "SubagentResult": SubagentResult,
+            "SubagentExecutor": executor.SubagentExecutor,
+            "SubagentResult": executor.SubagentResult,
         }
         globals().update(exports)
         return exports[name]

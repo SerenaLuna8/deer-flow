@@ -6,16 +6,30 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from deerflow.skills.package_paths import is_eval_fixture_path
-from deerflow.skills.review.models import make_finding, normalize_relative_path
+from deerflow.skills.review.models import (
+    make_finding,
+    normalize_relative_path,
+)
+from deerflow.skills.review.package_paths import is_eval_fixture_path
 
-_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_MARKDOWN_LINK_RE = re.compile(r'!?\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)')
 _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
-_PATH_TOKEN_RE = re.compile(r"(?<![\w./-])(?:references|scripts|templates|assets|evals)/[A-Za-z0-9._~/%+-]+")
-_RESOURCE_DIRS = {"references", "scripts", "templates", "assets", "evals"}
+_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w./-])(?:references|scripts|templates|assets|evals)"
+    r"/[A-Za-z0-9._~/%+-]+"
+)
+_RESOURCE_DIRS = {
+    "references",
+    "scripts",
+    "templates",
+    "assets",
+    "evals",
+}
 
 
-def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def build_resource_graph(
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     files = {str(entry["path"]): entry for entry in snapshot.get("files", [])}
     nodes = [{"path": path, "kind": files[path].get("kind", "unknown")} for path in sorted(files)]
     edges: set[tuple[str, str]] = set()
@@ -23,12 +37,9 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
     escaping: set[tuple[str, str]] = set()
 
     for path, entry in files.items():
-        if is_eval_fixture_path(path):
+        if is_eval_fixture_path(path) or entry.get("kind") != "text":
             continue
-        if entry.get("kind") != "text":
-            continue
-        content = str(entry.get("content") or "")
-        for raw_ref in _extract_references(content):
+        for raw_ref in _extract_references(str(entry.get("content") or "")):
             resolved = _resolve_reference(path, raw_ref)
             if resolved is None:
                 continue
@@ -52,7 +63,7 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
                 severity="warning",
                 path=source,
                 message=f"Referenced resource does not exist: {target}",
-                remediation="Add the referenced file, correct the path, or remove the stale reference.",
+                remediation=("Add the referenced file, correct the path, or remove the stale reference."),
                 evidence=target,
             )
         )
@@ -62,8 +73,8 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
                 "resource.escaping-link",
                 severity="warning",
                 path=source,
-                message=f"Reference escapes the package boundary: {raw_ref}",
-                remediation="Keep skill references package-relative and inside the skill directory.",
+                message=(f"Reference escapes the package boundary: {raw_ref}"),
+                remediation=("Keep Skill references package-relative and inside the Skill directory."),
                 evidence=raw_ref,
             )
         )
@@ -73,29 +84,28 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
                 "resource.unreferenced",
                 severity="warning",
                 path=orphan,
-                message="Resource is not reachable from SKILL.md or another referenced resource.",
-                remediation="Reference the file with read-when guidance or remove it from the package.",
+                message="Resource is not reachable from SKILL.md.",
+                remediation=("Reference the file with read-when guidance or remove it."),
             )
         )
 
-    graph = {
-        "nodes": nodes,
-        "edges": [{"source": source, "target": target} for source, target in sorted(edges)],
-        "orphans": orphans,
-    }
-    return graph, findings
+    return (
+        {
+            "nodes": nodes,
+            "edges": [{"source": source, "target": target} for source, target in sorted(edges)],
+            "orphans": orphans,
+        },
+        findings,
+    )
 
 
 def _extract_references(content: str) -> set[str]:
-    refs: set[str] = set()
-    for match in _MARKDOWN_LINK_RE.finditer(content):
-        refs.add(match.group(1).split("#", 1)[0])
+    refs = {match.group(1).split("#", 1)[0] for match in _MARKDOWN_LINK_RE.finditer(content)}
     for match in _CODE_SPAN_RE.finditer(content):
         token = match.group(1).strip()
         if "/" in token:
             refs.add(token)
-    for match in _PATH_TOKEN_RE.finditer(content):
-        refs.add(match.group(0))
+    refs.update(match.group(0) for match in _PATH_TOKEN_RE.finditer(content))
     return refs
 
 
@@ -106,10 +116,9 @@ def _resolve_reference(source_path: str, raw_ref: str) -> str | None:
     try:
         if ref.startswith("/"):
             return "__ESCAPES__"
-        base = PurePosixPath(source_path).parent
         if "://" in ref:
             return None
-        candidate = (base / ref).as_posix()
+        candidate = (PurePosixPath(source_path).parent / ref).as_posix()
         return normalize_relative_path(candidate)
     except ValueError:
         return "__ESCAPES__"

@@ -1,2 +1,6 @@
 export { useLocalSettings, useThreadSettings } from "./hooks";
-export type { LocalSettings } from "./local";
+export {
+  CHAT_CONTENT_WIDTH_CSS_VALUES,
+  CHAT_CONTENT_WIDTH_OPTIONS,
+} from "./local";
+export type { ChatContentWidth, LocalSettings } from "./local";

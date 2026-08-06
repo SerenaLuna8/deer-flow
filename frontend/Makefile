@@ -28,5 +28,5 @@ format:
 	$(PNPM) format:write
 
 build-static:
-	NEXT_CONFIG_BUILD_OUTPUT=standalone SKIP_ENV_VALIDATION=1 NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true $(PNPM) build
-	@if [ -d .next/static ]; then mkdir -p .next/standalone/.next && cp -R .next/static .next/standalone/.next/static; fi
+	BUILD_MODE=static NEXT_CONFIG_BUILD_OUTPUT=standalone SKIP_ENV_VALIDATION=1 $(PNPM) build
+	@if [ -d .next-static/static ]; then mkdir -p .next-static/standalone/.next-static && cp -R .next-static/static .next-static/standalone/.next-static/static; fi

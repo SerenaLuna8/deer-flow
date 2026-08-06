@@ -1,38 +1,46 @@
+GATEWAY_WORKERS ?= 1
+SETUP_ENV_FILE := $(wildcard ../.env)
+RUNTIME_ENV_RUNNER = uv run python scripts/run_runtime.py --
+
 install:
 	uv sync
 
 dev:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+	GATEWAY_WORKERS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
 
 gateway:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	GATEWAY_WORKERS=$(GATEWAY_WORKERS) PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers $(GATEWAY_WORKERS)
+
+worker:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m app.worker.app
+
+scheduler:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 $(RUNTIME_ENV_RUNNER) python -m app.scheduler.app
 
 test:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" tests/ -v
-
-test-live:
-	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s
-
-test-blocking-io:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python tests/support/core_gate_plugin.py tests/ -q
 
 lint:
-	uv run ruff check .
-	uv run ruff format --check .
+	uvx ruff check .
+	uvx ruff format --check .
 
 format:
-	uv run ruff check . --fix && uv run ruff format .
+	uvx ruff check . --fix && uvx ruff format .
+
+setup-db:
+	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py
+
+check-db:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
+
+reconcile-usage:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/reconcile_usage.py $(ARGS)
+
+rotate-credentials:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/rotate_credentials.py $(ARGS)
+
+import-project-skills:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/import_project_skills.py $(ARGS)
 
 detect-blocking-io:
 	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.deer-flow/blocking-io-findings.json
-
-# Generate a new alembic revision by autogenerating the diff against the live
-# ORM models. Usage: make migrate-rev MSG="add foo column to runs"
-# The Gateway runs `alembic upgrade head` automatically at startup via
-# `bootstrap_schema`, so there is intentionally no `migrate` / `migrate-stamp`
-# target -- the single execution path keeps ops mistakes off the table.
-# The script builds a fresh temp SQLite at head, then diffs the live models
-# against it, so a clean checkout does NOT need a pre-existing ./data/deerflow.db.
-migrate-rev:
-	@if [ -z "$(MSG)" ]; then echo 'usage: make migrate-rev MSG="describe the change"'; exit 1; fi
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python scripts/_autogen_revision.py "$(MSG)"

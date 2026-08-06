@@ -10,8 +10,7 @@ change at runtime.
 
 The registry covers two kinds of entries:
 
-- Top-level ``AppConfig`` fields (``database``, ``checkpointer``,
-  ``run_events``, ``stream_bridge``, ``sandbox``, ``log_level``). For
+- Top-level ``AppConfig`` fields (``database``, ``sandbox``, ``log_level``). For
   these, :func:`format_field_description` produces the standardised
   ``"startup-only: ..."`` prefix that the matching Pydantic
   ``Field(description=...)`` carries, so the boundary surfaces in IDE
@@ -43,11 +42,7 @@ STARTUP_ONLY_PREFIX = "startup-only:"
 #: field is restart-required — so an operator changing the value knows
 #: which subsystem to restart.
 STARTUP_ONLY_FIELDS: dict[str, str] = {
-    "database": ("init_engine_from_config() runs once during langgraph_runtime() startup; the SQLAlchemy engine holds the connection pool and is not rebuilt on config.yaml edits."),
-    "checkpointer": ("make_checkpointer() binds the persistent checkpointer once at startup, including SQLite WAL / busy_timeout settings."),
-    "run_events": ("make_run_event_store() picks the memory- vs SQL-backed implementation at startup and is frozen onto app.state.run_events_config to stay paired with the underlying event store."),
-    "agent_storage": ("langgraph_runtime() validates agent_storage.backend against database.backend once at startup, and the db backend's synchronous SQLAlchemy engine is process-cached on first use; switching backend needs a restart."),
-    "stream_bridge": ("make_stream_bridge() constructs the stream-bridge singleton once during startup."),
+    "database": ("The PostgreSQL engine and checkpointer bind database.url and their connection pools once during langgraph_runtime() startup; they are not rebuilt on config.yaml edits."),
     "sandbox": ("get_sandbox_provider() caches the provider singleton (``_default_sandbox_provider``); a different ``sandbox.use`` class path only takes effect on next process start."),
     "log_level": (
         "apply_logging_level() runs only during app.py startup; it sets the deerflow/app logger levels and may lower root handler thresholds so configured messages can propagate. A freshly reloaded AppConfig does not retrigger it."
@@ -57,26 +52,24 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "and TraceMiddleware captures logging.enhance.enabled once at startup so response X-Trace-Id headers, log trace_id fields, and Langfuse "
         "deerflow_trace_id stay coherent. A freshly reloaded AppConfig does not retrigger any of this."
     ),
+    "mcp_security": (
+        "Gateway authoring and Run admission, Scheduler admission, and independent Worker MCP clients capture the CIDR network policy, controlled-egress requirement, and timeout ceilings at process startup; "
+        "all Gateway, Scheduler, and Worker instances must restart together when mcp_security.* changes."
+    ),
     # Not part of the AppConfig Pydantic schema — channel credentials are
     # consumed directly by ``start_channel_service()`` once at lifespan
     # startup and the live channel clients are not rebuilt on
     # config.yaml edits.
     "channels": ("start_channel_service() is invoked once during startup; the live IM channel clients (Feishu, Slack, Telegram, DingTalk) are not rebuilt when channels.* changes."),
     "channel_connections": (
-        "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
+        "The project-connections router caches legacy deployment-provider flags and the Telegram compatibility username on app.state; "
+        "channel_connections.* edits need a Gateway restart. Database-backed project instances reconcile independently from PostgreSQL."
     ),
     "scheduler": (
-        "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
+        "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, "
         "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
     ),
-    "run_ownership": (
-        "RunOwnershipConfig is captured once into RunManager at langgraph_runtime() startup; the lease heartbeat background task is created and "
-        "started there, and heartbeat_enabled / lease_seconds / grace_seconds are not re-read on config.yaml edits."
-    ),
-    "dedupe_storage": (
-        "make_inbound_dedupe_store() resolves the inbound dedupe store once when ChannelService is constructed at startup; the store "
-        "(in-process memory or shared Postgres) is captured onto ChannelManager and is not rebuilt on config.yaml edits."
-    ),
+    "worker": ("The independent Worker process captures polling, leasing, concurrency, shutdown, and retry policy at process startup; live workers are not rebuilt on config.yaml edits."),
 }
 
 

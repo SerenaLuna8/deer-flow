@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.gateway.auth.credential_file import write_initial_credentials
 from app.gateway.auth.password import hash_password
-from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+from app.gateway.auth.repositories.sql import SQLUserRepository
 from deerflow.persistence.user.model import UserRow
 
 
@@ -36,11 +36,7 @@ async def _run(email: str | None) -> int:
     await init_engine_from_config(config.database)
     try:
         sf = get_session_factory()
-        if sf is None:
-            print("Error: persistence engine not available (check config.database).", file=sys.stderr)
-            return 1
-
-        repo = SQLiteUserRepository(sf)
+        repo = SQLUserRepository(sf)
 
         if email:
             user = await repo.get_user_by_email(email)
@@ -49,7 +45,7 @@ async def _run(email: str | None) -> int:
             # expose a "first admin" helper and we do not want to add
             # one just for this CLI.
             async with sf() as session:
-                stmt = select(UserRow).where(UserRow.system_role == "admin").limit(1)
+                stmt = select(UserRow).where(UserRow.system_role == "system_admin").limit(1)
                 row = (await session.execute(stmt)).scalar_one_or_none()
             if row is None:
                 user = None

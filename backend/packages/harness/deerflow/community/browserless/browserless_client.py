@@ -48,26 +48,8 @@ class BrowserlessClient:
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
     ) -> str:
-        """Fetch the rendered HTML of a page using Browserless.
+        """Fetch rendered HTML while preserving the public string contract."""
 
-        Public string contract: this always returns either the rendered HTML or
-        an "Error: ..." string, never a richer result object. Callers that also
-        need the target page's real status (Browserless returns HTTP 200 for the
-        render request itself even when the target page responded with a 4xx/5xx
-        or an anti-bot block page) should use fetch_html_with_status() instead.
-
-        Args:
-            url: The URL to fetch.
-            wait_for_event: Wait for a page event (e.g. "networkidle", "load").
-            wait_for_timeout_ms: Extra wait after page load.
-            wait_for_selector: CSS selector to wait for.
-            wait_for_selector_timeout_ms: Timeout for selector wait.
-            reject_resource_types: Resource types to block (e.g. ["image"]).
-            reject_request_pattern: URL patterns to block.
-
-        Returns:
-            Rendered HTML content, or an "Error: ..." string on failure.
-        """
         result = await self.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
@@ -89,13 +71,7 @@ class BrowserlessClient:
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
     ) -> BrowserlessFetchResult | str:
-        """Fetch the rendered HTML of a page using Browserless, with target status.
-
-        Same request/response handling as fetch_html(), except a successful fetch
-        returns a BrowserlessFetchResult carrying the target page's real status
-        headers instead of a bare string, so a caller can tell a genuine 200 apart
-        from a render-succeeded-but-target-errored (or anti-bot blocked) response.
-        Use fetch_html() instead when only the HTML/error string is needed.
+        """Fetch rendered HTML and expose the target page's real status.
 
         Only sends accepted parameters for the current Browserless API version.
         Sets a default navigation timeout (30s) via query param.
@@ -110,8 +86,7 @@ class BrowserlessClient:
             reject_request_pattern: URL patterns to block.
 
         Returns:
-            Fetch result with the rendered HTML and target-page status headers,
-            or an "Error: ..." string on failure.
+            A status-aware fetch result, or an ``Error: ...`` string.
         """
         payload: dict[str, Any] = {
             "url": url,
@@ -160,8 +135,14 @@ class BrowserlessClient:
 
                 return BrowserlessFetchResult(
                     html=html,
-                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
-                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                    target_status_code=_get_header(
+                        resp.headers,
+                        "X-Response-Code",
+                    ),
+                    target_status=_get_header(
+                        resp.headers,
+                        "X-Response-Status",
+                    ),
                 )
 
         except httpx.TimeoutException:

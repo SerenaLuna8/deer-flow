@@ -1,4 +1,4 @@
-"""Backend↔frontend contract for structured subagent result metadata.
+"""Structured subagent result metadata.
 
 ``task`` tool result text is model-visible display content. Runtime
 consumers read the structured facts carried inside
@@ -15,13 +15,11 @@ consumers read the structured facts carried inside
   backend recorded.
 - ``subagent_result_brief`` / ``subagent_result_sha256`` (optional):
   bounded completed-result metadata plus a digest of the full result.
-- ``subagent_model_name`` (optional): effective DeerFlow model identifier used
-  by this delegated run.
-- ``subagent_token_usage`` (optional): final cumulative ``input_tokens`` /
-  ``output_tokens`` / ``total_tokens`` snapshot when the provider reported it.
+- ``subagent_model_name`` (optional): effective model identifier used by the
+  delegated run.
+- ``subagent_token_usage`` (optional): validated cumulative input/output/total
+  token snapshot returned by the provider.
 
-The shared fixture at ``contracts/subagent_status_contract.json`` pins
-the enum values across Python and TypeScript.
 """
 
 from __future__ import annotations
@@ -53,12 +51,11 @@ SubagentStatusValue = Literal[
     "polling_timed_out",
 ]
 
-#: Enumeration of every value ``subagent_status`` may take. Mirrors the
-#: ``valid_status_values`` array in the shared fixture; the contract test
-#: pins them against each other. Capped runs do NOT get their own status
-#: value (#3875 Phase 2): a cap that still produced output is ``completed``
-#: and a cap with no output is ``failed``, with the reason carried on the
-#: additive ``subagent_stop_reason`` field so old consumers keep working.
+#: Enumeration of every value ``subagent_status`` may take. Capped runs do
+#: NOT get their own status value (#3875 Phase 2): a cap that still produced
+#: output is ``completed`` and a cap with no output is ``failed``, with the
+#: reason carried on the additive ``subagent_stop_reason`` field so old
+#: consumers keep working.
 SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
     "completed",
     "failed",
@@ -172,16 +169,7 @@ def make_subagent_additional_kwargs(
 
 
 def normalize_token_usage(value: Any) -> dict[str, int] | None:
-    """Validate a cumulative token-usage mapping into the contract shape.
-
-    The single shared validator for both metadata surfaces — the terminal
-    ``ToolMessage`` metadata (here) and the persisted ``subagent.step`` /
-    ``subagent.end`` run events (``step_events.py``). Keeping one function
-    prevents the two from drifting (e.g. one later accepting an extra token
-    field the other rejects, silently dropping usage on one path). Requires
-    non-negative ``int`` values for all three keys — ``bool`` is rejected — and
-    returns ``None`` for any non-mapping or malformed input.
-    """
+    """Validate one cumulative token snapshot into the public wire shape."""
     if not isinstance(value, Mapping):
         return None
     normalized: dict[str, int] = {}

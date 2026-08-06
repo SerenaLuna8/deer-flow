@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter, usePathname } from "next/navigation";
 import React, {
   createContext,
@@ -10,8 +11,26 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { fetch as fetchWithAuth } from "@/core/api/fetcher";
+
 import { isStaticWebsiteOnly } from "../static-mode";
 
+import { transitionAccountQueries } from "./account-query-client";
+import { classifyAuthMeResponse, type AuthMeResult } from "./auth-response";
+import {
+  createAuthIdentityCoordinator,
+  type AuthIdentityCoordinator,
+} from "./identity-coordinator";
+import {
+  currentBrowserReturnPath,
+  isPrivateRoutePath,
+} from "./private-return-path";
+import {
+  AUTH_PROBE_TIMEOUT_MS,
+  AUTH_SUBMIT_TIMEOUT_MS,
+  fetchAuth,
+  fetchWithAuthTimeout,
+} from "./request";
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -25,8 +44,8 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   logout: () => Promise<void>;
-  refreshUser: () => Promise<void>;
-  applyUser: (user: User | null) => void;
+  refreshUser: (signal?: AbortSignal) => Promise<AuthMeResult | null>;
+  applyUser: (user: User | null) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -47,9 +66,15 @@ interface AuthProviderProps {
 export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [isLoading, setIsLoading] = useState(false);
+  const queryClient = useQueryClient();
   const router = useRouter();
-  const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
+  const identityCoordinatorRef = React.useRef<AuthIdentityCoordinator | null>(
+    null,
+  );
+  identityCoordinatorRef.current ??=
+    createAuthIdentityCoordinator(setIsLoading);
+  const identityCoordinator = identityCoordinatorRef.current;
 
   const isAuthenticated = user !== null;
 
@@ -58,41 +83,112 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * already fetched it. Equivalent to setUser, exposed with a stable name
    * so consumers don't reach into React internals.
    */
-  const applyUser = useCallback((next: User | null) => {
-    setUser(next);
-  }, []);
+  const userRef = React.useRef<User | null>(initialUser);
+  const applyAtGeneration = useCallback(
+    async (generation: number, next: User | null) => {
+      const previousId = userRef.current?.id ?? null;
+      const nextId = next?.id ?? null;
+      const previousSystemRole = userRef.current?.system_role ?? null;
+      const nextSystemRole = next?.system_role ?? null;
+      return identityCoordinator.commitAtGeneration(
+        generation,
+        () =>
+          transitionAccountQueries(queryClient, previousId, nextId, {
+            previousSystemRole,
+            nextSystemRole,
+          }),
+        () => {
+          userRef.current = next;
+          setUser(next);
+        },
+      );
+    },
+    [identityCoordinator, queryClient],
+  );
+  const applyUser = useCallback(
+    async (next: User | null) => {
+      const generation = identityCoordinator.beginIdentityChange();
+      await applyAtGeneration(generation, next);
+    },
+    [applyAtGeneration, identityCoordinator],
+  );
 
   /**
    * Fetch current user from FastAPI
    * Used when initialUser might be stale (e.g., after tab was inactive)
    */
-  const refreshUser = useCallback(async () => {
-    if (staticMode) return;
-
-    try {
-      setIsLoading(true);
-      const res = await fetch("/api/v1/auth/me", {
-        credentials: "include",
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setUser(data);
-      } else if (res.status === 401) {
-        // Session expired or invalid
-        setUser(null);
-        // Redirect to login if on a protected route
-        if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
-        }
+  const refreshUser = useCallback(
+    async (externalSignal?: AbortSignal) => {
+      if (staticMode) {
+        const currentUser = userRef.current;
+        return currentUser
+          ? ({ type: "authenticated", user: currentUser } as const)
+          : ({ type: "unauthenticated" } as const);
       }
-    } catch (err) {
-      console.error("Failed to refresh user:", err);
-      setUser(null);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [staticMode, pathname, router]);
+
+      const attempt = identityCoordinator.startRefresh();
+      const abortFromCaller = () =>
+        attempt.controller.abort(externalSignal?.reason);
+      if (externalSignal?.aborted) {
+        abortFromCaller();
+      } else {
+        externalSignal?.addEventListener("abort", abortFromCaller, {
+          once: true,
+        });
+      }
+      try {
+        const res = await fetchAuth(
+          "/api/v1/auth/me",
+          {
+            cache: "no-store",
+            signal: attempt.signal,
+          },
+          AUTH_PROBE_TIMEOUT_MS,
+        );
+        if (!identityCoordinator.isCurrent(attempt)) return null;
+
+        const result = await classifyAuthMeResponse(res);
+        if (!identityCoordinator.isCurrent(attempt)) return null;
+        if (result.type === "authenticated") {
+          const applied = await applyAtGeneration(
+            attempt.generation,
+            result.user,
+          );
+          return applied ? result : null;
+        }
+        if (result.type === "unauthenticated") {
+          const applied = await applyAtGeneration(attempt.generation, null);
+          if (
+            applied &&
+            typeof window !== "undefined" &&
+            isPrivateRoutePath(window.location.pathname)
+          ) {
+            router.push(
+              buildLoginUrl(currentBrowserReturnPath(window.location)),
+            );
+          }
+          return applied ? result : null;
+        }
+        console.warn(
+          "[auth] Retaining the current identity after an unavailable /auth/me response.",
+        );
+        return result;
+      } catch (err) {
+        if (!identityCoordinator.isCurrent(attempt) || attempt.signal.aborted) {
+          return null;
+        }
+        console.warn(
+          "[auth] Retaining the current identity after /auth/me failed:",
+          err,
+        );
+        return { type: "unavailable" } as const;
+      } finally {
+        externalSignal?.removeEventListener("abort", abortFromCaller);
+        identityCoordinator.finishRefresh(attempt);
+      }
+    },
+    [staticMode, router, applyAtGeneration, identityCoordinator],
+  );
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -106,7 +202,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * logout used to.
    */
   const logout = useCallback(async () => {
-    // Immediately clear local state to prevent UI flicker
+    identityCoordinator.beginIdentityChange();
+    const previousId = userRef.current?.id ?? null;
+    userRef.current = null;
+    void transitionAccountQueries(queryClient, previousId, null, {
+      force: true,
+    });
     setUser(null);
 
     if (staticMode) {
@@ -116,10 +217,15 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     let logoutFailed = false;
     try {
-      const res = await fetch("/api/v1/auth/logout", {
-        method: "POST",
-        credentials: "include",
-      });
+      const res = await fetchWithAuthTimeout(
+        fetchWithAuth,
+        "/api/v1/auth/logout",
+        {
+          method: "POST",
+          credentials: "include",
+        },
+        AUTH_SUBMIT_TIMEOUT_MS,
+      );
       if (!res.ok) logoutFailed = true;
     } catch (err) {
       console.error("Logout request failed:", err);
@@ -135,7 +241,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
     // Redirect to home page
     router.push("/");
-  }, [staticMode, router]);
+  }, [staticMode, router, queryClient, identityCoordinator]);
+
+  useEffect(() => {
+    identityCoordinator.activate();
+    return () => identityCoordinator.dispose();
+  }, [identityCoordinator]);
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.
@@ -198,7 +309,11 @@ export function useRequireAuth(): AuthContextType {
 
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
-      router.push(buildLoginUrl(pathname || "/workspace"));
+      const returnPath =
+        typeof window === "undefined"
+          ? pathname || "/workspace"
+          : currentBrowserReturnPath(window.location);
+      router.push(buildLoginUrl(returnPath));
     }
   }, [auth.isAuthenticated, auth.isLoading, router, pathname]);
 

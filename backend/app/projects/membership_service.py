@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.private_work.authorization import (
+    AUTHORIZATION_REVOKED_REASON,
+    PrivateRunAuthorizationService,
+)
+from app.private_work.retention import PrivateWorkRetentionService
+from app.private_work.retention_jobs import RetentionJobAdmission
+from app.projects.capabilities import Capability, capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.errors import ProjectMembershipVersionConflict, ProjectNotFound
+from app.projects.membership_models import MembershipView
+from app.projects.membership_repository import MembershipRepository
+from app.projects.models import ProjectRole
+from deerflow.runtime.private_scope import PrivateResourceScope
+
+
+class MembershipQuotaPort(Protocol):
+    async def release_member(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        membership_id: uuid.UUID,
+        activation_generation: int,
+    ) -> None: ...
+
+
+class MembershipAuditPort(Protocol):
+    async def member_role_changed(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        previous_role: ProjectRole,
+        role: ProjectRole,
+    ) -> None: ...
+
+    async def member_ended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        status: str,
+    ) -> None: ...
+
+
+class _NoopMembershipQuota:
+    async def release_member(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        membership_id: uuid.UUID,
+        activation_generation: int,
+    ) -> None:
+        del session, scope, membership_id, activation_generation
+
+
+class _NoopMembershipAudit:
+    async def member_role_changed(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        previous_role: ProjectRole,
+        role: ProjectRole,
+    ) -> None:
+        del session, context, membership_id, previous_role, role
+
+    async def member_ended(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        status: str,
+    ) -> None:
+        del session, context, membership_id, status
+
+
+class MembershipService:
+    def __init__(
+        self,
+        repository: MembershipRepository,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        authorization: object = PrivateRunAuthorizationService,
+        retention: object = PrivateWorkRetentionService,
+        retention_jobs: object = RetentionJobAdmission,
+        quota: MembershipQuotaPort | None = None,
+        audit: MembershipAuditPort | None = None,
+    ):
+        self.repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._authorization = authorization
+        self._retention = retention
+        self._retention_jobs = retention_jobs
+        self._quota = quota or _NoopMembershipQuota()
+        self._audit = audit or _NoopMembershipAudit()
+
+    async def list_members(self, context: ProjectContext) -> tuple[MembershipView, ...]:
+        context.require(Capability.PROJECT_READ)
+        return await self.repository.list_members(context)
+
+    async def change_role(
+        self,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        role: ProjectRole,
+        expected_version: int,
+    ) -> MembershipView:
+        context.require(Capability.PROJECT_MEMBERS_MANAGE)
+        if role is ProjectRole.CHANNEL_GUEST:
+            # Channel guest identities are created and managed only by the
+            # internal group-binding repository.  Public role changes must not
+            # mint or convert one.
+            raise ProjectNotFound()
+        async with self.repository.transaction():
+            project, target = await self.repository.lock_project_and_member(context, membership_id)
+            self._require_version(target.version, expected_version)
+            target_role = self._role(target.role)
+            if target_role is ProjectRole.ADMIN and role is not ProjectRole.ADMIN:
+                await self.repository.require_another_active_admin(project.id, target.id)
+            lost_capabilities = capabilities_for(target_role) - capabilities_for(role)
+            revoked_at = self._clock() if lost_capabilities else None
+            if target_role is not ProjectRole.VIEWER and role is ProjectRole.VIEWER:
+                assert revoked_at is not None
+                await self._retention.restrict_owner_to_viewer(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=target.user_id,
+                    now=revoked_at,
+                )
+            if revoked_at is not None:
+                await self._authorization.mark_revoked(
+                    self.repository.session,
+                    project_id=project.id,
+                    owner_user_id=target.user_id,
+                    reason=AUTHORIZATION_REVOKED_REASON,
+                    now=revoked_at,
+                )
+            result = await self.repository.set_role(project, target, role)
+            if target_role is not role:
+                await self._audit.member_role_changed(
+                    self.repository.session,
+                    context,
+                    target.id,
+                    target_role,
+                    role,
+                )
+        return result
+
+    async def remove(
+        self,
+        context: ProjectContext,
+        membership_id: uuid.UUID,
+        expected_version: int,
+    ) -> MembershipView:
+        context.require(Capability.PROJECT_MEMBERS_MANAGE)
+        async with self.repository.transaction():
+            project, target = await self.repository.lock_project_and_member(context, membership_id)
+            self._require_version(target.version, expected_version)
+            if self._role(target.role) is ProjectRole.ADMIN:
+                await self.repository.require_another_active_admin(project.id, target.id)
+            result = await self._end(context, project, target, status="removed")
+        return result
+
+    async def leave(self, context: ProjectContext, expected_version: int) -> MembershipView:
+        context.require(Capability.PROJECT_READ)
+        async with self.repository.transaction():
+            project, target = await self.repository.lock_project_and_member(context, context.membership_id)
+            self._require_version(target.version, expected_version)
+            if self._role(target.role) is ProjectRole.ADMIN:
+                await self.repository.require_another_active_admin(project.id, target.id)
+            result = await self._end(context, project, target, status="left")
+        return result
+
+    async def _end(self, context: ProjectContext, project, target, *, status: str) -> MembershipView:
+        ended_at = self._clock()
+        retention_until = ended_at + timedelta(days=30)
+        active_version = target.version
+        activation_generation = target.activation_generation
+        await self._retention.freeze_owner(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=target.user_id,
+            now=ended_at,
+        )
+        await self._authorization.mark_revoked(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=target.user_id,
+            reason=AUTHORIZATION_REVOKED_REASON,
+            now=ended_at,
+        )
+        result = await self.repository.end_membership(
+            project,
+            target,
+            status=status,
+            ended_at=ended_at,
+            retention_until=retention_until,
+            ended_by_user_id=context.user_id,
+        )
+        await self._retention_jobs.admit_former_owner(
+            self.repository.session,
+            project_id=project.id,
+            owner_user_id=target.user_id,
+            membership_id=target.id,
+            activation_generation=activation_generation,
+            retention_until=retention_until,
+        )
+        await self._quota.release_member(
+            self.repository.session,
+            PrivateResourceScope(
+                project_id=str(project.id),
+                owner_user_id=str(target.user_id),
+                membership_version=active_version,
+            ),
+            membership_id=target.id,
+            activation_generation=activation_generation,
+        )
+        await self._audit.member_ended(
+            self.repository.session,
+            context,
+            target.id,
+            status,
+        )
+        return result
+
+    @staticmethod
+    def _require_version(actual: int, expected: int) -> None:
+        if actual != expected:
+            raise ProjectMembershipVersionConflict()
+
+    @staticmethod
+    def _role(value: str | ProjectRole) -> ProjectRole:
+        try:
+            return ProjectRole(value)
+        except ValueError:
+            raise ProjectNotFound() from None

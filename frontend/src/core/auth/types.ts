@@ -2,17 +2,17 @@ import { z } from "zod";
 
 // ── User schema (single source of truth) ──────────────────────────
 
-export const userSchema = z.object({
-  id: z.string(),
-  email: z.string().email(),
-  system_role: z.enum(["admin", "user"]),
-  needs_setup: z.boolean().optional().default(false),
-  oauth_provider: z.string().nullable().optional().default(null),
-});
+export const userSchema = z
+  .object({
+    id: z.string().uuid(),
+    email: z.string().email(),
+    system_role: z.enum(["system_admin", "user"]),
+    needs_setup: z.boolean(),
+    oauth_provider: z.string().nullable(),
+  })
+  .strict();
 
-export type User = Omit<z.infer<typeof userSchema>, "oauth_provider"> & {
-  oauth_provider?: string | null;
-};
+export type User = z.infer<typeof userSchema>;
 
 // ── SSR auth result (tagged union) ────────────────────────────────
 
@@ -43,6 +43,8 @@ const AUTH_ERROR_CODES = [
   "provider_not_found",
   "not_authenticated",
   "system_already_initialized",
+  "rate_limited",
+  "registration_disabled",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];

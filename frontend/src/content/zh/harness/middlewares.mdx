@@ -17,32 +17,27 @@ import { Callout } from "nextra/components";
 
 这种设计使 Agent 核心保持简单稳定，同时允许丰富的可组合行为分层叠加。
 
-<Callout type="info">
-  每个子 Agent 运行各自的 Agent 循环，并拥有自己的中间件链。下方的循环检测、token 预算和摘要压缩防护已镜像到子 Agent 链（#3875）；其余中间件为 Lead Agent 专属（如记忆、标题生成、澄清）。参见[子 Agent → 失控行为防护](/docs/harness/subagents#失控行为防护)。
-</Callout>
-
 ## 链的工作方式
 
 中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
 
 1. 运行时中间件（错误处理、线程数据、上传、悬空工具调用修补）
-2. `DynamicContextMiddleware` — 当前日期和可选记忆上下文
+2. `DynamicContextMiddleware` — 当前日期和 Run 固定的记忆上下文
 3. `SkillActivationMiddleware` — slash skill 激活
 4. `DurableContextMiddleware` — 捕获持久摘要、委托和技能引用状态
 5. `SummarizationMiddleware` — 上下文压缩（如果启用）
 6. `TodoMiddleware` — 任务列表管理（仅计划模式）
 7. `TokenUsageMiddleware` — token 追踪（如果启用）
 8. `TitleMiddleware` — 自动生成线程标题
-9. `MemoryMiddleware` — 跨会话记忆注入和队列
-10. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
-11. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
-12. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-13. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
-14. `LoopDetectionMiddleware` — 打破重复工具调用循环
-15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
-16. 自定义中间件（如有）
-17. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
-18. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
+9. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
+10. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
+11. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
+12. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
+13. `LoopDetectionMiddleware` — 打破重复工具调用循环
+14. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
+15. 自定义中间件（如有）
+16. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
+17. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
 
 顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
 
@@ -62,33 +57,23 @@ import { Callout } from "nextra/components";
 
 Warning 介入会按 thread 和 run 排队，并在下一次模型调用时合并为一条隐藏的 `HumanMessage(name="loop_warning")`，追加到已有工具结果之后。这样不会破坏 provider 对 tool-call/tool-message 配对的校验。Run 开始和结束时会清理过期或未送达的 warning；达到 hard stop 时仍会清空 tool calls 并强制生成最终文本回复。
 
-此中间件同样挂载到子 Agent 链——子 Agent 不允许调用 `task`，因此这里只会触发工具循环启发式判定，退化的子 Agent 循环会被同样地打破。
-
 **配置**：内置，无需用户配置。
 
 ---
 
-### MemoryMiddleware
+### DynamicContextMiddleware
 
-在每次对话开始时读取持久化记忆事实并将其注入到系统提示中。对话结束后，将后台更新排队，以将新信息纳入记忆存储。
+加入当前日期提醒；当私有 Run 启用 Memory 时，通过 Worker 签发的 authority 读取该 Run 冻结的有界 Memory 文档。每个模型边界复用同一份精确快照，并把完整文档作为隐藏、低权限 Human message 注入。这个中间件不整理或更新长期 Memory。
 
-**配置**：参见[记忆系统](/docs/harness/memory)页面和 `config.yaml` 中的 `memory:` 部分。
-
-```yaml
-memory:
-  enabled: true
-  injection_enabled: true
-  max_injection_tokens: 2000
-  debounce_seconds: 30
-```
+长期写入链路独立运行：SNIP 把通过校验的压缩输出归档为待整理历史，Scheduler 或手动请求再准入 durable `memory_dream` Job 交给 Worker。文档、Dream 和版本合同参见[记忆系统](/docs/harness/memory)。
 
 ---
 
 ### SubagentLimitMiddleware
 
-限制 Agent 在单次轮次中可以进行的并行子 Agent 任务调用数量，也限制一次 Lead Agent run 内的子 Agent 委派总数。这防止 Agent 在重复规划 checkpoint 中持续启动无边界批次。
+限制 Agent 在单次轮次中可以进行的并行子 Agent 任务调用数量。这防止 Agent 生成无限数量的并发子 Agent。
 
-**配置**：每次请求配置中的 `subagent_enabled`、`max_concurrent_subagents`，以及可选的 `max_total_subagents`。总量上限默认使用 `config.yaml` 中的 `subagents.max_total_per_run`。
+**配置**：每次请求配置中的 `subagent_enabled` 和 `max_concurrent_subagents`。
 
 ---
 
@@ -143,7 +128,7 @@ token_usage:
 
 当对话变长时，对旧消息进行摘要以减少上下文大小。生成的摘要存入线程状态，并在后续模型调用中作为隐藏的 durable context 数据投影进去，在不把旧消息继续留在活跃 transcript 中的情况下保留含义。
 
-同一个中间件与同一个 `summarization.enabled` 开关也会压缩子 Agent transcript，使一份配置同时覆盖 Lead Agent 与子 Agent 两条链（#3875）。
+摘要压缩只处理当前 Thread Context，不会 flush、排队或更新长期 Memory。
 
 **配置**：`config.yaml` 中的 `summarization:` 部分。详见下方详细配置。
 

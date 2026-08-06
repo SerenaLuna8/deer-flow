@@ -5,17 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from starlette.datastructures import Headers, MutableHeaders
+from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from deerflow.config.app_config import is_trace_correlation_enabled
-from deerflow.trace_context import (
-    TRACE_ID_HEADER,
-    mark_trace_id_from_request_header,
-    normalize_trace_id,
-    request_trace_context,
-    reset_trace_id_from_request_header,
-)
+from deerflow.trace_context import TRACE_ID_HEADER, request_trace_context
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +37,18 @@ class TraceMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = Headers(scope=scope)
-        incoming_trace_id = headers.get(TRACE_ID_HEADER)
-        header_provided = normalize_trace_id(incoming_trace_id) is not None
+        # This public Gateway issues the durable request origin. A caller-owned
+        # header is correlation input, not authority, and must never become the
+        # Run/Job/audit/Langfuse identity or be echoed into logs.
+        with request_trace_context() as trace_id:
 
-        with request_trace_context(incoming_trace_id) as trace_id:
-            header_token = mark_trace_id_from_request_header(from_header=header_provided)
-            try:
+            async def send_with_trace(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    response_headers = MutableHeaders(scope=message)
+                    response_headers[TRACE_ID_HEADER] = trace_id
+                await send(message)
 
-                async def send_with_trace(message: Message) -> None:
-                    if message["type"] == "http.response.start":
-                        response_headers = MutableHeaders(scope=message)
-                        response_headers[TRACE_ID_HEADER] = trace_id
-                    await send(message)
-
-                await self.app(scope, receive, send_with_trace)
-            finally:
-                reset_trace_id_from_request_header(header_token)
+            await self.app(scope, receive, send_with_trace)
 
 
 def resolve_trace_enabled(config: Any) -> bool:

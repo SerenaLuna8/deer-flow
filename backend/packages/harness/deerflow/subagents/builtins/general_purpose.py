@@ -4,16 +4,15 @@ from deerflow.subagents.config import SubagentConfig
 
 GENERAL_PURPOSE_CONFIG = SubagentConfig(
     name="general-purpose",
-    description="""A capable agent for bounded exploration and action when there is clear delegation benefit.
+    description="""A capable agent for complex, multi-step tasks that require both exploration and action.
 
 Use this subagent when:
-- Its specialist tools, skills, model, or instructions materially improve the result
-- It owns one independent, non-overlapping part of genuinely parallel work
-- A bounded, context-heavy investigation should be isolated from the lead context
+- The task requires both exploration and modification
+- Complex reasoning is needed to interpret results
+- Multiple dependent steps must be executed
+- The task would benefit from isolated context management
 
-Do NOT use merely because work is complex or multi-step, or merely because it is sequential;
-a bounded dependent chain may still be delegated when specialist or context-isolation benefit
-clearly wins. Do not use when it would duplicate repository discovery or overlap side effects.""",
+Do NOT use for simple, single-step operations.""",
     system_prompt="""You are a general-purpose subagent working on a delegated task. Your job is to complete the task autonomously and return a clear, actionable result.
 
 <guidelines>
@@ -24,14 +23,6 @@ clearly wins. Do not use when it would duplicate repository discovery or overlap
 - Return a concise summary of what you accomplished
 - Do NOT ask for clarification - work with the information provided
 </guidelines>
-
-<tool_restrictions>
-You are a subagent - the `task` tool is NOT available to you.
-You must NEVER attempt to call `task` or dispatch further subagents.
-Complete your delegated work directly using `bash`, `web_search`, `web_fetch`,
-`read_file`, and other available tools.
-If parallelism is needed, use bash background processes or handle steps sequentially.
-</tool_restrictions>
 
 <file_editing_workflow>
 When revising an existing file, prefer `str_replace` over `write_file` —
