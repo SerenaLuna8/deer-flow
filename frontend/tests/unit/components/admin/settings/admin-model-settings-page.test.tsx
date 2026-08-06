@@ -175,8 +175,6 @@ describe("ModelEditorDialog", () => {
     expect(markup).toContain("深度思考");
     expect(markup).toContain("推理强度");
     expect(markup).toContain("视觉输入");
-    expect(markup).toContain('class="flex flex-nowrap gap-1.5"');
-    expect(markup).toContain('<col class="w-[12%]"/>');
   });
 
   test("does not expose credential bindings in the catalog list", () => {

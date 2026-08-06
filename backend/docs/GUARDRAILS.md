@@ -542,15 +542,11 @@ guardrails:
 
 ```bash
 cd backend
-uv run python -m pytest tests/test_guardrail_middleware.py -v
+uv run python -m pytest tests/test_create_deerflow_agent.py tests/test_run_worker_rollback.py -q
 ```
 
-25 tests covering:
-- AllowlistProvider: allow, deny, both allowlist+denylist, async
-- GuardrailMiddleware: allow passthrough, deny with OAP codes, fail-closed, fail-open, passport forwarding, empty reasons fallback, empty tool name, protocol isinstance check
-- Async paths: awrap_tool_call for allow, deny, fail-closed, fail-open
-- GraphBubbleUp: LangGraph control signals propagate through (not caught)
-- Config: defaults, from_dict, singleton load/reset
+The focused coverage protects middleware composition and server-issued guardrail
+attribution. The full backend gate remains `POSTGRES_TEST_URL=... make test`.
 
 ## Files
 
@@ -568,6 +564,7 @@ packages/harness/deerflow/agents/middlewares/
     tool_error_handling_middleware.py  # Registers GuardrailMiddleware in chain
 
 config.example.yaml          # Three provider options documented
-tests/test_guardrail_middleware.py  # 25 tests
+tests/test_create_deerflow_agent.py  # Middleware composition
+tests/test_run_worker_rollback.py    # Issued attribution boundary
 docs/GUARDRAILS.md           # This file
 ```

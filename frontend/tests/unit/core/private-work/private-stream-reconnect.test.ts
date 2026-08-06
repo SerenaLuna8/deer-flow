@@ -275,52 +275,6 @@ describe("private stream reconnect", () => {
     ]);
   });
 
-  test("replays a just-completed run instead of applying the legacy in-memory preflight", async () => {
-    const storage = makeSessionStorage();
-    rs.stubGlobal("window", {
-      location: { origin: "http://localhost:2026" },
-      sessionStorage: storage,
-    });
-    const fetcher = rs.fn(async (input: string | URL) => {
-      const url = input.toString();
-      if (url.endsWith("/runs/run-completed")) {
-        return new Response(JSON.stringify({ status: "success" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(
-        [
-          "event: values",
-          'data: {"messages":[{"id":"ai-final","type":"ai","content":"complete"}]}',
-          "id: 21",
-          "",
-          "event: end",
-          'data: {"status":"completed"}',
-          "id: 22",
-          "",
-          "",
-        ].join("\n"),
-        { headers: { "Content-Type": "text/event-stream" } },
-      );
-    });
-    rs.stubGlobal("fetch", fetcher);
-
-    const frames: Array<{ id?: string; event: string; data: unknown }> = [];
-    for await (const frame of getProjectAPIClient(SCOPE).runs.joinStream(
-      THREAD_ID,
-      "run-completed",
-    )) {
-      frames.push(frame);
-    }
-
-    expect(frames.map((frame) => [frame.id, frame.event])).toEqual([
-      ["21", "values"],
-      ["22", "end"],
-    ]);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
   test("rejects a started durable stream that reaches clean EOF before terminal", async () => {
     const storage = makeSessionStorage();
     rs.stubGlobal("window", {

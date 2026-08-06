@@ -12,8 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from postgres_utils import RedactedURL, replace_database
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.projects.errors import ProjectBootstrapFailed
+from deerflow.persistence.final_schema_contract import (
+    FINAL_M7_CATALOG_SIGNATURE,
+    read_m7_catalog_signature,
+)
 from scripts import check_postgres, setup_postgres
 
 
@@ -840,6 +845,13 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
     assert result.healthy is True
     assert result.current_revision == result.head_revision
     assert result.missing_tables == ()
+
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            assert await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
+    finally:
+        await engine.dispose()
 
     async with setup_postgres._complete_bootstrap_lock(database_url):
         inspector = await setup_postgres.asyncpg.connect(setup_postgres._asyncpg_url(admin_url))

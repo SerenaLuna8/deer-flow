@@ -1,3 +1,5 @@
+"""Strict platform Memory policy contract."""
+
 from __future__ import annotations
 
 import pytest

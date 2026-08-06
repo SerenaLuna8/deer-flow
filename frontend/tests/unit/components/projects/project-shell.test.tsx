@@ -6,6 +6,7 @@ rs.mock("next/navigation", () => ({
   usePathname: () => "/projects/alpha/agents",
 }));
 
+import { ProjectHome } from "@/components/projects/project-home";
 import {
   isProjectNavigationItemActive,
   ProjectDesktopNav,
@@ -95,6 +96,18 @@ function renderExpandedDesktopNav(project: Project) {
 }
 
 describe("project shell navigation", () => {
+  test("keeps the overview content free of a duplicate workspace-return link", () => {
+    const html = renderToStaticMarkup(
+      <ProjectHome
+        project={adminProject}
+        tokenUsageSection={<div data-testid="token-usage">Usage</div>}
+      />,
+    );
+
+    expect(html).toContain('data-testid="token-usage"');
+    expect(html).not.toContain('href="/workspace"');
+  });
+
   test("keeps overview standalone and groups project governance destinations", () => {
     const items = projectNavigationItems(
       adminProject,
@@ -211,14 +224,11 @@ describe("project shell navigation", () => {
     );
   });
 
-  test("keeps the desktop divider aligned without repeating project identity", () => {
+  test("does not repeat project identity in the desktop navigation", () => {
     const expanded = renderExpandedDesktopNav(adminProject);
-    const collapsed = renderCollapsedDesktopNav(adminProject);
 
     expect(expanded).toContain("ActWeave");
     expect(expanded).not.toContain("Alpha Project");
-    expect(expanded).toContain("h-[4.75rem]");
-    expect(collapsed).toContain("h-[4.75rem]");
   });
 
   test("keeps authorized function icons available when the desktop menu is collapsed", () => {

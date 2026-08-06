@@ -1,6 +1,8 @@
-import { expect, test } from "@rstest/core";
+import { afterEach, expect, rs, test } from "@rstest/core";
 
-import { promotePrivateRunExecutionProfile } from "@/core/api/api-client";
+import { createProjectPrivateClient } from "@/core/api/api-client";
+import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
   collectRunExecutionProfiles,
   RUN_EXECUTION_PROFILE_CONTEXT_KEY,
@@ -10,6 +12,10 @@ import {
   agentModeForRunExecutionProfile,
   buildRunExecutionProfileRequest,
 } from "@/core/threads/agent-mode";
+
+afterEach(() => {
+  rs.unstubAllGlobals();
+});
 
 test("moves execution choices behind the reserved SDK adapter key", () => {
   const profile = {
@@ -41,7 +47,7 @@ test("moves execution choices behind the reserved SDK adapter key", () => {
   });
 });
 
-test("carries requested choices to the top-level request and consumes the effective Run profile", () => {
+test("carries requested choices through the SDK and consumes the effective Run profile", async () => {
   const requested = buildRunExecutionProfileRequest({
     mode: "ultra",
     modeSelectionExplicit: true,
@@ -58,21 +64,36 @@ test("carries requested choices to the top-level request and consumes the effect
     { thread_id: "thread-1" },
     requested,
   );
-  const promoted = promotePrivateRunExecutionProfile(
-    new URL("http://localhost/api/threads/thread-1/runs/stream"),
-    {
-      method: "POST",
-      body: JSON.stringify({ context }),
-    },
+  let requestBody: Record<string, unknown> | undefined;
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(async (_url: string | URL, init?: RequestInit) => {
+      if (typeof init?.body !== "string") {
+        throw new TypeError("expected a serialized JSON request body");
+      }
+      requestBody = JSON.parse(init.body) as Record<string, unknown>;
+      return new Response("", {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }),
   );
-  if (typeof promoted.body !== "string") {
-    throw new TypeError("expected a serialized promoted Run body");
-  }
-  const body = JSON.parse(promoted.body) as {
+
+  const stream = createProjectPrivateClient({
+    apiUrl: "http://localhost:2026/api/projects/project/private-work",
+  }).runs.stream("thread-1", "project-assistant-v1", {
+    input: { messages: [] },
+    context,
+  });
+  await expect(stream.next()).resolves.toMatchObject({ done: true });
+
+  const body = requestBody as {
     execution_profile: typeof requested;
+    context: Record<string, unknown>;
   };
 
   expect(body.execution_profile).toEqual(requested);
+  expect(body.context).toEqual({ thread_id: "thread-1" });
 
   const effectiveProfiles = collectRunExecutionProfiles([
     {
@@ -92,4 +113,13 @@ test("carries requested choices to the top-level request and consumes the effect
     supports_vision: true,
   });
   expect(effective && agentModeForRunExecutionProfile(effective)).toBe("ultra");
+});
+
+test("labels vision as a model capability rather than claiming image input", () => {
+  expect(
+    zhCN.conversation.runExecutionProfile("gpt-5.6-luna", "Pro", true),
+  ).toBe("实际执行：gpt-5.6-luna · Pro · 支持视觉");
+  expect(
+    enUS.conversation.runExecutionProfile("gpt-5.6-luna", "Pro", true),
+  ).toBe("Effective run: gpt-5.6-luna · Pro · vision-capable");
 });

@@ -17,7 +17,7 @@ const project: Project = {
   id: PROJECT_ID,
   slug: "alpha",
   display_name: "Alpha Project",
-  description: "Core project route",
+  description: "Project memory route",
   icon: "folder",
   role: "admin",
   capabilities,

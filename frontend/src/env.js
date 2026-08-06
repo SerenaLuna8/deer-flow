@@ -20,7 +20,6 @@ export const env = createEnv({
    */
   client: {
     NEXT_PUBLIC_BACKEND_BASE_URL: z.string().optional(),
-    NEXT_PUBLIC_LANGGRAPH_BASE_URL: z.string().optional(),
     NEXT_PUBLIC_BUILD_MODE: z
       .enum(["production", "static"])
       .default("production"),
@@ -34,7 +33,6 @@ export const env = createEnv({
     NODE_ENV: process.env.NODE_ENV,
 
     NEXT_PUBLIC_BACKEND_BASE_URL: process.env.NEXT_PUBLIC_BACKEND_BASE_URL,
-    NEXT_PUBLIC_LANGGRAPH_BASE_URL: process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,
     NEXT_PUBLIC_BUILD_MODE: process.env.NEXT_PUBLIC_BUILD_MODE,
     GITHUB_OAUTH_TOKEN: process.env.GITHUB_OAUTH_TOKEN,
   },

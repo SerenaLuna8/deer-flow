@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import {
   clearReconnectRun,
-  createCompatibleClient,
+  createProjectPrivateClient,
 } from "@/core/api/api-client";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
@@ -903,10 +903,8 @@ export function getProjectAPIClient(
       undefined,
       lifecycle,
     );
-    const client = createCompatibleClient({
+    const client = createProjectPrivateClient({
       apiUrl: projectPrivateWorkBaseURL(parsed.projectId),
-      runMetadataStorage: reconnectStorage,
-      durableRunStreams: true,
     });
     entry = Object.assign(lifecycle, {
       client,

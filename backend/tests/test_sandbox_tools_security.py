@@ -5,6 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    _is_trusted_read_only_tool,
+)
 from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
@@ -30,12 +33,22 @@ from deerflow.sandbox.tools import (
     validate_local_tool_path,
     write_file_tool,
 )
+from deerflow.tools.builtins.list_uploaded_files_tool import (
+    list_uploaded_files_tool,
+)
 
 _THREAD_DATA = {
     "workspace_path": "/tmp/deer-flow/threads/t1/user-data/workspace",
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+
+def test_only_canonical_read_only_tools_bypass_the_side_effect_boundary() -> None:
+    assert _is_trusted_read_only_tool(
+        SimpleNamespace(tool=list_uploaded_files_tool),
+    )
+    assert not _is_trusted_read_only_tool(SimpleNamespace(tool=object()))
 
 
 def test_private_local_sandbox_does_not_create_virtual_mnt_directories() -> None:

@@ -136,11 +136,11 @@ backend/
 │   ├── skills/               # immutable admitted Skill parsing/loading
 │   └── subagents/            # delegated Agent execution
 ├── scripts/                  # setup/check/operator CLIs
-└── tests/                    # unit, PostgreSQL, process, blocking-I/O gates
+└── tests/                    # unit, PostgreSQL, and process gates
 ```
 
 The dependency direction is `app.* -> deerflow.*`. Harness code must never import
-`app.*`; `tests/test_harness_boundary.py` enforces this.
+`app.*`. Blocking-I/O detection is the separate `make detect-blocking-io` static gate.
 
 ## Authorization and persistence boundaries
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from app.reliability.workers import WorkerRegistry
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -161,6 +162,28 @@ def _claim(index: int) -> JobClaim:
 
 def _config(**updates) -> WorkerConfig:
     return WorkerConfig().model_copy(update=updates)
+
+
+def test_worker_job_type_contract_accepts_dream_and_rejects_unknown() -> None:
+    WorkerService(
+        None,
+        None,
+        {"memory_dream": object()},
+        WorkerConfig(),
+    )
+    assert WorkerRegistry._capabilities(frozenset({"memory_dream"})) == [
+        "memory_dream",
+    ]
+
+    with pytest.raises(ValueError, match="unsupported job type"):
+        WorkerService(
+            None,
+            None,
+            {"unknown_job": object()},
+            WorkerConfig(),
+        )
+    with pytest.raises(ValueError, match="unsupported job type"):
+        WorkerRegistry._capabilities(frozenset({"unknown_job"}))
 
 
 @pytest.mark.asyncio

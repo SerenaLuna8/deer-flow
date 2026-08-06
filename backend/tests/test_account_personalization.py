@@ -1,3 +1,5 @@
+"""Account-scoped personalization API contracts."""
+
 from __future__ import annotations
 
 import uuid

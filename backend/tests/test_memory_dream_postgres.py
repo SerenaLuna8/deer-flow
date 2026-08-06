@@ -687,7 +687,9 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
         claim = await _claim_dream(
             seed.factory,
             worker_id=worker_id,
-            now=now,
+            # JobRepository stamps availability from the real clock. Advance
+            # the deterministic claim clock past that insertion instant.
+            now=now + timedelta(seconds=1),
         )
         assert claim.job_id == admission.job_id
         async with seed.factory() as session:

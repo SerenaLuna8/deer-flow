@@ -37,5 +37,5 @@ title:
 
 - Middleware：`packages/harness/deerflow/agents/middlewares/title_middleware.py`
 - 配置：`packages/harness/deerflow/config/title_config.py`
-- 单元测试：`tests/test_title_middleware_core_logic.py`、`tests/test_title_generation.py`
-- Project Thread/Run 集成行为：private-work router 与 PostgreSQL 门禁
+- 组合与失败边界：`tests/test_create_deerflow_agent.py`、`tests/test_run_worker_rollback.py`
+- Project Thread/Run 集成行为：Replay E2E、private-work router 与 PostgreSQL 门禁

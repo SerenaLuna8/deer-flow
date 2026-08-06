@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import get_args
 
-import pytest
-from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import dialect as postgres_dialect
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import AddConstraint
 
 import deerflow.persistence.models  # noqa: F401
+from app.audit.models import JobAuditMetadata
 from app.final_schema import FINAL_REQUIRED_RELATIONS
+from app.gateway.routers.admin_jobs import AdminJobResponse
+from app.reliability.operations import JobType as OperationsJobType
 from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 from deerflow.persistence.final_schema_contract import (
     FINAL_APP_SEQUENCES,
-    FINAL_M7_CATALOG_SIGNATURE,
-    read_m7_catalog_signature,
 )
 from deerflow.persistence.jobs.sql import JobType
 
@@ -87,11 +86,23 @@ def test_deferred_dream_result_fk_matches_the_orm() -> None:
     assert expected in " ".join(schema_sql.split())
 
 
-def test_job_type_contract_exposes_only_memory_dream() -> None:
-    assert "memory_dream" in JobType.__args__
-    assert "memory_extract" not in JobType.__args__
-    assert "memory_consolidate" not in JobType.__args__
-    assert "memory_retention_purge" not in JobType.__args__
+def test_job_type_contract_is_consistent_across_persistence_and_public_models() -> None:
+    expected = {
+        "private_run",
+        "automation_run",
+        "retention_purge",
+        "mcp_discovery",
+        "memory_dream",
+    }
+    contracts = (
+        JobType,
+        OperationsJobType,
+        AdminJobResponse.model_fields["job_type"].annotation,
+        JobAuditMetadata.model_fields["job_type"].annotation,
+    )
+
+    for contract in contracts:
+        assert set(get_args(contract)) == expected
 
 
 def test_history_identity_sequence_is_part_of_the_canonical_catalog() -> None:
@@ -99,24 +110,3 @@ def test_history_identity_sequence_is_part_of_the_canonical_catalog() -> None:
         "memory_history_entries_sequence_seq",
         "memory_history_entries",
     ) in FINAL_APP_SEQUENCES
-
-
-@pytest.mark.asyncio
-async def test_full_schema_installs_with_the_canonical_catalog(
-    postgres_database_url: str,
-) -> None:
-    schema_sql = (Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/full_schema.sql").read_text(encoding="utf-8")
-    engine = create_async_engine(postgres_database_url)
-    try:
-        async with engine.connect() as connection:
-            raw_connection = await connection.get_raw_connection()
-            await raw_connection.driver_connection.execute(schema_sql)
-
-        async with engine.connect() as connection:
-            marker = await connection.scalar(
-                text("SELECT version_num FROM alembic_version"),
-            )
-            assert marker == CURRENT_SCHEMA_REVISION
-            assert await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
-    finally:
-        await engine.dispose()

@@ -80,15 +80,6 @@ test.describe("real backend render (replay, no API key)", () => {
     page,
     context,
   }) => {
-    // ultra mode so the context the frontend sends (is_plan_mode + subagent_enabled)
-    // matches the recorded fixture; otherwise the replay input hash would miss.
-    await page.addInitScript(() => {
-      window.localStorage.setItem(
-        "deerflow.local-settings",
-        JSON.stringify({ context: { mode: "ultra" } }),
-      );
-    });
-
     const threadId = await createReplayThread(context, APP, project);
     await page.goto(
       `/projects/${encodeURIComponent(project.slug)}/chats/${threadId}`,

@@ -1,3 +1,5 @@
+"""Scheduler transaction and lane isolation contracts."""
+
 from __future__ import annotations
 
 import asyncio
@@ -80,7 +82,7 @@ class _Dream:
 
 
 @pytest.mark.asyncio
-async def test_pr3_scheduler_keeps_automation_and_dream_in_separate_transactions() -> None:
+async def test_scheduler_keeps_automation_and_dream_in_separate_transactions() -> None:
     stop_event = asyncio.Event()
     factory = _SessionFactory()
     automation = _Automation()

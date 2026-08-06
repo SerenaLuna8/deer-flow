@@ -84,7 +84,7 @@ pnpm test
 | `pnpm format`           | 检查 Prettier 格式             |
 | `pnpm format:write`     | 写入 Prettier 格式             |
 
-前端 API 默认走 Nginx/Next.js 同源代理。只有在独立调试且明确了解跨域和认证影响时，才覆盖 `NEXT_PUBLIC_BACKEND_BASE_URL` 或 `NEXT_PUBLIC_LANGGRAPH_BASE_URL`。
+前端 API 默认走 Nginx/Next.js 同源代理。只有在独立调试且明确了解跨域和认证影响时，才覆盖 `NEXT_PUBLIC_BACKEND_BASE_URL`。
 
 项目会话中的实时文件写入会自动打开右侧文件预览并收起桌面项目菜单；Agent 通过
 `present_files` 明确交付的文件会在对话中显示可下载文件卡片。

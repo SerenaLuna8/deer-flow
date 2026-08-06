@@ -79,8 +79,10 @@ async def test_late_date_injection_keeps_the_current_user_before_existing_run_ou
         "assistant-1",
     ]
     assert isinstance(messages[0], SystemMessage)
+    assert "<current_date>" in str(messages[0].content)
     assert isinstance(messages[1], HumanMessage)
     assert messages[1].content == "研究 Agent 发展史"
+    assert not any(message.additional_kwargs.get("project_memory_loaded") is True for message in messages)
 
 
 @pytest.mark.asyncio

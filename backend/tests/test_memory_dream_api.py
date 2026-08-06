@@ -24,6 +24,13 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamAdmissionRecord,
 )
 from deerflow.runtime.context_compaction import ThreadCompactionResult
+from deerflow.skills.slash import parse_slash_skill_reference
+
+
+def test_dream_command_is_reserved_from_skill_activation() -> None:
+    assert parse_slash_skill_reference("/dream") is None
+    assert parse_slash_skill_reference("/dream now") is None
+    assert parse_slash_skill_reference("/Dream") is None
 
 
 def _context() -> PrivateWorkContext:

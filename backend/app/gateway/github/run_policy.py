@@ -53,8 +53,8 @@ async def inject_github_credentials(msg: InboundMessage, run_context: dict[str, 
         pushing the ``installation_id`` through ``run_context`` and
         looking up a process-local provider in the harness — is
         deliberately deferred: it crosses the harness/app boundary
-        (``tests/test_harness_boundary.py``) and needs a registered
-        token-provider lookup, not a string-vs-closure switch.
+        and needs a registered token-provider lookup, not a
+        string-vs-closure switch.
 
     Minting on the bus-consumer side (not in the webhook route) keeps
     GitHub's 10s delivery timeout safe. Mint failures propagate up to

@@ -1623,8 +1623,8 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
     would do most of the work and then 401 on the final ``git push``.
 
     The token still crosses the harness/app boundary as opaque data — the
-    harness never imports the app-layer minting code, preserving the
-    dependency firewall enforced by ``tests/test_harness_boundary.py``.
+    harness never imports the app-layer minting code, preserving the package
+    dependency firewall.
     """
     context = runtime.context if runtime.context is not None else None
     value = context.get("github_token") if context else None
