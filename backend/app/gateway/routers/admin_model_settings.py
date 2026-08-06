@@ -374,11 +374,7 @@ async def test_admin_model_connection(
             request_id=context.request_id,
         )
     return AdminModelConnectionTestResponse(
-        status=(
-            "succeeded"
-            if await ModelConnectionTester(config).test(model)
-            else "failed"
-        ),
+        status=("succeeded" if await ModelConnectionTester(config).test(model) else "failed"),
         request_id=context.request_id,
     )
 

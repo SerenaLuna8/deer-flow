@@ -350,7 +350,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         async def create(self, **_kwargs):
             return run
 
-        async def update_model_name(self, **_kwargs):
+        async def update_admitted_execution_profile(self, **_kwargs):
             return True
 
         async def get(self, **_kwargs):
@@ -378,7 +378,12 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
     class Models:
         async def admit_model_snapshot(self, _session, *, purpose, **_kwargs):
             events.append(f"model:{purpose}")
-            return SimpleNamespace(logical_name="lead-model")
+            return SimpleNamespace(
+                logical_name="lead-model",
+                supports_thinking=False,
+                supports_reasoning_effort=False,
+                supports_vision=False,
+            )
 
     monkeypatch.setattr(snapshot_module, "AsyncSession", Session)
     monkeypatch.setattr(snapshot_module, "PrivateRunRepository", Runs)

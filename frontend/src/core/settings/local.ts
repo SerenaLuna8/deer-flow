@@ -34,12 +34,18 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
   context: {
     model_name: undefined,
+    model_selection_explicit: false,
     mode: undefined,
+    mode_selection_explicit: false,
   },
 };
 
 export const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
 export const THREAD_MODEL_KEY_PREFIX = "deerflow.thread-model.";
+export const THREAD_MODEL_EXPLICIT_KEY_PREFIX =
+  "deerflow.thread-explicit-model.";
+export const THREAD_MODE_KEY_PREFIX = "deerflow.thread-mode.";
+export const THREAD_MODE_EXPLICIT_KEY_PREFIX = "deerflow.thread-explicit-mode.";
 
 function isBrowser(): boolean {
   return typeof window !== "undefined";
@@ -66,7 +72,9 @@ export interface LocalSettings {
     | "reasoning_effort"
   > & {
     model_name?: string | undefined;
+    model_selection_explicit?: boolean;
     mode: AgentMode | undefined;
+    mode_selection_explicit?: boolean;
   };
 }
 
@@ -86,6 +94,10 @@ export function normalizeLocalSettings(
   normalizedContext.mode = isAgentMode(normalizedContext.mode)
     ? normalizedContext.mode
     : undefined;
+  normalizedContext.model_selection_explicit =
+    normalizedContext.model_selection_explicit === true;
+  normalizedContext.mode_selection_explicit =
+    normalizedContext.mode_selection_explicit === true;
   return {
     ...DEFAULT_LOCAL_SETTINGS,
     ...settings,
@@ -134,11 +146,38 @@ export function saveThreadModelName(
   localStorage.setItem(key, modelName);
 }
 
+function getThreadModelExplicitStorageKey(threadId: string): string {
+  return `${THREAD_MODEL_EXPLICIT_KEY_PREFIX}${threadId}`;
+}
+
+export function getThreadModelSelectionExplicit(threadId: string): boolean {
+  if (!isBrowser()) {
+    return false;
+  }
+  return localStorage.getItem(getThreadModelExplicitStorageKey(threadId)) === "1";
+}
+
+export function saveThreadModelSelectionExplicit(
+  threadId: string,
+  explicit: boolean,
+) {
+  if (!isBrowser()) {
+    return;
+  }
+  const key = getThreadModelExplicitStorageKey(threadId);
+  if (!explicit) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, "1");
+}
+
 export function applyThreadModelOverride(
   settings: LocalSettings,
   threadModelName: string | undefined,
+  threadModelSelectionExplicit = false,
 ): LocalSettings {
-  if (!threadModelName) {
+  if (!threadModelName || !threadModelSelectionExplicit) {
     return settings;
   }
   return {
@@ -146,6 +185,78 @@ export function applyThreadModelOverride(
     context: {
       ...settings.context,
       model_name: threadModelName,
+      model_selection_explicit: threadModelSelectionExplicit,
+    },
+  };
+}
+
+function getThreadModeStorageKey(threadId: string): string {
+  return `${THREAD_MODE_KEY_PREFIX}${threadId}`;
+}
+
+export function getThreadMode(threadId: string): AgentMode | undefined {
+  if (!isBrowser()) {
+    return undefined;
+  }
+  const mode = localStorage.getItem(getThreadModeStorageKey(threadId));
+  return isAgentMode(mode) ? mode : undefined;
+}
+
+export function saveThreadMode(
+  threadId: string,
+  mode: AgentMode | undefined,
+) {
+  if (!isBrowser()) {
+    return;
+  }
+  const key = getThreadModeStorageKey(threadId);
+  if (!mode) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, mode);
+}
+
+function getThreadModeExplicitStorageKey(threadId: string): string {
+  return `${THREAD_MODE_EXPLICIT_KEY_PREFIX}${threadId}`;
+}
+
+export function getThreadModeSelectionExplicit(threadId: string): boolean {
+  if (!isBrowser()) {
+    return false;
+  }
+  return localStorage.getItem(getThreadModeExplicitStorageKey(threadId)) === "1";
+}
+
+export function saveThreadModeSelectionExplicit(
+  threadId: string,
+  explicit: boolean,
+) {
+  if (!isBrowser()) {
+    return;
+  }
+  const key = getThreadModeExplicitStorageKey(threadId);
+  if (!explicit) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, "1");
+}
+
+export function applyThreadModeOverride(
+  settings: LocalSettings,
+  threadMode: AgentMode | undefined,
+  threadModeSelectionExplicit = false,
+): LocalSettings {
+  if (!threadMode || !threadModeSelectionExplicit) {
+    return settings;
+  }
+  return {
+    ...settings,
+    context: {
+      ...settings.context,
+      mode: threadMode,
+      mode_selection_explicit: true,
     },
   };
 }

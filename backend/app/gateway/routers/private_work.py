@@ -58,6 +58,10 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.execution_profile import (
+    RunExecutionProfileUnsupported,
+    effective_run_execution_profile_from_kwargs,
+)
 from app.private_work.feedback_service import (
     PrivateFeedbackRecord,
     PrivateFeedbackService,
@@ -188,6 +192,13 @@ class PrivateThreadStateResponse(StrictPrivateWorkResponse):
     tasks: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PrivateRunExecutionProfileResponse(StrictPrivateWorkResponse):
+    model_name: str
+    thinking_enabled: bool
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
+    supports_vision: bool
+
+
 class PrivateRunResponse(StrictPrivateWorkResponse):
     run_id: str
     thread_id: str
@@ -197,6 +208,7 @@ class PrivateRunResponse(StrictPrivateWorkResponse):
     multitask_strategy: str = "reject"
     error: str | None = None
     model_name: str | None = None
+    execution_profile: PrivateRunExecutionProfileResponse | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -425,6 +437,12 @@ def _timestamp(value: object) -> str:
 def _run_response(record: PrivateRunRecord | RunRecord) -> PrivateRunResponse:
     raw_status = record.status
     status_value = getattr(raw_status, "value", raw_status)
+    try:
+        effective_profile = effective_run_execution_profile_from_kwargs(
+            record.kwargs,
+        )
+    except RunExecutionProfileUnsupported:
+        effective_profile = None
     return PrivateRunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
@@ -434,6 +452,13 @@ def _run_response(record: PrivateRunRecord | RunRecord) -> PrivateRunResponse:
         multitask_strategy=record.multitask_strategy,
         error=record.error,
         model_name=record.model_name,
+        execution_profile=(
+            PrivateRunExecutionProfileResponse(
+                **effective_profile.as_dict(),
+            )
+            if effective_profile is not None
+            else None
+        ),
         created_at=_timestamp(record.created_at),
         updated_at=_timestamp(record.updated_at),
     )

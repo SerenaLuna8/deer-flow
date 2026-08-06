@@ -8,7 +8,6 @@ import {
   CirclePauseIcon,
   CirclePlayIcon,
   DatabaseIcon,
-  KeyRoundIcon,
   Layers3Icon,
   PencilIcon,
   PlusIcon,
@@ -557,21 +556,6 @@ function safeActionError(
   return messages.generic;
 }
 
-function credentialLabel(
-  model: AdminModelItem,
-  credentials: AdminModelCredentialOption[],
-  labels: AdminModelTranslations["card"],
-): string {
-  if (!model.credential_id) return labels.credentialUnbound;
-  const credential = credentials.find(
-    (item) => item.id === model.credential_id,
-  );
-  if (!credential) return labels.credentialUnavailable;
-  return credential.current_version_id === model.credential_version_id
-    ? `${credential.display_name} · v${credential.version}`
-    : `${credential.display_name} · ${labels.credentialHistorical}`;
-}
-
 function CatalogMetric({
   label,
   value,
@@ -653,28 +637,38 @@ function ModelIdentity({
   );
 }
 
-function ModelStatusAndCapabilities({ model }: { model: AdminModelItem }) {
+function ModelStatusBadge({ model }: { model: AdminModelItem }) {
   const labels = useI18n().t.adminModelSettings;
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-      <Badge
-        variant="outline"
+    <Badge
+      variant="outline"
+      className={
+        model.status === "active"
+          ? "border-success/30 bg-success/10"
+          : "bg-muted text-muted-foreground"
+      }
+    >
+      <span
+        aria-hidden
         className={
           model.status === "active"
-            ? "border-success/30 bg-success/10"
-            : "bg-muted text-muted-foreground"
+            ? "bg-success size-1.5 rounded-full"
+            : "bg-muted-foreground/60 size-1.5 rounded-full"
         }
-      >
-        <span
-          aria-hidden
-          className={
-            model.status === "active"
-              ? "bg-success size-1.5 rounded-full"
-              : "bg-muted-foreground/60 size-1.5 rounded-full"
-          }
-        />
-        {model.status === "active" ? labels.card.active : labels.card.suspended}
-      </Badge>
+      />
+      {model.status === "active" ? labels.card.active : labels.card.suspended}
+    </Badge>
+  );
+}
+
+function ModelCapabilities({ model }: { model: AdminModelItem }) {
+  const labels = useI18n().t.adminModelSettings;
+  const hasCapabilities =
+    model.supports_thinking ||
+    model.supports_reasoning_effort ||
+    model.supports_vision;
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {model.supports_thinking ? (
         <Badge variant="outline" className="bg-muted/40">
           {labels.card.thinking}
@@ -689,6 +683,11 @@ function ModelStatusAndCapabilities({ model }: { model: AdminModelItem }) {
         <Badge variant="outline" className="bg-muted/40">
           {labels.card.vision}
         </Badge>
+      ) : null}
+      {!hasCapabilities ? (
+        <span className="text-muted-foreground text-xs">
+          {labels.card.noCapabilities}
+        </span>
       ) : null}
     </div>
   );
@@ -729,7 +728,11 @@ function ModelActions({
   );
 
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div
+      className={
+        compact ? "flex flex-nowrap gap-1.5" : "flex flex-wrap gap-1.5"
+      }
+    >
       <Button
         type="button"
         variant="outline"
@@ -806,14 +809,12 @@ function ModelActions({
 
 function ModelCatalog({
   models,
-  credentials,
   pendingAction,
   onEdit,
   onToggleStatus,
   onSetDefault,
 }: {
   models: AdminModelItem[];
-  credentials: AdminModelCredentialOption[];
   pendingAction: string | null;
   onEdit: (model: AdminModelItem) => void;
   onToggleStatus: (model: AdminModelItem) => void;
@@ -830,13 +831,13 @@ function ModelCatalog({
       >
         <table className="w-full table-fixed border-collapse text-left text-sm">
           <colgroup>
-            <col className="w-[18%]" />
-            <col className="w-[15%]" />
-            <col className="w-[16%]" />
-            <col className="w-[16%]" />
+            <col className="w-[17%]" />
+            <col className="w-[19%]" />
             <col className="w-[8%]" />
-            <col className="w-[16%]" />
+            <col className="w-[19%]" />
             <col className="w-[11%]" />
+            <col className="w-[14%]" />
+            <col className="w-[12%]" />
           </colgroup>
           <thead className="bg-muted/40 text-muted-foreground">
             <tr className="border-border/70 border-b">
@@ -847,7 +848,7 @@ function ModelCatalog({
                 {labels.card.providerModel}
               </th>
               <th className="px-3 py-2.5 text-xs font-medium">
-                {labels.card.credential}
+                {labels.card.status}
               </th>
               <th className="px-3 py-2.5 text-xs font-medium">
                 {labels.card.capabilities}
@@ -865,11 +866,6 @@ function ModelCatalog({
           </thead>
           <tbody className="divide-border/70 divide-y">
             {models.map((model) => {
-              const credential = credentialLabel(
-                model,
-                credentials,
-                labels.card,
-              );
               return (
                 <tr
                   key={model.id}
@@ -888,16 +884,10 @@ function ModelCatalog({
                     </p>
                   </td>
                   <td className="px-3 py-3.5">
-                    <p
-                      className="flex min-w-0 items-center gap-1.5"
-                      title={credential}
-                    >
-                      <KeyRoundIcon aria-hidden className="size-3.5 shrink-0" />
-                      <span className="min-w-0 truncate">{credential}</span>
-                    </p>
+                    <ModelStatusBadge model={model} />
                   </td>
                   <td className="px-3 py-3.5">
-                    <ModelStatusAndCapabilities model={model} />
+                    <ModelCapabilities model={model} />
                   </td>
                   <td className="px-3 py-3.5 text-xs">
                     <p
@@ -944,7 +934,6 @@ function ModelCatalog({
         className="border-border/70 bg-card divide-border/70 divide-y overflow-hidden rounded-xl border lg:hidden"
       >
         {models.map((model) => {
-          const credential = credentialLabel(model, credentials, labels.card);
           return (
             <article
               key={model.id}
@@ -969,19 +958,25 @@ function ModelCatalog({
                     {model.provider_model}
                   </p>
                 </div>
-                <div className="min-w-0">
+              </div>
+              <div className="grid gap-2 text-xs">
+                <div>
                   <span className="text-muted-foreground">
-                    {labels.card.credential}
+                    {labels.card.status}
                   </span>
-                  <p
-                    className="mt-0.5 [overflow-wrap:anywhere]"
-                    title={credential}
-                  >
-                    {credential}
-                  </p>
+                  <div className="mt-0.5">
+                    <ModelStatusBadge model={model} />
+                  </div>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">
+                    {labels.card.capabilities}
+                  </span>
+                  <div className="mt-0.5">
+                    <ModelCapabilities model={model} />
+                  </div>
                 </div>
               </div>
-              <ModelStatusAndCapabilities model={model} />
               <ModelActions
                 model={model}
                 pendingAction={pendingAction}
@@ -1000,7 +995,6 @@ function ModelCatalog({
 
 export function AdminModelCatalogStateView({
   state,
-  credentials,
   pendingAction,
   actionError,
   successMessage,
@@ -1012,7 +1006,6 @@ export function AdminModelCatalogStateView({
   retrying = false,
 }: {
   state: AdminModelCatalogState;
-  credentials: AdminModelCredentialOption[];
   pendingAction: string | null;
   actionError?: string | null;
   successMessage?: string | null;
@@ -1261,7 +1254,6 @@ export function AdminModelCatalogStateView({
           {visibleModels.length > 0 ? (
             <ModelCatalog
               models={visibleModels}
-              credentials={credentials}
               pendingAction={pendingAction}
               onEdit={onEdit}
               onToggleStatus={onToggleStatus}
@@ -2258,7 +2250,6 @@ function AuthorizedAdminModelSettingsPage({
     <>
       <AdminModelCatalogStateView
         state={state}
-        credentials={credentials}
         pendingAction={pendingAction}
         actionError={editor.open ? null : actionError}
         successMessage={successMessage}

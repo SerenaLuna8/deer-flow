@@ -35,6 +35,7 @@ import {
   usePromptInputAttachments,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -61,6 +62,7 @@ import type { Model } from "@/core/models/types";
 import { createProjectThread } from "@/core/private-work/api-client";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { useLocalSettings } from "@/core/settings";
+import { useThreadAgentModelRef } from "@/core/shared-assets";
 import {
   buildParentConversationContext,
   buildReferenceMessageMetadata,
@@ -71,9 +73,15 @@ import {
   type SidecarQueuedValue,
 } from "@/core/sidecar";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
-import { resolveAgentMode, type AgentMode } from "@/core/threads/agent-mode";
+import {
+  resolveAgentExecutionModelSelection,
+  resolveAgentExecutionAvailability,
+  resolveAgentMode,
+  type AgentMode,
+} from "@/core/threads/agent-mode";
 import {
   useDeleteThread,
+  useThreadMetadata,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
@@ -135,7 +143,8 @@ export function SidecarPanel({ className }: { className?: string }) {
   const sidecar = useSidecar();
   const { thread: parentThread } = useParentThread();
   const [localSettings] = useLocalSettings();
-  const { models, tokenUsageEnabled } = useModels();
+  const modelCatalog = useModels();
+  const { models, tokenUsageEnabled } = modelCatalog;
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [creatingThread, setCreatingThread] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -148,18 +157,48 @@ export function SidecarPanel({ className }: { className?: string }) {
   const { data: uploadLimits } = useUploadLimits(
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
   );
-
-  const selectedModel = useMemo(() => {
-    if (models.length === 0) {
-      return undefined;
-    }
-    return (
-      models.find((model) => model.name === sidecar.context.model_name) ??
-      models[0]
-    );
-  }, [models, sidecar.context.model_name]);
+  const agentThreadId = sidecar.sidecarThreadId ?? sidecar.parentThreadId;
+  const agentThreadMetadata = useThreadMetadata(agentThreadId, {
+    privateWork,
+  });
+  const agentModel = useThreadAgentModelRef(agentThreadMetadata.data?.metadata);
+  const agentExecutionAvailability = resolveAgentExecutionAvailability({
+    required: true,
+    agentModelRef: agentModel.modelRef,
+    agentModelLoading:
+      agentThreadMetadata.isLoading ||
+      agentThreadMetadata.isFetching ||
+      agentModel.isLoading,
+    agentModelError: agentThreadMetadata.error ?? agentModel.error,
+    models,
+    modelsLoading: modelCatalog.isLoading || modelCatalog.isFetching,
+    modelsError: modelCatalog.error,
+  });
+  const agentModelBlocked = agentExecutionAvailability !== "ready";
+  const agentModelUnavailable = agentExecutionAvailability === "unavailable";
+  const handleAgentModelRetry = useCallback(() => {
+    void Promise.all([agentModel.refetch(), modelCatalog.refetch()]);
+  }, [agentModel, modelCatalog]);
+  const modelSelection = useMemo(
+    () =>
+      resolveAgentExecutionModelSelection(
+        models,
+        sidecar.context.model_name,
+        agentModel.modelRef,
+        sidecar.context.model_selection_explicit === true,
+      ),
+    [
+      agentModel.modelRef,
+      models,
+      sidecar.context.model_name,
+      sidecar.context.model_selection_explicit,
+    ],
+  );
+  const selectedModel = modelSelection.model;
 
   const supportThinking = selectedModel?.supports_thinking ?? false;
+  const supportReasoningEffort =
+    selectedModel?.supports_reasoning_effort ?? false;
 
   const {
     thread,
@@ -171,10 +210,12 @@ export function SidecarPanel({ className }: { className?: string }) {
     loadMoreHistory,
     historyError,
     retryHistory,
+    runExecutionProfiles,
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
     context: sidecar.context,
+    agentModelRef: agentModel.modelRef,
   });
 
   const referenceCountLabel = useMemo(() => {
@@ -209,6 +250,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     creatingThread ||
     Boolean(queuedSubmit) ||
     isUploading ||
+    agentModelBlocked ||
     hasOpenHumanInputCard ||
     (hasSidecarThread && isHistoryLoading) ||
     isStaticWebsiteOnly();
@@ -217,28 +259,51 @@ export function SidecarPanel({ className }: { className?: string }) {
     if (models.length === 0) {
       return;
     }
+    if (modelSelection.modelSelectionLocked) {
+      setModelDialogOpen(false);
+      return;
+    }
 
-    const currentModel = models.find(
-      (model) => model.name === sidecar.context.model_name,
-    );
-    const fallbackModel = currentModel ?? models[0]!;
+    const currentModel =
+      sidecar.context.model_selection_explicit === true
+        ? models.find(
+            (model) => model.name === sidecar.context.model_name,
+          )
+        : undefined;
+    const fallbackModel = modelSelection.model ?? models[0]!;
     const nextModelName = fallbackModel.name;
     const nextMode = resolveAgentMode(
-      sidecar.context.mode,
+      sidecar.context.mode_selection_explicit === true
+        ? sidecar.context.mode
+        : undefined,
       fallbackModel.supports_thinking ?? false,
+      fallbackModel.supports_reasoning_effort ?? false,
     );
     const modeChanged = sidecar.context.mode !== nextMode;
+    const nextModelSelectionExplicit =
+      currentModel !== undefined &&
+      sidecar.context.model_selection_explicit === true;
 
-    if (sidecar.context.model_name === nextModelName && !modeChanged) {
+    if (
+      sidecar.context.model_name === nextModelName &&
+      !modeChanged &&
+      sidecar.context.model_selection_explicit === nextModelSelectionExplicit
+    ) {
       return;
     }
 
     sidecar.setContext({
       ...sidecar.context,
       model_name: nextModelName,
+      model_selection_explicit: nextModelSelectionExplicit,
       mode: nextMode,
     });
-  }, [models, sidecar]);
+  }, [
+    modelSelection.model,
+    modelSelection.modelSelectionLocked,
+    models,
+    sidecar,
+  ]);
 
   const reportUploadLimitViolations = useCallback(
     (violations: UploadLimitViolation[]) => {
@@ -276,33 +341,45 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const handleModelSelect = useCallback(
     (modelName: string) => {
+      if (modelSelection.modelSelectionLocked) {
+        return;
+      }
       const model = models.find((candidate) => candidate.name === modelName);
       if (!model) {
         return;
       }
       const nextMode = resolveAgentMode(
-        sidecar.context.mode,
+        sidecar.context.mode_selection_explicit === true
+          ? sidecar.context.mode
+          : undefined,
         model.supports_thinking ?? false,
+        model.supports_reasoning_effort ?? false,
       );
       sidecar.setContext({
         ...sidecar.context,
         model_name: modelName,
+        model_selection_explicit: true,
         mode: nextMode,
       });
       setModelDialogOpen(false);
     },
-    [models, sidecar],
+    [modelSelection.modelSelectionLocked, models, sidecar],
   );
 
   const handleModeSelect = useCallback(
     (mode: AgentMode) => {
-      const nextMode = resolveAgentMode(mode, supportThinking);
+      const nextMode = resolveAgentMode(
+        mode,
+        supportThinking,
+        supportReasoningEffort,
+      );
       sidecar.setContext({
         ...sidecar.context,
         mode: nextMode,
+        mode_selection_explicit: true,
       });
     },
-    [sidecar, supportThinking],
+    [sidecar, supportReasoningEffort, supportThinking],
   );
 
   const ensureSidecarThread = useCallback(
@@ -639,12 +716,15 @@ export function SidecarPanel({ className }: { className?: string }) {
             isHistoryLoading={isHistoryLoading}
             historyError={historyError}
             retryHistory={retryHistory}
+            runExecutionProfiles={runExecutionProfiles}
             tokenUsageInlineMode={tokenUsageInlineMode}
             sidecarSurface
             initialScroll="instant"
             resizeScroll="instant"
             onSubmitHumanInput={
-              isStaticWebsiteOnly() ? undefined : handleSubmitHumanInput
+              isStaticWebsiteOnly() || agentModelBlocked
+                ? undefined
+                : handleSubmitHumanInput
             }
           />
         ) : (
@@ -657,6 +737,26 @@ export function SidecarPanel({ className }: { className?: string }) {
       </div>
 
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
+        {agentModelUnavailable && (
+          <Alert
+            variant="destructive"
+            className="border-destructive/30 bg-destructive/5 mb-3"
+            data-testid="sidecar-agent-model-unavailable-alert"
+          >
+            <AlertTitle>{t.conversation.agentModelUnavailableTitle}</AlertTitle>
+            <AlertDescription className="flex items-center justify-between gap-3">
+              <span>{t.conversation.agentModelUnavailableDescription}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={handleAgentModelRetry}
+              >
+                {t.common.retry}
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
         <PromptInputProvider key={sidecar.parentThreadId}>
           <PromptInput
             className="bg-background/85 rounded-2xl backdrop-blur-sm *:data-[slot='input-group']:rounded-2xl"
@@ -692,6 +792,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <SidecarAddAttachmentsButton uploadLimits={uploadLimits} />
                 <SidecarModeMenu
                   context={sidecar.context}
+                  supportReasoningEffort={supportReasoningEffort}
                   supportThinking={supportThinking}
                   onModeSelect={handleModeSelect}
                 />
@@ -703,6 +804,8 @@ export function SidecarPanel({ className }: { className?: string }) {
                   models={models}
                   open={modelDialogOpen}
                   selectedModel={selectedModel}
+                  selectedModelName={modelSelection.modelName}
+                  modelSelectionLocked={modelSelection.modelSelectionLocked}
                   onModelSelect={handleModelSelect}
                   onOpenChange={setModelDialogOpen}
                 />
@@ -807,15 +910,21 @@ function SidecarAddAttachmentsButton({
 
 function SidecarModeMenu({
   context,
+  supportReasoningEffort,
   supportThinking,
   onModeSelect,
 }: {
   context: ThreadStreamOptions["context"];
+  supportReasoningEffort: boolean;
   supportThinking: boolean;
   onModeSelect: (mode: AgentMode) => void;
 }) {
   const { t } = useI18n();
-  const mode = resolveAgentMode(context.mode, supportThinking);
+  const mode = resolveAgentMode(
+    context.mode_selection_explicit === true ? context.mode : undefined,
+    supportThinking,
+    supportReasoningEffort,
+  );
 
   return (
     <PromptInputActionMenu>
@@ -905,64 +1014,68 @@ function SidecarModeMenu({
                   <div className="ml-auto size-4" />
                 )}
               </PromptInputActionMenuItem>
-              <PromptInputActionMenuItem
-                className={cn(
-                  mode === "pro"
-                    ? "text-accent-foreground"
-                    : "text-muted-foreground/65",
-                )}
-                onSelect={() => onModeSelect("pro")}
-              >
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-1 font-bold">
-                    <GraduationCapIcon
-                      className={cn(
-                        "mr-2 size-4",
-                        mode === "pro" && "text-accent-foreground",
-                      )}
-                    />
-                    {t.inputBox.proMode}
-                  </div>
-                  <div className="pl-7 text-xs">
-                    {t.inputBox.proModeDescription}
-                  </div>
-                </div>
-                {mode === "pro" ? (
-                  <CheckIcon className="ml-auto size-4" />
-                ) : (
-                  <div className="ml-auto size-4" />
-                )}
-              </PromptInputActionMenuItem>
-              <PromptInputActionMenuItem
-                className={cn(
-                  mode === "ultra"
-                    ? "text-accent-foreground"
-                    : "text-muted-foreground/65",
-                )}
-                onSelect={() => onModeSelect("ultra")}
-              >
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-1 font-bold">
-                    <RocketIcon
-                      className={cn(
-                        "mr-2 size-4",
-                        mode === "ultra" && "text-[#dabb5e]",
-                      )}
-                    />
-                    <div className={cn(mode === "ultra" && "golden-text")}>
-                      {t.inputBox.ultraMode}
+              {supportReasoningEffort && (
+                <>
+                  <PromptInputActionMenuItem
+                    className={cn(
+                      mode === "pro"
+                        ? "text-accent-foreground"
+                        : "text-muted-foreground/65",
+                    )}
+                    onSelect={() => onModeSelect("pro")}
+                  >
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-1 font-bold">
+                        <GraduationCapIcon
+                          className={cn(
+                            "mr-2 size-4",
+                            mode === "pro" && "text-accent-foreground",
+                          )}
+                        />
+                        {t.inputBox.proMode}
+                      </div>
+                      <div className="pl-7 text-xs">
+                        {t.inputBox.proModeDescription}
+                      </div>
                     </div>
-                  </div>
-                  <div className="pl-7 text-xs">
-                    {t.inputBox.ultraModeDescription}
-                  </div>
-                </div>
-                {mode === "ultra" ? (
-                  <CheckIcon className="ml-auto size-4" />
-                ) : (
-                  <div className="ml-auto size-4" />
-                )}
-              </PromptInputActionMenuItem>
+                    {mode === "pro" ? (
+                      <CheckIcon className="ml-auto size-4" />
+                    ) : (
+                      <div className="ml-auto size-4" />
+                    )}
+                  </PromptInputActionMenuItem>
+                  <PromptInputActionMenuItem
+                    className={cn(
+                      mode === "ultra"
+                        ? "text-accent-foreground"
+                        : "text-muted-foreground/65",
+                    )}
+                    onSelect={() => onModeSelect("ultra")}
+                  >
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-1 font-bold">
+                        <RocketIcon
+                          className={cn(
+                            "mr-2 size-4",
+                            mode === "ultra" && "text-[#dabb5e]",
+                          )}
+                        />
+                        <div className={cn(mode === "ultra" && "golden-text")}>
+                          {t.inputBox.ultraMode}
+                        </div>
+                      </div>
+                      <div className="pl-7 text-xs">
+                        {t.inputBox.ultraModeDescription}
+                      </div>
+                    </div>
+                    {mode === "ultra" ? (
+                      <CheckIcon className="ml-auto size-4" />
+                    ) : (
+                      <div className="ml-auto size-4" />
+                    )}
+                  </PromptInputActionMenuItem>
+                </>
+              )}
             </>
           )}
         </DropdownMenuGroup>
@@ -977,6 +1090,8 @@ function SidecarModelSelector({
   models,
   open,
   selectedModel,
+  selectedModelName,
+  modelSelectionLocked,
   onModelSelect,
   onOpenChange,
 }: {
@@ -985,13 +1100,34 @@ function SidecarModelSelector({
   models: Model[];
   open: boolean;
   selectedModel?: Model;
+  selectedModelName?: string;
+  modelSelectionLocked: boolean;
   onModelSelect: (modelName: string) => void;
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useI18n();
+  const displayName = selectedModel?.display_name ?? selectedModelName;
 
-  if (!selectedModel) {
+  if (!displayName) {
     return null;
+  }
+
+  if (modelSelectionLocked) {
+    return (
+      <Tooltip content={t.inputBox.agentModelLocked}>
+        <PromptInputButton
+          className={cn("min-w-0 px-2!", className)}
+          data-testid="sidecar-agent-model-locked"
+          disabled
+        >
+          <div className="flex min-w-0 flex-col items-start text-left">
+            <ModelSelectorName className="truncate text-xs font-normal">
+              {displayName}
+            </ModelSelectorName>
+          </div>
+        </PromptInputButton>
+      </Tooltip>
+    );
   }
 
   return (
@@ -1000,7 +1136,7 @@ function SidecarModelSelector({
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
           <div className="flex min-w-0 flex-col items-start text-left">
             <ModelSelectorName className="truncate text-xs font-normal">
-              {selectedModel.display_name}
+              {displayName}
             </ModelSelectorName>
           </div>
         </PromptInputButton>

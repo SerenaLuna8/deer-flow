@@ -89,7 +89,11 @@ import {
 } from "@/core/sidecar";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
-import { resolveAgentMode, type AgentMode } from "@/core/threads/agent-mode";
+import {
+  resolveAgentExecutionModelSelection,
+  resolveAgentMode,
+  type AgentMode,
+} from "@/core/threads/agent-mode";
 import {
   compactThreadContext,
   compactThreadForDream,
@@ -298,6 +302,7 @@ export function InputBox({
   threadId,
   threadExists = true,
   agentMetadata,
+  agentModelRef,
   draftConversationScope = threadId,
   initialValue,
   onContextChange,
@@ -323,7 +328,10 @@ export function InputBox({
     | "subagent_enabled"
     | "reasoning_effort"
   > & {
+    model_name?: string;
+    model_selection_explicit?: boolean;
     mode: AgentMode | undefined;
+    mode_selection_explicit?: boolean;
   };
   extraHeader?: React.ReactNode;
   /**
@@ -335,6 +343,7 @@ export function InputBox({
   threadId: string;
   threadExists?: boolean;
   agentMetadata?: Record<string, unknown> | null;
+  agentModelRef?: string | null;
   draftConversationScope?: string;
   initialValue?: string;
   onContextChange?: (
@@ -346,7 +355,10 @@ export function InputBox({
       | "subagent_enabled"
       | "reasoning_effort"
     > & {
+      model_name?: string;
+      model_selection_explicit?: boolean;
       mode: AgentMode | undefined;
+      mode_selection_explicit?: boolean;
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
@@ -630,40 +642,95 @@ export function InputBox({
     uploadLimits,
   ]);
 
+  const modelSelection = useMemo(
+    () =>
+      resolveAgentExecutionModelSelection(
+        models,
+        context.model_name,
+        agentModelRef,
+        context.model_selection_explicit === true,
+      ),
+    [
+      agentModelRef,
+      context.model_name,
+      context.model_selection_explicit,
+      models,
+    ],
+  );
+  const selectedModel = modelSelection.model;
+  const resolvedModelName = modelSelection.modelName;
+  const modelSelectionLocked = modelSelection.modelSelectionLocked;
+
   useEffect(() => {
     if (models.length === 0) {
       return;
     }
-    const currentModel = models.find((m) => m.name === context.model_name);
-    const fallbackModel = currentModel ?? models[0]!;
+    if (modelSelectionLocked) {
+      setModelDialogOpen(false);
+      return;
+    }
+    const currentModel =
+      context.model_selection_explicit === true
+        ? models.find((m) => m.name === context.model_name)
+        : undefined;
+    const fallbackModel = modelSelection.model ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
+    const supportsReasoningEffort =
+      fallbackModel.supports_reasoning_effort ?? false;
     const nextModelName = fallbackModel.name;
-    const nextMode = resolveAgentMode(context.mode, supportsThinking);
+    const nextMode = resolveAgentMode(
+      context.mode_selection_explicit === true ? context.mode : undefined,
+      supportsThinking,
+      supportsReasoningEffort,
+    );
+    const nextModelSelectionExplicit =
+      currentModel !== undefined && context.model_selection_explicit === true;
 
-    if (context.model_name === nextModelName && context.mode === nextMode) {
+    if (
+      context.model_name === nextModelName &&
+      context.mode === nextMode &&
+      context.model_selection_explicit === nextModelSelectionExplicit
+    ) {
       return;
     }
 
     onContextChange?.({
       ...context,
       model_name: nextModelName,
+      model_selection_explicit: nextModelSelectionExplicit,
       mode: nextMode,
     });
-  }, [context, models, onContextChange]);
-
-  const selectedModel = useMemo(() => {
-    if (models.length === 0) {
-      return undefined;
-    }
-    return models.find((m) => m.name === context.model_name) ?? models[0];
-  }, [context.model_name, models]);
-
-  const resolvedModelName = selectedModel?.name;
+  }, [
+    context,
+    modelSelection.model,
+    modelSelectionLocked,
+    models,
+    onContextChange,
+  ]);
 
   const supportThinking = useMemo(
     () => selectedModel?.supports_thinking ?? false,
     [selectedModel],
   );
+  const supportReasoningEffort = useMemo(
+    () => selectedModel?.supports_reasoning_effort ?? false,
+    [selectedModel],
+  );
+  const effectiveMode = useMemo(
+    () =>
+      resolveAgentMode(
+        context.mode_selection_explicit === true ? context.mode : undefined,
+        supportThinking,
+        supportReasoningEffort,
+      ),
+    [
+      context.mode,
+      context.mode_selection_explicit,
+      supportReasoningEffort,
+      supportThinking,
+    ],
+  );
+  const modelDisplayName = selectedModel?.display_name ?? resolvedModelName;
 
   const draftKey = useMemo(
     () =>
@@ -844,7 +911,7 @@ export function InputBox({
 
   const handleModelSelect = useCallback(
     (model_name: string) => {
-      if (disabled || polishingInput) {
+      if (disabled || polishingInput || modelSelectionLocked) {
         return;
       }
       const model = models.find((m) => m.name === model_name);
@@ -854,11 +921,23 @@ export function InputBox({
       onContextChange?.({
         ...context,
         model_name,
-        mode: resolveAgentMode(context.mode, model.supports_thinking ?? false),
+        model_selection_explicit: true,
+        mode: resolveAgentMode(
+          context.mode_selection_explicit === true ? context.mode : undefined,
+          model.supports_thinking ?? false,
+          model.supports_reasoning_effort ?? false,
+        ),
       });
       setModelDialogOpen(false);
     },
-    [disabled, onContextChange, context, models, polishingInput],
+    [
+      disabled,
+      onContextChange,
+      context,
+      models,
+      modelSelectionLocked,
+      polishingInput,
+    ],
   );
 
   const handleModeSelect = useCallback(
@@ -868,10 +947,18 @@ export function InputBox({
       }
       onContextChange?.({
         ...context,
-        mode: resolveAgentMode(mode, supportThinking),
+        mode: resolveAgentMode(mode, supportThinking, supportReasoningEffort),
+        mode_selection_explicit: true,
       });
     },
-    [disabled, onContextChange, context, polishingInput, supportThinking],
+    [
+      disabled,
+      onContextChange,
+      context,
+      polishingInput,
+      supportThinking,
+      supportReasoningEffort,
+    ],
   );
 
   const handleGoalCommand = useCallback(
@@ -1378,13 +1465,21 @@ export function InputBox({
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
-      if (resolvedModelName && context.model_name !== resolvedModelName) {
+      if (
+        !modelSelectionLocked &&
+        resolvedModelName &&
+        context.model_name !== resolvedModelName
+      ) {
         onContextChange?.({
           ...context,
           model_name: resolvedModelName,
+          model_selection_explicit: false,
           mode: resolveAgentMode(
-            context.mode,
+            context.mode_selection_explicit === true
+              ? context.mode
+              : undefined,
             selectedModel?.supports_thinking ?? false,
+            selectedModel?.supports_reasoning_effort ?? false,
           ),
         });
         return new Promise<void>((resolve, reject) => {
@@ -1403,6 +1498,8 @@ export function InputBox({
       onSubmit,
       reportUploadLimitViolations,
       resolvedModelName,
+      modelSelectionLocked,
+      selectedModel?.supports_reasoning_effort,
       selectedModel?.supports_thinking,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
@@ -2601,43 +2698,36 @@ export function InputBox({
               </PromptInputButton>
             </Tooltip>
             <PromptInputActionMenu>
-              <ModeHoverGuide
-                mode={
-                  context.mode === "flash" ||
-                  context.mode === "thinking" ||
-                  context.mode === "pro" ||
-                  context.mode === "ultra"
-                    ? context.mode
-                    : "flash"
-                }
-              >
+              <ModeHoverGuide mode={effectiveMode}>
                 <PromptInputActionMenuTrigger
                   className="max-w-28 gap-1! px-2! sm:max-w-none"
                   disabled={composerLocked}
                 >
                   <div>
-                    {context.mode === "flash" && <ZapIcon className="size-3" />}
-                    {context.mode === "thinking" && (
+                    {effectiveMode === "flash" && (
+                      <ZapIcon className="size-3" />
+                    )}
+                    {effectiveMode === "thinking" && (
                       <LightbulbIcon className="size-3" />
                     )}
-                    {context.mode === "pro" && (
+                    {effectiveMode === "pro" && (
                       <GraduationCapIcon className="size-3" />
                     )}
-                    {context.mode === "ultra" && (
+                    {effectiveMode === "ultra" && (
                       <RocketIcon className="size-3 text-[#dabb5e]" />
                     )}
                   </div>
                   <div
                     className={cn(
                       "truncate text-xs font-normal",
-                      context.mode === "ultra" ? "golden-text" : "",
+                      effectiveMode === "ultra" ? "golden-text" : "",
                     )}
                   >
-                    {(context.mode === "flash" && t.inputBox.flashMode) ||
-                      (context.mode === "thinking" &&
+                    {(effectiveMode === "flash" && t.inputBox.flashMode) ||
+                      (effectiveMode === "thinking" &&
                         t.inputBox.reasoningMode) ||
-                      (context.mode === "pro" && t.inputBox.proMode) ||
-                      (context.mode === "ultra" && t.inputBox.ultraMode)}
+                      (effectiveMode === "pro" && t.inputBox.proMode) ||
+                      (effectiveMode === "ultra" && t.inputBox.ultraMode)}
                   </div>
                 </PromptInputActionMenuTrigger>
               </ModeHoverGuide>
@@ -2649,7 +2739,7 @@ export function InputBox({
                   <PromptInputActionMenu>
                     <PromptInputActionMenuItem
                       className={cn(
-                        context.mode === "flash"
+                        effectiveMode === "flash"
                           ? "text-accent-foreground"
                           : "text-muted-foreground/65",
                       )}
@@ -2660,7 +2750,7 @@ export function InputBox({
                           <ZapIcon
                             className={cn(
                               "mr-2 size-4",
-                              context.mode === "flash" &&
+                              effectiveMode === "flash" &&
                                 "text-accent-foreground",
                             )}
                           />
@@ -2670,7 +2760,7 @@ export function InputBox({
                           {t.inputBox.flashModeDescription}
                         </div>
                       </div>
-                      {context.mode === "flash" ? (
+                      {effectiveMode === "flash" ? (
                         <CheckIcon className="ml-auto size-4" />
                       ) : (
                         <div className="ml-auto size-4" />
@@ -2680,7 +2770,7 @@ export function InputBox({
                       <>
                         <PromptInputActionMenuItem
                           className={cn(
-                            context.mode === "thinking"
+                            effectiveMode === "thinking"
                               ? "text-accent-foreground"
                               : "text-muted-foreground/65",
                           )}
@@ -2691,7 +2781,7 @@ export function InputBox({
                               <LightbulbIcon
                                 className={cn(
                                   "mr-2 size-4",
-                                  context.mode === "thinking" &&
+                                  effectiveMode === "thinking" &&
                                     "text-accent-foreground",
                                 )}
                               />
@@ -2701,75 +2791,81 @@ export function InputBox({
                               {t.inputBox.reasoningModeDescription}
                             </div>
                           </div>
-                          {context.mode === "thinking" ? (
+                          {effectiveMode === "thinking" ? (
                             <CheckIcon className="ml-auto size-4" />
                           ) : (
                             <div className="ml-auto size-4" />
                           )}
                         </PromptInputActionMenuItem>
-                        <PromptInputActionMenuItem
-                          className={cn(
-                            context.mode === "pro"
-                              ? "text-accent-foreground"
-                              : "text-muted-foreground/65",
-                          )}
-                          onSelect={() => handleModeSelect("pro")}
-                        >
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-1 font-bold">
-                              <GraduationCapIcon
-                                className={cn(
-                                  "mr-2 size-4",
-                                  context.mode === "pro" &&
-                                    "text-accent-foreground",
-                                )}
-                              />
-                              {t.inputBox.proMode}
-                            </div>
-                            <div className="pl-7 text-xs">
-                              {t.inputBox.proModeDescription}
-                            </div>
-                          </div>
-                          {context.mode === "pro" ? (
-                            <CheckIcon className="ml-auto size-4" />
-                          ) : (
-                            <div className="ml-auto size-4" />
-                          )}
-                        </PromptInputActionMenuItem>
-                        <PromptInputActionMenuItem
-                          className={cn(
-                            context.mode === "ultra"
-                              ? "text-accent-foreground"
-                              : "text-muted-foreground/65",
-                          )}
-                          onSelect={() => handleModeSelect("ultra")}
-                        >
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-1 font-bold">
-                              <RocketIcon
-                                className={cn(
-                                  "mr-2 size-4",
-                                  context.mode === "ultra" && "text-[#dabb5e]",
-                                )}
-                              />
-                              <div
-                                className={cn(
-                                  context.mode === "ultra" && "golden-text",
-                                )}
-                              >
-                                {t.inputBox.ultraMode}
+                        {supportReasoningEffort && (
+                          <>
+                            <PromptInputActionMenuItem
+                              className={cn(
+                                effectiveMode === "pro"
+                                  ? "text-accent-foreground"
+                                  : "text-muted-foreground/65",
+                              )}
+                              onSelect={() => handleModeSelect("pro")}
+                            >
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-1 font-bold">
+                                  <GraduationCapIcon
+                                    className={cn(
+                                      "mr-2 size-4",
+                                      effectiveMode === "pro" &&
+                                        "text-accent-foreground",
+                                    )}
+                                  />
+                                  {t.inputBox.proMode}
+                                </div>
+                                <div className="pl-7 text-xs">
+                                  {t.inputBox.proModeDescription}
+                                </div>
                               </div>
-                            </div>
-                            <div className="pl-7 text-xs">
-                              {t.inputBox.ultraModeDescription}
-                            </div>
-                          </div>
-                          {context.mode === "ultra" ? (
-                            <CheckIcon className="ml-auto size-4" />
-                          ) : (
-                            <div className="ml-auto size-4" />
-                          )}
-                        </PromptInputActionMenuItem>
+                              {effectiveMode === "pro" ? (
+                                <CheckIcon className="ml-auto size-4" />
+                              ) : (
+                                <div className="ml-auto size-4" />
+                              )}
+                            </PromptInputActionMenuItem>
+                            <PromptInputActionMenuItem
+                              className={cn(
+                                effectiveMode === "ultra"
+                                  ? "text-accent-foreground"
+                                  : "text-muted-foreground/65",
+                              )}
+                              onSelect={() => handleModeSelect("ultra")}
+                            >
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center gap-1 font-bold">
+                                  <RocketIcon
+                                    className={cn(
+                                      "mr-2 size-4",
+                                      effectiveMode === "ultra" &&
+                                        "text-[#dabb5e]",
+                                    )}
+                                  />
+                                  <div
+                                    className={cn(
+                                      effectiveMode === "ultra" &&
+                                        "golden-text",
+                                    )}
+                                  >
+                                    {t.inputBox.ultraMode}
+                                  </div>
+                                </div>
+                                <div className="pl-7 text-xs">
+                                  {t.inputBox.ultraModeDescription}
+                                </div>
+                              </div>
+                              {effectiveMode === "ultra" ? (
+                                <CheckIcon className="ml-auto size-4" />
+                              ) : (
+                                <div className="ml-auto size-4" />
+                              )}
+                            </PromptInputActionMenuItem>
+                          </>
+                        )}
                       </>
                     )}
                   </PromptInputActionMenu>
@@ -2785,51 +2881,69 @@ export function InputBox({
                 usage={contextUsage.data}
               />
             )}
-            <ModelSelector
-              open={modelDialogOpen}
-              onOpenChange={setModelDialogOpen}
-            >
-              <ModelSelectorTrigger asChild>
+            {modelSelectionLocked ? (
+              <Tooltip content={t.inputBox.agentModelLocked}>
                 <PromptInputButton
                   className="max-w-40 min-w-0 sm:max-w-56"
-                  disabled={composerLocked}
+                  data-testid="agent-model-locked"
+                  disabled
                 >
                   <div className="flex min-w-0 flex-col items-start text-left">
                     <ModelSelectorName className="text-xs font-normal">
-                      {selectedModel?.display_name}
+                      {modelDisplayName}
                     </ModelSelectorName>
                   </div>
                 </PromptInputButton>
-              </ModelSelectorTrigger>
-              <ModelSelectorContent>
-                <ModelSelectorLabel>{t.inputBox.model}</ModelSelectorLabel>
-                <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      className={cn(
-                        m.name === context.model_name
-                          ? "text-accent-foreground"
-                          : "text-muted-foreground/65",
-                      )}
-                      key={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-xs">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
-                  ))}
-                </ModelSelectorList>
-              </ModelSelectorContent>
-            </ModelSelector>
+              </Tooltip>
+            ) : (
+              <ModelSelector
+                open={modelDialogOpen}
+                onOpenChange={setModelDialogOpen}
+              >
+                <ModelSelectorTrigger asChild>
+                  <PromptInputButton
+                    className="max-w-40 min-w-0 sm:max-w-56"
+                    disabled={composerLocked}
+                  >
+                    <div className="flex min-w-0 flex-col items-start text-left">
+                      <ModelSelectorName className="text-xs font-normal">
+                        {modelDisplayName}
+                      </ModelSelectorName>
+                    </div>
+                  </PromptInputButton>
+                </ModelSelectorTrigger>
+                <ModelSelectorContent>
+                  <ModelSelectorLabel>{t.inputBox.model}</ModelSelectorLabel>
+                  <ModelSelectorList>
+                    {models.map((m) => (
+                      <ModelSelectorItem
+                        className={cn(
+                          m.name === context.model_name
+                            ? "text-accent-foreground"
+                            : "text-muted-foreground/65",
+                        )}
+                        key={m.name}
+                        onSelect={() => handleModelSelect(m.name)}
+                      >
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <ModelSelectorName>
+                            {m.display_name}
+                          </ModelSelectorName>
+                          <span className="text-muted-foreground truncate text-xs">
+                            {m.model}
+                          </span>
+                        </div>
+                        {m.name === context.model_name ? (
+                          <CheckIcon className="ml-auto size-4" />
+                        ) : (
+                          <div className="ml-auto size-4" />
+                        )}
+                      </ModelSelectorItem>
+                    ))}
+                  </ModelSelectorList>
+                </ModelSelectorContent>
+              </ModelSelector>
+            )}
             <PromptInputSubmit
               className="rounded-full"
               disabled={composerLocked}

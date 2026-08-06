@@ -172,10 +172,11 @@ export const enUS: Translations = {
     voiceInputNoSpeech: "No speech was detected. Please try again.",
     voiceInputFailed: "Voice input failed. Please try again.",
     model: "Model",
+    agentModelLocked: "This Agent is locked to this model",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription:
-      "Disable extended thinking and use minimal reasoning for simple tasks",
+      "Disable extended thinking and use no reasoning effort for simple tasks",
     reasoningMode: "Reasoning",
     reasoningModeDescription:
       "Enable extended thinking with low reasoning effort",
@@ -610,10 +611,12 @@ export const enUS: Translations = {
       providerModel: "Provider model",
       credential: "Credential",
       environmentKey: "Environment variable",
+      status: "Status",
       version: "Version",
       versionMeta: (versionNumber, revision, sortOrder) =>
         `Config v${versionNumber} · revision ${revision} · order ${sortOrder}`,
       capabilities: "Model capabilities",
+      noCapabilities: "None",
       thinking: "Thinking",
       reasoningEffort: "Reasoning effort",
       vision: "Vision input",
@@ -1640,6 +1643,11 @@ export const enUS: Translations = {
     runFailedTitle: "Run did not finish",
     runFailedDescription:
       "The agent could not produce a response. Check the selected model, asset dependencies, and credentials, then edit or send the message again.",
+    agentModelUnavailableTitle: "Agent model unavailable",
+    agentModelUnavailableDescription:
+      "The Agent's configured model could not be resolved. Check its active binding, published version, and active model catalog entry, then retry.",
+    runExecutionProfile: (modelName, modeName, supportsVision) =>
+      `Effective run: ${modelName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
   },
 
   // Chats

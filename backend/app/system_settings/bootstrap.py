@@ -210,18 +210,19 @@ def _opencode_model_command() -> CreateSystemModel:
             provider_adapter="openai",
             provider_model="gpt-5.6-luna",
             settings={
-                # ChatOpenAI appends the Responses resource when this flag is
-                # enabled, so the configured base must end at /v1 rather than
-                # duplicate the supplied /v1/responses endpoint.
+                # This catalog entry is provisioned with the OpenCode Go
+                # credential. ChatOpenAI appends the Responses resource, so
+                # the configured base must end at /go/v1 rather than duplicate
+                # the supplied /go/v1/responses endpoint.
                 "base_url": "https://opencode.ai/zen/go/v1",
                 "request_timeout": 600.0,
                 "max_retries": 2,
                 "use_responses_api": True,
                 "output_version": "responses/v1",
             },
-            supports_thinking=False,
-            supports_reasoning_effort=False,
-            supports_vision=False,
+            supports_thinking=True,
+            supports_reasoning_effort=True,
+            supports_vision=True,
             credential_id=OPENCODE_CREDENTIAL_ID,
             credential_version_id=OPENCODE_CREDENTIAL_VERSION_ID,
             credential_env_key="OPENCODE_API_KEY",

@@ -113,10 +113,79 @@ test("repairs a late injected user before run history has loaded", () => {
     [],
   );
 
-  expect(merged.findIndex((message) => message.id === "human-2__user")).toBe(
-    1,
-  );
+  expect(merged.findIndex((message) => message.id === "human-2__user")).toBe(1);
   expect(merged.findIndex((message) => message.id === "assistant-2")).toBe(2);
+});
+
+test("replaces an optimistic user with its dynamic-context canonical projection", () => {
+  const merged = mergeMessages(
+    [],
+    [
+      {
+        type: "system",
+        id: "human-optimistic-1",
+        content: "<system-reminder />",
+        additional_kwargs: {
+          hide_from_ui: true,
+          dynamic_context_reminder: true,
+        },
+      },
+      {
+        type: "human",
+        id: "human-optimistic-1__user",
+        content: "hello",
+        additional_kwargs: { run_id: "run-optimistic-1" },
+      },
+    ] as Message[],
+    [
+      {
+        type: "human",
+        id: "human-optimistic-1",
+        content: "hello",
+        additional_kwargs: {},
+      } as Message,
+    ],
+  );
+  const visibleHumans = merged.filter(
+    (message) =>
+      message.type === "human" &&
+      message.additional_kwargs?.hide_from_ui !== true,
+  );
+
+  expect(visibleHumans).toHaveLength(1);
+  expect(visibleHumans[0]?.id).toBe("human-optimistic-1__user");
+});
+
+test("keeps a genuinely different optimistic user with the same text", () => {
+  const merged = mergeMessages(
+    [],
+    [
+      {
+        type: "human",
+        id: "human-canonical-1",
+        content: "hello",
+        additional_kwargs: { run_id: "run-canonical-1" },
+      } as Message,
+    ],
+    [
+      {
+        type: "human",
+        id: "human-optimistic-2",
+        content: "hello",
+        additional_kwargs: {},
+      } as Message,
+    ],
+  );
+  const visibleHumans = merged.filter(
+    (message) =>
+      message.type === "human" &&
+      message.additional_kwargs?.hide_from_ui !== true,
+  );
+
+  expect(visibleHumans.map((message) => message.id)).toEqual([
+    "human-canonical-1",
+    "human-optimistic-2",
+  ]);
 });
 
 test("shows original user text when only the sanitized journal row remains", () => {

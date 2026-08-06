@@ -23,6 +23,10 @@ _AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
 )
 
 
+class AgentModelSettingsUnsupported(ValueError):
+    """The exact provider cannot honor immutable Agent sampling settings."""
+
+
 def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
     """Recursively merge two dictionaries without mutating the inputs."""
     merged = dict(base or {})
@@ -207,28 +211,40 @@ def _validated_agent_model_overrides(
     if overrides is None:
         return {}
     if not isinstance(overrides, Mapping):
-        raise ValueError("Agent model overrides must be a mapping")
+        raise AgentModelSettingsUnsupported(
+            "Agent model overrides must be a mapping",
+        )
     unknown = set(overrides) - _AGENT_MODEL_SETTING_FIELDS
     if unknown:
-        raise ValueError(f"Unsupported Agent model setting: {sorted(unknown)[0]}")
+        raise AgentModelSettingsUnsupported(
+            f"Unsupported Agent model setting: {sorted(unknown)[0]}",
+        )
     supported_fields = _provider_model_field_names(model_class)
     mapped: dict[str, float | int] = {}
     for key, value in overrides.items():
         if key == "temperature":
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not 0 <= value <= 2:
-                raise ValueError("Agent model setting temperature must be between 0 and 2")
+                raise AgentModelSettingsUnsupported(
+                    "Agent model setting temperature must be between 0 and 2",
+                )
             if "temperature" not in supported_fields:
-                raise ValueError(f"Model {model_name} does not support Agent model setting temperature")
+                raise AgentModelSettingsUnsupported(
+                    f"Model {model_name} does not support Agent model setting temperature",
+                )
             mapped["temperature"] = value
             continue
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 200_000:
-            raise ValueError("Agent model setting max_tokens must be an integer between 1 and 200000")
+            raise AgentModelSettingsUnsupported(
+                "Agent model setting max_tokens must be an integer between 1 and 200000",
+            )
         provider_field = next(
             (candidate for candidate in _AGENT_MAX_TOKENS_PROVIDER_FIELDS if candidate in supported_fields),
             None,
         )
         if provider_field is None:
-            raise ValueError(f"Model {model_name} does not support Agent model setting max_tokens")
+            raise AgentModelSettingsUnsupported(
+                f"Model {model_name} does not support Agent model setting max_tokens",
+            )
         mapped[provider_field] = value
     return mapped
 
@@ -356,16 +372,25 @@ def create_chat_model(
 
     if issubclass(model_class, CodexChatModel):
         if model_overrides is not None and model_overrides.get("max_tokens") is not None:
-            raise ValueError(f"Model {name} does not support Agent model setting max_tokens")
+            raise AgentModelSettingsUnsupported(
+                f"Model {name} does not support Agent model setting max_tokens",
+            )
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
         model_settings_from_config.pop("max_output_tokens", None)
 
-        # Use explicit reasoning_effort from frontend if provided (low/medium/high)
+        # Use explicit reasoning_effort from the admitted Run when provided.
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
             model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
+        elif explicit_effort and explicit_effort in (
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ):
             model_settings_from_config["reasoning_effort"] = explicit_effort
         elif "reasoning_effort" not in model_settings_from_config:
             model_settings_from_config["reasoning_effort"] = "medium"

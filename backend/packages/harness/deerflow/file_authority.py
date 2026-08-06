@@ -42,6 +42,8 @@ class RunFileAuthority(Protocol):
 
     def current_upload_ids(self) -> tuple[str, ...]: ...
 
+    def current_uploads(self) -> tuple[AuthorityManifestEntry, ...]: ...
+
     async def write_output(
         self,
         relative_path: str,

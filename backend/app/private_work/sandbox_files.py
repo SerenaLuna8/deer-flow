@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -45,6 +46,210 @@ _LOGICAL_ROOTS = {
     "output": "outputs",
 }
 _PRIVATE_FILE_REMOVE_MAX_ATTEMPTS = 3
+RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG = "__run_current_upload_snapshot"
+_CURRENT_UPLOAD_SNAPSHOT_KEYS = frozenset(
+    {
+        "file_id",
+        "logical_path",
+        "media_type",
+        "size",
+        "sha256",
+        "version",
+    }
+)
+
+
+class CurrentUploadSnapshotInvalid(ValueError):
+    """The server-owned current-upload snapshot is absent or malformed."""
+
+
+class CurrentUploadSnapshotStale(RuntimeError):
+    """The restored file authority no longer matches the admitted snapshot."""
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentUploadSnapshotEntry:
+    """Secret-free exact metadata frozen for one current-message upload."""
+
+    file_id: str
+    logical_path: str
+    media_type: str
+    size: int
+    sha256: str
+    version: int
+
+    def __post_init__(self) -> None:
+        if _canonical_private_file_id(self.file_id) is None:
+            raise CurrentUploadSnapshotInvalid
+        if type(self.logical_path) is not str:
+            raise CurrentUploadSnapshotInvalid
+        path = PurePosixPath(self.logical_path)
+        if path.is_absolute() or len(path.parts) < 2 or path.parts[0] != "uploads" or path.as_posix() != self.logical_path or any(part in {"", ".", ".."} for part in path.parts):
+            raise CurrentUploadSnapshotInvalid
+        if type(self.media_type) is not str or not self.media_type or len(self.media_type) > 255:
+            raise CurrentUploadSnapshotInvalid
+        if type(self.size) is not int or self.size < 0:
+            raise CurrentUploadSnapshotInvalid
+        if type(self.sha256) is not str or len(self.sha256) != 64 or any(character not in "0123456789abcdef" for character in self.sha256):
+            raise CurrentUploadSnapshotInvalid
+        if type(self.version) is not int or self.version < 1:
+            raise CurrentUploadSnapshotInvalid
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "file_id": self.file_id,
+            "logical_path": self.logical_path,
+            "media_type": self.media_type,
+            "size": self.size,
+            "sha256": self.sha256,
+            "version": self.version,
+        }
+
+
+def _canonical_private_file_id(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return value if str(parsed) == value else None
+
+
+def current_upload_candidates_from_run_kwargs(
+    run_kwargs: object,
+) -> tuple[str, ...]:
+    """Recover current-message file references from immutable Run input.
+
+    The returned IDs are client-selected candidates, never file authority.
+    Gateway admission intersects them with locked, ready, thread-scoped upload
+    rows and freezes exact metadata. The Worker later accepts only that frozen
+    subset. Keeping image bytes and data URLs out of this payload also prevents
+    them from entering LangGraph state/checkpoints.
+    """
+
+    if not isinstance(run_kwargs, Mapping):
+        return ()
+    graph_input = run_kwargs.get("input")
+    if not isinstance(graph_input, Mapping):
+        return ()
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return ()
+
+    for raw_message in reversed(messages):
+        if not isinstance(raw_message, Mapping):
+            continue
+        message_type = raw_message.get("type")
+        message_role = raw_message.get("role")
+        if message_type != "human" and message_role != "user":
+            continue
+        additional_kwargs = raw_message.get("additional_kwargs")
+        if not isinstance(additional_kwargs, Mapping):
+            return ()
+        files = additional_kwargs.get("files")
+        if not isinstance(files, list):
+            return ()
+        candidates: list[str] = []
+        for raw_file in files:
+            if not isinstance(raw_file, Mapping):
+                continue
+            file_id = _canonical_private_file_id(raw_file.get("file_id"))
+            if file_id is not None and file_id not in candidates:
+                candidates.append(file_id)
+        return tuple(candidates)
+    return ()
+
+
+def persisted_current_upload_snapshot(
+    entries: tuple[CurrentUploadSnapshotEntry, ...],
+) -> list[dict[str, object]]:
+    if type(entries) is not tuple or any(type(entry) is not CurrentUploadSnapshotEntry for entry in entries):
+        raise CurrentUploadSnapshotInvalid
+    file_ids = tuple(entry.file_id for entry in entries)
+    if len(file_ids) != len(set(file_ids)):
+        raise CurrentUploadSnapshotInvalid
+    return [entry.as_dict() for entry in entries]
+
+
+def required_current_upload_snapshot_from_run_kwargs(
+    run_kwargs: object,
+) -> tuple[CurrentUploadSnapshotEntry, ...]:
+    """Return the exact server snapshot, rejecting legacy attachment Runs.
+
+    Runs without current-message file references remain compatible. A Run that
+    does reference files must carry the server-owned snapshot so a Worker never
+    falls back to re-authorizing mutable client selections after admission.
+    """
+
+    if not isinstance(run_kwargs, Mapping):
+        raise CurrentUploadSnapshotInvalid
+    candidates = current_upload_candidates_from_run_kwargs(run_kwargs)
+    if RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG not in run_kwargs:
+        if candidates:
+            raise CurrentUploadSnapshotInvalid
+        return ()
+    raw_entries = run_kwargs.get(RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG)
+    if not isinstance(raw_entries, list):
+        raise CurrentUploadSnapshotInvalid
+    entries: list[CurrentUploadSnapshotEntry] = []
+    try:
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, Mapping) or set(raw_entry) != _CURRENT_UPLOAD_SNAPSHOT_KEYS:
+                raise CurrentUploadSnapshotInvalid
+            entries.append(
+                CurrentUploadSnapshotEntry(
+                    file_id=raw_entry.get("file_id"),
+                    logical_path=raw_entry.get("logical_path"),
+                    media_type=raw_entry.get("media_type"),
+                    size=raw_entry.get("size"),
+                    sha256=raw_entry.get("sha256"),
+                    version=raw_entry.get("version"),
+                )
+            )
+    except (TypeError, ValueError):
+        raise CurrentUploadSnapshotInvalid from None
+    snapshot = tuple(entries)
+    snapshot_ids = tuple(entry.file_id for entry in snapshot)
+    if len(snapshot_ids) != len(set(snapshot_ids)):
+        raise CurrentUploadSnapshotInvalid
+    snapshot_set = set(snapshot_ids)
+    if snapshot_ids != tuple(file_id for file_id in candidates if file_id in snapshot_set):
+        raise CurrentUploadSnapshotInvalid
+    return snapshot
+
+
+async def admit_current_upload_snapshot(
+    session: AsyncSession,
+    *,
+    scope: PrivateResourceScope,
+    thread_id: str,
+    run_kwargs: object,
+) -> tuple[CurrentUploadSnapshotEntry, ...]:
+    """Lock and freeze the authorized subset of current-message file claims."""
+
+    repository = PrivateFileRepository(session)
+    entries: list[CurrentUploadSnapshotEntry] = []
+    for raw_file_id in current_upload_candidates_from_run_kwargs(run_kwargs):
+        record = await repository.get(
+            scope=scope,
+            thread_id=thread_id,
+            file_id=uuid.UUID(raw_file_id),
+            lock=True,
+        )
+        if record is None or record.status != "ready" or record.kind != "upload":
+            continue
+        entries.append(
+            CurrentUploadSnapshotEntry(
+                file_id=str(record.id),
+                logical_path=record.logical_path,
+                media_type=record.media_type,
+                size=record.size,
+                sha256=record.sha256,
+                version=record.version,
+            )
+        )
+    return tuple(entries)
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,12 +484,20 @@ class PrivateRunFileAuthority:
         *,
         mounts: tuple[RunScopedReadOnlyMount, ...] = (),
         provider: SandboxProvider | None = None,
+        current_upload_snapshot: tuple[CurrentUploadSnapshotEntry, ...] = (),
     ) -> None:
+        if type(current_upload_snapshot) is not tuple or any(type(entry) is not CurrentUploadSnapshotEntry for entry in current_upload_snapshot):
+            raise ValueError("Invalid current private upload snapshot")
+        snapshot_ids = tuple(entry.file_id for entry in current_upload_snapshot)
+        if len(snapshot_ids) != len(set(snapshot_ids)):
+            raise ValueError("Invalid current private upload snapshot")
         self._run_scope = run_scope
         self._projection = projection
         self._finalizer = finalizer
         self._mounts = mounts
         self._provider = provider
+        self._current_upload_snapshot = current_upload_snapshot
+        self._current_upload_snapshot_ids = frozenset(snapshot_ids)
         self._lease: PrivateSandboxLease | None = None
         self._sandbox: Any | None = None
         self._manifest: AuthorityManifest | None = None
@@ -328,6 +541,27 @@ class PrivateRunFileAuthority:
         self._lease = lease
         self._sandbox = sandbox
         self._manifest = await self._projection.restore(self._run_scope, sandbox)
+        upload_entries = tuple(entry for entry in self._manifest.entries if entry.kind == "upload")
+        by_id = {str(entry.file_id): entry for entry in upload_entries}
+        if len(by_id) != len(upload_entries):
+            raise CurrentUploadSnapshotStale
+        for expected in self._current_upload_snapshot:
+            restored = by_id.get(expected.file_id)
+            if restored is None or (
+                restored.logical_path,
+                restored.media_type,
+                restored.size,
+                restored.sha256,
+                restored.version,
+            ) != (
+                expected.logical_path,
+                expected.media_type,
+                expected.size,
+                expected.sha256,
+                expected.version,
+            ):
+                raise CurrentUploadSnapshotStale
+        self._current_upload_ids = [entry.file_id for entry in self._current_upload_snapshot]
         return self._manifest
 
     def record_presented_paths(self, presented_paths: tuple[str, ...]) -> None:
@@ -336,17 +570,32 @@ class PrivateRunFileAuthority:
         self._presented_paths = list(dict.fromkeys((*self._presented_paths, *presented_paths)))
 
     def record_current_upload_ids(self, file_ids: tuple[str, ...]) -> None:
-        """Remember authorized current-Run uploads for lead and subagents."""
+        """Remember authorized current-Run uploads for lead requests."""
 
         if type(file_ids) is not tuple or any(type(file_id) is not str or not file_id for file_id in file_ids):
             raise ValueError("Invalid current private upload ids")
         visible_ids = {str(entry.file_id) for entry in (self._manifest.entries if self._manifest else ()) if entry.kind == "upload"}
-        if any(file_id not in visible_ids for file_id in file_ids):
-            raise ValueError("Current private uploads are outside authority")
+        if any(file_id not in visible_ids or file_id not in self._current_upload_snapshot_ids for file_id in file_ids):
+            raise CurrentUploadSnapshotStale
         self._current_upload_ids = list(dict.fromkeys((*self._current_upload_ids, *file_ids)))
 
     def current_upload_ids(self) -> tuple[str, ...]:
         return tuple(self._current_upload_ids)
+
+    def current_uploads(self) -> tuple[AuthorityManifestEntry, ...]:
+        """Return only server-restored entries selected for this Run message."""
+
+        manifest = self._manifest
+        if manifest is None:
+            raise RuntimeError("Private file authority has not been restored")
+        upload_entries = tuple(entry for entry in manifest.entries if entry.kind == "upload")
+        by_id = {str(entry.file_id): entry for entry in upload_entries}
+        if len(by_id) != len(upload_entries):
+            raise RuntimeError("Private file authority is unavailable")
+        try:
+            return tuple(by_id[file_id] for file_id in self._current_upload_ids)
+        except KeyError:
+            raise RuntimeError("Private file authority is unavailable") from None
 
     async def write_output(
         self,

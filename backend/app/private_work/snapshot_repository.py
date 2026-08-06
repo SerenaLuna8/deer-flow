@@ -16,13 +16,31 @@ from app.private_work.errors import (
     PrivateWorkAssetStale,
     PrivateWorkConflict,
     PrivateWorkError,
+    PrivateWorkRunExecutionProfileUnsupported,
+    PrivateWorkRunModelSelectionLocked,
+    PrivateWorkRunModelUnavailable,
     PrivateWorkUnavailable,
+)
+from app.private_work.execution_profile import (
+    RUN_EXECUTION_PROFILE_KWARG,
+    RunExecutionProfileUnsupported,
+    RunModelSelectionLocked,
+    RunSelectedModelUnavailable,
+    persisted_run_execution_profile,
+    resolve_admitted_run_execution_profile,
+    selected_run_model_ref,
 )
 from app.private_work.run_repository import (
     PrivateRunConflict,
     PrivateRunCreate,
     PrivateRunRecord,
     PrivateRunRepository,
+)
+from app.private_work.sandbox_files import (
+    RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG,
+    CurrentUploadSnapshotInvalid,
+    admit_current_upload_snapshot,
+    persisted_current_upload_snapshot,
 )
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
@@ -54,6 +72,10 @@ from app.system_settings.errors import (
     SystemModelInvalid,
     SystemModelNotFound,
     SystemModelStorageUnavailable,
+)
+from app.system_settings.validation import (
+    ModelSettingsInvalid,
+    validate_model_settings,
 )
 from deerflow.agents.memory.dream import validate_memory_document
 from deerflow.mcp_definition_policy import (
@@ -136,6 +158,10 @@ class AdmittedRunModelSnapshot(Protocol):
     """Minimum secret-free result required by Run admission."""
 
     logical_name: str
+    provider_adapter: str
+    supports_thinking: bool
+    supports_reasoning_effort: bool
+    supports_vision: bool
 
 
 class RunModelSnapshotAdmissionPort(Protocol):
@@ -586,6 +612,12 @@ class RunSnapshotRepository:
                 )
         except RunSnapshotAssetStale:
             raise PrivateWorkAssetStale(context.request_id) from None
+        except RunModelSelectionLocked:
+            raise PrivateWorkRunModelSelectionLocked(context.request_id) from None
+        except RunSelectedModelUnavailable:
+            raise PrivateWorkRunModelUnavailable(context.request_id) from None
+        except RunExecutionProfileUnsupported:
+            raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
         except PrivateRunConflict:
             raise PrivateWorkConflict(context.request_id) from None
         except PrivateWorkError as error:
@@ -623,9 +655,13 @@ class RunSnapshotRepository:
             raise PrivateWorkConflict(context.request_id)
         _reject_secret_bearing_keys(request.metadata, context.request_id)
         _reject_secret_bearing_keys(request.kwargs, context.request_id)
+        effective_lead_model_ref = selected_run_model_ref(
+            lead_agent.payload.model_ref,
+            request.execution_profile,
+        )
         exact_model_name = (
             self._model_ref_resolver.resolve(
-                lead_agent.payload.model_ref,
+                effective_lead_model_ref,
             )
             if self._model_catalog is None
             else None
@@ -635,12 +671,31 @@ class RunSnapshotRepository:
         if self._model_catalog is None and resolved_closure is not None:
             if any(self._model_ref_resolver.resolve(agent.payload.model_ref) is None for agent in resolved_closure.delegated_agents):
                 raise RunSnapshotAssetStale
+        if self._model_catalog is None and any(value is not None for value in request.execution_profile.as_dict().values()):
+            # Production always supplies the PostgreSQL model catalog. The
+            # exact-resolver fallback cannot prove model capabilities and
+            # therefore cannot safely admit an explicit execution profile.
+            raise RunSnapshotAssetStale
+        try:
+            current_upload_snapshot = await admit_current_upload_snapshot(
+                session,
+                scope=context.resource_scope,
+                thread_id=thread_id,
+                run_kwargs=request.kwargs,
+            )
+        except CurrentUploadSnapshotInvalid:
+            raise RunSnapshotAssetStale from None
+        admitted_run_kwargs = dict(request.kwargs)
+        admitted_run_kwargs[RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG] = persisted_current_upload_snapshot(
+            current_upload_snapshot,
+        )
         safe_request = replace(
             request,
             assistant_id=str(lead_agent.asset_id),
             status="pending",
             multitask_strategy="reject",
             model_name=exact_model_name,
+            kwargs=admitted_run_kwargs,
         )
         (
             skills,
@@ -698,17 +753,38 @@ class RunSnapshotRepository:
                     thread_id=thread_id,
                     run_id=run.run_id,
                     purpose="lead",
-                    model_ref=lead_agent.payload.model_ref,
+                    model_ref=effective_lead_model_ref,
                 )
+            except SystemModelNotFound:
+                if request.execution_profile.model_name is not None:
+                    raise RunSelectedModelUnavailable from None
+                raise RunSnapshotAssetStale from None
             except (
                 SystemModelConflict,
                 SystemModelInvalid,
-                SystemModelNotFound,
             ):
                 raise RunSnapshotAssetStale from None
             except SystemModelStorageUnavailable:
                 raise PrivateWorkUnavailable(context.request_id) from None
             exact_model_name = model_snapshot.logical_name
+            sampling_overrides = lead_agent.payload.model_settings.sampling_overrides()
+            if sampling_overrides:
+                try:
+                    validate_model_settings(
+                        sampling_overrides,
+                        provider_adapter=model_snapshot.provider_adapter,
+                    )
+                except (AttributeError, ModelSettingsInvalid):
+                    raise RunExecutionProfileUnsupported from None
+            effective_profile = resolve_admitted_run_execution_profile(
+                requested=request.execution_profile,
+                logical_name=model_snapshot.logical_name,
+                supports_thinking=model_snapshot.supports_thinking,
+                supports_reasoning_effort=(model_snapshot.supports_reasoning_effort),
+                supports_vision=model_snapshot.supports_vision,
+                agent_thinking_enabled=(lead_agent.payload.model_settings.thinking_enabled),
+                agent_reasoning_effort=(lead_agent.payload.model_settings.reasoning_effort),
+            )
             if resolved_closure is not None:
                 try:
                     for delegated_agent in resolved_closure.delegated_agents:
@@ -758,14 +834,18 @@ class RunSnapshotRepository:
                     raise RunSnapshotAssetStale from None
                 except SystemModelStorageUnavailable:
                     raise PrivateWorkUnavailable(context.request_id) from None
-            if (
-                not isinstance(exact_model_name, str)
-                or not exact_model_name
-                or not await PrivateRunRepository(session).update_model_name(
-                    scope=context.resource_scope,
-                    run_id=run.run_id,
-                    model_name=exact_model_name,
-                )
+            admitted_kwargs = dict(run.kwargs)
+            admitted_kwargs[RUN_EXECUTION_PROFILE_KWARG] = persisted_run_execution_profile(
+                request.execution_profile,
+                effective_profile,
+            )
+            if not await PrivateRunRepository(
+                session,
+            ).update_admitted_execution_profile(
+                scope=context.resource_scope,
+                run_id=run.run_id,
+                model_name=exact_model_name,
+                kwargs=admitted_kwargs,
             ):
                 raise RunSnapshotAssetStale
             refreshed = await PrivateRunRepository(session).get(

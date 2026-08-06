@@ -166,9 +166,10 @@ export const zhCN: Translations = {
     voiceInputNoSpeech: "没有检测到语音，请重试。",
     voiceInputFailed: "语音输入失败，请重试。",
     model: "模型",
+    agentModelLocked: "此 Agent 已固定使用该模型",
     mode: "模式",
     flashMode: "闪速",
-    flashModeDescription: "关闭扩展思考，以最低推理强度快速完成简单任务",
+    flashModeDescription: "关闭扩展思考，不使用推理强度，快速完成简单任务",
     reasoningMode: "思考",
     reasoningModeDescription: "开启扩展思考，采用低推理强度",
     proMode: "Pro",
@@ -588,10 +589,12 @@ export const zhCN: Translations = {
       providerModel: "提供方模型",
       credential: "凭据",
       environmentKey: "环境变量键",
+      status: "状态",
       version: "版本",
       versionMeta: (versionNumber, revision, sortOrder) =>
         `配置 v${versionNumber} · 修订 ${revision} · 排序 ${sortOrder}`,
       capabilities: "模型能力",
+      noCapabilities: "无",
       thinking: "深度思考",
       reasoningEffort: "推理强度",
       vision: "视觉输入",
@@ -1549,6 +1552,11 @@ export const zhCN: Translations = {
     runFailedTitle: "运行未完成",
     runFailedDescription:
       "Agent 未能生成回复。请检查所选模型、依赖资产和凭据后，修改或重新发送消息。",
+    agentModelUnavailableTitle: "Agent 模型不可用",
+    agentModelUnavailableDescription:
+      "无法解析 Agent 配置的模型。请检查其启用绑定、已发布版本和模型目录中的启用状态后重试。",
+    runExecutionProfile: (modelName, modeName, supportsVision) =>
+      `实际执行：${modelName} · ${modeName} · ${supportsVision ? "支持视觉" : "仅文本"}`,
   },
 
   // Chats

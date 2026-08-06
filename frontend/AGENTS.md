@@ -268,6 +268,35 @@ Input polish is project-scoped and never runs without `private_work.create` plus
 `shared_assets.execute`. The server revalidates the current Thread Agent snapshot and
 Credential-grant closure; the browser never constructs authority fields.
 
+Composer model and thinking choices are Run preferences, not browser authority. Normal submit
+and replay derive one complete `execution_profile` from the selected active model and its
+declared thinking/reasoning capabilities. The SDK adapter promotes that profile into the strict
+top-level private-Run field and removes its reserved transport key before the request crosses the
+trust boundary; generic context/config copies of model or reasoning fields remain stripped.
+Gateway may honor a model choice only for a `default`-bound Agent, rejects a conflicting choice
+for an exact-model Agent, and returns the effective model, thinking switch, reasoning effort, and
+vision capability on the Run. The UI must use that effective profile for historical/execution
+presentation and must never imply that the local selection proves admission or provider support.
+Model and mode values each keep an explicit-selection marker per Thread. A missing/non-explicit
+Thread override inherits the current global/catalog default for display and submission, so a stale
+legacy value cannot be shown as selected while the request silently omits it.
+The main composer and Sidecar resolve the Thread Agent's current `model_ref` before submission:
+an exact-model Agent displays a locked model picker and omits `model_name`, while a `default`-
+bound Agent keeps the user's explicit thread/global choice. Locking an exact Agent must never
+overwrite or clear that persisted preference. An existing Thread fails closed when Agent or
+version resolution fails, a System binding/current published version is missing, the active model
+catalog is loading/unavailable/empty, or an exact model is absent from that catalog: submit, human
+input, edit-and-rerun, and regenerate remain disabled while an actionable retry is shown. A
+`/new` draft is not blocked merely because server-issued Thread metadata does not exist yet.
+
+Upload messages carry only ready-file metadata and opaque file IDs, never browser-created image
+data URLs. For an exact admitted vision model, Worker derives current-message images from its
+server-owned file authority and injects them ephemerally into lead model requests. Text-only Runs
+keep the same files available as ordinary uploads but receive no automatic pixel input. The
+browser must not claim that setting the catalog's vision flag alone proves provider compatibility;
+that flag gates the execution path, while a real provider vision request remains the target-
+environment smoke test.
+
 ## Shared assets and credentials
 
 Project asset pages group visible system and project Agent, Skill, MCP, and Credential rows.
@@ -573,10 +602,13 @@ query for the active account while leaving Thread and other private-work caches 
   and the single group-tail Run-duration display.
 - `core/threads/hooks.ts` owns pre-submit upload state, scoped prepare/submit replay, optimistic
   replacement, and replay failure rollback.
-- `core/threads/agent-mode.ts` owns the single composer mode contract. Flash, Thinking, Pro, and
-  Ultra map to minimal, low, medium, and high reasoning effort respectively. The composer and
-  Sidecar persist only the mode; submit and replay derive runtime fields after all stored context
-  so a legacy standalone reasoning-effort value cannot override the selected mode.
+- `core/threads/agent-mode.ts` owns the capability-aware composer mode contract. Flash disables
+  extended thinking and explicitly requests `none` when the selected model supports effort
+  controls; Thinking, Pro, and Ultra request low, medium, and high. Mode no longer grants
+  plan or subagent behavior.
+- `core/private-work/execution-profile.ts` owns the strict requested/effective profile types and
+  removes legacy model/reasoning keys before submit. `core/api/api-client.ts` is the sole SDK
+  compatibility adapter that promotes the reserved carrier to top-level `execution_profile`.
 - Project Memory and Connection pages own their scoped queries and mutations; the Memory page owns
   the document, Dream, version/detail, restore, and conflict-invalidation roots, while shared
   presentation components remain pure.

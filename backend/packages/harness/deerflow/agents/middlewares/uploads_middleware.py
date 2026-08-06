@@ -355,8 +355,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             "record_current_upload_ids",
             None,
         )
-        if callable(record_current_upload_ids):
-            record_current_upload_ids(tuple(file["file_id"] for file in new_files))
+        if not callable(record_current_upload_ids):
+            raise RuntimeError("Private file authority is unavailable")
+        record_current_upload_ids(tuple(file["file_id"] for file in new_files))
         requested_set = set(requested)
         historical_candidates = [dict(file) for file in authorized if file["file_id"] not in requested_set]
         query_text = get_original_user_content_text(

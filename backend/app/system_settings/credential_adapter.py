@@ -160,9 +160,7 @@ class SystemModelCredentialAdapter:
                 command.credential_version_id,
                 command.credential_env_key,
             )
-            if provider_credential_required(command.provider_adapter) != (
-                credential_group != (None, None, None)
-            ):
+            if provider_credential_required(command.provider_adapter) != (credential_group != (None, None, None)):
                 raise ValueError
             api_key: SecretStr | None = None
             if credential_group != (None, None, None):
@@ -186,17 +184,9 @@ class SystemModelCredentialAdapter:
                     or not envelope.is_active
                 ):
                     raise ValueError
-                env_schema = (
-                    version.payload_schema.get("env")
-                    if isinstance(version.payload_schema, dict)
-                    else None
-                )
+                env_schema = version.payload_schema.get("env") if isinstance(version.payload_schema, dict) else None
                 env_key = command.credential_env_key
-                if (
-                    not isinstance(env_schema, list)
-                    or not isinstance(env_key, str)
-                    or env_key not in env_schema
-                ):
+                if not isinstance(env_schema, list) or not isinstance(env_key, str) or env_key not in env_schema:
                     raise ValueError
                 keyring = self._keyring or CredentialKeyring.from_environment()
                 payload = decrypt_credential_payload(

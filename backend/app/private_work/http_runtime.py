@@ -10,7 +10,8 @@ from typing import Any
 from fastapi import Request
 
 from app.private_work.context import PrivateWorkContext
-from app.private_work.errors import PrivateWorkUnavailable
+from app.private_work.errors import PrivateWorkInvalid, PrivateWorkUnavailable
+from app.private_work.execution_profile import RequestedRunExecutionProfile
 from app.private_work.inbound_dedupe import DuplicateInboundDelivery
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
@@ -89,6 +90,23 @@ async def start_private_run(
     persisted_command = copy.deepcopy(raw_command) if isinstance(raw_command, Mapping) else None
     raw_stream_mode = getattr(body, "stream_mode", None)
     stream_mode = list(raw_stream_mode) if isinstance(raw_stream_mode, list) else ["values"]
+    raw_execution_profile = getattr(body, "execution_profile", None)
+    try:
+        execution_profile = RequestedRunExecutionProfile(
+            model_name=getattr(raw_execution_profile, "model_name", None),
+            thinking_enabled=getattr(
+                raw_execution_profile,
+                "thinking_enabled",
+                None,
+            ),
+            reasoning_effort=getattr(
+                raw_execution_profile,
+                "reasoning_effort",
+                None,
+            ),
+        )
+    except TypeError:
+        raise PrivateWorkInvalid(context.request_id) from None
     origin_trace_id = get_current_trace_id() or normalize_trace_id(context.request_id) or generate_trace_id()
     create_request = PrivateRunCreate(
         run_id=run_id or str(uuid.uuid4()),
@@ -103,6 +121,7 @@ async def start_private_run(
         },
         multitask_strategy=getattr(body, "multitask_strategy", "reject"),
         origin_trace_id=origin_trace_id,
+        execution_profile=execution_profile,
     )
     if type(server_context) is PrivateRunAdmissionServerContext:
         trusted_admission_context = replace(

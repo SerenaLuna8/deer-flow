@@ -3,6 +3,7 @@
 import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
+import { RUN_EXECUTION_PROFILE_CONTEXT_KEY } from "../private-work/execution-profile";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
@@ -29,6 +30,68 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
     headers.set("X-CSRF-Token", token);
   }
   return { ...init, headers };
+}
+
+const PRIVATE_RUN_CREATE_PATH = /\/threads\/[^/]+\/runs(?:\/(?:stream|wait))?$/;
+
+/**
+ * The upstream LangGraph SDK serializes a fixed set of Run fields and does not
+ * yet expose ActWeave's top-level ``execution_profile`` extension. Callers put
+ * the profile under a reserved context key; this final request hook promotes
+ * it after SDK serialization and removes the reserved key before the request
+ * crosses the trust boundary.
+ */
+export function promotePrivateRunExecutionProfile(
+  url: URL,
+  init: RequestInit,
+): RequestInit {
+  if (
+    (init.method ?? "GET").toUpperCase() !== "POST" ||
+    !PRIVATE_RUN_CREATE_PATH.test(url.pathname) ||
+    typeof init.body !== "string"
+  ) {
+    return init;
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(init.body);
+  } catch {
+    return init;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return init;
+  }
+
+  const context = Reflect.get(body, "context");
+  if (
+    typeof context !== "object" ||
+    context === null ||
+    Array.isArray(context) ||
+    !Object.hasOwn(context, RUN_EXECUTION_PROFILE_CONTEXT_KEY)
+  ) {
+    return init;
+  }
+
+  const executionProfile = Reflect.get(
+    context,
+    RUN_EXECUTION_PROFILE_CONTEXT_KEY,
+  );
+  const nextContext = { ...context };
+  Reflect.deleteProperty(nextContext, RUN_EXECUTION_PROFILE_CONTEXT_KEY);
+
+  return {
+    ...init,
+    body: JSON.stringify({
+      ...body,
+      context: nextContext,
+      execution_profile: executionProfile,
+    }),
+  };
+}
+
+function prepareSdkRequest(url: URL, init: RequestInit): RequestInit {
+  return injectCsrfHeader(url, promotePrivateRunExecutionProfile(url, init));
 }
 
 // Run statuses that have reached a terminal state where no further streaming
@@ -178,7 +241,7 @@ export function createCompatibleClient({
   console.log(`Creating API client with base URL: ${apiUrl}`);
   const client = new LangGraphClient({
     apiUrl,
-    onRequest: injectCsrfHeader,
+    onRequest: prepareSdkRequest,
   });
 
   const originalRunStream = client.runs.stream.bind(client.runs);

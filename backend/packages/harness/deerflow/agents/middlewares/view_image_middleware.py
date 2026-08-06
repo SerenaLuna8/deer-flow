@@ -8,8 +8,9 @@ import hashlib
 import logging
 import threading
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import PurePosixPath
 from typing import override
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
@@ -31,11 +32,15 @@ from deerflow.agents.thread_state import (
     ViewedImageData,
     normalize_viewed_images,
 )
-from deerflow.file_authority import require_private_file_authority
+from deerflow.file_authority import (
+    AuthorityManifestEntry,
+    require_private_file_authority,
+)
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import sandbox_from_runtime
 from deerflow.tools.builtins.view_image_tool import (
+    _EXTENSION_TO_MIME,
     _MAX_IMAGE_BYTES,
     _detect_image_mime,
     _is_allowed_image_virtual_path,
@@ -46,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
+_MAX_CURRENT_UPLOAD_IMAGES = 4
+_MAX_CURRENT_UPLOAD_TOTAL_BYTES = _MAX_IMAGE_BYTES
+_CURRENT_UPLOAD_ERROR = "Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits"
 
 
 class ViewImageMiddlewareState(ThreadState):
@@ -111,6 +119,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 if cls._reference_matches_current_runtime(
                     runtime,
                     image_data["file_ref"],
+                    state=state,
                 )
             }
             if raw_images != current_images:
@@ -240,11 +249,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     def _reference_matches_current_runtime(
         runtime: Runtime,
         file_ref: Mapping[str, object],
+        *,
+        state: Mapping[str, object],
     ) -> bool:
         if not ViewImageMiddleware._matches_current_scope(runtime, file_ref):
-            return False
-        state = runtime.state
-        if not isinstance(state, Mapping):
             return False
         sandbox_state = state.get("sandbox")
         return isinstance(sandbox_state, Mapping) and sandbox_state.get("sandbox_id") == file_ref.get("sandbox_id")
@@ -255,6 +263,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         image_path: str,
         image_data: ViewedImageData,
         *,
+        state: Mapping[str, object],
         cancel_event: threading.Event | None = None,
     ) -> str | None:
         """Reauthorize and revalidate one immutable image observation."""
@@ -276,13 +285,14 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             or not ViewImageMiddleware._reference_matches_current_runtime(
                 runtime,
                 file_ref,
+                state=state,
             )
         ):
             return None
 
         try:
-            sandbox = sandbox_from_runtime(runtime)
-            if sandbox.id != file_ref.get("sandbox_id") or sandbox.id != (runtime.state.get("sandbox") or {}).get("sandbox_id"):
+            sandbox = sandbox_from_runtime(runtime, state=state)
+            if sandbox.id != file_ref.get("sandbox_id"):
                 return None
             image_bytes = _read_bounded_image_bytes(
                 sandbox,
@@ -310,6 +320,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         runtime: Runtime,
         *,
         cancel_event: threading.Event | None = None,
+        excluded_sha256: frozenset[str] = frozenset(),
     ) -> list[str | dict]:
         viewed_images = state.get("viewed_images", {})
         if not viewed_images:
@@ -326,7 +337,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 "text": "Here are the images you've viewed:",
             }
         ]
+        excluded_any = False
         for image_path, image_data in viewed_images.items():
+            if image_data.get("sha256") in excluded_sha256:
+                excluded_any = True
+                continue
             file_ref = image_data.get("file_ref")
             if not isinstance(
                 file_ref,
@@ -334,6 +349,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             ) or not self._reference_matches_current_runtime(
                 runtime,
                 file_ref,
+                state=state,
             ):
                 continue
             mime_type = image_data.get("mime_type", "unknown")
@@ -347,6 +363,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 runtime,
                 image_path,
                 image_data,
+                state=state,
                 cancel_event=cancel_event,
             )
             if data_url is None:
@@ -363,7 +380,164 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     "image_url": {"url": data_url},
                 }
             )
+        if len(content_blocks) == 1 and excluded_any:
+            return []
         return content_blocks
+
+    @staticmethod
+    def _current_upload_virtual_path(entry: AuthorityManifestEntry) -> str:
+        if type(entry.logical_path) is not str:
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+        logical_path = PurePosixPath(entry.logical_path)
+        if entry.logical_path != logical_path.as_posix() or len(logical_path.parts) < 2 or logical_path.parts[0] != "uploads" or any(part in {"", ".", ".."} for part in logical_path.parts):
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+        return f"/mnt/user-data/uploads/{PurePosixPath(*logical_path.parts[1:]).as_posix()}"
+
+    @staticmethod
+    def _current_upload_file_ref(
+        runtime: Runtime,
+        image_path: str,
+    ) -> dict[str, str]:
+        context = runtime.context
+        if not isinstance(context, Mapping):
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+        private_scope = context.get("private_scope")
+        run_id = context.get("run_id")
+        if type(private_scope) is not PrivateResourceScope or not isinstance(run_id, str) or not run_id:
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+        try:
+            authority = require_private_file_authority(
+                context,
+                method="current_uploads",
+            )
+        except RuntimeError:
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR) from None
+        sandbox_id = getattr(authority, "sandbox_id", None)
+        if not isinstance(sandbox_id, str) or not sandbox_id:
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+        return {
+            "path": image_path,
+            "sandbox_id": sandbox_id,
+            "run_id": run_id,
+            "project_id": private_scope.project_id,
+            "owner_user_id": private_scope.owner_user_id,
+        }
+
+    def _current_upload_images(
+        self,
+        runtime: Runtime,
+    ) -> tuple[tuple[str, ViewedImageData], ...]:
+        context = runtime.context
+        if not isinstance(context, Mapping) or context.get("is_subagent") is True:
+            return ()
+        try:
+            authority = require_private_file_authority(
+                context,
+                method="current_uploads",
+            )
+        except RuntimeError:
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR) from None
+        if authority is None:
+            return ()
+        try:
+            entries = authority.current_uploads()
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR) from None
+        if type(entries) is not tuple:
+            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+
+        images: list[tuple[str, ViewedImageData]] = []
+        seen_ids: set[str] = set()
+        seen_content: set[tuple[str, int, str]] = set()
+        total_bytes = 0
+        for entry in entries:
+            if type(entry) is not AuthorityManifestEntry or not isinstance(entry.file_id, UUID) or entry.kind != "upload" or type(entry.version) is not int or isinstance(entry.version, bool) or entry.version < 1:
+                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            file_id = str(entry.file_id)
+            if file_id in seen_ids:
+                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            seen_ids.add(file_id)
+
+            image_path = self._current_upload_virtual_path(entry)
+            extension = PurePosixPath(image_path).suffix.lower()
+            expected_mime = _EXTENSION_TO_MIME.get(extension)
+            is_declared_image = isinstance(entry.media_type, str) and entry.media_type.startswith("image/")
+            if expected_mime is None and not is_declared_image:
+                continue
+            if (
+                expected_mime is None
+                or entry.media_type != expected_mime
+                or not isinstance(entry.size, int)
+                or isinstance(entry.size, bool)
+                or not 0 < entry.size <= _MAX_IMAGE_BYTES
+                or not isinstance(entry.sha256, str)
+                or len(entry.sha256) != 64
+                or any(character not in "0123456789abcdef" for character in entry.sha256)
+            ):
+                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+
+            identity = (entry.sha256, entry.size, entry.media_type)
+            if identity in seen_content:
+                continue
+            seen_content.add(identity)
+            total_bytes += entry.size
+            if len(images) >= _MAX_CURRENT_UPLOAD_IMAGES or total_bytes > _MAX_CURRENT_UPLOAD_TOTAL_BYTES:
+                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            images.append(
+                (
+                    image_path,
+                    {
+                        "mime_type": entry.media_type,
+                        "size": entry.size,
+                        "sha256": entry.sha256,
+                        "file_ref": self._current_upload_file_ref(runtime, image_path),
+                    },
+                )
+            )
+        return tuple(images)
+
+    def _create_current_upload_image_content(
+        self,
+        runtime: Runtime,
+        *,
+        state: Mapping[str, object],
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[list[str | dict], frozenset[str]]:
+        images = self._current_upload_images(runtime)
+        if not images:
+            return [], frozenset()
+
+        content: list[str | dict] = [
+            {
+                "type": "text",
+                "text": "Here are the images attached to the current user message:",
+            }
+        ]
+        injected_sha256: set[str] = set()
+        for index, (image_path, image_data) in enumerate(images, start=1):
+            data_url = self._read_image_as_data_url(
+                runtime,
+                image_path,
+                image_data,
+                state=state,
+                cancel_event=cancel_event,
+            )
+            if data_url is None:
+                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            content.extend(
+                (
+                    {
+                        "type": "text",
+                        "text": f"\n- Current image attachment {index} ({image_data['mime_type']})",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    },
+                )
+            )
+            injected_sha256.add(image_data["sha256"])
+        return content, frozenset(injected_sha256)
 
     @staticmethod
     def _create_image_context_message(
@@ -385,13 +559,24 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     ) -> ModelRequest:
         state = request.state or {}
         runtime = request.runtime
-        if runtime is None or not self._should_inject_image_message(state):
+        if runtime is None or not self.enable_injection:
             return request
-        image_content = self._create_image_details_message(
-            state,
+        image_content, current_sha256 = self._create_current_upload_image_content(
             runtime,
+            state=state,
             cancel_event=cancel_event,
         )
+        if self._should_inject_image_message(state):
+            image_content.extend(
+                self._create_image_details_message(
+                    state,
+                    runtime,
+                    cancel_event=cancel_event,
+                    excluded_sha256=current_sha256,
+                )
+            )
+        if not image_content:
+            return request
         image_message = self._create_image_context_message(image_content)
         return request.override(
             messages=[*request.messages, image_message],

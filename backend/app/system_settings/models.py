@@ -135,12 +135,16 @@ class RunModelConfigSnapshotView:
     run_id: str
     purpose: str
     logical_name: str
+    provider_adapter: str
     model_config_id: uuid.UUID
     model_config_version_id: uuid.UUID
     payload_checksum: str
     credential_id: uuid.UUID | None
     credential_version_id: uuid.UUID | None
     credential_env_key: str | None
+    supports_thinking: bool
+    supports_reasoning_effort: bool
+    supports_vision: bool
     created_at: datetime
 
 

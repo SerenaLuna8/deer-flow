@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Awaitable, Callable
 from email.utils import parsedate_to_datetime
 from typing import Any, override
 
+from httpx import HTTPStatusError
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
@@ -55,16 +57,62 @@ _QUOTA_PATTERNS = (
     "欠费",
 )
 _AUTH_PATTERNS = (
+    "autherror",
+    "auth_error",
     "authentication",
     "unauthorized",
     "invalid api key",
     "invalid_api_key",
-    "permission",
+    "permission_denied",
     "forbidden",
     "access denied",
+    "access_denied",
     "无权",
     "未授权",
 )
+_CURRENT_UPLOAD_ERROR_DETAIL = "Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits"
+_PROVIDER_MODULE_PREFIXES = (
+    "anthropic",
+    "cohere",
+    "google.api_core",
+    "groq",
+    "mistralai",
+    "openai",
+    "together",
+)
+_PROVIDER_AUTH_EXCEPTION_NAMES = frozenset(
+    {
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "Unauthenticated",
+        "UnauthorizedError",
+    }
+)
+_TRANSIENT_EXCEPTION_NAMES = frozenset(
+    {
+        "APIConnectionError",
+        "APITimeoutError",
+        "ConnectError",
+        "ConnectTimeout",
+        "InternalServerError",
+        "NetworkError",
+        "PoolTimeout",
+        "ProxyError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "StreamChunkTimeoutError",
+        "TimeoutException",
+        "TransportError",
+        "WriteError",
+        "WriteTimeout",
+    }
+)
+_TRANSPORT_EXCEPTION_NAMES = _TRANSIENT_EXCEPTION_NAMES - {
+    "InternalServerError",
+    "StreamChunkTimeoutError",
+}
+_SAFE_CLASSIFIER_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}\Z")
 
 # Per-exception retry budget overrides.
 #
@@ -187,25 +235,34 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     )
 
     def _classify_error(self, exc: BaseException) -> tuple[bool, str]:
-        detail = _extract_error_detail(exc)
-        lowered = detail.lower()
-        error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
+        exception_names = _exception_type_names(exc)
 
-        if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
+        # Middleware that runs before the provider call can fail locally. Its
+        # bounded error text must never be interpreted as a provider response
+        # merely because it contains words such as "unauthorized".
+        if _is_current_upload_error(exc):
+            return False, "generic"
+
+        # Proxy authentication is an egress transport failure, not evidence
+        # that the model Credential itself is invalid. Handle it before any
+        # provider authentication classification.
+        if status_code == 407 or exception_names & _TRANSPORT_EXCEPTION_NAMES:
+            return True, "transient"
+
+        provider_detail = " ".join(_extract_provider_error_values(exc)).lower()
+        if _matches_any(provider_detail, _QUOTA_PATTERNS):
             return False, "quota"
-        if _matches_any(lowered, _AUTH_PATTERNS):
+        # The supported Codex CLI provider can surface the raw httpx status
+        # exception instead of a provider-SDK exception. Authenticate only
+        # from that concrete structured response; arbitrary local exceptions
+        # with status-like attributes or auth-looking text remain generic.
+        if isinstance(exc, HTTPStatusError) and exc.response.status_code in {401, 403}:
+            return False, "auth"
+        if _is_provider_auth_exception(exc) or (_is_provider_exception(exc) and _matches_any(provider_detail, _AUTH_PATTERNS)):
             return False, "auth"
 
-        exc_name = exc.__class__.__name__
-        if exc_name in {
-            "APITimeoutError",
-            "APIConnectionError",
-            "InternalServerError",
-            "ReadError",  # httpx.ReadError: connection dropped mid-stream
-            "RemoteProtocolError",  # httpx: server closed connection unexpectedly
-            "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout
-        }:
+        if exception_names & _TRANSIENT_EXCEPTION_NAMES:
             return True, "transient"
         # Upstream sometimes returns ``200 OK`` with an empty
         # ``generations`` list (observed against Volces "coding" /
@@ -220,7 +277,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
-        if _matches_any(lowered, _BUSY_PATTERNS):
+        if _is_provider_exception(exc) and _matches_any(provider_detail, _BUSY_PATTERNS):
             return True, "busy"
 
         return False, "generic"
@@ -260,6 +317,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         )
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
+        if _is_current_upload_error(exc):
+            return "The current image attachment could not be securely read or validated. Please attach the image again and retry."
         if reason == "quota":
             return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
@@ -279,6 +338,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     "is very large — please ask the assistant to split the work into "
                     "smaller steps, or shorten the requested output, and try again."
                 )
+            if _is_transport_or_proxy_error(exc):
+                return "The configured LLM provider could not be reached because the model transport or proxy connection failed. Please check the Worker network configuration and try again."
             return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
         return "The configured LLM provider could not complete the request. Please retry, or contact an administrator if the problem continues."
 
@@ -286,6 +347,26 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         return self._build_error_fallback_message(
             self._build_user_message(exc, reason),
             reason=reason,
+        )
+
+    def _log_terminal_failure(
+        self,
+        *,
+        attempt: int,
+        exc: BaseException,
+        reason: str,
+    ) -> None:
+        provider_error_code, provider_error_type = _extract_safe_provider_classifiers(exc)
+        status_code = _extract_status_code(exc)
+        exception_class = _safe_classifier(type(exc).__name__) or "Exception"
+        logger.warning(
+            "LLM call failed after %d attempt(s): error_code=%s exception_class=%s status_code=%s provider_error_code=%s provider_error_type=%s",
+            attempt,
+            llm_error_code_for_reason(reason),
+            exception_class,
+            status_code if status_code is not None else "none",
+            provider_error_code or "none",
+            provider_error_type or "none",
         )
 
     def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
@@ -347,10 +428,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     time.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
-                logger.warning(
-                    "LLM call failed after %d attempt(s): error_code=%s",
-                    attempt,
-                    llm_error_code_for_reason(reason),
+                self._log_terminal_failure(
+                    attempt=attempt,
+                    exc=exc,
+                    reason=reason,
                 )
                 if retriable:
                     self._record_failure()
@@ -397,10 +478,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     await asyncio.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
-                logger.warning(
-                    "LLM call failed after %d attempt(s): error_code=%s",
-                    attempt,
-                    llm_error_code_for_reason(reason),
+                self._log_terminal_failure(
+                    attempt=attempt,
+                    exc=exc,
+                    reason=reason,
                 )
                 if retriable:
                     self._record_failure()
@@ -411,21 +492,102 @@ def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in detail for pattern in patterns)
 
 
-def _extract_error_code(exc: BaseException) -> Any:
-    for attr in ("code", "error_code"):
+def _exception_type_names(exc: BaseException) -> frozenset[str]:
+    return frozenset(cls.__name__ for cls in type(exc).__mro__)
+
+
+def _is_provider_exception(exc: BaseException) -> bool:
+    return any(cls.__module__ == prefix or cls.__module__.startswith(f"{prefix}.") for cls in type(exc).__mro__ for prefix in _PROVIDER_MODULE_PREFIXES)
+
+
+def _is_provider_auth_exception(exc: BaseException) -> bool:
+    return _is_provider_exception(exc) and bool(_exception_type_names(exc) & _PROVIDER_AUTH_EXCEPTION_NAMES)
+
+
+def _is_current_upload_error(exc: BaseException) -> bool:
+    return type(exc) is RuntimeError and str(exc).strip() == _CURRENT_UPLOAD_ERROR_DETAIL
+
+
+def _is_transport_or_proxy_error(exc: BaseException) -> bool:
+    return _extract_status_code(exc) == 407 or bool(_exception_type_names(exc) & _TRANSPORT_EXCEPTION_NAMES)
+
+
+def _safe_classifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    return candidate if _SAFE_CLASSIFIER_RE.fullmatch(candidate) is not None else None
+
+
+def _classifier_from_mapping(payload: dict[Any, Any], key: str) -> str | None:
+    value = _safe_classifier(payload.get(key))
+    if value is not None:
+        return value
+    nested = payload.get("error")
+    if isinstance(nested, dict):
+        return _classifier_from_mapping(nested, key)
+    return None
+
+
+def _extract_safe_provider_classifiers(exc: BaseException) -> tuple[str | None, str | None]:
+    """Extract log-safe provider code/type tokens, never body or message text."""
+
+    if not _is_provider_exception(exc):
+        return None, None
+
+    code = _safe_classifier(getattr(exc, "code", None)) or _safe_classifier(getattr(exc, "error_code", None))
+    error_type = _safe_classifier(getattr(exc, "type", None))
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        code = code or _classifier_from_mapping(body, "code")
+        error_type = error_type or _classifier_from_mapping(body, "type")
+    return code, error_type
+
+
+def _error_values_from_mapping(payload: dict[Any, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in ("code", "type", "message", "detail"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    nested = payload.get("error")
+    if isinstance(nested, dict):
+        values.extend(_error_values_from_mapping(nested))
+    elif isinstance(nested, str) and nested.strip():
+        values.append(nested.strip())
+    return tuple(values)
+
+
+def _extract_provider_error_values(exc: BaseException) -> tuple[str, ...]:
+    """Return bounded provider-owned classifiers without trusting local text.
+
+    Only exception objects from a supported provider SDK contribute their
+    message/body. This prevents a local ``RuntimeError`` from impersonating a
+    provider authentication, quota, or busy response through word choice.
+    """
+
+    if not _is_provider_exception(exc):
+        return ()
+
+    values: list[str] = []
+    for attr in ("code", "error_code", "type"):
         value = getattr(exc, attr, None)
-        if value not in (None, ""):
-            return value
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
 
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
-        error = body.get("error")
-        if isinstance(error, dict):
-            for key in ("code", "type"):
-                value = error.get(key)
-                if value not in (None, ""):
-                    return value
-    return None
+        values.extend(_error_values_from_mapping(body))
+    elif isinstance(body, str) and body.strip():
+        values.append(body.strip())
+
+    message = getattr(exc, "message", None)
+    if isinstance(message, str) and message.strip():
+        values.append(message.strip())
+    detail = str(exc).strip()
+    if detail:
+        values.append(detail)
+    return tuple(values)
 
 
 def _extract_status_code(exc: BaseException) -> int | None:

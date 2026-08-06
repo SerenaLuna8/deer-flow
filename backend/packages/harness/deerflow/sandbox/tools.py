@@ -1157,11 +1157,19 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
     return sandbox_id == "local" or sandbox_id.startswith("local:") or sandbox_id.startswith("local-run:")
 
 
-def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
+def sandbox_from_runtime(
+    runtime: Runtime | None = None,
+    *,
+    state: Mapping[str, object] | None = None,
+) -> Sandbox:
     """Extract sandbox instance from tool runtime.
 
     DEPRECATED: Use ensure_sandbox_initialized() for lazy initialization support.
     This function assumes sandbox is already initialized and will raise error if not.
+    Model-call middleware receives a plain ``langgraph.runtime.Runtime``, which
+    intentionally has no ``state`` attribute, so those callers must pass their
+    explicit ``ModelRequest.state`` through ``state``. Tool callers continue to
+    use ``ToolRuntime.state`` when the explicit argument is absent.
 
     Raises:
         SandboxRuntimeError: If runtime is not available or sandbox state is missing.
@@ -1169,9 +1177,12 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     """
     if runtime is None:
         raise SandboxRuntimeError("Tool runtime not available")
-    if runtime.state is None:
+    runtime_state = state
+    if runtime_state is None:
+        runtime_state = getattr(runtime, "state", None)
+    if runtime_state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    sandbox_state, _ = unwrap_sandbox(runtime_state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")

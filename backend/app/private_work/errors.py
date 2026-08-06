@@ -7,6 +7,9 @@ PRIVATE_WORK_ERROR_STATUS = {
     "PRIVATE_WORK_FORBIDDEN": 403,
     "PRIVATE_WORK_CONFLICT": 409,
     "PRIVATE_WORK_ASSET_STALE": 409,
+    "RUN_MODEL_SELECTION_LOCKED": 409,
+    "RUN_MODEL_UNAVAILABLE": 409,
+    "RUN_EXECUTION_PROFILE_UNSUPPORTED": 409,
     "DEFAULT_AGENT_UNAVAILABLE": 409,
     "PRIVATE_WORK_TOO_LARGE": 413,
     "PROJECT_STORAGE_QUOTA_EXCEEDED": 429,
@@ -44,6 +47,21 @@ class PrivateWorkConflict(PrivateWorkError):
 class PrivateWorkAssetStale(PrivateWorkError):
     code = "PRIVATE_WORK_ASSET_STALE"
     public_message = "Private work asset is stale."
+
+
+class PrivateWorkRunModelSelectionLocked(PrivateWorkError):
+    code = "RUN_MODEL_SELECTION_LOCKED"
+    public_message = "The selected Agent model is locked."
+
+
+class PrivateWorkRunModelUnavailable(PrivateWorkError):
+    code = "RUN_MODEL_UNAVAILABLE"
+    public_message = "The selected model is unavailable."
+
+
+class PrivateWorkRunExecutionProfileUnsupported(PrivateWorkError):
+    code = "RUN_EXECUTION_PROFILE_UNSUPPORTED"
+    public_message = "The selected model does not support the Run execution profile."
 
 
 class PrivateWorkDefaultAgentUnavailable(PrivateWorkError):

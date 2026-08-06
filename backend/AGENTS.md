@@ -482,6 +482,35 @@ while `logging.enhance.enabled=false` prevents only the external Langfuse
 never expose the raw durable trace; audit stores only its domain-separated request HMAC.
 Operator log records may carry the trace only when the startup-frozen logging enhancement is
 enabled.
+Interactive private Runs accept model and reasoning preferences only through the strict top-level
+`execution_profile` request. Generic metadata/config/context copies of `model_name`,
+`thinking_enabled`, or `reasoning_effort` are always discarded. A `default`-bound Agent may use an
+active exact logical model selected for that Run; an exact-model Agent remains locked. Admission
+freezes the exact model version, validates thinking/reasoning capabilities without fallback, and
+stores the requested plus effective profile in server-owned Run kwargs. The Worker reasserts that
+effective profile at both runtime-config channels, while Run read/list responses expose only the
+effective logical model, thinking switch, reasoning effort, and vision capability.
+For models that expose reasoning effort, Flash means `thinking_enabled=false` plus an explicit
+`reasoning_effort=none`; it must not omit the provider field and fall back to GPT-5.6's medium
+default. Thinking, Pro, and Ultra resolve to low, medium, and high respectively.
+Current-message image input is derived only from file IDs intersected with server file authority
+during the Gateway admission transaction. Admission locks each authorized ready upload and freezes
+its exact ID, version, logical path, size, MIME, and SHA-256 as server-owned Run metadata; forged,
+missing, staging, and out-of-scope client claims never enter that snapshot. On every fresh Worker
+attempt, including checkpoint takeover with graph input `None`, the Worker restores the current
+project/owner/thread-scoped PostgreSQL manifest and requires every frozen attachment to match that
+exact metadata. A missing, deleted, changed, malformed, or broadened attachment set is a permanent
+fail-closed Run error and must never silently degrade into a text-only request. The persisted client
+payload is never itself file authority. When the exact admitted lead model has
+`supports_vision=true`,
+`ViewImageMiddleware` reopens those regular sandbox files before every lead model request and
+revalidates Run/project/owner/sandbox scope, size, SHA-256, extension, MIME, and file magic. It
+injects at most four unique images with a 20 MiB per-image and aggregate limit; non-image
+attachments remain ordinary files, while malformed, changed, unsupported, over-budget, or
+unauthorized image claims fail closed. The data URLs exist only on the ephemeral `ModelRequest`
+and never enter graph state, checkpoints, SSE, the Run journal, or application logs. Subagents do
+not automatically inherit current-message images. The explicit `view_image` tool remains the
+path for historical uploads and images discovered or created later in the Run.
 `run_events.id` and `run_events.seq` are signed PostgreSQL BIGINT values in the full schema.
 The schema change has no in-place upgrade path: an older database must be replaced with an
 empty target and initialized through `make setup-db`. A settled terminal is replayed only when

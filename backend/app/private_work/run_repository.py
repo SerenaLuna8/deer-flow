@@ -12,6 +12,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.execution_profile import RequestedRunExecutionProfile
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
@@ -31,6 +32,9 @@ class PrivateRunCreate:
     model_name: str | None = None
     origin_trace_id: str = field(default_factory=generate_trace_id)
     follow_up_to_run_id: str | None = None
+    execution_profile: RequestedRunExecutionProfile = field(
+        default_factory=RequestedRunExecutionProfile,
+    )
 
     def __post_init__(self) -> None:
         normalized = normalize_trace_id(self.origin_trace_id)
@@ -39,6 +43,10 @@ class PrivateRunCreate:
         object.__setattr__(self, "origin_trace_id", normalized)
         if self.follow_up_to_run_id is not None and (not isinstance(self.follow_up_to_run_id, str) or not self.follow_up_to_run_id or len(self.follow_up_to_run_id) > 64 or self.follow_up_to_run_id == self.run_id):
             raise ValueError("follow_up_to_run_id is invalid")
+        if type(self.execution_profile) is not RequestedRunExecutionProfile:
+            raise TypeError(
+                "execution_profile must be RequestedRunExecutionProfile",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -871,6 +879,32 @@ class PrivateRunRepository:
         model_name: str | None,
     ) -> bool:
         result = await self.session.execute(update(RunRow).where(RunRow.run_id == run_id, *self.predicates(scope)).values(model_name=model_name, updated_at=datetime.now(UTC)))
+        return result.rowcount != 0
+
+    async def update_admitted_execution_profile(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        model_name: str,
+        kwargs: Mapping[str, object],
+    ) -> bool:
+        """Persist only the server-resolved model/profile on a new Run."""
+
+        if type(model_name) is not str or not model_name or not isinstance(kwargs, Mapping):
+            raise PrivateRunConflict
+        result = await self.session.execute(
+            update(RunRow)
+            .where(
+                RunRow.run_id == run_id,
+                *self.predicates(scope),
+            )
+            .values(
+                model_name=model_name,
+                kwargs_json=dict(kwargs),
+                updated_at=datetime.now(UTC),
+            )
+        )
         return result.rowcount != 0
 
     async def delete(

@@ -44,8 +44,10 @@ import {
   useLocalSettings,
   useThreadSettings,
 } from "@/core/settings";
+import { useThreadAgentModelRef } from "@/core/shared-assets";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import type { AgentThread } from "@/core/threads";
+import { resolveAgentExecutionAvailability } from "@/core/threads/agent-mode";
 import {
   useBranchThread,
   useThreadMetadata,
@@ -137,7 +139,8 @@ export function ScopedChatPage({
   const welcomeDismissedThreadIdsRef = useRef(new Set<string>());
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
-  const { tokenUsageEnabled } = useModels();
+  const modelCatalog = useModels();
+  const { models, tokenUsageEnabled } = modelCatalog;
   const threadTokenUsage = useThreadTokenUsage(
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock, privateWork },
@@ -147,6 +150,24 @@ export function ScopedChatPage({
     isMock,
     privateWork,
   });
+  const agentModel = useThreadAgentModelRef(threadMetadata.data?.metadata);
+  const agentExecutionAvailability = resolveAgentExecutionAvailability({
+    required: !isNewThread,
+    agentModelRef: agentModel.modelRef,
+    agentModelLoading:
+      threadMetadata.isLoading ||
+      threadMetadata.isFetching ||
+      agentModel.isLoading,
+    agentModelError: threadMetadata.error ?? agentModel.error,
+    models,
+    modelsLoading: modelCatalog.isLoading || modelCatalog.isFetching,
+    modelsError: modelCatalog.error,
+  });
+  const agentModelBlocked = agentExecutionAvailability !== "ready";
+  const agentModelUnavailable = agentExecutionAvailability === "unavailable";
+  const handleAgentModelRetry = useCallback(() => {
+    void Promise.all([agentModel.refetch(), modelCatalog.refetch()]);
+  }, [agentModel, modelCatalog]);
   const branchThread = useBranchThread(privateWork);
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
@@ -170,11 +191,13 @@ export function ScopedChatPage({
     loadMoreHistory,
     historyError,
     retryHistory,
+    runExecutionProfiles,
     hasTerminalRunFailure,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
     context: settings.context,
+    agentModelRef: agentModel.modelRef,
     isMock,
     privateWork,
     // onSend only animates the UI; do NOT flip `isNewThread` here — the
@@ -447,6 +470,7 @@ export function ScopedChatPage({
                   isHistoryLoading={isHistoryLoading}
                   historyError={historyError}
                   retryHistory={retryHistory}
+                  runExecutionProfiles={runExecutionProfiles}
                   tokenUsageInlineMode={tokenUsageInlineMode}
                   canSubmitFeedback={scope.canRun}
                   canDeleteFiles={scope.canDeleteFiles === true}
@@ -457,6 +481,7 @@ export function ScopedChatPage({
                     !isMock &&
                     !isStaticWebsiteOnly() &&
                     !isUploading &&
+                    !agentModelBlocked &&
                     !thread.isLoading
                   }
                   onRegenerateMessage={
@@ -471,6 +496,7 @@ export function ScopedChatPage({
                     !isMock &&
                     !isStaticWebsiteOnly() &&
                     !isUploading &&
+                    !agentModelBlocked &&
                     !thread.isLoading &&
                     !branchThread.isPending &&
                     !hasGoal &&
@@ -482,7 +508,10 @@ export function ScopedChatPage({
                       : handleEditAndRegenerate
                   }
                   onSubmitHumanInput={
-                    !scope.canRun || isMock || isStaticWebsiteOnly()
+                    !scope.canRun ||
+                    agentModelBlocked ||
+                    isMock ||
+                    isStaticWebsiteOnly()
                       ? undefined
                       : handleSubmitHumanInput
                   }
@@ -553,6 +582,30 @@ export function ScopedChatPage({
                       </AlertDescription>
                     </Alert>
                   )}
+                  {agentModelUnavailable && (
+                    <Alert
+                      variant="destructive"
+                      className="border-destructive/30 bg-destructive/5 mb-3"
+                      data-testid="agent-model-unavailable-alert"
+                    >
+                      <AlertTitle>
+                        {t.conversation.agentModelUnavailableTitle}
+                      </AlertTitle>
+                      <AlertDescription className="flex items-center justify-between gap-3">
+                        <span>
+                          {t.conversation.agentModelUnavailableDescription}
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={handleAgentModelRetry}
+                        >
+                          {t.common.retry}
+                        </Button>
+                      </AlertDescription>
+                    </Alert>
+                  )}
                   {mountedRef.current ? (
                     <InputBox
                       className={cn(
@@ -563,6 +616,7 @@ export function ScopedChatPage({
                       threadId={threadId}
                       threadExists={!isNewThread}
                       agentMetadata={threadMetadata.data?.metadata}
+                      agentModelRef={agentModel.modelRef}
                       draftConversationScope={isNewThread ? "new" : threadId}
                       autoFocus={isWelcomeMode}
                       status={
@@ -583,6 +637,7 @@ export function ScopedChatPage({
                         isMock ||
                         isStaticWebsiteOnly() ||
                         isUploading ||
+                        agentModelBlocked ||
                         (!isNewThread && isHistoryLoading)
                       }
                       onContextChange={(context) =>

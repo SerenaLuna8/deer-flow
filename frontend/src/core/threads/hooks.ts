@@ -14,7 +14,17 @@ import { toast } from "sonner";
 import { z } from "zod";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
-import { getAgentModeRuntimeContext } from "@/core/threads/agent-mode";
+import { useModels } from "@/core/models/hooks";
+import {
+  collectRunExecutionProfiles,
+  REASONING_EFFORTS,
+  type RunExecutionProfileRequest,
+  withRunExecutionProfileContext,
+} from "@/core/private-work/execution-profile";
+import {
+  buildRunExecutionProfileRequest,
+  resolveAgentExecutionModelSelection,
+} from "@/core/threads/agent-mode";
 
 import { fetch } from "../api/fetcher";
 import { useI18n } from "../i18n/hooks";
@@ -85,6 +95,7 @@ export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
+  agentModelRef?: string | null;
   isMock?: boolean;
   privateWork?: ProjectPrivateWorkScope;
   onSend?: (threadId: string) => void;
@@ -319,6 +330,36 @@ function messageIdentity(message: Message): string | undefined {
     return `message:${message.id}`;
   }
   return undefined;
+}
+
+function hasAcknowledgedOptimisticHuman(
+  optimisticMessages: Message[],
+  canonicalMessages: Message[],
+): boolean {
+  // DynamicContextMiddleware keeps the submitted id on its hidden reminder
+  // and moves the visible canonical user message to `<submitted-id>__user`.
+  // Match only this server-owned id relationship; equal text can be a distinct
+  // user turn and must never acknowledge an optimistic message.
+  const canonicalHumanIds = new Set(
+    canonicalMessages.flatMap((message) => {
+      const id = message.id;
+      return message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        typeof id === "string" &&
+        id.length > 0
+        ? [id]
+        : [];
+    }),
+  );
+  return optimisticMessages.some((message) => {
+    const id = message.id;
+    return (
+      message.type === "human" &&
+      typeof id === "string" &&
+      id.length > 0 &&
+      (canonicalHumanIds.has(id) || canonicalHumanIds.has(`${id}__user`))
+    );
+  });
 }
 
 function isRunAdmissionMessage(message: Message): boolean {
@@ -949,6 +990,12 @@ export function mergeMessages(
     historyMessages,
     scopedThreadMessages,
   );
+  const visibleOptimisticMessages = hasAcknowledgedOptimisticHuman(
+    optimisticMessages,
+    [...projectedHistoryMessages, ...scopedThreadMessages],
+  )
+    ? []
+    : optimisticMessages;
   const threadMessageIds = new Set(
     scopedThreadMessages
       .filter((message) => !isHiddenFromUIMessage(message))
@@ -1026,7 +1073,7 @@ export function mergeMessages(
   const merged = dedupeMessagesByIdentity([
     ...regularHistoryMessages.slice(0, cutoff),
     ...scopedThreadMessages,
-    ...optimisticMessages,
+    ...visibleOptimisticMessages,
   ]);
   const chronologicalRunOrder = new Map<string, number>();
   [...runsNewestFirst]
@@ -1565,6 +1612,7 @@ export function useThreadStream({
   threadId,
   displayThreadId,
   context,
+  agentModelRef,
   isMock,
   privateWork: explicitPrivateWork,
   onSend,
@@ -1574,6 +1622,42 @@ export function useThreadStream({
 }: ThreadStreamOptions) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const { t } = useI18n();
+  const { models: executionModels } = useModels({ enabled: !isMock });
+  const executionModelSelection = useMemo(
+    () =>
+      resolveAgentExecutionModelSelection(
+        executionModels,
+        context.model_name,
+        agentModelRef,
+        context.model_selection_explicit === true,
+      ),
+    [
+      agentModelRef,
+      context.model_name,
+      context.model_selection_explicit,
+      executionModels,
+    ],
+  );
+  const executionModel = executionModelSelection.model;
+  const executionProfile = useMemo<RunExecutionProfileRequest>(
+    () =>
+      buildRunExecutionProfileRequest({
+        mode: context.mode,
+        modeSelectionExplicit: context.mode_selection_explicit === true,
+        modelName: context.model_name,
+        modelSelectionExplicit: context.model_selection_explicit === true,
+        agentModelRef,
+        model: executionModel,
+      }),
+    [
+      context.mode,
+      context.mode_selection_explicit,
+      context.model_name,
+      context.model_selection_explicit,
+      agentModelRef,
+      executionModel,
+    ],
+  );
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
@@ -1628,6 +1712,10 @@ export function useThreadStream({
     pendingSupersededRunIds,
     privateWork,
   });
+  const runExecutionProfiles = useMemo(
+    () => collectRunExecutionProfiles(historyRuns ?? []),
+    [historyRuns],
+  );
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -2200,16 +2288,29 @@ export function useThreadStream({
   // after individual "messages-tuple" events for AI messages).
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
+  const optimisticHumanAcknowledged = hasAcknowledgedOptimisticHuman(
+    optimisticMessages,
+    [...visibleHistory, ...persistedMessages],
+  );
   useEffect(() => {
     if (optimisticMessageCount === 0) return;
 
     const newHumanMsgArrived = humanMessageCount > prevHumanMsgCountRef.current;
 
-    if (!hasHumanOptimistic || newHumanMsgArrived) {
+    if (
+      !hasHumanOptimistic ||
+      newHumanMsgArrived ||
+      optimisticHumanAcknowledged
+    ) {
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
-  }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
+  }, [
+    hasHumanOptimistic,
+    humanMessageCount,
+    optimisticHumanAcknowledged,
+    optimisticMessageCount,
+  ]);
 
   const sendMessage = useCallback(
     async (
@@ -2371,12 +2472,14 @@ export function useThreadStream({
               options?.continueFromLatestCheckpoint,
             ),
             ...buildRootThreadStreamOptions(),
-            context: {
-              ...extraContext,
-              ...context,
-              thread_id: threadId,
-              ...getAgentModeRuntimeContext(context.mode),
-            },
+            context: withRunExecutionProfileContext(
+              {
+                ...extraContext,
+                ...context,
+                thread_id: threadId,
+              },
+              executionProfile,
+            ),
           },
         );
         options?.onSent?.();
@@ -2411,6 +2514,7 @@ export function useThreadStream({
       t.uploads.uploadFailed,
       t.uploads.uploadingFiles,
       context,
+      executionProfile,
       queryClient,
       humanMessageCount,
       persistedMessages,
@@ -2515,11 +2619,13 @@ export function useThreadStream({
           checkpoint: prepared.checkpoint,
           metadata: prepared.metadata,
           ...buildRootThreadStreamOptions(),
-          context: {
-            ...context,
-            thread_id: threadId,
-            ...getAgentModeRuntimeContext(context.mode),
-          },
+          context: withRunExecutionProfileContext(
+            {
+              ...context,
+              thread_id: threadId,
+            },
+            executionProfile,
+          ),
         });
         if (replayAttempt.status === "failed") {
           if (preparedReplayAttemptRef.current === replayAttempt) {
@@ -2577,6 +2683,7 @@ export function useThreadStream({
     [
       clearPreparedReplayMasks,
       context,
+      executionProfile,
       humanMessageCount,
       persistedMessages,
       privateWork,
@@ -2749,6 +2856,7 @@ export function useThreadStream({
     loadMoreHistory,
     historyError,
     retryHistory,
+    runExecutionProfiles,
     hasTerminalRunFailure: latestRunHasTerminalFailure(historyRuns),
   } as const;
 }
@@ -3232,6 +3340,15 @@ const threadRunMetadataSchema = z
     }
   });
 
+const runExecutionProfileSchema = z
+  .object({
+    model_name: z.string().min(1),
+    thinking_enabled: z.boolean(),
+    reasoning_effort: z.enum(REASONING_EFFORTS).nullable(),
+    supports_vision: z.boolean(),
+  })
+  .strict();
+
 const threadRunSchema = z
   .object({
     run_id: z.string().min(1),
@@ -3251,6 +3368,7 @@ const threadRunSchema = z
     multitask_strategy: z.enum(["reject", "interrupt", "rollback", "enqueue"]),
     error: z.string().nullable(),
     model_name: z.string().min(1).nullable(),
+    execution_profile: runExecutionProfileSchema.nullable(),
   })
   .strict();
 

@@ -140,6 +140,7 @@ export interface Translations {
     voiceInputNoSpeech: string;
     voiceInputFailed: string;
     model: string;
+    agentModelLocked: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -996,6 +997,7 @@ export interface Translations {
       providerModel: string;
       credential: string;
       environmentKey: string;
+      status: string;
       version: string;
       versionMeta: (
         versionNumber: number,
@@ -1003,6 +1005,7 @@ export interface Translations {
         sortOrder: number,
       ) => string;
       capabilities: string;
+      noCapabilities: string;
       thinking: string;
       reasoningEffort: string;
       vision: string;
@@ -1390,6 +1393,13 @@ export interface Translations {
     branchFailed: string;
     runFailedTitle: string;
     runFailedDescription: string;
+    agentModelUnavailableTitle: string;
+    agentModelUnavailableDescription: string;
+    runExecutionProfile: (
+      modelName: string,
+      modeName: string,
+      supportsVision: boolean,
+    ) => string;
   };
 
   // Chats

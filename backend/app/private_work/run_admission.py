@@ -25,7 +25,17 @@ from app.private_work.errors import (
     PrivateWorkError,
     PrivateWorkForbidden,
     PrivateWorkNotFound,
+    PrivateWorkRunExecutionProfileUnsupported,
+    PrivateWorkRunModelSelectionLocked,
+    PrivateWorkRunModelUnavailable,
     PrivateWorkUnavailable,
+)
+from app.private_work.execution_profile import (
+    RUN_EXECUTION_PROFILE_KWARG,
+    RunExecutionProfileUnsupported,
+    RunModelSelectionLocked,
+    RunSelectedModelUnavailable,
+    parse_persisted_run_execution_profile,
 )
 from app.private_work.human_input_response import HumanInputResponsePromotion
 from app.private_work.inbound_dedupe import (
@@ -34,6 +44,11 @@ from app.private_work.inbound_dedupe import (
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import PrivateRunConflict, PrivateRunCreate, PrivateRunRecord, PrivateRunRepository
+from app.private_work.sandbox_files import (
+    RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG,
+    CurrentUploadSnapshotInvalid,
+    required_current_upload_snapshot_from_run_kwargs,
+)
 from app.private_work.snapshot_repository import (
     RunAssetSnapshot,
     RunMcpGrantSnapshot,
@@ -426,11 +441,35 @@ class PrivateRunAdmissionService:
         thread_id: str,
         request: PrivateRunCreate,
     ) -> bool:
-        kwargs_match = run.kwargs == request.kwargs or _matches_server_promoted_human_input_retry(
-            run.kwargs,
+        persisted_kwargs = dict(run.kwargs)
+        persisted_profile = persisted_kwargs.pop(
+            RUN_EXECUTION_PROFILE_KWARG,
+            None,
+        )
+        try:
+            required_current_upload_snapshot_from_run_kwargs(run.kwargs)
+        except CurrentUploadSnapshotInvalid:
+            return False
+        persisted_kwargs.pop(RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG, None)
+        if persisted_profile is None:
+            profile_match = request.execution_profile.as_dict() == {
+                "model_name": None,
+                "thinking_enabled": None,
+                "reasoning_effort": None,
+            }
+        else:
+            try:
+                persisted_requested, _ = parse_persisted_run_execution_profile(
+                    persisted_profile,
+                )
+                profile_match = persisted_requested == request.execution_profile
+            except RunExecutionProfileUnsupported:
+                profile_match = False
+        kwargs_match = persisted_kwargs == request.kwargs or _matches_server_promoted_human_input_retry(
+            persisted_kwargs,
             request.kwargs,
         )
-        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and run.metadata == request.metadata and kwargs_match
+        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and run.metadata == request.metadata and kwargs_match and profile_match
 
     @staticmethod
     def _server_kwargs(
@@ -707,6 +746,12 @@ class PrivateRunAdmissionService:
                 )
         except (RunSnapshotAssetStale, AssetResolutionUnavailable):
             raise PrivateWorkAssetStale(context.request_id) from None
+        except RunModelSelectionLocked:
+            raise PrivateWorkRunModelSelectionLocked(context.request_id) from None
+        except RunSelectedModelUnavailable:
+            raise PrivateWorkRunModelUnavailable(context.request_id) from None
+        except RunExecutionProfileUnsupported:
+            raise PrivateWorkRunExecutionProfileUnsupported(context.request_id) from None
         except AssetForbidden:
             raise PrivateWorkForbidden(context.request_id) from None
         except AssetValidationFailed:

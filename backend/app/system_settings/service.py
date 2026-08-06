@@ -141,6 +141,7 @@ def _model_view(
 
 def _snapshot_view(
     row: RunModelConfigSnapshotRow,
+    version: SystemModelConfigVersionRow,
 ) -> RunModelConfigSnapshotView:
     return RunModelConfigSnapshotView(
         project_id=uuid.UUID(str(row.project_id)),
@@ -149,6 +150,7 @@ def _snapshot_view(
         run_id=row.run_id,
         purpose=row.purpose,
         logical_name=row.logical_name,
+        provider_adapter=version.provider_adapter,
         model_config_id=uuid.UUID(str(row.model_config_id)),
         model_config_version_id=uuid.UUID(
             str(row.model_config_version_id),
@@ -157,6 +159,9 @@ def _snapshot_view(
         credential_id=(uuid.UUID(str(row.credential_id)) if row.credential_id is not None else None),
         credential_version_id=(uuid.UUID(str(row.credential_version_id)) if row.credential_version_id is not None else None),
         credential_env_key=row.credential_env_key,
+        supports_thinking=version.supports_thinking,
+        supports_reasoning_effort=version.supports_reasoning_effort,
+        supports_vision=version.supports_vision,
         created_at=row.created_at,
     )
 
@@ -587,7 +592,7 @@ class SystemModelCatalogService:
                     or existing.credential_env_key != version.credential_env_key
                 ):
                     raise SystemModelConflict(request_id)
-                return _snapshot_view(existing)
+                return _snapshot_view(existing, version)
             snapshot = RunModelConfigSnapshotRow(
                 project_id=canonical_project_id,
                 owner_user_id=owner_user_id,
@@ -603,7 +608,7 @@ class SystemModelCatalogService:
                 credential_env_key=version.credential_env_key,
             )
             await repository.add_snapshot(snapshot)
-            return _snapshot_view(snapshot)
+            return _snapshot_view(snapshot, version)
         except SystemModelError:
             raise
         except IntegrityError:

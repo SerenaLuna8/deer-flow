@@ -12,9 +12,9 @@ from app.system_settings.models import (
     RunModelConfigSnapshotView,
     SystemModelCatalogStateView,
     SystemModelCatalogView,
+    SystemModelConnectionCheck,
     SystemModelVersionView,
     SystemModelView,
-    SystemModelConnectionCheck,
     UpdateSystemModel,
 )
 from app.system_settings.service import SystemModelCatalogService
@@ -27,11 +27,11 @@ __all__ = [
     "SystemModelCatalogService",
     "SystemModelCatalogStateView",
     "SystemModelCatalogView",
+    "SystemModelConnectionCheck",
     "SystemModelCredentialAdapter",
     "SystemModelMaterializationUnavailable",
     "SystemModelMaterializer",
     "SystemModelVersionView",
     "SystemModelView",
-    "SystemModelConnectionCheck",
     "UpdateSystemModel",
 ]

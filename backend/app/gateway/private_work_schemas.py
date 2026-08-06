@@ -113,6 +113,28 @@ class PrivateRunCheckpoint(StrictPrivateWorkRequest):
     checkpoint_map: None = None
 
 
+class PrivateRunExecutionProfileRequest(StrictPrivateWorkRequest):
+    """Non-authoritative Run preferences resolved by Gateway admission."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    model_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+    )
+    thinking_enabled: bool | None = None
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
+
+    @field_validator("model_name")
+    @classmethod
+    def reject_symbolic_default(cls, value: str | None) -> str | None:
+        if value == "default":
+            raise ValueError("model_name must be an exact logical name")
+        return value
+
+
 class PrivateRunCreateRequest(StrictPrivateWorkRequest):
     assistant_id: str | None = None
     input: dict[str, object] | list[object] | str | None = None
@@ -120,6 +142,9 @@ class PrivateRunCreateRequest(StrictPrivateWorkRequest):
     config: dict[str, object] = Field(default_factory=dict)
     context: dict[str, object] = Field(default_factory=dict)
     metadata: dict[str, object] = Field(default_factory=dict)
+    execution_profile: PrivateRunExecutionProfileRequest = Field(
+        default_factory=PrivateRunExecutionProfileRequest,
+    )
     multitask_strategy: Literal["reject", "interrupt", "rollback"] = "reject"
     checkpoint: PrivateRunCheckpoint | None = None
     on_disconnect: Literal["cancel", "continue"] = "cancel"
@@ -267,6 +292,7 @@ def strip_client_authority_fields(
 __all__ = [
     "PrivateRunCheckpoint",
     "PrivateRunCreateRequest",
+    "PrivateRunExecutionProfileRequest",
     "PrivateThreadContextUsageResponse",
     "PrivateThreadTokenUsageResponse",
     "PrivateWorkRoute",

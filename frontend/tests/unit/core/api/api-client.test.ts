@@ -6,6 +6,7 @@ import {
   isInactiveRunStreamError,
   isRunNotCancellableError,
 } from "@/core/api/api-client";
+import { RUN_EXECUTION_PROFILE_CONTEXT_KEY } from "@/core/private-work/execution-profile";
 
 const TEST_API_URL = "http://localhost:3000/test/api";
 
@@ -45,6 +46,50 @@ test("rejects a compatibility client without an explicit project API URL", () =>
   expect(() => createCompatibleClient()).toThrow(
     "A project-private API URL is required",
   );
+});
+
+test("promotes the reserved execution profile to the private Run body", async () => {
+  let requestBody: Record<string, unknown> | undefined;
+  const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+    if (typeof init?.body !== "string") {
+      throw new TypeError("expected a serialized JSON request body");
+    }
+    requestBody = JSON.parse(init.body) as Record<string, unknown>;
+    return new Response("", {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const profile = {
+    model_name: "gpt-5.6-luna",
+    thinking_enabled: true,
+    reasoning_effort: "high" as const,
+  };
+  const stream = createTestClient().runs.stream(
+    "thread-1",
+    "project-assistant-v1",
+    {
+      input: { messages: [] },
+      context: {
+        thread_id: "thread-1",
+        [RUN_EXECUTION_PROFILE_CONTEXT_KEY]: profile,
+      },
+    },
+  );
+
+  await expect(stream.next()).resolves.toMatchObject({ done: true });
+  expect(requestBody).toMatchObject({
+    execution_profile: profile,
+    context: { thread_id: "thread-1" },
+  });
+  expect(
+    Reflect.has(
+      requestBody?.context as object,
+      RUN_EXECUTION_PROFILE_CONTEXT_KEY,
+    ),
+  ).toBe(false);
 });
 
 test("identifies inactive run stream errors", () => {

@@ -25,6 +25,11 @@ from app.private_work.authorization import PrivateRunAuthorizationBoundary
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkMcpQuotaExceeded
+from app.private_work.execution_profile import (
+    RUN_EXECUTION_PROFILE_KWARG,
+    RunExecutionProfileUnsupported,
+    effective_run_execution_profile_from_kwargs,
+)
 from app.private_work.file_finalizer import (
     PrivateFileFinalizationAuditPort,
     PrivateFileFinalizer,
@@ -45,9 +50,13 @@ from app.private_work.run_repository import (
     PrivateRunUsageSnapshot,
 )
 from app.private_work.sandbox_files import (
+    CurrentUploadSnapshotEntry,
+    CurrentUploadSnapshotInvalid,
+    CurrentUploadSnapshotStale,
     PrivateFileRunScope,
     PrivateRunFileAuthority,
     PrivateSandboxFileProjection,
+    required_current_upload_snapshot_from_run_kwargs,
 )
 from app.private_work.snapshot_repository import (
     RunSnapshotRepository,
@@ -84,6 +93,7 @@ from deerflow.mcp_definition_policy import (
     McpEndpointPolicy,
     NetworkMcpEndpointPolicy,
 )
+from deerflow.models.factory import AgentModelSettingsUnsupported
 from deerflow.persistence.jobs.sql import (
     JobClaim,
     JobRepository,
@@ -1163,15 +1173,52 @@ class RunAgentPrivateExecutor:
         )
 
     @staticmethod
+    def _required_current_upload_snapshot(
+        run_kwargs: object,
+    ) -> tuple[CurrentUploadSnapshotEntry, ...]:
+        try:
+            return required_current_upload_snapshot_from_run_kwargs(run_kwargs)
+        except CurrentUploadSnapshotInvalid:
+            raise PermanentExecutionError(
+                "RUN_CURRENT_UPLOAD_STALE",
+            ) from None
+
+    @staticmethod
     def _runner_config(
         execution: PrivateRunExecution,
         archive_context: SnipArchiveContext,
     ) -> dict[str, Any]:
         config = copy.deepcopy(execution.config)
+        raw_profile_present = RUN_EXECUTION_PROFILE_KWARG in execution.run.kwargs
+        try:
+            effective_profile = effective_run_execution_profile_from_kwargs(
+                execution.run.kwargs,
+            )
+        except RunExecutionProfileUnsupported:
+            raise PermanentExecutionError(
+                "RUN_EXECUTION_PROFILE_STALE",
+            ) from None
+        if raw_profile_present and effective_profile is None:
+            raise PermanentExecutionError("RUN_EXECUTION_PROFILE_STALE")
         raw_context = config.get("context")
         runtime_context = dict(raw_context) if isinstance(raw_context, Mapping) else {}
         runtime_context[MEMORY_ARCHIVE_CONTEXT_KEY] = archive_context
+        raw_configurable = config.get("configurable")
+        configurable = dict(raw_configurable) if isinstance(raw_configurable, Mapping) else {}
+        if effective_profile is not None:
+            persisted_model_name = getattr(execution.run, "model_name", None)
+            if persisted_model_name is not None and persisted_model_name != effective_profile.model_name:
+                raise PermanentExecutionError(
+                    "RUN_EXECUTION_PROFILE_STALE",
+                )
+            for key, value in (
+                ("thinking_enabled", effective_profile.thinking_enabled),
+                ("reasoning_effort", effective_profile.reasoning_effort),
+            ):
+                runtime_context[key] = value
+                configurable[key] = value
         config["context"] = runtime_context
+        config["configurable"] = configurable
         return config
 
     @staticmethod
@@ -1269,6 +1316,9 @@ class RunAgentPrivateExecutor:
         record: RunRecord | None = None
         runtime_config_pushed = False
         try:
+            current_upload_snapshot = self._required_current_upload_snapshot(
+                execution.run.kwargs,
+            )
             exact_model_name = execution.run.model_name
             if exact_model_name is None:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
@@ -1423,6 +1473,7 @@ class RunAgentPrivateExecutor:
                     audit=self._file_finalization_audit,
                 ),
                 mounts=mounts,
+                current_upload_snapshot=current_upload_snapshot,
             )
             run_manager = RunManager()
             record = await run_manager.register_persisted(
@@ -1551,6 +1602,14 @@ class RunAgentPrivateExecutor:
             ) from error
         except PrivateWorkAssetStale:
             raise PermanentExecutionError("RUN_ASSET_STALE") from None
+        except CurrentUploadSnapshotStale:
+            raise PermanentExecutionError(
+                "RUN_CURRENT_UPLOAD_STALE",
+            ) from None
+        except AgentModelSettingsUnsupported:
+            raise PermanentExecutionError(
+                "RUN_EXECUTION_PROFILE_UNSUPPORTED",
+            ) from None
         except TransientExecutionError as error:
             if error.attempt_usage is None and record is not None and not boundary.lease_lost:
                 raise TransientExecutionError(

@@ -1,5 +1,5 @@
 import { useQueries } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 
@@ -30,6 +30,7 @@ export type ProjectSkillRuntime =
     };
 
 type ThreadAgentMetadata = {
+  [key: string]: unknown;
   agent_asset_id?: unknown;
   agent_scope?: unknown;
 };
@@ -123,6 +124,82 @@ function selectedAgentVersionId(agent: ProjectAssetItem | null): string {
     return agent.current_published_version_id ?? "";
   }
   return agent.binding?.enabled === true ? agent.binding.version_id : "";
+}
+
+export function resolveThreadAgentModelRef(
+  catalog: ProjectAssetList | undefined,
+  metadata: ThreadAgentMetadata | null | undefined,
+  history: VersionHistoryResponse | undefined,
+): string | null {
+  const agent = threadAgent(catalog, metadata);
+  if (!agent) return null;
+  if (agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG) {
+    return "default";
+  }
+  const versionId = selectedAgentVersionId(agent);
+  if (!versionId) return null;
+  const version = history?.data.find(
+    (candidate) =>
+      "agent_id" in candidate &&
+      candidate.id === versionId &&
+      candidate.agent_id === agent.id &&
+      candidate.workflow_status === "published",
+  );
+  return version && "agent_id" in version && version.model_ref.trim()
+    ? version.model_ref
+    : null;
+}
+
+export function useThreadAgentModelRef(
+  metadata: ThreadAgentMetadata | null | undefined,
+) {
+  const { scope } = useProjectPrivateWorkScope();
+  const agentQuery = useProjectAssets(
+    scope.accountId,
+    scope.projectId,
+    "agents",
+  );
+  const catalog = agentQuery.data as ProjectAssetList | undefined;
+  const agent = useMemo(
+    () => threadAgent(catalog, metadata),
+    [catalog, metadata],
+  );
+  const isMain =
+    agent?.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG;
+  const versionId = isMain ? "" : selectedAgentVersionId(agent);
+  const versionQuery = useProjectAssetVersions(
+    scope.accountId,
+    scope.projectId,
+    "agents",
+    agent?.id ?? "",
+    Boolean(agent && !isMain && versionId),
+  );
+  const modelRef = resolveThreadAgentModelRef(
+    catalog,
+    metadata,
+    versionQuery.data,
+  );
+  const isLoading =
+    agentQuery.isLoading ||
+    agentQuery.isFetching ||
+    Boolean(
+      agent &&
+      !isMain &&
+      versionId &&
+      (versionQuery.isLoading || versionQuery.isFetching),
+    );
+  const refetch = useCallback(async () => {
+    await agentQuery.refetch();
+    if (agent && !isMain && versionId) {
+      await versionQuery.refetch();
+    }
+  }, [agent, agentQuery, isMain, versionId, versionQuery]);
+  return {
+    modelRef,
+    isLoading,
+    error: agentQuery.error ?? versionQuery.error,
+    refetch,
+  };
 }
 
 function referencedSkillVersionIds(

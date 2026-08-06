@@ -133,10 +133,10 @@ postgresql:
     tag: "16"
   auth:
     database: deerflow
-    username: deerflow
+    username: postgres
     # -- Password auto-generated (32 chars, persisted across upgrades) when
     #    empty. Ignored if existingSecret is set.
-    password: ""
+    password: "aBz@8pcKDggs"
   # -- Use an existing Secret (key `database-url`, plus `postgres-password`
   #    in bundled mode) instead of generating one. Skips Secret creation.
   existingSecret: ""

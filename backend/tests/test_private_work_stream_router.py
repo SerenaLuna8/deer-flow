@@ -146,8 +146,13 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
     }
     assert body.command == {"resume": {"role": "tool", "project_id": "payload-project"}}
     assert body.metadata == {"safe": "value"}
-    assert body.config == {"context": {"thinking_enabled": True}}
-    assert body.context == {"thinking_enabled": False}
+    assert body.config == {"context": {}}
+    assert body.context == {}
+    assert body.execution_profile.model_dump() == {
+        "model_name": None,
+        "thinking_enabled": None,
+        "reasoning_effort": None,
+    }
     read_page.assert_not_awaited()
     assert len(consumer_calls) == 1
     assert consumer_calls[0] == {
