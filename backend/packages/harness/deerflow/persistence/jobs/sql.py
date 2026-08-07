@@ -27,6 +27,7 @@ JobType = Literal[
     "retention_purge",
     "mcp_discovery",
     "memory_dream",
+    "memory_seal",
 ]
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
@@ -72,6 +73,7 @@ class EnqueueJob:
             "retention_purge",
             "mcp_discovery",
             "memory_dream",
+            "memory_seal",
         }:
             raise ValueError("unsupported job type")
         if _SHA256_HEX.fullmatch(self.idempotency_key) is None:
@@ -103,7 +105,14 @@ class EnqueueJob:
                 raise ValueError("memory_dream requires owner authority without Run or occurrence")
             if not self.namespace or len(self.namespace) > 255:
                 raise ValueError("memory_dream requires a bounded namespace")
-        if self.job_type != "memory_dream" and self.namespace is not None:
+        elif self.job_type == "memory_seal":
+            # For seal jobs the namespace column carries the Thread id — the
+            # coordinate the Worker drains — instead of a Memory namespace.
+            if self.scope.owner_user_id is None or self.run_id is not None or self.occurrence_id is not None:
+                raise ValueError("memory_seal requires owner authority without Run or occurrence")
+            if not self.namespace or len(self.namespace) > 255:
+                raise ValueError("memory_seal requires a bounded thread coordinate")
+        if self.job_type not in {"memory_dream", "memory_seal"} and self.namespace is not None:
             raise ValueError(f"{self.job_type} does not accept a memory namespace")
         normalized_trace_id = normalize_trace_id(self.origin_trace_id)
         if self.job_type in {"private_run", "automation_run"}:

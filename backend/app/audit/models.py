@@ -73,6 +73,12 @@ class AuditAction(StrEnum):
     RUN_CANCEL_REQUESTED = "run.cancel_requested"
     RUN_FILES_FINALIZED = "run.files_finalized"
     RUN_TERMINAL = "run.terminal"
+    MEMORY_REMEMBER = "memory.remember"
+    MEMORY_RECALL_EXECUTED = "memory.recall.executed"
+    MEMORY_SEAL_ADMITTED = "memory.seal.admitted"
+    MEMORY_SEAL_SETTLED = "memory.seal.settled"
+    MEMORY_INJECTION_SKIPPED = "memory.injection.skipped"
+    MEMORY_DREAM_REVIEW_FLAGGED = "memory.dream.review_flagged"
     JOB_DEAD = "job.dead"
     JOB_REQUEUED = "job.requeued"
     PURGE_COMPLETED = "purge.completed"
@@ -335,6 +341,42 @@ _ACTION_CONTRACTS[AuditAction.RUN_TERMINAL] = AuditActionContract(
             metadata_equals=(("status", "cancelled"),),
         ),
     ),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_SEAL_ADMITTED] = _contract(
+    AuditTargetKind.JOB,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.SCHEDULER,),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_SEAL_SETTLED] = _contract(
+    AuditTargetKind.JOB,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.WORKER,),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_REMEMBER] = _contract(
+    AuditTargetKind.RUN,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.WORKER,),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_RECALL_EXECUTED] = _contract(
+    AuditTargetKind.RUN,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.WORKER,),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_INJECTION_SKIPPED] = _contract(
+    AuditTargetKind.RUN,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.GATEWAY, AuditProcess.SCHEDULER),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_DREAM_REVIEW_FLAGGED] = _contract(
+    AuditTargetKind.JOB,
+    AuditScope.PROJECT,
+    "process",
+    processes=(AuditProcess.WORKER,),
 )
 _ACTION_CONTRACTS[AuditAction.JOB_DEAD] = _contract(
     AuditTargetKind.JOB,
@@ -718,6 +760,47 @@ class RunFilesFinalizedAuditMetadata(_AuditMetadata):
     committed_bytes: StrictInt = Field(ge=0)
 
 
+class MemoryRememberAuditMetadata(_AuditMetadata):
+    # Only the closed durability tag is recorded; memory content never
+    # reaches the audit trail.
+    kind: Literal["permanent", "durable", "ephemeral", "correction"]
+
+
+class MemoryRecallExecutedAuditMetadata(_AuditMetadata):
+    # Content-free recall quality signal: bucketed result count, which ranking
+    # stage produced the top hit, and whether a tag filter narrowed the search.
+    # Query and episode text never reach the audit trail.
+    result_bucket: Literal["0", "1-2", "3+"]
+    matched_stage: Literal["exact", "similarity", "none"]
+    tags_filtered: StrictBool
+
+
+class MemorySealSettledAuditMetadata(_AuditMetadata):
+    # Content-free outcome of one idle-seal attempt: ``sealed`` drained the
+    # thread, ``noop`` yielded to a live Run.
+    disposition: Literal["sealed", "noop"]
+
+
+class MemoryInjectionSkippedAuditMetadata(_AuditMetadata):
+    # The only degradation reason today; storage corruption stays fail-closed
+    # and never reaches this event.
+    reason: Literal["over_budget"]
+
+
+class MemoryDreamReviewFlaggedAuditMetadata(_AuditMetadata):
+    # Content-free review signal: the published version plus a decile bucket
+    # of the pure-deletion ratio; never document text.
+    version: StrictInt = Field(ge=1)
+    deletion_ratio_bucket: Literal[
+        "40-50%",
+        "50-60%",
+        "60-70%",
+        "70-80%",
+        "80-90%",
+        "90-100%",
+    ]
+
+
 class JobAuditMetadata(_AuditMetadata):
     job_type: Literal[
         "private_run",
@@ -725,6 +808,7 @@ class JobAuditMetadata(_AuditMetadata):
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
+        "memory_seal",
     ]
     public_error_code: StrictStr | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
     attempt_count: StrictInt = Field(ge=0, le=20)
@@ -788,6 +872,11 @@ _AUDIT_METADATA_MODELS[AuditAction.QUOTA_RECONCILED] = QuotaReconciledAuditMetad
 _AUDIT_METADATA_MODELS[AuditAction.RUN_ADMITTED] = RunAdmittedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_FILES_FINALIZED] = RunFilesFinalizedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_TERMINAL] = RunTerminalAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_REMEMBER] = MemoryRememberAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_RECALL_EXECUTED] = MemoryRecallExecutedAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_SEAL_SETTLED] = MemorySealSettledAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_INJECTION_SKIPPED] = MemoryInjectionSkippedAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_DREAM_REVIEW_FLAGGED] = MemoryDreamReviewFlaggedAuditMetadata
 for _action in (AuditAction.JOB_DEAD, AuditAction.JOB_REQUEUED):
     _AUDIT_METADATA_MODELS[_action] = JobAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.PURGE_COMPLETED] = PurgeAuditMetadata

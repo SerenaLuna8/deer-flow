@@ -367,6 +367,7 @@ def build_middlewares(
                 available_skills=available_skills,
                 slash_source_owner_token=slash_source_owner_token,
                 skill_file_read_tool_names=(resolved_app_config.summarization.skill_file_read_tool_names),
+                read_evidence_ttl_calls=resolved_app_config.skills.read_evidence_ttl_calls,
             )
         )
 
@@ -720,6 +721,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     )
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
+    # Lead-only memory tools: each exists only when the Worker installed a
+    # Memory authority with that capability in this Run's context. Subagent
+    # tool assembly never sees the parent runtime context, so the tools stay
+    # invisible to subagents by construction.
+    from deerflow.agents.memory.authority_resolution import resolve_memory_authority
+    from deerflow.tools.builtins import recall_memory_tool, remember_tool
+
+    if resolve_memory_authority(cfg, method="search_episodes") is not None:
+        final_tools.append(recall_memory_tool)
+    if resolve_memory_authority(cfg, method="propose_entry") is not None:
+        final_tools.append(remember_tool)
     private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
     runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(private_runtime, "agent_catalog", None)) if private_runtime is not None else None
     agent_model_overrides: dict[str, object] = {}

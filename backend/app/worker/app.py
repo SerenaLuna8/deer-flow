@@ -12,7 +12,9 @@ from functools import partial
 
 from app.automations.reconciliation import AutomationReconciler
 from app.final_schema import FinalSchemaProbe
+from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpointer import ProjectScopedCheckpointer
+from app.private_work.thread_service import PrivateThreadService
 from app.quotas.integration import ProjectQuotaEnforcer
 from app.quotas.service import QuotaService
 from app.quotas.system_policy import SystemQuotaPolicyReader
@@ -29,6 +31,7 @@ from app.system_runtime_settings.materializer import (
 from app.system_settings import SystemModelMaterializer
 from app.worker.mcp_discovery import McpToolDiscoveryJobHandler
 from app.worker.memory_dream import MemoryDreamJobHandler
+from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
 from deerflow.config import get_app_config
@@ -173,6 +176,7 @@ async def run_worker(
             runtime_policy_materializer = SystemRuntimePolicyMaterializer(
                 session_factory,
             )
+            run_event_store = DbRunEventStore(session_factory)
             executor = RunAgentPrivateExecutor(
                 session_factory,
                 app_config=config,
@@ -181,7 +185,7 @@ async def run_worker(
                 bridge=bridge,
                 project_checkpointer=project_checkpointer,
                 store=store,
-                event_store=DbRunEventStore(session_factory),
+                event_store=run_event_store,
                 quota=quota_enforcer,
                 audit=audit_sink,
             )
@@ -220,6 +224,24 @@ async def run_worker(
                     job_repository_builder=repository_builder,
                     retry_initial_seconds=config.worker.retry_initial_seconds,
                     retry_max_seconds=config.worker.retry_max_seconds,
+                    audit=audit_sink,
+                ),
+                "memory_seal": MemorySealJobHandler(
+                    session_factory,
+                    app_config=config,
+                    barrier=ProjectChatControlService(
+                        session_factory,
+                        project_checkpointer,
+                        PrivateThreadService(
+                            session_factory,
+                            project_checkpointer,
+                        ),
+                        run_event_store,
+                        endpoint_policy=mcp_endpoint_policy,
+                        model_materializer=model_materializer,
+                    ),
+                    job_repository_builder=repository_builder,
+                    audit=audit_sink,
                 ),
             }
         registry = WorkerRegistry(session_factory, version=WORKER_VERSION)

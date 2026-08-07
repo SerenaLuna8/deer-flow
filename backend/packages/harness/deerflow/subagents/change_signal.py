@@ -1,0 +1,105 @@
+"""Cross-thread change signal for background subagent state (U8).
+
+Background subagents mutate their ``SubagentResult`` from the isolated
+subagent event-loop thread and from the scheduler pool thread, while the
+``task`` tool waits on the parent Worker's event loop. Historically the tool
+polled every 5 seconds, so a 200ms subtask still paid up to 5 seconds of
+tail latency. This signal keeps that 5-second cadence as a *heartbeat upper
+bound* but wakes waiters the moment something actually changed.
+
+Design points:
+
+- ``notify`` is thread-safe and marshals each wake-up through
+  ``loop.call_soon_threadsafe`` onto the waiter's own loop.
+- Terminal notifications always fire immediately; that is the latency win.
+- Non-terminal notifications (progress messages) are debounced (default 1s)
+  so a chatty subagent cannot generate an event storm — a suppressed
+  notification is picked up by the heartbeat, exactly like before.
+- The terminal state is latched: subscribing after the terminal transition
+  returns an already-set event, so a waiter can never sleep through a
+  completion that happened between its state read and its subscribe call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+
+_DEFAULT_DEBOUNCE_SECONDS = 1.0
+
+
+class SubagentChangeSignal:
+    """Wakes event-loop waiters when a background subagent's state changes."""
+
+    __slots__ = ("_debounce_seconds", "_last_notify", "_lock", "_terminal", "_waiters")
+
+    def __init__(self, *, debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS) -> None:
+        self._lock = threading.Lock()
+        self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
+        self._debounce_seconds = debounce_seconds
+        self._last_notify = float("-inf")
+        self._terminal = False
+
+    def subscribe(self) -> asyncio.Event:
+        """Register the calling event loop for wake-ups.
+
+        Must run on the loop that will await the returned event.
+        """
+
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        with self._lock:
+            self._waiters.append((loop, event))
+            if self._terminal:
+                # Latch: a terminal transition before subscribe is never missed.
+                event.set()
+        return event
+
+    def unsubscribe(self, event: asyncio.Event) -> None:
+        with self._lock:
+            self._waiters = [(loop, waiter) for loop, waiter in self._waiters if waiter is not event]
+
+    def notify(self, *, terminal: bool = False) -> None:
+        """Wake every subscribed waiter; safe from any thread.
+
+        Non-terminal notifications inside the debounce window are dropped —
+        the heartbeat bounds their staleness. Terminal notifications always
+        deliver and latch the signal for late subscribers.
+        """
+
+        now = time.monotonic()
+        with self._lock:
+            if terminal:
+                self._terminal = True
+            elif now - self._last_notify < self._debounce_seconds:
+                return
+            self._last_notify = now
+            waiters = list(self._waiters)
+        for loop, event in waiters:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                # The waiter's loop already closed; nothing to wake.
+                continue
+
+
+async def wait_for_change(event: asyncio.Event, *, heartbeat_seconds: float) -> bool:
+    """Wait for the next change or one heartbeat, whichever comes first.
+
+    Returns ``True`` when woken by a change, ``False`` on heartbeat timeout.
+    Callers clear the event before re-reading state (clear → read → wait), so
+    a change racing with the state read re-sets the event and the next wait
+    returns immediately instead of sleeping a full heartbeat.
+    """
+
+    if heartbeat_seconds <= 0:
+        return event.is_set()
+    try:
+        await asyncio.wait_for(event.wait(), timeout=heartbeat_seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+__all__ = ["SubagentChangeSignal", "wait_for_change"]

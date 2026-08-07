@@ -5,6 +5,10 @@ target-version = "py312"
 select = ["E", "F", "I", "UP"]
 ignore = []
 
+[lint.per-file-ignores]
+# Exact prompt snapshot strings mirror packaged markdown and cannot be reflowed.
+"tests/test_memory_snip.py" = ["E501"]
+
 [lint.isort]
 known-first-party = ["deerflow", "app"]
 

@@ -77,7 +77,10 @@ from app.system_settings.validation import (
     ModelSettingsInvalid,
     validate_model_settings,
 )
-from deerflow.agents.memory.dream import validate_memory_document
+from deerflow.agents.memory.dream import (
+    MemoryDocumentOverBudget,
+    validate_memory_document,
+)
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
     McpEndpointPolicy,
@@ -242,6 +245,7 @@ class RunSnapshotRepository:
         runtime_policy: RunRuntimePolicyAdmissionPort | None = None,
         endpoint_policy: McpEndpointPolicy | None = None,
         personalization_repository_builder=AccountPersonalizationRepository,
+        audit=None,
     ) -> None:
         self._session_factory = session_factory
         self._model_ref_resolver = model_ref_resolver or ExactModelRefResolver()
@@ -251,6 +255,25 @@ class RunSnapshotRepository:
         if not callable(personalization_repository_builder):
             raise TypeError("personalization repository builder must be callable")
         self._personalization_repository_builder = personalization_repository_builder
+        if audit is not None and not callable(getattr(audit, "memory_injection_skipped", None)):
+            raise TypeError("Run snapshot audit port is invalid")
+        self._audit = audit
+
+    async def _skip_memory_injection(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        run_id: str,
+    ) -> None:
+        """Degrade over-budget injection to a skip; never block admission."""
+
+        if self._audit is not None:
+            await self._audit.memory_injection_skipped(
+                session,
+                project_id=context.project_id,
+                run_id=run_id,
+                request_id=context.request_id,
+            )
 
     async def _admit_memory_context_snapshot(
         self,
@@ -316,6 +339,9 @@ class RunSnapshotRepository:
                 ).hexdigest()
                 if digest != source_snapshot.content_digest:
                     raise ValueError("Run Memory snapshot digest drift")
+            except MemoryDocumentOverBudget:
+                await self._skip_memory_injection(session, context, run_id)
+                return
             except (TypeError, ValueError):
                 raise PrivateWorkConflict(context.request_id) from None
             session.add(
@@ -359,6 +385,9 @@ class RunSnapshotRepository:
             digest = hashlib.sha256(document.content.encode("utf-8")).hexdigest()
             if digest != document.content_digest:
                 raise ValueError("Memory document digest drift")
+        except MemoryDocumentOverBudget:
+            await self._skip_memory_injection(session, context, run_id)
+            return
         except (TypeError, ValueError):
             raise PrivateWorkConflict(context.request_id) from None
         session.add(

@@ -51,6 +51,12 @@ export const auditActionSchema = z.enum([
   "run.cancel_requested",
   "run.files_finalized",
   "run.terminal",
+  "memory.remember",
+  "memory.recall.executed",
+  "memory.seal.admitted",
+  "memory.seal.settled",
+  "memory.injection.skipped",
+  "memory.dream.review_flagged",
   "job.dead",
   "job.requeued",
   "purge.completed",
@@ -110,6 +116,41 @@ const runFilesFinalizedMetadataSchema = z
     committed_bytes: z.number().int().nonnegative(),
   })
   .strict();
+const memoryRememberMetadataSchema = z
+  .object({
+    kind: z.enum(["permanent", "durable", "ephemeral", "correction"]),
+  })
+  .strict();
+const memoryRecallExecutedMetadataSchema = z
+  .object({
+    result_bucket: z.enum(["0", "1-2", "3+"]),
+    matched_stage: z.enum(["exact", "similarity", "none"]),
+    tags_filtered: z.boolean(),
+  })
+  .strict();
+const memorySealSettledMetadataSchema = z
+  .object({
+    disposition: z.enum(["sealed", "noop"]),
+  })
+  .strict();
+const memoryInjectionSkippedMetadataSchema = z
+  .object({
+    reason: z.enum(["over_budget"]),
+  })
+  .strict();
+const memoryDreamReviewFlaggedMetadataSchema = z
+  .object({
+    version: z.number().int().min(1),
+    deletion_ratio_bucket: z.enum([
+      "40-50%",
+      "50-60%",
+      "60-70%",
+      "70-80%",
+      "80-90%",
+      "90-100%",
+    ]),
+  })
+  .strict();
 const jobMetadataSchema = z
   .object({
     job_type: z.enum([
@@ -118,6 +159,7 @@ const jobMetadataSchema = z
       "retention_purge",
       "mcp_discovery",
       "memory_dream",
+      "memory_seal",
     ]),
     public_error_code: publicErrorCodeSchema.nullable().optional(),
     attempt_count: z.number().int().min(0).max(20),
@@ -183,6 +225,12 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "run.cancel_requested": emptyMetadataSchema,
   "run.files_finalized": runFilesFinalizedMetadataSchema,
   "run.terminal": runTerminalMetadataSchema,
+  "memory.remember": memoryRememberMetadataSchema,
+  "memory.recall.executed": memoryRecallExecutedMetadataSchema,
+  "memory.seal.admitted": emptyMetadataSchema,
+  "memory.seal.settled": memorySealSettledMetadataSchema,
+  "memory.injection.skipped": memoryInjectionSkippedMetadataSchema,
+  "memory.dream.review_flagged": memoryDreamReviewFlaggedMetadataSchema,
   "job.dead": jobMetadataSchema,
   "job.requeued": jobMetadataSchema,
   "purge.completed": purgeMetadataSchema,

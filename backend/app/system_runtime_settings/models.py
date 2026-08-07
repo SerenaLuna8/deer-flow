@@ -134,6 +134,22 @@ class MemoryPolicy(_PolicyModel):
     model_name: ModelName | None = None
     dream_interval_minutes: int = Field(default=120, ge=15, le=1_440)
     max_injection_tokens: int = Field(default=2_000, ge=100, le=8_000)
+    idle_seal_minutes: int = Field(default=1_440, ge=0, le=10_080)
+    episode_retention_days: int = Field(default=365, ge=0, le=3_650)
+
+    @field_validator("idle_seal_minutes")
+    @classmethod
+    def validate_idle_seal_minutes(cls, value: int) -> int:
+        if value != 0 and value < 30:
+            raise ValueError("idle_seal_minutes must be 0 or between 30 and 10080")
+        return value
+
+    @field_validator("episode_retention_days")
+    @classmethod
+    def validate_episode_retention_days(cls, value: int) -> int:
+        if value != 0 and value < 30:
+            raise ValueError("episode_retention_days must be 0 or between 30 and 3650")
+        return value
 
 
 class ToolSearchPolicy(_PolicyModel):
@@ -193,6 +209,7 @@ class LoopDetectionPolicy(_PolicyModel):
         default_factory=lambda: {
             "web_fetch": ToolFrequencyOverridePolicy(warn=6, hard_limit=10),
             "web_search": ToolFrequencyOverridePolicy(warn=6, hard_limit=10),
+            "recall_memory": ToolFrequencyOverridePolicy(warn=6, hard_limit=10),
         },
         max_length=64,
     )

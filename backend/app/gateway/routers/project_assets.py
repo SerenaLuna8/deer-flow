@@ -69,6 +69,9 @@ from app.shared_assets.skill_service import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
 )
+from app.system_settings.credential_migration import (
+    SystemModelCredentialMigrationAdapter,
+)
 from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
 from deerflow.mcp_endpoint_policy import validate_remote_mcp_endpoint_syntax
 from deerflow.persistence.engine import get_session_factory
@@ -562,6 +565,7 @@ class CredentialGrantMigrationResponse(_StrictModel):
     credential_id: uuid.UUID
     credential_version_id: uuid.UUID
     migrated_count: int = Field(ge=0)
+    migrated_model_count: int = Field(ge=0)
     request_id: str
 
 
@@ -597,8 +601,15 @@ class McpConfiguredResponse(_StrictModel):
     request_id: str
 
 
+class CredentialPendingMigrationResponse(_StrictModel):
+    total: int = Field(ge=0)
+    system_model_count: int = Field(ge=0)
+
+
 class CredentialVersionResponse(_StrictModel):
     data: CredentialVersionItemResponse
+    # Null when the pending count is not derivable, never a silent zero.
+    pending_migration: CredentialPendingMigrationResponse | None
     request_id: str
 
 
@@ -803,6 +814,7 @@ def get_credential_service(request: Request) -> CredentialService:
     return CredentialService(
         _factory(),
         governance_sink=_governance_sink(request),
+        system_models=SystemModelCredentialMigrationAdapter(),
     )
 
 
@@ -1320,7 +1332,16 @@ def register_asset_routes(
         return await _version_history(actor, lambda: service.get_version_history(actor, credential_id), CredentialVersionHistoryResponse)
 
     async def replace_credential(credential_id: uuid.UUID, body: CredentialReplaceRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        return await _version_call(actor, lambda: service.replace(actor, credential_id, body.payload, expected_credential_version=body.expected_credential_version), CredentialVersionResponse)
+        try:
+            result = await service.replace(actor, credential_id, body.payload, expected_credential_version=body.expected_credential_version)
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+        pending = result.pending_migration
+        return CredentialVersionResponse(
+            data=_response_data(result.version, redact_project_mcp=_is_project_asset_actor(actor)),
+            pending_migration=CredentialPendingMigrationResponse(**vars(pending)) if pending is not None else None,
+            request_id=actor.request_id,
+        )
 
     async def revoke_credential(credential_id: uuid.UUID, body: CredentialRevokeRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
         try:

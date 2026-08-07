@@ -12,7 +12,8 @@ from importlib import resources
 from typing import Any, Literal, TypedDict
 
 MAX_SNIP_OUTPUT_CHARS = 1000
-SNIP_ARCHIVE_PROMPT_VERSION = "snip-archive-prompt-v1"
+MAX_CONTINUITY_CHARS = 2000
+SNIP_ARCHIVE_PROMPT_VERSION = "snip-archive-prompt-v2"
 SNIP_NOTHING = "(nothing)"
 MEMORY_ARCHIVE_CONTEXT_KEY = "__memory_archive_context"
 MEMORY_ARCHIVE_RECEIPT_KEY = "memory_archive_receipt"
@@ -20,6 +21,22 @@ MEMORY_ARCHIVE_RECEIPT_VERSION = "memory-archive-receipt-v1"
 
 _SOURCE_DIGEST_DOMAIN = "deerflow.snip.source.v1"
 _VALID_SNIP_LINE = re.compile(r"^- \[(?:permanent|durable|ephemeral|correction|skip)\] \S(?:.*\S)?$")
+_CONTINUITY_OPEN = "<continuity>"
+_CONTINUITY_CLOSE = "</continuity>"
+
+# Appended verbatim for the single bounded repair retry after SnipOutputInvalid.
+# It restates the output contract and never echoes the invalid output.
+SNIP_RETRY_REINFORCEMENT = (
+    "Your previous response did not match the required output format. "
+    "Respond again from scratch with exactly two segments. First output one "
+    f'"{_CONTINUITY_OPEN}" block containing a non-empty free-prose task-continuity '
+    f'summary within {MAX_CONTINUITY_CHARS} characters, closed by "{_CONTINUITY_CLOSE}". '
+    "After the closing tag, output only lines of the exact form "
+    '"- [permanent|durable|ephemeral|correction|skip] fact text", or the '
+    f'single line "{SNIP_NOTHING}" if there is nothing worth keeping. '
+    f"Keep the tagged lines within {MAX_SNIP_OUTPUT_CHARS} characters. "
+    "No other prose, no code fences, no headings."
+)
 
 
 def _load_prompt() -> str:
@@ -120,6 +137,43 @@ def validate_snip_output(raw: str) -> str:
     if any(line and _VALID_SNIP_LINE.fullmatch(line) is None for line in normalized.split("\n")):
         raise SnipOutputInvalid("SNIP output has an invalid line")
     return normalized
+
+
+def parse_snip_dual_output(raw: str) -> tuple[str, str]:
+    """Split one dual-segment SNIP response into ``(continuity, tagged_text)``.
+
+    The continuity segment is bounded free prose for Thread continuation and
+    only ever flows into ``summary_text``. The tagged segment keeps the exact
+    single-segment contract (:func:`validate_snip_output`): line grammar, the
+    1000-character bound, and ``(nothing)`` semantics — so the memory pipeline
+    input stays byte-identical.
+    """
+
+    normalized = normalize_snip_output(raw)
+    if not normalized.startswith(_CONTINUITY_OPEN):
+        raise SnipOutputInvalid("SNIP output does not start with a continuity segment")
+    close_index = normalized.find(_CONTINUITY_CLOSE)
+    if close_index < 0:
+        raise SnipOutputInvalid("SNIP continuity segment is unterminated")
+    continuity = normalized[len(_CONTINUITY_OPEN) : close_index].strip()
+    remainder = normalized[close_index + len(_CONTINUITY_CLOSE) :]
+    if not continuity:
+        raise SnipOutputInvalid("SNIP continuity segment is empty")
+    if len(continuity) > MAX_CONTINUITY_CHARS:
+        raise SnipOutputInvalid("SNIP continuity segment is over the character limit")
+    if _CONTINUITY_OPEN in continuity or _CONTINUITY_OPEN in remainder or _CONTINUITY_CLOSE in remainder:
+        raise SnipOutputInvalid("SNIP output has more than one continuity segment")
+    return continuity, validate_snip_output(remainder)
+
+
+def validate_snip_line(line: str) -> str:
+    """Validate exactly one tagged fact line against the SNIP line grammar."""
+
+    if not isinstance(line, str) or len(line) > MAX_SNIP_OUTPUT_CHARS:
+        raise SnipOutputInvalid("SNIP line is not bounded text")
+    if _VALID_SNIP_LINE.fullmatch(line) is None:
+        raise SnipOutputInvalid("SNIP line grammar is invalid")
+    return line
 
 
 def _message_identity(message: object) -> dict[str, Any]:
@@ -237,6 +291,7 @@ def build_memory_archive_receipt(
 
 
 __all__ = [
+    "MAX_CONTINUITY_CHARS",
     "MAX_SNIP_OUTPUT_CHARS",
     "MEMORY_ARCHIVE_CONTEXT_KEY",
     "MEMORY_ARCHIVE_RECEIPT_KEY",
@@ -245,11 +300,14 @@ __all__ = [
     "SNIP_ARCHIVE_PROMPT",
     "SNIP_ARCHIVE_PROMPT_VERSION",
     "SNIP_NOTHING",
+    "SNIP_RETRY_REINFORCEMENT",
     "SnipOutputInvalid",
     "SnipArchiveContext",
     "build_memory_archive_receipt",
     "compute_snip_content_digest",
     "compute_snip_source_digest",
     "normalize_snip_output",
+    "parse_snip_dual_output",
+    "validate_snip_line",
     "validate_snip_output",
 ]

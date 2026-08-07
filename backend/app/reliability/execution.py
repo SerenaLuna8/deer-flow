@@ -1102,6 +1102,7 @@ class RunAgentPrivateExecutor:
                 ),
                 discovery_timeout_seconds=mcp_security.discovery_timeout_seconds,
                 tool_call_timeout_seconds=mcp_security.tool_call_timeout_seconds,
+                run_session_reuse=mcp_security.run_session_reuse,
             )
         else:
             self._asset_runtime = asset_runtime
@@ -1510,6 +1511,7 @@ class RunAgentPrivateExecutor:
                 thread_id=execution.run.thread_id,
                 namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
                 memory_config=runtime_app_config.memory,
+                audit=self._file_finalization_audit,
             )
             run_context = RunContext(
                 checkpointer=checkpointer,

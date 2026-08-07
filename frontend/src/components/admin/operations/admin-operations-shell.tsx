@@ -59,7 +59,7 @@ const DEFAULT_NAVIGATION_LABELS: NavigationLabels = {
   overview: "Overview",
   projects: "Projects",
   jobs: "Jobs",
-  audit: "Audit",
+  audit: "Logs",
   assets: "Assets",
   systemSettings: "System settings",
   settings: "Model settings",
@@ -427,10 +427,10 @@ export function AdminOperationsShell({
       >
         <div
           className={cn(
-            "border-sidebar-border flex h-14 shrink-0 items-center border-b",
+            "border-sidebar-border flex shrink-0 items-center border-b",
             desktopNavigationExpanded
-              ? "justify-between gap-2 px-3"
-              : "justify-center",
+              ? "h-14 justify-between gap-2 px-3"
+              : "h-auto flex-col justify-center gap-1 px-2 py-2",
           )}
         >
           <Link
@@ -440,7 +440,7 @@ export function AdminOperationsShell({
             className={cn(
               "focus-visible:ring-sidebar-ring flex min-w-0 items-center rounded-lg focus-visible:ring-2 focus-visible:outline-none",
               desktopNavigationExpanded
-                ? "flex-1 gap-2.5 px-1 py-1.5"
+                ? "min-w-0 flex-1 gap-2.5 px-1 py-1.5"
                 : "size-10 justify-center",
             )}
           >
@@ -449,61 +449,45 @@ export function AdminOperationsShell({
               className="text-selection size-5 shrink-0"
             />
             {desktopNavigationExpanded ? (
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold">
-                  {t.adminOperations.shellTitle}
-                </span>
-                <span className="text-muted-foreground block truncate text-[0.6875rem]">
-                  {t.adminOperations.shellDescription}
-                </span>
+              <span className="block truncate text-sm font-semibold">
+                {t.adminOperations.shellTitle}
               </span>
             ) : null}
           </Link>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                data-testid="admin-desktop-navigation-toggle"
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="text-muted-foreground hover:text-foreground size-9 shrink-0"
+                aria-controls="admin-desktop-navigation"
+                aria-expanded={desktopNavigationExpanded}
+                aria-label={desktopNavigationToggleLabel}
+                title={desktopNavigationToggleLabel}
+                onClick={() =>
+                  setAdminNavigationExpanded(!desktopNavigationExpanded)
+                }
+              >
+                {desktopNavigationExpanded ? (
+                  <PanelLeftCloseIcon aria-hidden className="size-4" />
+                ) : (
+                  <PanelLeftOpenIcon aria-hidden className="size-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right" align="center" sideOffset={10}>
+              {desktopNavigationToggleLabel}
+            </TooltipContent>
+          </Tooltip>
         </div>
         <div className="border-sidebar-border shrink-0 border-b px-2.5 py-2">
-          {desktopNavigationExpanded ? (
-            <Button
-              data-testid="admin-desktop-navigation-toggle"
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground hover:text-foreground w-full justify-start"
-              aria-controls="admin-desktop-navigation"
-              aria-expanded={desktopNavigationExpanded}
-              aria-label={desktopNavigationToggleLabel}
-              title={desktopNavigationToggleLabel}
-              onClick={() =>
-                setAdminNavigationExpanded(!desktopNavigationExpanded)
-              }
-            >
-              <PanelLeftCloseIcon aria-hidden className="size-4" />
-              <span>{desktopNavigationToggleLabel}</span>
-            </Button>
-          ) : (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  data-testid="admin-desktop-navigation-toggle"
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="text-muted-foreground hover:text-foreground size-10"
-                  aria-controls="admin-desktop-navigation"
-                  aria-expanded={desktopNavigationExpanded}
-                  aria-label={desktopNavigationToggleLabel}
-                  title={desktopNavigationToggleLabel}
-                  onClick={() =>
-                    setAdminNavigationExpanded(!desktopNavigationExpanded)
-                  }
-                >
-                  <PanelLeftOpenIcon aria-hidden className="size-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right" align="center" sideOffset={10}>
-                {desktopNavigationToggleLabel}
-              </TooltipContent>
-            </Tooltip>
-          )}
+          <AdminWorkspaceLink
+            compact={!desktopNavigationExpanded}
+            label={localLabels.backToWorkspace}
+            testId="admin-desktop-workspace-link"
+          />
         </div>
         <AdminOperationsNavigation
           compact={!desktopNavigationExpanded}
@@ -518,18 +502,11 @@ export function AdminOperationsShell({
               {user.email}
             </p>
           ) : null}
-          <div className="grid gap-1">
-            <AdminWorkspaceLink
-              compact={!desktopNavigationExpanded}
-              label={localLabels.backToWorkspace}
-              testId="admin-desktop-workspace-link"
-            />
-            <AdminSignOut
-              compact={!desktopNavigationExpanded}
-              label={t.adminOperations.signOut}
-              onSignOut={() => void logout()}
-            />
-          </div>
+          <AdminSignOut
+            compact={!desktopNavigationExpanded}
+            label={t.adminOperations.signOut}
+            onSignOut={() => void logout()}
+          />
         </div>
       </aside>
 

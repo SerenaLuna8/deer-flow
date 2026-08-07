@@ -535,13 +535,14 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
     )
 
     class CoordinatedAdmission(MemoryDreamAdmissionService):
-        async def admit_scheduled_scope(self, session, scope, *, now):
+        async def admit_scheduled_scope(self, session, scope, *, now, require_due=True):
             backend_pids["scheduler"] = int(await session.scalar(text("SELECT pg_backend_pid()")))
             scheduler_scope_started.set()
             return await super().admit_scheduled_scope(
                 session,
                 scope,
                 now=now,
+                require_due=require_due,
             )
 
     async def coordinated_scope_validator(session, claim, *, lock):
@@ -711,6 +712,7 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
             work=work,
             content=changed_content,
             max_tokens=max_injection_tokens,
+            episode_retention_days=0,
         )
         scheduler = MemoryDreamSchedulerService(
             seed.factory,

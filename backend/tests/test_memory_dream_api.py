@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -53,7 +54,23 @@ class _Service:
         self.dream_calls: list[str | None] = []
         self.dream_configs: list[object] = []
         self.restore_calls: list[tuple[int, int]] = []
+        self.episode_calls: list[dict[str, object]] = []
+        self.episodes: tuple = ()
+        self.pending_calls: list[dict[str, object]] = []
+        self.pending: tuple = ()
         self.error: Exception | None = None
+
+    async def list_episodes(self, context, *, q, tags, before, limit):
+        if self.error is not None:
+            raise self.error
+        self.episode_calls.append({"q": q, "tags": tags, "before": before, "limit": limit})
+        return self.episodes
+
+    async def list_pending(self, context, *, limit, offset):
+        if self.error is not None:
+            raise self.error
+        self.pending_calls.append({"limit": limit, "offset": offset})
+        return self.pending
 
     async def dream(self, context, *, thread_id=None, app_config=None):
         if self.error is not None:
@@ -88,6 +105,7 @@ class _Service:
             history_count=None,
             prompt_version=None,
             model_ref=None,
+            needs_review=False,
             created_at=datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC),
         )
 
@@ -186,6 +204,7 @@ async def test_restore_uses_cas_and_returns_complete_version_detail(
         "trigger": "restore",
         "historyCount": None,
         "changed": True,
+        "needsReview": False,
         "createdAt": "2026-08-05T01:02:03Z",
         "content": "# 用户偏好与协作方式\n\n# 项目背景\n\n# 长期约束与架构决策\n\n# 当前仍有效的目标",
         "unifiedDiff": "--- memory-before.md\n+++ memory-after.md\n",
@@ -225,6 +244,181 @@ async def test_manual_dream_unknown_scoped_thread_maps_to_private_404(
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+
+
+async def _get(app: FastAPI, path: str, params: dict | None = None) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        return await client.get(path, params=params)
+
+
+@pytest.mark.asyncio
+async def test_episodes_endpoint_returns_ranked_items_with_exact_filters(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    episode_id = uuid.uuid4()
+    occurred = datetime(2026, 8, 1, 10, 0, 0, tzinfo=UTC)
+    service.episodes = (
+        SimpleNamespace(
+            id=episode_id,
+            thread_id="thread-9",
+            origin="snip",
+            tagged_text="- [durable] deployment target is region-eu",
+            occurred_at=occurred,
+            created_at=occurred,
+        ),
+    )
+
+    response = await _get(
+        value,
+        f"/api/projects/{uuid.uuid4()}/memory/episodes",
+        params=[
+            ("q", " deployment "),
+            ("tags", "durable"),
+            ("tags", "permanent"),
+            ("tags", "durable"),
+            ("limit", "10"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "id": str(episode_id),
+                "threadId": "thread-9",
+                "origin": "snip",
+                "taggedText": "- [durable] deployment target is region-eu",
+                "occurredAt": "2026-08-01T10:00:00Z",
+                "createdAt": "2026-08-01T10:00:00Z",
+            }
+        ]
+    }
+    assert service.episode_calls == [
+        {
+            "q": "deployment",
+            "tags": ("durable", "permanent"),
+            "before": None,
+            "limit": 10,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_episodes_endpoint_browses_by_cursor_without_query(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+
+    response = await _get(
+        value,
+        f"/api/projects/{uuid.uuid4()}/memory/episodes",
+        params={"before": "2026-08-01T10:00:00Z"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    assert service.episode_calls == [
+        {
+            "q": None,
+            "tags": (),
+            "before": datetime(2026, 8, 1, 10, 0, 0, tzinfo=UTC),
+            "limit": 20,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_episodes_endpoint_rejects_out_of_contract_parameters(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    base = f"/api/projects/{uuid.uuid4()}/memory/episodes"
+
+    too_long = await _get(value, base, params={"q": "x" * 201})
+    bad_tag = await _get(value, base, params={"tags": "skip"})
+    zero_limit = await _get(value, base, params={"limit": "0"})
+    big_limit = await _get(value, base, params={"limit": "51"})
+    naive_before = await _get(value, base, params={"before": "2026-08-01T10:00:00"})
+
+    assert too_long.status_code == 422
+    assert bad_tag.status_code == 422
+    assert zero_limit.status_code == 422
+    assert big_limit.status_code == 422
+    assert naive_before.status_code == 422
+    assert service.episode_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_endpoint_exposes_the_backlog_in_dream_order(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    created = datetime(2026, 8, 6, 9, 0, 0, tzinfo=UTC)
+    service.pending = (
+        SimpleNamespace(
+            sequence=41,
+            origin="tool",
+            tagged_text="- [durable] deployment target is region-eu",
+            created_at=created,
+        ),
+        SimpleNamespace(
+            sequence=42,
+            origin="snip",
+            tagged_text="- [ephemeral] debugging the flaky import",
+            created_at=created,
+        ),
+    )
+
+    response = await _get(
+        value,
+        f"/api/projects/{uuid.uuid4()}/memory/pending",
+        params={"limit": "25", "offset": "50"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "sequence": 41,
+                "origin": "tool",
+                "taggedText": "- [durable] deployment target is region-eu",
+                "createdAt": "2026-08-06T09:00:00Z",
+            },
+            {
+                "sequence": 42,
+                "origin": "snip",
+                "taggedText": "- [ephemeral] debugging the flaky import",
+                "createdAt": "2026-08-06T09:00:00Z",
+            },
+        ]
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+    assert service.pending_calls == [{"limit": 25, "offset": 50}]
+
+
+@pytest.mark.asyncio
+async def test_pending_endpoint_rejects_out_of_contract_pagination(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    base = f"/api/projects/{uuid.uuid4()}/memory/pending"
+
+    defaults = await _get(value, base)
+    zero_limit = await _get(value, base, params={"limit": "0"})
+    big_limit = await _get(value, base, params={"limit": "101"})
+    negative_offset = await _get(value, base, params={"offset": "-1"})
+    big_offset = await _get(value, base, params={"offset": "10001"})
+
+    assert defaults.status_code == 200
+    assert zero_limit.status_code == 422
+    assert big_limit.status_code == 422
+    assert negative_offset.status_code == 422
+    assert big_offset.status_code == 422
+    assert service.pending_calls == [{"limit": 50, "offset": 0}]
 
 
 @pytest.mark.asyncio

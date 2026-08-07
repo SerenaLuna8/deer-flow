@@ -379,8 +379,12 @@ export const enUS: Translations = {
       backToWorkspace: "Back to project workspace",
       expandNavigation: "Expand navigation",
       collapseNavigation: "Collapse navigation",
-      previousPage: "Newer",
+      previousPage: "Previous",
+      nextPage: "Next",
       page: (page) => `Page ${page}`,
+      pageSize: "Per page",
+      pageSizeOption: (pageSize) => `${pageSize}`,
+      itemsOnPage: (count) => `${count} on this page`,
       copy: "Copy",
       copied: "Copied",
       platformHealthy: "Systems operational",
@@ -394,14 +398,13 @@ export const enUS: Translations = {
       overview: "Overview",
       projects: "Projects",
       jobs: "Jobs",
-      audit: "Audit",
+      audit: "Logs",
       assets: "Assets",
       systemSettings: "System settings",
       settings: "Model settings",
     },
     overview: {
       title: "Operations overview",
-      description: "Current readiness, workload, and aggregate quota usage.",
       loading: "Loading platform operations",
       unavailableTitle: "Operations data is unavailable",
       unavailableDescription: "Platform operations could not be loaded.",
@@ -432,14 +435,13 @@ export const enUS: Translations = {
           scheduler: "Scheduler",
           stream: "Stream",
           quota: "Quota",
-          audit: "Audit",
+          audit: "Logs",
         },
       },
       channels: {
         title: "Channel providers",
         emptyTitle: "No provider health reports",
         empty: "No channel providers are configured or reporting health.",
-        checkedAt: "Checked {time}",
       },
       counts: {
         projects: "Projects",
@@ -460,7 +462,6 @@ export const enUS: Translations = {
     },
     projects: {
       title: "Projects",
-      description: "Public operational state for every project.",
       loading: "Loading projects",
       unavailableTitle: "Operations data is unavailable",
       unavailableDescription: "Project operations could not be loaded.",
@@ -508,7 +509,6 @@ export const enUS: Translations = {
     },
     jobs: {
       title: "Jobs",
-      description: "Public job state and explicitly safe recovery actions.",
       loading: "Loading jobs",
       unavailableTitle: "Operations data is unavailable",
       unavailableDescription: "Job operations could not be loaded.",
@@ -536,7 +536,10 @@ export const enUS: Translations = {
         retention_purge: "Retention purge",
         mcp_discovery: "MCP tool discovery",
         memory_dream: "Memory Dream",
+        memory_seal: "Memory idle seal",
       },
+      retrySafetyLabel: "Safe retry",
+      errorLabel: "Error",
       retrySafety: {
         safe: "Safe to retry",
         unsafe: "Unsafe to retry",
@@ -545,26 +548,40 @@ export const enUS: Translations = {
       filters: {
         label: "Filter jobs",
         project: "Project",
-        projectQuery: "Search projects",
-        projectQueryPlaceholder: "Search by project name or slug",
+        allProjects: "All projects",
         status: "Status",
         type: "Job type",
         allStatuses: "All statuses",
         allTypes: "All job types",
         apply: "Search",
         clear: "Reset",
-        invalidQuery: "Search text must be 120 characters or fewer.",
       },
     },
     audit: {
-      title: "Audit",
-      description: "Allowlisted platform governance events.",
-      loading: "Loading audit events",
+      title: "Logs",
+      loading: "Loading logs",
       unavailableTitle: "Operations data is unavailable",
-      unavailableDescription: "Audit events could not be loaded.",
-      emptyTitle: "No audit events found",
-      emptyDescription: "No platform audit events are available.",
-      older: "Older events",
+      unavailableDescription: "Logs could not be loaded.",
+      emptyTitle: "No logs found",
+      emptyDescription: "No logs match the current view.",
+      older: "Older logs",
+      columns: {
+        time: "Time",
+        action: "Action",
+        outcome: "Outcome",
+        actor: "Actor",
+        target: "Target",
+        project: "Project",
+        error: "Error",
+      },
+      filters: {
+        label: "Filter logs",
+        project: "Project",
+        allProjects: "All projects",
+        platformOnly: "Admin operations",
+        apply: "Search",
+        clear: "Reset",
+      },
     },
   },
 
@@ -572,21 +589,15 @@ export const enUS: Translations = {
     header: {
       eyebrow: "System settings",
       title: "Model settings",
-      description:
-        "Manage available platform models, the default model, and system Credential references. Credential values are never read or displayed here.",
       create: "Create model",
     },
     overview: {
       label: "Model catalog overview",
       configured: "Configured models",
-      configuredDetail: "Models in the platform catalog",
       active: "Active models",
-      activeDetail: "Available for conversations",
       defaultModel: "Default model",
-      defaultDetail: "System default for new conversations",
       notSet: "Not set",
       revision: "Catalog revision",
-      revisionDetail: "Used for concurrency checks",
     },
     states: {
       loading: "Loading model catalog",
@@ -598,9 +609,6 @@ export const enUS: Translations = {
       emptyDescription:
         "Create your first model, enable it, and set it as the default.",
       catalogLabel: "Model catalog",
-      catalogDescription:
-        "Each entry shows only non-sensitive configuration metadata and exact Credential references.",
-      modelCount: (count) => `${count} ${count === 1 ? "model" : "models"}`,
     },
     card: {
       defaultModel: "Default model",
@@ -739,8 +747,6 @@ export const enUS: Translations = {
     header: {
       eyebrow: "Platform configuration",
       title: "System settings",
-      description:
-        "Set the platform's default behavior. Choose one area and save its changes independently.",
       refresh: "Refresh",
       refreshing: "Refreshing",
     },
@@ -835,14 +841,10 @@ export const enUS: Translations = {
     shell: {
       platformAria: "Platform asset management",
       systemCatalog: "System asset catalog",
-      systemCatalogDescription:
-        "System definitions are runtime read-only; Credential writes are controlled",
       adminScope: "Platform administrator scope",
       projectAria: "Project shared-asset governance",
       backToProjects: "Back to projects",
       projectGovernance: "Project shared-asset governance",
-      projectBoundary:
-        "Governs only project-owned shared Agents, Skills, MCP, and Credentials in the selected project. It never reads members, chats, runs, Memory, files, or other private user content.",
       projectId: "Project UUID",
     },
     common: {
@@ -902,9 +904,13 @@ export const enUS: Translations = {
       revoked: "Revoked",
       loading: "Loading",
       migrationSuccess:
-        "Compatible reference migration completed. No authorization changes were made when no eligible MCP Grant or Skill environment binding required migration.",
+        "Compatible reference migration completed. No authorization changes were made when no eligible MCP Grant, Skill environment binding, or system model required migration.",
+      pendingMigrationNotice: (total, systemModelCount) =>
+        systemModelCount > 0
+          ? `New version created, but ${total} ${total === 1 ? "reference" : "references"} still use the previous key (${systemModelCount} system ${systemModelCount === 1 ? "model" : "models"}).`
+          : `New version created, but ${total} ${total === 1 ? "reference" : "references"} still use the previous key.`,
       credentialRotationNote:
-        "Replacement creates a new version only. Existing MCP Grants and Skill environment bindings remain pinned until they are migrated explicitly.",
+        "Replacement creates a new version only. Existing MCP Grants, Skill environment bindings, and system models stay pinned to the previous key until they are migrated explicitly.",
       historySchemaUnavailable:
         "The current Credential field schema could not be verified. Reload and try again.",
     },
@@ -974,52 +980,26 @@ export const enUS: Translations = {
       },
     },
     pages: {
-      systemEyebrow: "Platform shared assets",
-      databaseCatalog: "PostgreSQL catalog",
-      runtimeReadOnly: "Runtime read-only",
-      controlledWrite: "Controlled secure writes",
       loading: "Loading assets",
       loadFailed: "Assets could not be loaded",
       systemCount: (count) => `${count} ${count === 1 ? "asset" : "assets"}`,
-      credentialCount: (count) =>
-        `${count} system ${count === 1 ? "Credential" : "Credentials"}`,
-      systemNote: (kind) =>
-        `System ${kind} entries are written during database initialization from the versioned, digest-verified packaged catalog and remain runtime read-only. Update the repository catalog and run the explicit database initialization flow to publish system asset changes.`,
       emptySystem: (kind) =>
         `The packaged catalog contains no system ${kind} entries.`,
       emptyCreate: "Use the create action above to add the first entry.",
       system: {
         agentsTitle: "System Agents",
-        agentsDescription:
-          "Governance metadata for system Agents initialized from the packaged catalog.",
         skillsTitle: "System Skills",
-        skillsDescription:
-          "System Skill and version metadata initialized from the packaged catalog.",
         mcpTitle: "System MCP",
-        mcpDescription:
-          "Governance metadata for system MCP initialized from the packaged catalog.",
         credentialsTitle: "System Credentials",
-        credentialsDescription:
-          "Only Credential metadata is displayed. Secret values are never returned after writing.",
       },
-      projectEyebrow: "Project governance catalog",
-      projectDatabaseCatalog: "PostgreSQL asset catalog",
-      sharedOnly: "Shared assets only",
       projectLoadFailed: "Project assets could not be loaded",
       sourceCounts: (systemCount, projectCount) =>
         `System provided ${systemCount} · Project owned ${projectCount}`,
       project: {
         agentsTitle: "Project Agent governance",
-        agentsDescription:
-          "Review project-owned Agents in the selected project.",
         skillsTitle: "Project Skill governance",
-        skillsDescription: "Manage complete project-owned Skill versions.",
         mcpTitle: "Project MCP governance",
-        mcpDescription:
-          "Manage project-owned MCP definitions, approvals, and Credential Grants.",
         credentialsTitle: "Project Credential governance",
-        credentialsDescription:
-          "Govern only Credential security metadata for the selected project. Secret values are never returned after writing.",
       },
     },
     catalog: {
@@ -1029,7 +1009,6 @@ export const enUS: Translations = {
       searchPlaceholder: "Search by name or identifier",
       filterAll: "All statuses",
       catalogReady: "Catalog loaded",
-      catalogReadyDetail: "PostgreSQL available",
       totalAssets: "Total assets",
       activeAssets: "Active assets",
       unpublishedAssets: "Unpublished assets",
@@ -1318,7 +1297,7 @@ export const enUS: Translations = {
       confirmRevoke: "Permanently revoke",
       migrateTitle: "Migrate compatible Credential references",
       migrateDescription: (name) =>
-        `Replacing a Credential creates a new version without rotating existing MCP Grants or Skill environment bindings. References to an older “${name}” version migrate atomically only when every field schema is compatible. Any incompatible reference rejects the entire operation.`,
+        `Replacing a Credential creates a new version without rotating existing MCP Grants, Skill environment bindings, or system models. References to an older “${name}” version migrate atomically only when every field schema is compatible, and each affected system model gains a new model version. Any incompatible reference rejects the entire operation.`,
       migrating: "Migrating…",
       confirmMigrate: "Migrate references",
       deleteTitle: "Delete Credential?",
@@ -1365,13 +1344,6 @@ export const enUS: Translations = {
         requiredUnavailable:
           "No eligible Credential is available for a required slot.",
       },
-    },
-    rotation: {
-      title: "Credential envelope rotation",
-      summary: (current, total) =>
-        `${current} of ${total} active versions current`,
-      current: "Rotation current",
-      pending: (count) => `${count} pending`,
     },
     errors: {
       notFound: "The asset does not exist or is no longer visible.",
@@ -1748,6 +1720,8 @@ export const enUS: Translations = {
     writeFile: "Write file",
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
+    rememberMemory: "Save to memory",
+    remembered: "Remembered for the next organization pass",
     skillInstallTooltip: "Install skill and make it available to ActWeave",
   },
 
@@ -1919,11 +1893,11 @@ export const enUS: Translations = {
         "This setting changed elsewhere. It has been refreshed; please try again.",
       resetTitle: "Reset Memory",
       resetDescription:
-        "Delete long-term memory and pending content for this account in every project.",
+        "Delete long-term memory, pending content, and archived episodes for this account in every project.",
       resetButton: "Reset",
       resetDialogTitle: "Reset all Memory?",
       resetDialogDescription:
-        "This permanently deletes your long-term document, pending history, versions, Dream records, and Memory snapshots. It cannot be undone.",
+        "This permanently deletes your long-term document, pending history, archived episodes, versions, Dream records, and Memory snapshots. It cannot be undone.",
       resetChatNotice:
         "Chats, thread context, files, and /compact summaries will not be deleted.",
       cancel: "Cancel",

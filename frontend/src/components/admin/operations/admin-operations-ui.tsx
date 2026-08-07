@@ -9,6 +9,7 @@ import { useState, type ComponentProps, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAdminProjects } from "@/core/admin-operations/api";
 import { cn } from "@/lib/utils";
 
 export type StatusTone = "danger" | "healthy" | "neutral" | "warning";
@@ -338,5 +339,49 @@ export function AdminCopyButton({
         <CopyIcon aria-hidden className="size-3.5" />
       )}
     </Button>
+  );
+}
+
+export function AdminProjectFilterSelect({
+  accountId,
+  allLabel,
+  className,
+  label,
+  onChange,
+  platformLabel,
+  platformValue,
+  value,
+}: {
+  accountId: string;
+  allLabel: string;
+  className?: string;
+  label: string;
+  onChange: (projectId: string) => void;
+  platformLabel?: string;
+  platformValue?: string;
+  value: string;
+}) {
+  const projects = useAdminProjects(accountId, null, {}, 100);
+  return (
+    <label className={cn("min-w-0", className)}>
+      <span className="sr-only">{label}</span>
+      <select
+        aria-label={label}
+        value={value}
+        disabled={projects.isLoading}
+        onChange={(event) => onChange(event.target.value)}
+        className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 h-9 w-full rounded-md border px-3 text-sm outline-none focus-visible:ring-[3px] disabled:opacity-60"
+      >
+        <option value="">{allLabel}</option>
+        {platformLabel && platformValue ? (
+          <option value={platformValue}>{platformLabel}</option>
+        ) : null}
+        {(projects.data?.items ?? []).map((project) => (
+          <option key={project.project_id} value={project.project_id}>
+            {project.display_name}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

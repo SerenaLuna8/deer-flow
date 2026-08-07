@@ -21,9 +21,8 @@ import {
   configureSystemMcpCredentialGrantsInputSchema,
   credentialGrantMigrationResponseSchema,
   credentialMutationResponseSchema,
-  credentialRotationStatusSchema,
+  credentialReplacementResponseSchema,
   credentialVersionHistoryResponseSchema,
-  credentialVersionResponseSchema,
   disableSystemBindingInputSchema,
   deleteCredentialInputSchema,
   enableSystemBindingInputSchema,
@@ -70,7 +69,7 @@ import {
   type ConfigureSystemMcpCredentialGrantsInput,
   type CredentialGrantMigrationResponse,
   type CredentialMutationResponse,
-  type CredentialRotationStatus,
+  type CredentialReplacementResponse,
   type DeleteCredentialInput,
   type DisableSystemBindingInput,
   type EnableSystemBindingInput,
@@ -400,16 +399,6 @@ export async function listSystemAssetCatalog(
 ): Promise<AdminAssetList> {
   const response = await request(systemCatalogUrl(kind), { signal });
   return parseResponse(response, adminAssetListSchema);
-}
-
-export async function getAdminCredentialRotationStatus(
-  signal?: AbortSignal,
-): Promise<CredentialRotationStatus> {
-  const response = await request(
-    `${adminAssetUrl("credentials")}/rotation-status`,
-    { signal },
-  );
-  return parseResponse(response, credentialRotationStatusSchema);
 }
 
 async function createAsset(
@@ -1104,13 +1093,13 @@ export async function updateProjectSkillCredentialBindings(
   return parseResponse(response, skillCredentialBindingsResponseSchema);
 }
 
-async function postVersionMutation<T>(
+async function postVersionMutation<TInput, TResponse = VersionResponse>(
   url: string,
-  inputSchema: z.ZodType<T>,
-  responseSchema: z.ZodType<VersionResponse>,
+  inputSchema: z.ZodType<TInput>,
+  responseSchema: z.ZodType<TResponse>,
   input: unknown,
   signal?: AbortSignal,
-): Promise<VersionResponse> {
+): Promise<TResponse> {
   const body = parseInput(inputSchema, input);
   const response = await request(url, {
     method: "POST",
@@ -1182,12 +1171,12 @@ export function replaceProjectCredential(
   credentialId: string,
   input: ReplaceCredentialInput,
   signal?: AbortSignal,
-): Promise<VersionResponse> {
+): Promise<CredentialReplacementResponse> {
   const id = parseInput(assetIdSchema, credentialId);
   return postVersionMutation(
     `${projectAssetUrl(projectId, "credentials")}/${id}/replace`,
     replaceCredentialInputSchema,
-    credentialVersionResponseSchema,
+    credentialReplacementResponseSchema,
     input,
     signal,
   );
@@ -1197,12 +1186,12 @@ export function replaceAdminCredential(
   credentialId: string,
   input: ReplaceCredentialInput,
   signal?: AbortSignal,
-): Promise<VersionResponse> {
+): Promise<CredentialReplacementResponse> {
   const id = parseInput(assetIdSchema, credentialId);
   return postVersionMutation(
     `${adminAssetUrl("credentials")}/${id}/replace`,
     replaceCredentialInputSchema,
-    credentialVersionResponseSchema,
+    credentialReplacementResponseSchema,
     input,
     signal,
   );
@@ -1213,12 +1202,12 @@ export function replaceAdminProjectCredential(
   credentialId: string,
   input: ReplaceCredentialInput,
   signal?: AbortSignal,
-): Promise<VersionResponse> {
+): Promise<CredentialReplacementResponse> {
   const id = parseInput(assetIdSchema, credentialId);
   return postVersionMutation(
     `${adminProjectAssetUrl(projectId, "credentials")}/${id}/replace`,
     replaceCredentialInputSchema,
-    credentialVersionResponseSchema,
+    credentialReplacementResponseSchema,
     input,
     signal,
   );

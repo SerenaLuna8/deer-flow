@@ -16,7 +16,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 MAX_MEMORY_DOCUMENT_CHARS = 16_000
 MAX_DREAM_HISTORY_ITEMS = 20
 MAX_DREAM_HISTORY_CHARS = 1_000
-DREAM_PROMPT_VERSION = "dream-prompt-v1"
+DREAM_PROMPT_VERSION = "dream-prompt-v3"
 DEFAULT_DREAM_TIMEOUT_SECONDS = 120.0
 DEFAULT_DREAM_MAX_ROUNDS = 8
 
@@ -186,10 +186,13 @@ def _fresh_regeneration_instruction(
 class DreamHistoryInput:
     sequence: int
     tagged_text: str
+    origin: str = "snip"
 
     def __post_init__(self) -> None:
         if type(self.sequence) is not int or self.sequence < 1 or not isinstance(self.tagged_text, str) or not self.tagged_text or len(self.tagged_text) > MAX_DREAM_HISTORY_CHARS:
             raise ValueError("Dream history input is invalid")
+        if self.origin not in {"snip", "tool"}:
+            raise ValueError("Dream history origin is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,11 +201,19 @@ class MemoryDreamInput:
     document_version: int
     history: tuple[DreamHistoryInput, ...]
     max_tokens: int
+    # Only the server-decided `budget_rewrite` trigger may freeze an empty
+    # batch; every other Dream must consume 1..20 history entries.
+    budget_rewrite: bool = False
 
     def __post_init__(self) -> None:
         if type(self.document_version) is not int or self.document_version < 0:
             raise ValueError("Dream document version is invalid")
-        if not 1 <= len(self.history) <= MAX_DREAM_HISTORY_ITEMS:
+        if type(self.budget_rewrite) is not bool:
+            raise ValueError("Dream budget flag is invalid")
+        if self.budget_rewrite:
+            if self.history:
+                raise ValueError("Dream budget rewrite must not carry history")
+        elif not 1 <= len(self.history) <= MAX_DREAM_HISTORY_ITEMS:
             raise ValueError("Dream history batch is invalid")
         if any(current.sequence >= following.sequence for current, following in zip(self.history, self.history[1:], strict=False)):
             raise ValueError("Dream history must be strictly ordered")
@@ -222,7 +233,10 @@ def render_dream_input(value: MemoryDreamInput) -> str:
 
     if type(value) is not MemoryDreamInput:
         raise TypeError("MemoryDreamInput is required")
-    history = "\n\n".join(f"[H:{item.sequence}]\n{item.tagged_text}" for item in value.history)
+    if value.history:
+        history = "\n\n".join((f"[H:{item.sequence}] (origin=tool)\n{item.tagged_text}" if item.origin == "tool" else f"[H:{item.sequence}]\n{item.tagged_text}") for item in value.history)
+    else:
+        history = "No new history entries. This is a budget rewrite: rewrite the current document to fit the target limits without inventing new facts."
     return "\n".join(
         (
             "<dream-input>",

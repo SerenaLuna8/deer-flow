@@ -1,14 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  DatabaseIcon,
-  Layers3Icon,
-  PlusIcon,
-  SearchIcon,
-  ShieldCheckIcon,
-  XIcon,
-} from "lucide-react";
+import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import {
@@ -114,31 +107,19 @@ function useAdminProjectDetailFocus(selectedId: string | null) {
   return detailRef;
 }
 
-function projectPageCopy(
+function projectPageTitle(
   kind: AssetListKind,
   pages: Translations["adminAssets"]["pages"],
 ) {
   switch (kind) {
     case "agents":
-      return {
-        title: pages.project.agentsTitle,
-        description: pages.project.agentsDescription,
-      };
+      return pages.project.agentsTitle;
     case "skills":
-      return {
-        title: pages.project.skillsTitle,
-        description: pages.project.skillsDescription,
-      };
+      return pages.project.skillsTitle;
     case "mcp-servers":
-      return {
-        title: pages.project.mcpTitle,
-        description: pages.project.mcpDescription,
-      };
+      return pages.project.mcpTitle;
     case "credentials":
-      return {
-        title: pages.project.credentialsTitle,
-        description: pages.project.credentialsDescription,
-      };
+      return pages.project.credentialsTitle;
   }
 }
 
@@ -1347,31 +1328,10 @@ export function AdminProjectAssetPage({
   const { user } = useAuth();
   const { t } = useI18n();
   if (user?.system_role !== "system_admin") return null;
-  const meta = projectPageCopy(kind, t.adminAssets.pages);
+  const title = projectPageTitle(kind, t.adminAssets.pages);
   return (
     <AdminPage data-testid="admin-project-asset-page">
-      <AdminPageHeader
-        eyebrow={
-          <span className="inline-flex items-center gap-1.5">
-            <Layers3Icon aria-hidden className="size-3.5" />
-            {t.adminAssets.pages.projectEyebrow}
-          </span>
-        }
-        title={meta.title}
-        description={meta.description}
-        meta={
-          <>
-            <span className="inline-flex items-center gap-1.5">
-              <DatabaseIcon aria-hidden className="size-3.5" />
-              {t.adminAssets.pages.projectDatabaseCatalog}
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <ShieldCheckIcon aria-hidden className="size-3.5" />
-              {t.adminAssets.pages.sharedOnly}
-            </span>
-          </>
-        }
-      />
+      <AdminPageHeader title={title} />
       {kind === "credentials" ? (
         <AdminProjectCredentials accountId={user.id} projectId={projectId} />
       ) : (

@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.snip import (
+    MAX_CONTINUITY_CHARS,
     MAX_SNIP_OUTPUT_CHARS,
     SNIP_ARCHIVE_PROMPT,
     SNIP_ARCHIVE_PROMPT_VERSION,
@@ -13,10 +14,15 @@ from deerflow.agents.memory.snip import (
     SnipOutputInvalid,
     compute_snip_source_digest,
     normalize_snip_output,
+    parse_snip_dual_output,
     validate_snip_output,
 )
 
-EXPECTED_SNIP_ARCHIVE_PROMPT = """Extract key facts from this conversation. For each fact, annotate its memory attributes.
+EXPECTED_SNIP_ARCHIVE_PROMPT = """Produce exactly two segments from this conversation, in this order: a task-continuity summary, then tagged memory facts.
+
+Segment 1 — continuity block. Output exactly one block wrapped in <continuity> and </continuity> containing free prose written for an agent that resumes this thread after the summarized messages are gone. Cover: the current goal, what is already done, what is in progress, key decisions with their reasons, and the immediate next steps. Prefer concrete names — files, commands, identifiers, exact values — over vague references. If an existing summary is provided, return one complete replacement that covers both it and the new conversation segment. Keep the block content within 2000 characters. The continuity block must never be empty.
+
+Segment 2 — tagged facts. Immediately after the closing </continuity> tag, extract key facts worth remembering beyond this thread. For each fact, annotate its memory attributes.
 
 Only SNIP facts deserve a non-[skip] mark:
 - Signal: would the user need to repeat this if forgotten?
@@ -38,15 +44,11 @@ Priority: user corrections and preferences > solutions > decisions > events > en
 
 Do not mark something [skip] merely because it might already exist in long-term memory; Dream handles long-term-memory deduplication later.
 
-Output concise bullet points only. No preamble, no commentary.
-If nothing noteworthy happened, output: (nothing)
+Keep the tagged segment to concise bullet lines only — no preamble, no commentary, no prose outside the continuity block.
+If nothing in the new conversation segment is worth remembering, the tagged segment must be the single line: (nothing)
+Keep the tagged segment within 1000 characters. When space is limited, retain corrections and preferences first, then permanent facts, durable decisions/solutions, and only the newest active ephemeral state. Drop stale events, environment details, and skip items first.
 
 The input contains a Previous Summary and a New Conversation Segment.
-Return one complete replacement summary that covers both.
-Keep the final output within 1000 characters.
-When space is limited, retain corrections and preferences first, then permanent
-facts, durable decisions/solutions, and only the newest active ephemeral state.
-Drop stale events, environment details, and skip items first.
 
 Input:
 {messages}
@@ -54,7 +56,7 @@ Input:
 
 
 def test_snip_prompt_and_version_are_fixed_snapshots() -> None:
-    assert SNIP_ARCHIVE_PROMPT_VERSION == "snip-archive-prompt-v1"
+    assert SNIP_ARCHIVE_PROMPT_VERSION == "snip-archive-prompt-v2"
     assert SNIP_ARCHIVE_PROMPT == EXPECTED_SNIP_ARCHIVE_PROMPT
     assert SNIP_ARCHIVE_PROMPT.count("{messages}") == 1
 
@@ -113,6 +115,59 @@ def test_validate_snip_output_accepts_only_the_contract(raw: str, expected: str)
 def test_validate_snip_output_rejects_invalid_shapes(raw: str) -> None:
     with pytest.raises(SnipOutputInvalid):
         validate_snip_output(raw)
+
+
+def test_parse_snip_dual_output_splits_continuity_and_tagged_segments() -> None:
+    raw = "\r\n<continuity>\nGoal: finish PR7. Done: parser. Next: middleware wiring.\n</continuity>\n- [durable] PostgreSQL is the only application database.\n- [skip] Small talk.\r\n"
+
+    continuity, tagged_text = parse_snip_dual_output(raw)
+
+    assert continuity == "Goal: finish PR7. Done: parser. Next: middleware wiring."
+    assert tagged_text == ("- [durable] PostgreSQL is the only application database.\n- [skip] Small talk.")
+
+
+def test_parse_snip_dual_output_accepts_nothing_tagged_segment() -> None:
+    continuity, tagged_text = parse_snip_dual_output("<continuity>\nStill exploring; no decisions yet.\n</continuity>\n(nothing)")
+
+    assert continuity == "Still exploring; no decisions yet."
+    assert tagged_text == SNIP_NOTHING
+
+
+def test_parse_snip_dual_output_bounds_each_segment_independently() -> None:
+    max_continuity = "c" * MAX_CONTINUITY_CHARS
+    continuity, tagged_text = parse_snip_dual_output(f"<continuity>\n{max_continuity}\n</continuity>\n(nothing)")
+    assert continuity == max_continuity
+    assert tagged_text == SNIP_NOTHING
+
+    with pytest.raises(SnipOutputInvalid):
+        parse_snip_dual_output(f"<continuity>\n{'c' * (MAX_CONTINUITY_CHARS + 1)}\n</continuity>\n(nothing)")
+
+    prefix = "- [durable] "
+    max_tagged = prefix + "x" * (MAX_SNIP_OUTPUT_CHARS - len(prefix))
+    assert parse_snip_dual_output(f"<continuity>\nok\n</continuity>\n{max_tagged}")[1] == max_tagged
+
+    with pytest.raises(SnipOutputInvalid):
+        parse_snip_dual_output(f"<continuity>\nok\n</continuity>\n{max_tagged}y")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "- [durable] Tagged lines without a continuity block.",
+        "(nothing)",
+        "Prose before the block.\n<continuity>\nok\n</continuity>\n(nothing)",
+        "<continuity>\nunterminated block\n- [durable] A fact.",
+        "<continuity>\n   \n</continuity>\n- [durable] A fact.",
+        "<continuity>\nok\n</continuity>\n",
+        "<continuity>\nok\n</continuity>\nplain prose instead of tagged lines",
+        "<continuity>\nfirst\n</continuity>\n<continuity>\nsecond\n</continuity>\n(nothing)",
+        "<continuity>\nnested <continuity> marker\n</continuity>\n(nothing)",
+        "<continuity>\nok\n</continuity>\n- [durable] A fact.\n</continuity>",
+    ],
+)
+def test_parse_snip_dual_output_rejects_malformed_segments(raw: str) -> None:
+    with pytest.raises(SnipOutputInvalid):
+        parse_snip_dual_output(raw)
 
 
 def test_validate_snip_output_rejects_non_string_and_over_1000_characters() -> None:

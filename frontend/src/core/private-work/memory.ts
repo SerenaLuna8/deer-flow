@@ -25,15 +25,22 @@ export const memoryDocumentSchema = z
     updatedAt: memoryDateTimeSchema.nullable(),
     pendingCount: z.number().int().nonnegative(),
     dreamRunning: z.boolean(),
+    injectionStatus: z.enum(["ok", "skipped_over_budget"]),
   })
   .strict();
 
 export const memoryVersionSummarySchema = z
   .object({
     version: memoryVersionSchema,
-    trigger: z.enum(["auto_dream", "manual_dream", "restore"]),
+    trigger: z.enum([
+      "auto_dream",
+      "manual_dream",
+      "restore",
+      "budget_rewrite",
+    ]),
     historyCount: z.number().int().min(1).max(20).nullable(),
     changed: z.boolean(),
+    needsReview: z.boolean(),
     createdAt: memoryDateTimeSchema,
   })
   .strict();
@@ -76,10 +83,68 @@ export const memoryDreamResultSchema = z
     }
   });
 
+export const MEMORY_EPISODE_PAGE_SIZE = 20;
+export const MEMORY_EPISODE_SEARCH_LIMIT = 50;
+export const MEMORY_EPISODE_QUERY_MAX_LENGTH = 200;
+
+export const memoryEpisodeTagSchema = z.enum([
+  "permanent",
+  "durable",
+  "ephemeral",
+  "correction",
+]);
+
+export const memoryEpisodeSchema = z
+  .object({
+    id: z.string().uuid(),
+    threadId: z.string().min(1).max(64),
+    origin: z.enum(["snip", "tool"]),
+    taggedText: z.string().min(1).max(1_000),
+    occurredAt: memoryDateTimeSchema,
+    createdAt: memoryDateTimeSchema,
+  })
+  .strict();
+
+export const memoryEpisodesSchema = z
+  .object({
+    items: z.array(memoryEpisodeSchema).max(50),
+  })
+  .strict();
+
+const memoryEpisodesInputSchema = z
+  .object({
+    q: z.string().min(1).max(MEMORY_EPISODE_QUERY_MAX_LENGTH).optional(),
+    tags: z.array(memoryEpisodeTagSchema).max(4).optional(),
+    before: memoryDateTimeSchema.optional(),
+    limit: z.number().int().min(1).max(50),
+  })
+  .strict();
+
+export const MEMORY_PENDING_PAGE_SIZE = 50;
+
+export const memoryPendingEntrySchema = z
+  .object({
+    sequence: z.number().int().positive(),
+    origin: z.enum(["snip", "tool"]),
+    taggedText: z.string().min(1).max(1_000),
+    createdAt: memoryDateTimeSchema,
+  })
+  .strict();
+
+export const memoryPendingSchema = z
+  .object({
+    items: z.array(memoryPendingEntrySchema).max(100),
+  })
+  .strict();
+
 export type MemoryDocument = z.infer<typeof memoryDocumentSchema>;
 export type MemoryVersionSummary = z.infer<typeof memoryVersionSummarySchema>;
 export type MemoryVersionDetail = z.infer<typeof memoryVersionDetailSchema>;
 export type MemoryDreamResult = z.infer<typeof memoryDreamResultSchema>;
+export type MemoryEpisode = z.infer<typeof memoryEpisodeSchema>;
+export type MemoryEpisodeTag = z.infer<typeof memoryEpisodeTagSchema>;
+export type MemoryEpisodesInput = z.infer<typeof memoryEpisodesInputSchema>;
+export type MemoryPendingEntry = z.infer<typeof memoryPendingEntrySchema>;
 
 type ProjectMemoryAccess = Pick<PrivateWorkAccess, "apiBaseURL" | "scope">;
 
@@ -145,6 +210,33 @@ export function projectMemoryVersionQueryKey(
   return privateWorkQueryKey(scope, "memory", "version", parseVersion(version));
 }
 
+const memoryEpisodesFilterSchema = z
+  .object({
+    q: z.string().min(1).max(MEMORY_EPISODE_QUERY_MAX_LENGTH).optional(),
+    tags: z.array(memoryEpisodeTagSchema).max(4).optional(),
+  })
+  .strict();
+
+export type MemoryEpisodesFilter = z.infer<typeof memoryEpisodesFilterSchema>;
+
+export function projectMemoryEpisodesQueryKey(
+  scope: ProjectClientScope,
+  input: MemoryEpisodesFilter,
+) {
+  const parameters = memoryEpisodesFilterSchema.parse(input);
+  return privateWorkQueryKey(
+    scope,
+    "memory",
+    "episodes",
+    parameters.q ?? null,
+    [...(parameters.tags ?? [])].sort().join(","),
+  );
+}
+
+export function projectMemoryPendingQueryKey(scope: ProjectClientScope) {
+  return privateWorkQueryKey(scope, "memory", "pending");
+}
+
 export function projectMemoryMutationKey(
   scope: ProjectClientScope,
   action: "dream" | "restore",
@@ -195,6 +287,55 @@ export async function dreamProjectMemory(
     response,
     memoryDreamResultSchema,
     "Failed to organize project Memory",
+  );
+}
+
+export async function listProjectMemoryEpisodes(
+  access: ProjectMemoryAccess,
+  input: MemoryEpisodesInput,
+  signal?: AbortSignal,
+) {
+  const parameters = memoryEpisodesInputSchema.parse(input);
+  const { baseURL } = requireProjectMemoryAccess(access);
+  const search = new URLSearchParams();
+  if (parameters.q !== undefined) search.set("q", parameters.q);
+  for (const tag of parameters.tags ?? []) search.append("tags", tag);
+  if (parameters.before !== undefined) search.set("before", parameters.before);
+  search.set("limit", String(parameters.limit));
+  const response = await fetchWithAuth(`${baseURL}/episodes?${search}`, {
+    signal,
+  });
+  return readJSON(
+    response,
+    memoryEpisodesSchema,
+    "Failed to load project Memory archive",
+  );
+}
+
+export async function listProjectMemoryPending(
+  access: ProjectMemoryAccess,
+  input: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+) {
+  const parameters = z
+    .object({
+      limit: z.number().int().min(1).max(100).default(MEMORY_PENDING_PAGE_SIZE),
+      offset: z.number().int().min(0).max(10_000).default(0),
+    })
+    .strict()
+    .parse(input);
+  const { baseURL } = requireProjectMemoryAccess(access);
+  const search = new URLSearchParams({
+    limit: String(parameters.limit),
+    offset: String(parameters.offset),
+  });
+  const response = await fetchWithAuth(`${baseURL}/pending?${search}`, {
+    signal,
+  });
+  return readJSON(
+    response,
+    memoryPendingSchema,
+    "Failed to load project Memory backlog",
   );
 }
 

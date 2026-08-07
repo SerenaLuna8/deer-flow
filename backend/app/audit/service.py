@@ -297,6 +297,9 @@ class AuditService:
         action: AuditAction | None = None,
         outcome: AuditOutcome | None = None,
         target: AuditTarget | None = None,
+        project_id: uuid.UUID | None = None,
+        project_query: str | None = None,
+        platform_only: bool = False,
     ) -> AuditPage:
         if not is_issued_system_audit_context(context):
             raise TypeError("issued system audit context is required")
@@ -312,6 +315,9 @@ class AuditService:
                     action=action,
                     outcome=outcome,
                     target=target,
+                    project_id=project_id,
+                    project_query=project_query,
+                    platform_only=platform_only,
                 )
         except DBAPIError:
             raise AuditUnavailable() from None
@@ -326,6 +332,9 @@ class AuditService:
         action: AuditAction | None = None,
         outcome: AuditOutcome | None = None,
         target: AuditTarget | None = None,
+        project_id: uuid.UUID | None = None,
+        project_query: str | None = None,
+        platform_only: bool = False,
     ) -> AuditPage:
         await self._require_platform_reader(session, context)
         return await self._list_in_session(
@@ -336,6 +345,9 @@ class AuditService:
             action=action,
             outcome=outcome,
             target=target,
+            platform_project_id=project_id,
+            project_query=project_query,
+            platform_only=platform_only,
         )
 
     @staticmethod
@@ -385,6 +397,9 @@ class AuditService:
         action: AuditAction | None,
         outcome: AuditOutcome | None,
         target: AuditTarget | None,
+        platform_project_id: uuid.UUID | None = None,
+        project_query: str | None = None,
+        platform_only: bool = False,
     ) -> AuditPage:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise AuditCursorRejected()
@@ -394,6 +409,14 @@ class AuditService:
             raise AuditMetadataRejected()
         if target is not None and type(target) is not AuditTarget:
             raise AuditAuthorityRejected()
+        if project_query is not None and (type(project_query) is not str or not project_query.strip()):
+            raise AuditCursorRejected()
+        if platform_project_id is not None and type(platform_project_id) is not uuid.UUID:
+            raise AuditAuthorityRejected()
+        if type(platform_only) is not bool:
+            raise AuditCursorRejected()
+        if platform_only and (platform_project_id is not None or project_query is not None):
+            raise AuditCursorRejected()
         selected_cursor = None if cursor is None else self._decode_cursor(cursor)
         target_refs = None
         if target is not None:
@@ -412,8 +435,13 @@ class AuditService:
                 action=action.value if action is not None else None,
                 outcome=outcome.value if outcome is not None else None,
                 target_refs=target_refs,
+                project_id=platform_project_id,
+                project_query=None if project_query is None else project_query.strip(),
+                platform_only=platform_only,
             )
         else:
+            if platform_project_id is not None or project_query is not None or platform_only:
+                raise AuditAuthorityRejected()
             rows = await repository.list_project(
                 project_id,
                 limit=limit + 1,

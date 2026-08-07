@@ -559,12 +559,10 @@ function safeActionError(
 function CatalogMetric({
   label,
   value,
-  detail,
   icon: Icon,
 }: {
   label: string;
   value: string;
-  detail: string;
   icon: typeof BotIcon;
 }) {
   return (
@@ -579,9 +577,6 @@ function CatalogMetric({
           title={value}
         >
           {value}
-        </p>
-        <p className="text-muted-foreground truncate text-[0.6875rem]">
-          {detail}
         </p>
       </div>
     </div>
@@ -1047,9 +1042,6 @@ export function AdminModelCatalogStateView({
             <h1 className="mt-0.5 text-xl font-semibold tracking-tight">
               {labels.header.title}
             </h1>
-            <p className="text-muted-foreground mt-1 max-w-3xl text-sm leading-5">
-              {labels.header.description}
-            </p>
           </div>
         </div>
         <Button type="button" onClick={onCreate}>
@@ -1066,13 +1058,11 @@ export function AdminModelCatalogStateView({
           <CatalogMetric
             label={labels.overview.configured}
             value={catalog ? String(catalog.items.length) : "—"}
-            detail={labels.overview.configuredDetail}
             icon={Layers3Icon}
           />
           <CatalogMetric
             label={labels.overview.active}
             value={catalog ? String(activeModels.length) : "—"}
-            detail={labels.overview.activeDetail}
             icon={ActivityIcon}
           />
           <CatalogMetric
@@ -1081,13 +1071,11 @@ export function AdminModelCatalogStateView({
               defaultModel?.display_name ??
               (catalog ? labels.overview.notSet : "—")
             }
-            detail={labels.overview.defaultDetail}
             icon={StarIcon}
           />
           <CatalogMetric
             label={labels.overview.revision}
             value={catalog ? `r${catalog.catalog_revision}` : "—"}
-            detail={labels.overview.revisionDetail}
             icon={ShieldCheckIcon}
           />
         </div>
@@ -1172,20 +1160,6 @@ export function AdminModelCatalogStateView({
         </Card>
       ) : (
         <section aria-label={labels.states.catalogLabel} className="space-y-3">
-          <div className="flex items-end justify-between gap-4">
-            <div>
-              <h2 className="text-base font-semibold">
-                {labels.states.catalogLabel}
-              </h2>
-              <p className="text-muted-foreground mt-0.5 text-xs">
-                {labels.states.catalogDescription}
-              </p>
-            </div>
-            <span className="text-muted-foreground text-xs">
-              {labels.states.modelCount(state.data.items.length)}
-            </span>
-          </div>
-
           <div
             data-testid="admin-model-catalog-toolbar"
             className="border-border/70 bg-card flex flex-col gap-2 rounded-xl border p-2 sm:flex-row sm:items-center"
@@ -1239,18 +1213,6 @@ export function AdminModelCatalogStateView({
             </Button>
           </div>
 
-          <div className="text-muted-foreground flex min-h-5 items-center justify-between gap-3 text-xs">
-            <span>
-              {visibleModels.length > 0
-                ? catalogLabels.resultRange(
-                    1,
-                    visibleModels.length,
-                    state.data.items.length,
-                  )
-                : catalogLabels.noResults}
-            </span>
-          </div>
-
           {visibleModels.length > 0 ? (
             <ModelCatalog
               models={visibleModels}
@@ -1264,6 +1226,18 @@ export function AdminModelCatalogStateView({
               {catalogLabels.noResults}
             </div>
           )}
+
+          <div className="text-muted-foreground flex min-h-5 items-center justify-between gap-3 text-xs">
+            <span>
+              {visibleModels.length > 0
+                ? catalogLabels.resultRange(
+                    1,
+                    visibleModels.length,
+                    state.data.items.length,
+                  )
+                : catalogLabels.noResults}
+            </span>
+          </div>
         </section>
       )}
     </main>

@@ -8,6 +8,7 @@ from deerflow.agents.memory.dream import (
     validate_memory_document,
 )
 from deerflow.agents.memory.snip import (
+    MAX_CONTINUITY_CHARS,
     MAX_SNIP_OUTPUT_CHARS,
     MEMORY_ARCHIVE_CONTEXT_KEY,
     MEMORY_ARCHIVE_RECEIPT_KEY,
@@ -22,6 +23,7 @@ from deerflow.agents.memory.snip import (
     compute_snip_content_digest,
     compute_snip_source_digest,
     normalize_snip_output,
+    parse_snip_dual_output,
     validate_snip_output,
 )
 
@@ -29,6 +31,7 @@ __all__ = [
     "DREAM_PROMPT",
     "DREAM_PROMPT_VERSION",
     "EMPTY_MEMORY_DOCUMENT",
+    "MAX_CONTINUITY_CHARS",
     "MAX_SNIP_OUTPUT_CHARS",
     "MEMORY_ARCHIVE_CONTEXT_KEY",
     "MEMORY_ARCHIVE_RECEIPT_KEY",
@@ -44,6 +47,7 @@ __all__ = [
     "compute_snip_content_digest",
     "compute_snip_source_digest",
     "normalize_snip_output",
+    "parse_snip_dual_output",
     "validate_snip_output",
     "validate_memory_document",
 ]

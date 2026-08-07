@@ -36,6 +36,7 @@ from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     MemoryDocumentVersionRow,
     MemoryDreamRunRow,
+    MemoryEpisodeRow,
     MemoryHistoryEntryRow,
     RunMemoryContextSnapshotRow,
 )
@@ -549,6 +550,32 @@ class PrivacyCenterService:
                         "tagged_text": row.tagged_text,
                         "created_at": _iso(row.created_at),
                         "consumed_at": _iso(row.consumed_at),
+                    },
+                )
+
+            memory_episodes = (
+                select(MemoryEpisodeRow)
+                .where(
+                    MemoryEpisodeRow.project_id == scope[0],
+                    MemoryEpisodeRow.owner_user_id == scope[1],
+                )
+                .order_by(
+                    MemoryEpisodeRow.namespace,
+                    MemoryEpisodeRow.occurred_at,
+                    MemoryEpisodeRow.id,
+                )
+            )
+            async for row in self._scalar_rows(memory_episodes):
+                yield _export_line(
+                    "memory_episode",
+                    data={
+                        "id": str(row.id),
+                        "namespace": row.namespace,
+                        "thread_id": row.thread_id,
+                        "origin": row.origin,
+                        "tagged_text": row.tagged_text,
+                        "occurred_at": _iso(row.occurred_at),
+                        "created_at": _iso(row.created_at),
                     },
                 )
 

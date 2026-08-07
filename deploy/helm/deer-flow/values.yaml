@@ -201,7 +201,7 @@ ingress:
 # -- ActWeave config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 35
+  config_version: 36
   log_level: info
   logging:
     enhance:
@@ -276,6 +276,7 @@ config: |
     egress_proxy_url: null
     discovery_timeout_seconds: 15
     tool_call_timeout_seconds: 60
+    run_session_reuse: true
 
   tool_output:
     storage_subdir: .tool-results
@@ -297,6 +298,7 @@ config: |
 
   skills:
     container_path: /mnt/skills
+    read_evidence_ttl_calls: 12
   summarization:
     summary_prompt: null
 
@@ -327,3 +329,5 @@ config: |
     shutdown_grace_seconds: 30
     retry_initial_seconds: 2
     retry_max_seconds: 300
+    stream:
+      text_delta_flush_ms: 75

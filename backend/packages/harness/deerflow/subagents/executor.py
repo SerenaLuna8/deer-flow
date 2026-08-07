@@ -43,6 +43,7 @@ from deerflow.skills.tool_policy import (
     filter_tools_by_skill_allowed_tools,
 )
 from deerflow.skills.types import Skill
+from deerflow.subagents.change_signal import SubagentChangeSignal
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
@@ -202,6 +203,9 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    # Event-driven waiting (U8): writers on the isolated loop / scheduler
+    # thread notify; the parent-loop task tool subscribes instead of polling.
+    changes: SubagentChangeSignal = field(default_factory=SubagentChangeSignal, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
@@ -210,10 +214,29 @@ class SubagentResult:
             self.ai_messages = []
 
     def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
-        """Publish the latest cumulative collector snapshot while still running."""
+        """Publish the latest cumulative collector snapshot while still running.
+
+        Deliberately does not notify ``changes``: token totals ride along with
+        the next message/terminal wake-up or the heartbeat, keeping progress
+        notifications bounded.
+        """
+        updated = False
         with self._state_lock:
             if not self.status.is_terminal:
                 self.token_usage_records = list(records)
+                updated = True
+        if updated:
+            # Debounced: a chatty model stream cannot storm the parent loop.
+            self.changes.notify()
+
+    def mark_running(self, *, started_at: datetime | None = None) -> None:
+        """Transition PENDING → RUNNING and wake waiters."""
+        with self._state_lock:
+            if self.status.is_terminal:
+                return
+            self.status = SubagentStatus.RUNNING
+            self.started_at = started_at or datetime.now()
+        self.changes.notify()
 
     def try_set_terminal(
         self,
@@ -251,7 +274,9 @@ class SubagentResult:
                 self.token_usage_records = token_usage_records
             self.completed_at = completed_at or datetime.now()
             self.status = status
-            return True
+        # Outside the lock: waking waiters must not hold the state lock.
+        self.changes.notify(terminal=True)
+        return True
 
 
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
@@ -1023,6 +1048,9 @@ class SubagentExecutor:
                 processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
                 if len(ai_messages) > previous_count:
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+                    # Debounced progress wake-up so the parent can forward
+                    # task_running steps without waiting for the heartbeat.
+                    result.changes.notify()
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
@@ -1240,9 +1268,8 @@ class SubagentExecutor:
         # Submit to scheduler pool
         def run_task():
             with _background_tasks_lock:
-                _background_tasks[task_id].status = SubagentStatus.RUNNING
-                _background_tasks[task_id].started_at = datetime.now()
                 result_holder = _background_tasks[task_id]
+            result_holder.mark_running()
 
             try:
                 # Submit execution directly to the persistent isolated loop so the

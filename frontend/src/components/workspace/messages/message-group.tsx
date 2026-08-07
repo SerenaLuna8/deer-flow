@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
+  BrainIcon,
   ChevronUp,
   CoinsIcon,
   FolderOpenIcon,
@@ -12,6 +13,8 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -490,6 +493,7 @@ function ToolCall({
   tokenDebugStep?: TokenDebugStep;
 }) {
   const { t } = useI18n();
+  const { project_slug: projectSlug } = useParams<{ project_slug?: string }>();
   const {
     enabled: artifactsEnabled,
     setOpen,
@@ -765,6 +769,38 @@ function ToolCall({
         label={resolveLabel(t.toolCalls.writeTodos)}
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
+    );
+  } else if (name === "remember") {
+    // Fixed phrase written by the backend remember tool on success; the
+    // remembered line follows it verbatim.
+    const rememberedPrefix = "Remembered for the next organization pass: ";
+    const rememberedLine =
+      typeof result === "string" && result.startsWith(rememberedPrefix)
+        ? result.slice(rememberedPrefix.length)
+        : null;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(
+          rememberedLine ? t.toolCalls.remembered : t.toolCalls.rememberMemory,
+        )}
+        icon={BrainIcon}
+      >
+        {rememberedLine && (
+          <ChainOfThoughtSearchResult data-testid="remember-chip">
+            {projectSlug ? (
+              <Link
+                href={`/projects/${encodeURIComponent(projectSlug)}/memory`}
+                className="cursor-pointer"
+              >
+                {rememberedLine}
+              </Link>
+            ) : (
+              rememberedLine
+            )}
+          </ChainOfThoughtSearchResult>
+        )}
+      </ChainOfThoughtStep>
     );
   } else {
     const description: string | undefined = (args as { description: string })

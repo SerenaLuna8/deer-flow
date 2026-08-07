@@ -48,15 +48,20 @@ the returned slug. UUID-only detail, enter, pin, and mutation APIs never receive
 
 ## Source layout
 
+This lists the directories these rules govern, not every directory under `src/`.
+
 ```text
 frontend/src/
 ├── app/
+│   ├── (auth)/                       # login, registration, setup, OIDC callback
 │   ├── workspace/                    # live account landing or static local demo
 │   ├── projects/[project_slug]/      # only live project shell
 │   └── admin/                        # platform administration
 ├── components/
 │   ├── projects/                     # project shell and project-private pages
 │   ├── workspace/                    # reusable chat/message/artifact presentation
+│   ├── assets/                       # shared asset presentation
+│   ├── admin/                        # platform administration surfaces
 │   └── ui/                           # generated UI primitives
 ├── core/
 │   ├── auth/                         # authenticated account identity
@@ -68,11 +73,116 @@ frontend/src/
 │   ├── admin-settings/               # model catalog and global policy contracts
 │   ├── threads/                      # project-injected Thread state and streaming
 │   └── messages/                     # pure message/human-input rendering model
+├── lib/                              # cross-cutting helpers including `cn()`
+├── styles/                           # Tailwind entry and theme tokens
 └── env.js                            # environment validation
 ```
 
 Generated primitives under `components/ui/` and `components/ai-elements/` should not be
 edited manually.
+
+## Task recipes
+
+Entry points for the most common changes. The sections below own the invariants; these
+recipes only say where to start and which wiring step is easy to miss.
+
+### Add a page or route
+
+1. Create `src/app/projects/[project_slug]/<segment>/page.tsx`. Both parent shells already
+   exist: `app/projects/layout.tsx` resolves the account and mounts `QueryClientProvider`
+   plus `AuthProvider`, and `app/projects/[project_slug]/layout.tsx` rejects static builds
+   and mounts `ProjectContextProvider`.
+2. Keep the route file thin. A Server Component route awaits
+   `requireServerProjectCapability(slug, "project.members.manage")` and renders a component
+   from `src/components/projects/`. A `"use client"` route wrapper instead reads
+   `useCurrentProject()` and delegates.
+3. Register navigation in `src/components/projects/project-nav.tsx` with the matching
+   capability check. Creating the route file does not add a sidebar entry.
+4. Never resolve the slug yourself. `ProjectContextProvider` owns slug resolution and enter;
+   nested pages consume `useCurrentProject()`.
+
+`requireServerProjectCapability` calls `notFound()` when the project is invisible to the
+caller and `forbidden()` when a member lacks the capability, but it returns without blocking
+when the lookup itself is `unavailable`. It is a fast SSR gate, not the authorization
+boundary; the scoped API calls behind the page still fail closed.
+
+### Add a data-fetching hook or API call
+
+1. Declare the response contract in `src/core/<domain>/types.ts` as a strict Zod schema that
+   rejects unknown authority fields.
+2. Add the request in `src/core/<domain>/api.ts` using the authenticated fetcher from
+   `src/core/api/fetcher.ts`, and validate the response through that schema before returning.
+3. Add the key factory in `src/core/<domain>/query-keys.ts`. A project-scoped key starts at
+   the account+project root the way `privateWorkRoot()` builds
+   `["account", accountId, "project", projectId, "private-work"]`. Never key by slug.
+4. Add the `useQuery`/`useMutation` wrapper in `src/core/<domain>/hooks.ts` and forward
+   TanStack's `signal` into the request.
+5. If the domain introduces a new project-scoped root, add it to the `roots` array in
+   `transitionPrivateWorkScope` (`src/core/private-work/scope-registry.ts`). That array is
+   what cancels and removes the previous scope's queries and mutations on account or project
+   transition, so a root missing from it leaks across scopes.
+
+Secret-bearing input never travels through TanStack. Follow the `useSecureCredentialWrite`
+pattern: hold the value in local component state, call the imperative API directly, clear the
+form, then invalidate the list query only after success.
+
+`createAccountQueryClient()` returns a bare `QueryClient` with no default `staleTime`, so each
+query declares its own caching and polling behavior.
+
+### Add a UI component
+
+1. Place feature components under the owning directory: `components/projects/` for the
+   project shell and project-private pages, `components/workspace/` for chat, message, and
+   artifact presentation, `components/assets/` for shared asset presentation, and
+   `components/admin/` for admin surfaces.
+2. Compose from the generated primitives in `components/ui/`; aliases are declared in
+   `components.json`.
+3. Merge conditional classes with `cn()` from `src/lib/utils.ts`. Tailwind 4 enters through
+   `src/styles/globals.css`; a class name assembled at runtime needs an `@source inline(...)`
+   entry there or it is purged from the build.
+4. Import across modules through the `@/*` alias rather than relative paths.
+
+### Change streaming or SSE handling
+
+1. Frame acceptance, cursor state, and reconnect storage live in
+   `src/core/private-work/api-client.ts`. `acceptProjectStreamFrame` compares canonical
+   decimal strings and drops duplicate or non-advancing frames.
+2. The UI-facing hook is `useThreadStream` in `src/core/threads/hooks.ts`, consumed by
+   `ScopedChatPage`.
+3. A newly mounted projection joins with `lastEventId: "0"` deliberately, because a shared
+   cursor may have been advanced by an old invisible consumer whose frames this UI never
+   rendered. Do not turn that into a resume from the stored cursor.
+4. Never object-spread the LangGraph stream handle. `overlayThreadProjection` rebuilds it from
+   property descriptors so the SDK's lazy getters survive.
+
+### Add a unit test
+
+1. Create `tests/unit/<mirror of the source path>/<name>.test.ts` or `.tsx`. `rstest.config.ts`
+   collects only `tests/unit/**/*.test.{ts,tsx}`.
+2. Import through `@/…`; that alias is configured in `rstest.config.ts`. There is no setup
+   file and no `tests/support/` directory, so helpers and mocks are declared in the spec.
+3. Use `rs.fn` and `rs.stubGlobal` from `@rstest/core` and restore with
+   `rs.unstubAllGlobals()` in `afterEach`. Dispose any scoped client the test created.
+
+Run `pnpm test` for the suite or `pnpm test <path>` for one file.
+
+### Add or change a Playwright E2E test
+
+Three gates, each with its own config and output directory so artifacts cannot be reused
+across modes:
+
+| Gate             | Specs                     | Config                              | Command                                                                |
+| ---------------- | ------------------------- | ----------------------------------- | ---------------------------------------------------------------------- |
+| Dynamic (mocked) | `tests/e2e/`              | `playwright.config.ts`              | `pnpm test:e2e`                                                        |
+| Static boundary  | `tests/e2e-static/`       | `playwright.static.config.ts`       | `pnpm test:e2e:static`                                                 |
+| Real backend     | `tests/e2e-real-backend/` | `playwright.real-backend.config.ts` | `pnpm exec playwright test --config playwright.real-backend.config.ts` |
+
+1. Keep specs deterministic: mock `**/api/**` inside the spec and use fixed UUIDs and
+   timestamps. The dynamic web server runs with `DEER_FLOW_AUTH_DISABLED=1` and points the
+   Gateway at a dead port, so an unmocked request fails instead of reaching a real backend.
+2. `pnpm test:e2e` names one spec explicitly. A new dynamic spec needs that script updated or
+   an explicit path on the command line, or no gate will run it.
+3. `PLAYWRIGHT_SKIP_WEB_SERVER=1` reuses an already running server instead of rebuilding.
 
 ## Project authority and client ownership
 
@@ -117,6 +227,8 @@ from an old account/project must never update the new scope.
 
 ## Project-private data flow
 
+### Project API surfaces and channel configuration
+
 Project clients use `/api/projects/{project_id}/private-work` for Thread, Run, file,
 artifact, input-polish, and durable SSE operations. Project Memory uses
 `/api/projects/{project_id}/memory`; Connections use
@@ -141,6 +253,8 @@ Thread/Run content, raw provider identifiers, or guest identities. Group guests 
 and their owner-scoped Threads must not be merged into the normal signed-in conversation menu.
 Personal `p2p /connect` UI and behavior remain independent.
 
+### Navigation gating and project Memory
+
 Chats, Memory, Connections, and Automation navigation require a non-static build, server
 readiness `ready`, and `private_work.read_own`. Create/run/upload/connect controls additionally
 require their exact server capability. Viewer can read/list/export and delete their own
@@ -164,6 +278,8 @@ and does not admit Dream.
 explicit confirmation before calling restore. These built-ins, like `/compact`, never enter the
 ordinary Agent message stream.
 
+### Durable SSE cursor and stream handling
+
 Durable SSE cursor and deduplication state is keyed by account/project/thread. Event IDs are
 thread-monotonic; duplicate IDs and duplicate terminal frames are ignored. Gateway restart
 must resume from the stored `Last-Event-ID` without cross-scope replay.
@@ -174,19 +290,24 @@ only monotonic advances. A newly mounted Thread projection joins the current Run
 new UI rendered those frames. Project clients own an AbortController and active generation:
 disposed clients may neither yield late frames nor update cursor/reconnect storage. Reconnect
 metadata deletion is compare-and-remove so an old consumer cannot erase a newer Run.
+
 The same no-`number` rule applies to the four non-SSE private-work feeds for per-Run messages,
 Thread messages, per-Run events, and Thread events. Their `seq`, `before_seq`, and `after_seq`
 values remain canonical decimal strings through parsing, sorting, and pagination. Thread history
 and historical Subtask-step loading compare strings by decimal length/value and fail closed on
 numeric, non-canonical, or signed-BIGINT-overflow responses. The privacy-center NDJSON attachment
 is not consumed by these Thread/task clients and remains outside this contract.
+
 React cleanup defers the local stream detach so a Strict Mode remount can retain it. The eventual
 detach clears only the local SDK projection and must not send backend cancellation. Project chat
 requests remain root-stream only; namespaced child custom frames cannot update root task state.
+
 Do not object-spread the LangGraph SDK stream handle: it exposes enumerable lazy getters, and
 `toolCalls` can traverse a transient sparse message array while `RemoveMessage(__remove_all__)`
 compaction rebuilds message-tuple indexes. Preserve the handle with property descriptors and
 override only ActWeave's normalized `messages`, scoped `values`, and local `stop` projection.
+
+### Conversation history and catalog pagination
 
 Conversation history is a lead-Agent projection. Historical rows tagged with a subagent or
 middleware caller are hidden, and their tool results are filtered by the issuing AI
@@ -216,6 +337,8 @@ unknown fields, a full page without a usable next offset, or excessive page coun
 Thread rename/delete mutations send the last server-issued `expected_version`; a 409 is an
 explicit concurrent-edit result and must never be converted into an optimistic silent overwrite.
 
+### Run presentation: artifacts, reasoning, and subtasks
+
 During a live project Run, successful lead-Agent `write_file` and `str_replace` tool calls select
 the written file in the artifact preview, open the right-hand file panel, and collapse the desktop
 project navigation. Trusted stream messages tagged `subagent:<name>` are internal progress and
@@ -229,11 +352,13 @@ replacement while the Run or ready-file refetch is active, because an existing p
 point at the prior file version. The toolbar Files action is a directory action when ready files
 exist: it clears the detail selection, opens the file list, and exposes each file through a
 separate keyboard-operable open button that does not overlap download/delete controls.
+
 After a terminal assistant answer exists, the UI keeps the safe semantic groups unchanged but
 projects any immediately preceding processing, Subagent, and `present_files` groups into one
 result. Earlier lead-Agent reasoning, tool calls, Subagent cards, and the terminal message's own
 reasoning render in chronological order inside one compact, collapsed-by-default “Execution
 details” disclosure before the final answer.
+
 Every AI message keeps its own `ThinkingDisclosure`; reasoning must never be flattened into a
 generic execution step or combined with a later model call. Each disclosure reads that message's
 server-observed `additional_kwargs.reasoning_duration_ms`, floors it to whole seconds, and uses
@@ -264,6 +389,8 @@ measures progress against the current automatic-compression trigger. `tokens`, `
 primary trigger drives the compact ring. Hide the indicator for new/mock/non-runnable Threads, and
 invalidate it after terminal Runs, stop, `/compact`, and `/Dream`.
 
+### Composer submission and execution profile
+
 Input polish is project-scoped and never runs without `private_work.create` plus
 `shared_assets.execute`. The server revalidates the current Thread Agent snapshot and
 Credential-grant closure; the browser never constructs authority fields.
@@ -277,9 +404,11 @@ Gateway may honor a model choice only for a `default`-bound Agent, rejects a con
 for an exact-model Agent, and returns the effective model, thinking switch, reasoning effort, and
 vision capability on the Run. The UI must use that effective profile for historical/execution
 presentation and must never imply that the local selection proves admission or provider support.
+
 Model and mode values each keep an explicit-selection marker per Thread. A missing/non-explicit
 Thread override inherits the current global/catalog default for display and submission, so a stale
 legacy value cannot be shown as selected while the request silently omits it.
+
 The main composer and Sidecar resolve the Thread Agent's current `model_ref` before submission:
 an exact-model Agent displays a locked model picker and omits `model_name`, while a `default`-
 bound Agent keeps the user's explicit thread/global choice. Locking an exact Agent must never
@@ -298,6 +427,8 @@ that flag gates the execution path, while a real provider vision request remains
 environment smoke test.
 
 ## Shared assets and credentials
+
+### Asset catalog and Agent authoring
 
 Project asset pages group visible system and project Agent, Skill, MCP, and Credential rows.
 Queries are keyed by account, project, and kind. UI actions use per-item capabilities and
@@ -322,6 +453,8 @@ one final confirmation. Completion creates a published version 1 but leaves the 
 cards and details expose the capability-checked activate action. Never fall back to the former
 generic Agent create dialog or sequence a bare Agent create before the Builder commit.
 
+### Skill authoring and package import
+
 Project Skill creation offers AI conversation, blank creation, and archive import from one menu.
 Conversation creation uses `/projects/{project_slug}/skills/new` and the resumable
 `/skills/new/{session_id}` workspace. The name step creates only a private Builder session.
@@ -329,12 +462,14 @@ The workspace preserves the selected file while generated files change, selects 
 when the first candidate package appears, locks conversation while local file edits are unsaved,
 and requires an explicit checksum-bound validation before one atomic commit. Warnings require
 acknowledgement; commit publishes version 1 while leaving the Skill suspended and unbound.
+
 Skill Builder queries and mutations use their own account+project root and are aborted and removed
 with the active private-work scope. A message turn clears the composer and renders an optimistic
 user bubble immediately; the pending mutation's expected revision scopes that bubble so the
 canonical server message replaces it without duplication. Network or failed-session responses
 restore the submitted draft, and backend-unavailable errors use localized copy instead of exposing
 raw storage or proxy messages.
+
 The candidate workbench reconstructs folders from slash-separated file paths, so generated
 `scripts/`, `references/`, and `templates/` files remain independently selectable and editable.
 It does not persist empty folders or flatten nested paths. Builder currently exposes manual
@@ -369,6 +504,8 @@ immutable Skill snapshots persist files rather than directory entries.
 System Skill binding is list-only: its catalog row keeps the enable/disable switch, while its
 detail sheet never exposes enable-to-project or pinned-version switching actions.
 
+### Asset lifecycle, deletion, and platform governance
+
 Project Skill lifecycle has no archive or pause action. A project-owned Skill with
 `shared_assets.edit` exposes permanent package deletion from its detail sheet; the confirmation
 must state that every version and file will be removed, keep the destructive button disabled for
@@ -400,12 +537,22 @@ binding controls there; mixed-scope responses are filtered again at the presenta
 This does not change member-facing project asset pages, which still combine authorized System
 bindings with project-owned assets where runtime selection requires both.
 
+### Credentials and Skill Credential binding
+
 Credential create/replace is an imperative authenticated request, not a TanStack mutation.
 Secret-bearing form values must never enter QueryCache or MutationCache, must be cleared after
 submit, and must not remain in the DOM. Responses and errors may show safe status metadata but
 never plaintext, ciphertext, nonce, key ID, storage locator, secret hash, or raw provider
 payload. MCP versions with required Credential slots use submit/approve rather than direct
 publish.
+
+Replacement only mints a version, so the system Credential detail reports what stayed behind. The
+count comes from the replace response's `pending_migration` field and is never recomputed from a
+version list; a `null` report is treated exactly like nothing pending. A positive total renders
+one conditional `role="status"` notice carrying the number, the identifiable system-model share,
+and the migrate action itself, so the administrator never has to remember to find that entry. A
+zero total, a successful migration, and any later Credential selection leave the surface silent —
+this is a state report, not standing explanatory copy.
 
 Credential deletion is available from the project, admin-project, and system Credential detail
 surfaces, never from list rows. It uses a five-second delayed destructive confirmation and sends
@@ -421,6 +568,8 @@ existing project Credential version, and submits the complete binding set with
 draft and asks the user to reload. The UI never accepts or reads a secret value on this surface,
 and a Skill version with no declared requirements shows an explanatory empty state rather than a
 secret editor.
+
+### Project MCP authoring
 
 Project MCP authoring exposes only `http` and `sse`. The URL is required and described as a
 Worker-reachable HTTP or HTTPS endpoint whose host is exactly `localhost` or a canonical IPv4 or
@@ -439,18 +588,21 @@ not exposed; authentication is configured through encrypted Credential slots tar
 the secret-free base URL. Pasting a query strips it immediately and explains that query values
 belong in a Credential; create failures distinguish an operator CIDR-policy/startup-restart issue
 from approval failures where the Credential group and field names do not exactly match the slot.
+
 Project Credential create/replace dialogs accept `query` fields without caching or returning
 their values. Historical
 unsupported versions remain readable with an explicit blocked reason; Project MCP history
 exposes only the remote HTTP(S) origin, never a persisted path or query. Publish, binding, and
 Agent dependency selection stay disabled. The backend policy remains authoritative, and
 mutation failures stay visible in the active dialog without clearing the user's safe inputs.
+
 The dedicated
 `GET /api/projects/{project_id}/mcp-servers/{asset_id}/configured` authoring query is the only
 exception to origin-only presentation: it requires edit authority, returns the safe current or
 actionable pending configuration with its complete validated IP-literal path, and still never
 returns userinfo, query parameters, fragments, or Credential values. Edit UI must wait for this
 exact account/project/asset-scoped query and must not fall back to a history projection.
+
 Initial project MCP creation is one “添加 MCP” dialog and one configured-create mutation, never
 a bare asset create followed by a separate revision create/publish request. The base form shows
 name, slug, description, transport, and URL, followed by explicit `headers`, `query`, or no-auth
@@ -461,6 +613,7 @@ That contextual create flow hides the generic type field and fixes `credential_t
 `mcp_auth`; generic Credential-management create surfaces keep the editable type field. Existing
 MCP Credential eligibility remains scope/status/current-schema based and must not filter by type.
 `mcp_auth` is display/classification metadata, not an approval or runtime authorization boundary.
+
 Configured create and edit still persist only the secret-free MCP definition. Editing reuses the
 same two-column form, authentication choices, compatible-Credential selector, and contextual
 Credential creation flow as initial creation. No-auth save publishes immediately. When an Admin
@@ -475,6 +628,8 @@ the authoritative `ProjectAssetItem` before opening details and never fabricates
 bindings from the aggregate response. The dedicated configured PUT atomically creates the next
 internal revision and advances it directly to Published or Pending Approval; it must never leave a
 user-inaccessible Draft.
+
+### MCP configuration presentation and tool inventory
 
 All MCP surfaces present one logical configuration. They render no history selector, revision
 number, rollback target, or user-facing version terminology; project, admin-project, and system
@@ -492,9 +647,11 @@ renders transport, timeout, and URL in one desktop row with a wider URL column. 
 render Credential slots or grant state; Credential selection and creation remain confined to
 configured create/edit flows. System-owned MCP details retain the “系统提供” source badge. Internal
 API/type names remain version-based. JSON import is intentionally absent for now.
+
 This restriction is scope-specific: packaged System MCP retains the runtime-supported `stdio`,
 `sse`, and `http` transports plus their existing env/header/OAuth credential capabilities;
 only transports or definitions that the private runtime cannot execute are blocked.
+
 Published MCP details load the service-tool inventory through a separate project/account/asset/
 version query. The table shows original provider tool names and plain-text descriptions from the
 last Worker discovery, never endpoint, schema, routing, Credential, or raw error data. Drafts do
@@ -507,6 +664,9 @@ MCP details expose “Test service/Retest”, which submits another discovery Jo
 that exact inventory. System MCP and users missing either capability do not see the action. Opening
 the sheet only reads/polls Gateway state and never makes the browser contact MCP. The inventory
 remains display-only and cannot be used to infer runtime health or skip Worker discovery.
+
+### Agent defaults and Skill suggestions
+
 Agent cards expose the project default as read-only state to project members; only a member with
 `shared_assets.manage_bindings` may set an active, published, executable project Agent as the
 default or restore Main. Ordinary new-conversation entry points and Builder continuation share

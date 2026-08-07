@@ -19,17 +19,26 @@ import {
   accountIdSchema,
   adminAuditPageSchema,
   adminJobPageSchema,
+  adminJobPageSizeSchema,
+  adminOperationsPageSizeSchema,
   adminProjectSchema,
   adminProjectPageSchema,
+  adminProjectsPageSizeSchema,
+  auditFiltersSchema,
+  DEFAULT_ADMIN_JOB_PAGE_SIZE,
+  DEFAULT_ADMIN_OPERATIONS_PAGE_SIZE,
   jobFiltersSchema,
   operationsOverviewSchema,
   operationsServerErrorSchema,
   projectFiltersSchema,
   safeRequeueInputSchema,
   safeRequeueResponseSchema,
+  type AdminAuditFilters,
   type AdminAuditPage,
   type AdminJobFilters,
   type AdminJobPage,
+  type AdminJobPageSize,
+  type AdminOperationsPageSize,
   type AdminProjectFilters,
   type AdminProjectPage,
   type OperationsOverviewData,
@@ -169,11 +178,13 @@ export async function fetchAdminProjects(
   accountId: string,
   cursor: string | null = null,
   filters: AdminProjectFilters = {},
+  limit = 50,
   signal?: AbortSignal,
 ): Promise<AdminProjectPage> {
   accountIdSchema.parse(accountId);
   const parsedFilters = projectFiltersSchema.parse(filters);
-  const params = new URLSearchParams({ limit: "50" });
+  const parsedLimit = adminProjectsPageSizeSchema.parse(limit);
+  const params = new URLSearchParams({ limit: String(parsedLimit) });
   withCursor(params, cursor);
   if (parsedFilters.query) params.set("query", parsedFilters.query);
   if (parsedFilters.status) params.set("status", parsedFilters.status);
@@ -209,14 +220,16 @@ export async function fetchAdminJobs(
   accountId: string,
   cursor: string | null = null,
   filters: AdminJobFilters = {},
+  limit: AdminJobPageSize = DEFAULT_ADMIN_JOB_PAGE_SIZE,
   signal?: AbortSignal,
 ): Promise<AdminJobPage> {
   accountIdSchema.parse(accountId);
   const parsedFilters = jobFiltersSchema.parse(filters);
-  const params = new URLSearchParams({ limit: "50" });
+  const parsedLimit = adminJobPageSizeSchema.parse(limit);
+  const params = new URLSearchParams({ limit: String(parsedLimit) });
   withCursor(params, cursor);
-  if (parsedFilters.project_query) {
-    params.set("project_query", parsedFilters.project_query);
+  if (parsedFilters.project_id) {
+    params.set("project_id", parsedFilters.project_id);
   }
   if (parsedFilters.status) params.set("status", parsedFilters.status);
   if (parsedFilters.type) params.set("type", parsedFilters.type);
@@ -230,11 +243,20 @@ export async function fetchAdminJobs(
 export async function fetchAdminAudit(
   accountId: string,
   cursor: string | null = null,
+  filters: AdminAuditFilters = {},
+  limit: AdminOperationsPageSize = DEFAULT_ADMIN_OPERATIONS_PAGE_SIZE,
   signal?: AbortSignal,
 ): Promise<AdminAuditPage> {
   accountIdSchema.parse(accountId);
-  const params = new URLSearchParams({ limit: "50" });
+  const parsedFilters = auditFiltersSchema.parse(filters);
+  const parsedLimit = adminOperationsPageSizeSchema.parse(limit);
+  const params = new URLSearchParams({ limit: String(parsedLimit) });
   withCursor(params, cursor);
+  if (parsedFilters.platform_only) {
+    params.set("platform_only", "true");
+  } else if (parsedFilters.project_id) {
+    params.set("project_id", parsedFilters.project_id);
+  }
   const response = await requestOperations(
     `${operationsBaseURL()}/audit?${params.toString()}`,
     { signal },
@@ -302,13 +324,15 @@ export function adminProjectsQueryOptions(
   accountId: string,
   cursor: string | null = null,
   filters: AdminProjectFilters = {},
+  limit = 50,
 ) {
   const parsed = accountIdSchema.parse(accountId);
   const parsedFilters = projectFiltersSchema.parse(filters);
+  const parsedLimit = adminProjectsPageSizeSchema.parse(limit);
   return {
-    queryKey: adminProjectsQueryKey(parsed, cursor, parsedFilters),
+    queryKey: adminProjectsQueryKey(parsed, cursor, parsedFilters, parsedLimit),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      fetchAdminProjects(parsed, cursor, parsedFilters, signal),
+      fetchAdminProjects(parsed, cursor, parsedFilters, parsedLimit, signal),
     retry: false,
     refetchOnWindowFocus: false,
   };
@@ -318,13 +342,15 @@ export function adminJobsQueryOptions(
   accountId: string,
   cursor: string | null = null,
   filters: AdminJobFilters = {},
+  limit: AdminJobPageSize = DEFAULT_ADMIN_JOB_PAGE_SIZE,
 ) {
   const parsed = accountIdSchema.parse(accountId);
   const parsedFilters = jobFiltersSchema.parse(filters);
+  const parsedLimit = adminJobPageSizeSchema.parse(limit);
   return {
-    queryKey: adminJobsQueryKey(parsed, cursor, parsedFilters),
+    queryKey: adminJobsQueryKey(parsed, cursor, parsedFilters, parsedLimit),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      fetchAdminJobs(parsed, cursor, parsedFilters, signal),
+      fetchAdminJobs(parsed, cursor, parsedFilters, parsedLimit, signal),
     retry: false,
     refetchOnWindowFocus: false,
   };
@@ -333,12 +359,16 @@ export function adminJobsQueryOptions(
 export function adminAuditQueryOptions(
   accountId: string,
   cursor: string | null = null,
+  filters: AdminAuditFilters = {},
+  limit: AdminOperationsPageSize = DEFAULT_ADMIN_OPERATIONS_PAGE_SIZE,
 ) {
   const parsed = accountIdSchema.parse(accountId);
+  const parsedFilters = auditFiltersSchema.parse(filters);
+  const parsedLimit = adminOperationsPageSizeSchema.parse(limit);
   return {
-    queryKey: adminAuditQueryKey(parsed, cursor),
+    queryKey: adminAuditQueryKey(parsed, cursor, parsedFilters, parsedLimit),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
-      fetchAdminAudit(parsed, cursor, signal),
+      fetchAdminAudit(parsed, cursor, parsedFilters, parsedLimit, signal),
     retry: false,
     refetchOnWindowFocus: false,
   };
@@ -380,8 +410,9 @@ export function useAdminProjects(
   accountId: string,
   cursor: string | null = null,
   filters: AdminProjectFilters = {},
+  limit = 50,
 ) {
-  return useQuery(adminProjectsQueryOptions(accountId, cursor, filters));
+  return useQuery(adminProjectsQueryOptions(accountId, cursor, filters, limit));
 }
 
 export function useAdminProjectLifecycle(accountId: string) {
@@ -401,12 +432,18 @@ export function useAdminJobs(
   accountId: string,
   cursor: string | null = null,
   filters: AdminJobFilters = {},
+  limit: AdminJobPageSize = DEFAULT_ADMIN_JOB_PAGE_SIZE,
 ) {
-  return useQuery(adminJobsQueryOptions(accountId, cursor, filters));
+  return useQuery(adminJobsQueryOptions(accountId, cursor, filters, limit));
 }
 
-export function useAdminAudit(accountId: string, cursor: string | null = null) {
-  return useQuery(adminAuditQueryOptions(accountId, cursor));
+export function useAdminAudit(
+  accountId: string,
+  cursor: string | null = null,
+  filters: AdminAuditFilters = {},
+  limit: AdminOperationsPageSize = DEFAULT_ADMIN_OPERATIONS_PAGE_SIZE,
+) {
+  return useQuery(adminAuditQueryOptions(accountId, cursor, filters, limit));
 }
 
 export function useSafeRequeue(accountId: string) {

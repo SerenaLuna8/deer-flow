@@ -11,13 +11,19 @@ dependencies = [
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",
-    "langchain>=1.2.15",
+    # langchain / langchain-core / langgraph carry upper bounds (U5): ~30
+    # middlewares depend on upstream hook *behavior* (after_model reverse
+    # dispatch, wrapper nesting) and checkpoint_patches.py overrides upstream
+    # internals. Bumping a bound requires the canary run described in
+    # docs/langgraph-upgrade-playbook.zh-CN.md (tests/test_langchain_contract.py first).
+    "langchain>=1.2.15,<1.4",
+    "langchain-core>=1.4.9,<1.5",
     "langchain-anthropic>=1.4.1",
     "langchain-deepseek>=1.0.1",
     "langchain-mcp-adapters>=0.2.2",
     "langchain-openai>=1.2.1",
     "langfuse>=3.4.1",
-    "langgraph>=1.1.9",
+    "langgraph>=1.1.9,<1.3",
     "langgraph-api>=0.8.1",
     "langgraph-cli>=0.4.24",
     "langgraph-runtime-inmem>=0.28.0",

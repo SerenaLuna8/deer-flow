@@ -1,12 +1,14 @@
 "use client";
 
 import {
+  ArchiveIcon,
   BrainIcon,
   Clock3Icon,
   HistoryIcon,
   Loader2Icon,
   RefreshCwIcon,
   RotateCcwIcon,
+  SearchIcon,
   SparklesIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -23,6 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Sheet,
   SheetContent,
@@ -31,9 +34,13 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/core/i18n/hooks";
 import type {
   MemoryDocument,
+  MemoryEpisode,
+  MemoryEpisodeTag,
+  MemoryPendingEntry,
   MemoryVersionDetail,
   MemoryVersionSummary,
 } from "@/core/private-work/memory";
@@ -45,6 +52,13 @@ type QueryState<T> = {
   isLoading: boolean;
   retry: () => void;
 };
+
+export const MEMORY_EPISODE_TAGS: readonly MemoryEpisodeTag[] = [
+  "permanent",
+  "durable",
+  "ephemeral",
+  "correction",
+];
 
 export type MemoryDocumentWorkbenchProps = {
   document: QueryState<MemoryDocument>;
@@ -58,6 +72,27 @@ export type MemoryDocumentWorkbenchProps = {
     selectedVersion: number | null;
     select: (version: number | null) => void;
   };
+  episodes: {
+    items: readonly MemoryEpisode[];
+    error: Error | null;
+    isLoading: boolean;
+    retry: () => void;
+    searchInput: string;
+    setSearchInput: (value: string) => void;
+    submitSearch: () => void;
+    activeQuery: string | null;
+    tags: readonly MemoryEpisodeTag[];
+    toggleTag: (tag: MemoryEpisodeTag) => void;
+    hasMore: boolean;
+    loadMore: () => void;
+    loadingMore: boolean;
+  };
+  pending: {
+    items: readonly MemoryPendingEntry[];
+    error: Error | null;
+    isLoading: boolean;
+    retry: () => void;
+  };
   actions: {
     canDream: boolean;
     canRestore: boolean;
@@ -66,6 +101,7 @@ export type MemoryDocumentWorkbenchProps = {
     dream: () => Promise<void>;
     restore: (version: number) => Promise<void>;
   };
+  initialTab?: "records" | "archive";
 };
 
 function localizedCopy(locale: string) {
@@ -91,9 +127,15 @@ function localizedCopy(locale: string) {
       autoDream: "自动整理",
       manualDream: "手动整理",
       restoreTrigger: "版本恢复",
+      budgetRewrite: "预算压缩",
       handled: (value: number) => `处理 ${value} 条`,
       changed: "有内容变化",
       unchanged: "内容未变化",
+      needsReview: "建议复核",
+      overBudgetTitle: "记忆文档超出注入预算",
+      overBudgetDescription:
+        "在压缩进预算之前，新对话将暂时不注入这份记忆文档。",
+      compressNow: "立即压缩文档",
       detailsTitle: (value: number) => `版本 ${value}`,
       detailsDescription: "查看该版本保存的完整文档和相对上一版本的真实 diff。",
       diffTitle: "文档变化",
@@ -112,6 +154,32 @@ function localizedCopy(locale: string) {
       retry: "重试",
       previous: "上一页",
       next: "下一页",
+      recordsTab: "整理记录",
+      archiveTab: "历史归档",
+      archiveDescription:
+        "已汇入文档的原始记忆条目会归档在这里，可以按内容和标签检索。",
+      searchPlaceholder: "搜索归档记忆…",
+      search: "搜索",
+      clearSearch: "清除",
+      archiveFailed: "无法加载历史归档",
+      archiveEmpty: "还没有归档的记忆条目。",
+      archiveNoMatch: "没有找到匹配的归档记忆。",
+      loadMore: "加载更多",
+      loadingMore: "正在加载",
+      originSnip: "自动摘要",
+      originRemember: "主动记忆",
+      pendingTitle: "待整理内容",
+      pendingDescription:
+        "这些条目已被记录，将在下次整理（Dream）时汇入记忆文档。",
+      pendingFailed: "无法加载待整理内容",
+      tagLabel: (tag: string) =>
+        tag === "permanent"
+          ? "永久"
+          : tag === "durable"
+            ? "持久"
+            : tag === "ephemeral"
+              ? "短期"
+              : "更正",
     };
   }
   return {
@@ -138,10 +206,16 @@ function localizedCopy(locale: string) {
     autoDream: "Automatic Dream",
     manualDream: "Manual Dream",
     restoreTrigger: "Version restore",
+    budgetRewrite: "Budget compression",
     handled: (value: number) =>
       `Processed ${value} ${value === 1 ? "item" : "items"}`,
     changed: "Document changed",
     unchanged: "No content change",
+    needsReview: "Review suggested",
+    overBudgetTitle: "Memory document exceeds the injection budget",
+    overBudgetDescription:
+      "New conversations temporarily run without this memory document until it is compressed into budget.",
+    compressNow: "Compress document now",
     detailsTitle: (value: number) => `Version ${value}`,
     detailsDescription:
       "View the saved document and its real diff from the preceding version.",
@@ -161,6 +235,32 @@ function localizedCopy(locale: string) {
     retry: "Retry",
     previous: "Previous",
     next: "Next",
+    recordsTab: "Organization history",
+    archiveTab: "Archive",
+    archiveDescription:
+      "Original memory items already organized into the document are archived here and searchable by text and tag.",
+    searchPlaceholder: "Search archived memory…",
+    search: "Search",
+    clearSearch: "Clear",
+    archiveFailed: "Archive could not be loaded",
+    archiveEmpty: "No archived memory items yet.",
+    archiveNoMatch: "No archived memory matched this search.",
+    loadMore: "Load more",
+    loadingMore: "Loading",
+    originSnip: "Auto summary",
+    originRemember: "Remembered",
+    pendingTitle: "Pending items",
+    pendingDescription:
+      "These items are recorded and will be organized into the memory document by the next Dream.",
+    pendingFailed: "Pending items could not be loaded",
+    tagLabel: (tag: string) =>
+      tag === "permanent"
+        ? "Permanent"
+        : tag === "durable"
+          ? "Durable"
+          : tag === "ephemeral"
+            ? "Ephemeral"
+            : "Correction",
   };
 }
 
@@ -203,7 +303,10 @@ export function MemoryDocumentWorkbench({
   document,
   versions,
   detail,
+  episodes,
+  pending,
   actions,
+  initialTab = "records",
 }: MemoryDocumentWorkbenchProps) {
   const { locale, t } = useI18n();
   const copy = useMemo(() => localizedCopy(locale), [locale]);
@@ -215,8 +318,10 @@ export function MemoryDocumentWorkbench({
   const triggerLabel = (trigger: MemoryVersionSummary["trigger"]) => {
     if (trigger === "auto_dream") return copy.autoDream;
     if (trigger === "manual_dream") return copy.manualDream;
+    if (trigger === "budget_rewrite") return copy.budgetRewrite;
     return copy.restoreTrigger;
   };
+  const overBudget = document.data?.injectionStatus === "skipped_over_budget";
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 lg:py-8">
@@ -249,7 +354,7 @@ export function MemoryDocumentWorkbench({
                 !actions.canDream ||
                 actions.dreaming ||
                 document.data.dreamRunning ||
-                document.data.pendingCount === 0
+                (document.data.pendingCount === 0 && !overBudget)
               }
               onClick={() => void actions.dream().catch(() => undefined)}
             >
@@ -263,6 +368,34 @@ export function MemoryDocumentWorkbench({
           </div>
         ) : null}
       </header>
+
+      {overBudget && document.data ? (
+        <Alert>
+          <AlertTitle>{copy.overBudgetTitle}</AlertTitle>
+          <AlertDescription>
+            <p>{copy.overBudgetDescription}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              disabled={
+                !actions.canDream ||
+                actions.dreaming ||
+                document.data.dreamRunning
+              }
+              onClick={() => void actions.dream().catch(() => undefined)}
+            >
+              {actions.dreaming ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <SparklesIcon className="size-4" />
+              )}
+              {actions.dreaming ? copy.dreaming : copy.compressNow}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {document.isLoading ? (
         <Card>
@@ -330,100 +463,280 @@ export function MemoryDocumentWorkbench({
         </Card>
       ) : null}
 
-      <section aria-labelledby="memory-history-title" className="space-y-3">
-        <div>
-          <h2
-            id="memory-history-title"
-            className="flex items-center gap-2 text-lg font-semibold"
-          >
-            <HistoryIcon className="size-4.5" />
-            {copy.recordsTitle}
-          </h2>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {copy.recordsDescription}
-          </p>
-        </div>
-
-        {versions.isLoading ? (
-          <div className="space-y-2">
-            <Skeleton className="h-16 w-full" />
-            <Skeleton className="h-16 w-full" />
+      {pending.error ? (
+        <ErrorState
+          title={copy.pendingFailed}
+          retryLabel={copy.retry}
+          onRetry={pending.retry}
+        />
+      ) : pending.items.length ? (
+        <section
+          id="memory-pending"
+          aria-labelledby="memory-pending-title"
+          className="space-y-3"
+        >
+          <div>
+            <h2 id="memory-pending-title" className="text-sm font-semibold">
+              {copy.pendingTitle}
+            </h2>
+            <p className="text-muted-foreground mt-1 text-sm">
+              {copy.pendingDescription}
+            </p>
           </div>
-        ) : versions.error ? (
-          <ErrorState
-            title={copy.versionsFailed}
-            retryLabel={copy.retry}
-            onRetry={versions.retry}
-          />
-        ) : versions.data?.length ? (
-          <div className="overflow-hidden rounded-xl border">
-            {versions.data.map((version) => (
-              <button
-                key={version.version}
-                type="button"
-                className="hover:bg-muted/50 focus-visible:ring-ring flex w-full items-center justify-between gap-4 border-b px-4 py-3 text-left outline-none last:border-b-0 focus-visible:ring-2 focus-visible:ring-inset"
-                onClick={() => detail.select(version.version)}
+          <ul className="overflow-hidden rounded-xl border border-dashed">
+            {pending.items.map((entry) => (
+              <li
+                key={entry.sequence}
+                className="border-b border-dashed px-4 py-3 last:border-b-0"
               >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium">
-                      {copy.version(version.version)}
-                    </span>
-                    <Badge variant="secondary">
-                      {triggerLabel(version.trigger)}
-                    </Badge>
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        version.changed &&
-                          "border-emerald-500/30 text-emerald-700 dark:text-emerald-300",
-                      )}
-                    >
-                      {version.changed ? copy.changed : copy.unchanged}
-                    </Badge>
-                  </div>
-                  <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs">
-                    <span>{formatDate(version.createdAt, locale)}</span>
-                    {version.historyCount !== null ? (
-                      <span>{copy.handled(version.historyCount)}</span>
-                    ) : null}
-                  </div>
+                <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+                  <Badge variant="secondary">
+                    {entry.origin === "snip"
+                      ? copy.originSnip
+                      : copy.originRemember}
+                  </Badge>
+                  <span>{formatDate(entry.createdAt, locale)}</span>
                 </div>
-                <span aria-hidden="true" className="text-muted-foreground">
-                  ›
-                </span>
-              </button>
+                <p className="mt-1.5 text-sm leading-6 whitespace-pre-wrap">
+                  {entry.taggedText}
+                </p>
+              </li>
             ))}
-          </div>
-        ) : (
-          <div className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm">
-            {copy.noRecords}
-          </div>
-        )}
+          </ul>
+        </section>
+      ) : null}
 
-        {versions.page > 0 || versions.hasNext ? (
-          <div className="flex items-center justify-end gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={versions.page === 0}
-              onClick={versions.previous}
+      <Tabs defaultValue={initialTab} className="w-full">
+        <TabsList>
+          <TabsTrigger value="records">
+            <HistoryIcon className="size-4" />
+            {copy.recordsTab}
+          </TabsTrigger>
+          <TabsTrigger value="archive">
+            <ArchiveIcon className="size-4" />
+            {copy.archiveTab}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="records">
+          <section aria-labelledby="memory-history-title" className="space-y-3">
+            <div>
+              <h2 id="memory-history-title" className="sr-only">
+                {copy.recordsTitle}
+              </h2>
+              <p className="text-muted-foreground text-sm">
+                {copy.recordsDescription}
+              </p>
+            </div>
+
+            {versions.isLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-16 w-full" />
+              </div>
+            ) : versions.error ? (
+              <ErrorState
+                title={copy.versionsFailed}
+                retryLabel={copy.retry}
+                onRetry={versions.retry}
+              />
+            ) : versions.data?.length ? (
+              <div className="overflow-hidden rounded-xl border">
+                {versions.data.map((version) => (
+                  <button
+                    key={version.version}
+                    type="button"
+                    className="hover:bg-muted/50 focus-visible:ring-ring flex w-full items-center justify-between gap-4 border-b px-4 py-3 text-left outline-none last:border-b-0 focus-visible:ring-2 focus-visible:ring-inset"
+                    onClick={() => detail.select(version.version)}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium">
+                          {copy.version(version.version)}
+                        </span>
+                        <Badge variant="secondary">
+                          {triggerLabel(version.trigger)}
+                        </Badge>
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            version.changed &&
+                              "border-emerald-500/30 text-emerald-700 dark:text-emerald-300",
+                          )}
+                        >
+                          {version.changed ? copy.changed : copy.unchanged}
+                        </Badge>
+                        {version.needsReview ? (
+                          <Badge
+                            variant="outline"
+                            className="border-amber-500/40 text-amber-700 dark:text-amber-300"
+                          >
+                            {copy.needsReview}
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                        <span>{formatDate(version.createdAt, locale)}</span>
+                        {version.historyCount !== null ? (
+                          <span>{copy.handled(version.historyCount)}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <span aria-hidden="true" className="text-muted-foreground">
+                      ›
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm">
+                {copy.noRecords}
+              </div>
+            )}
+
+            {versions.page > 0 || versions.hasNext ? (
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={versions.page === 0}
+                  onClick={versions.previous}
+                >
+                  {copy.previous}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!versions.hasNext}
+                  onClick={versions.next}
+                >
+                  {copy.next}
+                </Button>
+              </div>
+            ) : null}
+          </section>
+        </TabsContent>
+
+        <TabsContent value="archive">
+          <section aria-labelledby="memory-archive-title" className="space-y-3">
+            <div>
+              <h2 id="memory-archive-title" className="sr-only">
+                {copy.archiveTab}
+              </h2>
+              <p className="text-muted-foreground text-sm">
+                {copy.archiveDescription}
+              </p>
+            </div>
+
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                episodes.submitSearch();
+              }}
             >
-              {copy.previous}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!versions.hasNext}
-              onClick={versions.next}
-            >
-              {copy.next}
-            </Button>
-          </div>
-        ) : null}
-      </section>
+              <div className="relative flex-1">
+                <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+                <Input
+                  type="search"
+                  value={episodes.searchInput}
+                  maxLength={200}
+                  placeholder={copy.searchPlaceholder}
+                  className="pl-9"
+                  onChange={(event) =>
+                    episodes.setSearchInput(event.target.value)
+                  }
+                />
+              </div>
+              <Button type="submit" variant="secondary">
+                {copy.search}
+              </Button>
+            </form>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {MEMORY_EPISODE_TAGS.map((tag) => {
+                const active = episodes.tags.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    aria-pressed={active}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                      active
+                        ? "border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+                        : "text-muted-foreground hover:bg-muted/60",
+                    )}
+                    onClick={() => episodes.toggleTag(tag)}
+                  >
+                    {copy.tagLabel(tag)}
+                  </button>
+                );
+              })}
+            </div>
+
+            {episodes.isLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-14 w-full" />
+                <Skeleton className="h-14 w-full" />
+              </div>
+            ) : episodes.error ? (
+              <ErrorState
+                title={copy.archiveFailed}
+                retryLabel={copy.retry}
+                onRetry={episodes.retry}
+              />
+            ) : episodes.items.length ? (
+              <>
+                <ul className="overflow-hidden rounded-xl border">
+                  {episodes.items.map((episode) => (
+                    <li
+                      key={episode.id}
+                      className="border-b px-4 py-3 last:border-b-0"
+                    >
+                      <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+                        <Badge variant="secondary">
+                          {episode.origin === "snip"
+                            ? copy.originSnip
+                            : copy.originRemember}
+                        </Badge>
+                        <span>{formatDate(episode.occurredAt, locale)}</span>
+                      </div>
+                      <p className="mt-1.5 text-sm leading-6 whitespace-pre-wrap">
+                        {episode.taggedText}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+                {episodes.hasMore ? (
+                  <div className="flex justify-center">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={episodes.loadingMore}
+                      onClick={episodes.loadMore}
+                    >
+                      {episodes.loadingMore ? (
+                        <Loader2Icon className="size-4 animate-spin" />
+                      ) : null}
+                      {episodes.loadingMore ? copy.loadingMore : copy.loadMore}
+                    </Button>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm">
+                {episodes.activeQuery || episodes.tags.length
+                  ? copy.archiveNoMatch
+                  : copy.archiveEmpty}
+              </div>
+            )}
+          </section>
+        </TabsContent>
+      </Tabs>
 
       <Sheet
         open={selectedVersion !== null}

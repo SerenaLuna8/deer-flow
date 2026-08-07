@@ -787,6 +787,50 @@ class CredentialRepository:
             result.extend(ActiveSkillCredentialBinding(binding, config) for binding in bindings)
         return tuple(result)
 
+    async def count_stale_grants(
+        self,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+    ) -> int:
+        """Count active grants that ``migrate_grants`` would still move.
+
+        Read-only on purpose: a preview must not take the row locks the
+        migration itself needs.
+        """
+
+        statement = (
+            select(func.count())
+            .select_from(CredentialGrantRow)
+            .join(
+                CredentialVersionRow,
+                CredentialVersionRow.id == CredentialGrantRow.credential_version_id,
+            )
+            .where(
+                CredentialVersionRow.credential_id == credential.id,
+                CredentialGrantRow.status == "active",
+                CredentialGrantRow.credential_version_id != target_version_id,
+            )
+        )
+        return int((await self.session.execute(statement)).scalar_one())
+
+    async def count_stale_skill_bindings(
+        self,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+    ) -> int:
+        """Count active Skill environment bindings still on an older version."""
+
+        statement = (
+            select(func.count())
+            .select_from(ProjectSkillCredentialBindingRow)
+            .where(
+                ProjectSkillCredentialBindingRow.credential_id == credential.id,
+                ProjectSkillCredentialBindingRow.status == "active",
+                ProjectSkillCredentialBindingRow.credential_version_id != target_version_id,
+            )
+        )
+        return int((await self.session.execute(statement)).scalar_one())
+
     async def revoke_grants(
         self,
         grants: Sequence[CredentialGrantRow],

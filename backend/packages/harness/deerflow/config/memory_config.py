@@ -1,10 +1,10 @@
 """Configuration for the final document-based Memory mechanism."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class MemoryConfig(BaseModel):
-    """Four-field runtime contract for project-scoped Memory."""
+    """Six-field runtime contract for project-scoped Memory."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -28,6 +28,32 @@ class MemoryConfig(BaseModel):
         le=8000,
         description="Maximum tokens to use for memory injection",
     )
+    idle_seal_minutes: int = Field(
+        default=1440,
+        ge=0,
+        le=10_080,
+        description="Idle minutes before a thread is sealed for capture (0 disables)",
+    )
+    episode_retention_days: int = Field(
+        default=365,
+        ge=0,
+        le=3_650,
+        description="Days archived episodes stay searchable (0 keeps them forever)",
+    )
+
+    @field_validator("idle_seal_minutes")
+    @classmethod
+    def validate_idle_seal_minutes(cls, value: int) -> int:
+        if value != 0 and value < 30:
+            raise ValueError("idle_seal_minutes must be 0 or between 30 and 10080")
+        return value
+
+    @field_validator("episode_retention_days")
+    @classmethod
+    def validate_episode_retention_days(cls, value: int) -> int:
+        if value != 0 and value < 30:
+            raise ValueError("episode_retention_days must be 0 or between 30 and 3650")
+        return value
 
 
 # Global configuration instance

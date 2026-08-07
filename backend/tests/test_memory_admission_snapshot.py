@@ -278,8 +278,30 @@ async def test_run_admission_skips_snapshot_when_memory_is_disabled(
     assert session.execute_calls == 0
 
 
+class _InjectionAudit:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def memory_injection_skipped(
+        self,
+        session,
+        *,
+        project_id,
+        run_id,
+        request_id,
+    ) -> None:
+        self.calls.append(
+            {
+                "session": session,
+                "project_id": project_id,
+                "run_id": run_id,
+                "request_id": request_id,
+            }
+        )
+
+
 @pytest.mark.asyncio
-async def test_run_admission_rejects_a_document_over_the_frozen_token_budget() -> None:
+async def test_run_admission_degrades_an_over_budget_document_to_a_skip() -> None:
     content = EMPTY_MEMORY_DOCUMENT + "\n" + ("超" * 200)
     session = _Session(
         SimpleNamespace(
@@ -289,23 +311,105 @@ async def test_run_admission_rejects_a_document_over_the_frozen_token_budget() -
         )
     )
     context = _context()
+    audit = _InjectionAudit()
     repository = RunSnapshotRepository(
         lambda: None,
         personalization_repository_builder=lambda current: _PreferenceRepository(
             current,
             enabled=True,
         ),
+        audit=audit,
+    )
+
+    await repository._admit_memory_context_snapshot(
+        session,
+        context,
+        run_id="run-3",
+        locked_policy=_policy(max_tokens=100),
+    )
+
+    assert session.added == []
+    (skipped,) = audit.calls
+    assert skipped["session"] is session
+    assert skipped["project_id"] == context.project_id
+    assert skipped["run_id"] == "run-3"
+    assert skipped["request_id"] == context.request_id
+
+
+@pytest.mark.asyncio
+async def test_run_admission_still_fails_closed_on_document_digest_drift() -> None:
+    content = EMPTY_MEMORY_DOCUMENT
+    session = _Session(
+        SimpleNamespace(
+            version=2,
+            content=content,
+            content_digest="b" * 64,
+        )
+    )
+    context = _context()
+    audit = _InjectionAudit()
+    repository = RunSnapshotRepository(
+        lambda: None,
+        personalization_repository_builder=lambda current: _PreferenceRepository(
+            current,
+            enabled=True,
+        ),
+        audit=audit,
     )
 
     with pytest.raises(PrivateWorkConflict):
         await repository._admit_memory_context_snapshot(
             session,
             context,
-            run_id="run-3",
-            locked_policy=_policy(max_tokens=100),
+            run_id="run-4",
+            locked_policy=_policy(),
         )
 
     assert session.added == []
+    assert audit.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_admission_rejects_an_invalid_injection_audit_port() -> None:
+    with pytest.raises(TypeError):
+        RunSnapshotRepository(
+            lambda: None,
+            audit=object(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_continuation_degrades_an_over_budget_inherited_snapshot() -> None:
+    content = EMPTY_MEMORY_DOCUMENT + "\n" + ("超" * 200)
+    source = SimpleNamespace(
+        document_version=3,
+        content=content,
+        content_digest=hashlib.sha256(content.encode()).hexdigest(),
+    )
+    session = _SequenceSession("source-run", source)
+    context = _context()
+    audit = _InjectionAudit()
+    repository = RunSnapshotRepository(
+        lambda: None,
+        personalization_repository_builder=lambda current: _PreferenceRepository(
+            current,
+            enabled=True,
+        ),
+        audit=audit,
+    )
+
+    await repository._admit_memory_context_snapshot(
+        session,
+        context,
+        thread_id="thread-1",
+        run_id="answer-run",
+        continuation_source_run_id="source-run",
+        locked_policy=_policy(max_tokens=100),
+    )
+
+    assert session.added == []
+    (skipped,) = audit.calls
+    assert skipped["run_id"] == "answer-run"
 
 
 @pytest.mark.asyncio

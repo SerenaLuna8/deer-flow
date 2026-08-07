@@ -33,10 +33,12 @@ from app.system_runtime_settings.models import (
 )
 from deerflow.agents.memory.dream import (
     MemoryDocumentInvalid,
+    estimate_memory_tokens,
     validate_memory_document,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.private_work.memory_document_repository import (
+    DEFAULT_EPISODE_RETENTION_DAYS,
     DEFAULT_MEMORY_NAMESPACE,
     MemoryDocumentConflict,
     MemoryDocumentNotFound,
@@ -45,6 +47,8 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentState,
     MemoryDocumentVersionRecord,
     MemoryDreamAdmissionRecord,
+    MemoryEpisodeRecord,
+    MemoryPendingEntryRecord,
 )
 from deerflow.runtime.context_compaction import ThreadCompactionResult
 
@@ -105,7 +109,10 @@ class PrivateMemoryDocumentService:
             namespace=DEFAULT_MEMORY_NAMESPACE,
         )
 
-    async def get(self, context: PrivateWorkContext) -> MemoryDocumentState:
+    async def get(
+        self,
+        context: PrivateWorkContext,
+    ) -> tuple[MemoryDocumentState, str]:
         scope = self._scope(context)
         try:
             async with self._sessions() as session, session.begin():
@@ -114,7 +121,17 @@ class PrivateMemoryDocumentService:
                     context,
                     Capability.PRIVATE_WORK_READ_OWN,
                 )
-                return await self._repository_builder(session).read_state(scope)
+                state = await self._repository_builder(session).read_state(scope)
+                policy = await SystemRuntimePolicyMaterializer.materialize_current_in_session(
+                    session,
+                    RuntimePolicySection.AGENT_RUNTIME,
+                )
+                # Derived, never stored: what the next Run admission would do
+                # with this document under the current platform budget.
+                injection_status = "ok"
+                if state.document.version >= 1 and isinstance(policy, AgentRuntimePolicyValue) and estimate_memory_tokens(state.document.content) > policy.memory.max_injection_tokens:
+                    injection_status = "skipped_over_budget"
+                return state, injection_status
         except PrivateWorkError:
             raise
         except DBAPIError:
@@ -141,6 +158,85 @@ class PrivateMemoryDocumentService:
                     scope,
                     limit=limit,
                     offset=offset,
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except Exception:
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def list_pending(
+        self,
+        context: PrivateWorkContext,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[MemoryPendingEntryRecord, ...]:
+        """Backlog read model: what the next Dream will organize, oldest first."""
+
+        scope = self._scope(context)
+        try:
+            async with self._sessions() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                )
+                return await self._repository_builder(session).list_pending_entries(
+                    scope,
+                    limit=limit,
+                    offset=offset,
+                )
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except Exception:
+            raise PrivateWorkUnavailable(context.request_id) from None
+
+    async def list_episodes(
+        self,
+        context: PrivateWorkContext,
+        *,
+        q: str | None,
+        tags: tuple[str, ...],
+        before: datetime | None,
+        limit: int,
+    ) -> tuple[MemoryEpisodeRecord, ...]:
+        """Archive read model: ranked search with ``q``, time browse without."""
+
+        scope = self._scope(context)
+        try:
+            async with self._sessions() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                )
+                repository = self._repository_builder(session)
+                now = datetime.now(UTC)
+                policy = await SystemRuntimePolicyMaterializer.materialize_current_in_session(
+                    session,
+                    RuntimePolicySection.AGENT_RUNTIME,
+                )
+                retention_days = policy.memory.episode_retention_days if isinstance(policy, AgentRuntimePolicyValue) else DEFAULT_EPISODE_RETENTION_DAYS
+                if q is not None:
+                    return await repository.search_episodes(
+                        scope,
+                        query=q,
+                        tags=tags,
+                        limit=limit,
+                        retention_days=retention_days,
+                        now=now,
+                    )
+                return await repository.list_episodes(
+                    scope,
+                    tags=tags,
+                    before=before,
+                    limit=limit,
+                    retention_days=retention_days,
+                    now=now,
                 )
         except PrivateWorkError:
             raise

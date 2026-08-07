@@ -18,12 +18,23 @@ import {
   AdminErrorState,
   AdminLoadingState,
   AdminStatus,
+  adminStatusTone,
 } from "./admin-operations-ui";
 
 export type OperationsOverviewState =
   | { status: "loading" }
   | { status: "error" }
   | { status: "ready"; data: OperationsOverviewData };
+
+const READINESS_COMPONENTS = [
+  "database",
+  "schema",
+  "worker_fleet",
+  "scheduler",
+  "stream",
+  "quota",
+  "audit",
+] as const;
 
 export function OperationsOverviewStateView({
   state,
@@ -49,21 +60,46 @@ export function OperationsOverviewStateView({
   }
 
   const readiness = state.data.readiness;
-  const readinessComponents = [
-    ["database", readiness.database],
-    ["schema", readiness.schema_state],
-    ["worker_fleet", readiness.worker_fleet],
-    ["scheduler", readiness.scheduler],
-    ["stream", readiness.stream],
-    ["quota", readiness.quota],
-    ["audit", readiness.audit],
-  ] as const;
   const readinessState = (value: string) => {
     const states = labels.readiness.states;
     return value in states
       ? states[value as keyof typeof states]
       : states.unknown;
   };
+  const componentStatuses = {
+    database: readiness.database,
+    schema: readiness.schema_state,
+    worker_fleet: readiness.worker_fleet,
+    scheduler: readiness.scheduler,
+    stream: readiness.stream,
+    quota: readiness.quota,
+    audit: readiness.audit,
+  } as const;
+  const fleetFacts = [
+    {
+      label: labels.readiness.workerCount,
+      value: readiness.worker_count,
+    },
+    {
+      label: labels.readiness.workerCapacity,
+      value: readiness.worker_capacity,
+    },
+    {
+      label: labels.readiness.oldestHeartbeat,
+      value:
+        readiness.worker_oldest_heartbeat_age_seconds === null
+          ? labels.readiness.notReported
+          : labels.readiness.secondsAgo.replace(
+              "{seconds}",
+              String(readiness.worker_oldest_heartbeat_age_seconds),
+            ),
+    },
+    {
+      label: labels.readiness.schedulerOwnership,
+      value: readinessState(readiness.scheduler_ownership),
+    },
+  ] as const;
+
   const readinessView = (
     <AdminSection
       title={labels.readiness.title}
@@ -72,74 +108,70 @@ export function OperationsOverviewStateView({
           {readinessState(readiness.status)}
         </AdminStatus>
       }
-      contentClassName="p-0"
+      contentClassName="space-y-4 p-4"
     >
-      <dl
+      <ul
         data-slot="admin-readiness-grid"
-        className="bg-border grid gap-px text-sm sm:grid-cols-2 xl:grid-cols-7"
+        className="flex flex-wrap gap-2"
+        aria-label={labels.readiness.title}
       >
-        {readinessComponents.map(([component, value], index) => (
+        {READINESS_COMPONENTS.map((component) => {
+          const value = componentStatuses[component];
+          const tone = adminStatusTone(value);
+          return (
+            <li
+              key={component}
+              className={cn(
+                "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium",
+                tone === "healthy" &&
+                  "border-border/80 bg-muted/40 text-foreground",
+                tone === "warning" &&
+                  "border-chart-4/30 bg-chart-4/10 text-foreground",
+                tone === "danger" &&
+                  "border-destructive/25 bg-destructive/10 text-destructive",
+                tone === "neutral" &&
+                  "border-border bg-muted text-muted-foreground",
+              )}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "size-1.5 rounded-full",
+                  tone === "healthy" && "bg-success",
+                  tone === "warning" && "bg-chart-4",
+                  tone === "danger" && "bg-destructive",
+                  tone === "neutral" && "bg-muted-foreground/60",
+                )}
+              />
+              <span>{labels.readiness.components[component]}</span>
+              <span className="text-muted-foreground">
+                {readinessState(value)}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {fleetFacts.map((fact) => (
           <div
-            key={component}
-            className={
-              index === readinessComponents.length - 1
-                ? "bg-card flex min-w-0 items-center justify-between gap-3 px-4 py-3 sm:col-span-2 sm:block xl:col-span-1"
-                : "bg-card flex min-w-0 items-center justify-between gap-3 px-4 py-3 sm:block"
-            }
+            key={fact.label}
+            className="bg-muted/35 min-w-0 rounded-lg px-3.5 py-3"
           >
             <dt className="text-muted-foreground text-xs font-medium">
-              {labels.readiness.components[component]}
+              {fact.label}
             </dt>
-            <dd className="mt-0 sm:mt-2">
-              <AdminStatus status={value}>{readinessState(value)}</AdminStatus>
+            <dd className="mt-1.5 text-sm font-semibold tracking-tight tabular-nums">
+              {fact.value}
             </dd>
           </div>
         ))}
       </dl>
-      <dl className="border-border bg-muted/30 grid border-t text-sm sm:grid-cols-2 lg:grid-cols-4">
-        <div className="border-border/70 px-4 py-3 sm:border-r">
-          <dt className="text-muted-foreground text-xs">
-            {labels.readiness.workerCount}
-          </dt>
-          <dd className="mt-1 font-medium tabular-nums">
-            {readiness.worker_count}
-          </dd>
-        </div>
-        <div className="border-border/70 px-4 py-3 lg:border-r">
-          <dt className="text-muted-foreground text-xs">
-            {labels.readiness.workerCapacity}
-          </dt>
-          <dd className="mt-1 font-medium tabular-nums">
-            {readiness.worker_capacity}
-          </dd>
-        </div>
-        <div className="border-border/70 px-4 py-3 sm:border-r">
-          <dt className="text-muted-foreground text-xs">
-            {labels.readiness.oldestHeartbeat}
-          </dt>
-          <dd className="mt-1 font-medium">
-            {readiness.worker_oldest_heartbeat_age_seconds === null
-              ? labels.readiness.notReported
-              : labels.readiness.secondsAgo.replace(
-                  "{seconds}",
-                  String(readiness.worker_oldest_heartbeat_age_seconds),
-                )}
-          </dd>
-        </div>
-        <div className="px-4 py-3">
-          <dt className="text-muted-foreground text-xs">
-            {labels.readiness.schedulerOwnership}
-          </dt>
-          <dd className="mt-1 font-medium">
-            {readinessState(readiness.scheduler_ownership)}
-          </dd>
-        </div>
-      </dl>
     </AdminSection>
   );
+
   if (state.data.data_status === "unavailable") {
     return (
-      <div className="space-y-5">
+      <div className="space-y-4">
         {readinessView}
         <AdminErrorState
           title={labels.unavailableTitle}
@@ -158,55 +190,60 @@ export function OperationsOverviewStateView({
     [labels.counts.runningJobs, state.data.counts.running_jobs],
     [labels.counts.deadJobs, state.data.counts.dead_jobs],
   ] as const;
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <AdminMetricGrid aria-label={labels.title} className="xl:grid-cols-5">
         {counts.map(([label, value], index) => (
           <AdminMetric
             key={label}
-            className={
-              index === counts.length - 1
-                ? "sm:col-span-2 xl:col-span-1"
-                : undefined
-            }
+            className={cn(
+              "px-4 py-4",
+              index === counts.length - 1 && "sm:col-span-2 xl:col-span-1",
+            )}
             label={label}
             value={value}
           />
         ))}
       </AdminMetricGrid>
+
       {readinessView}
-      <AdminSection
-        title={labels.usage.title}
-        aria-label={labels.usage.title}
-        contentClassName="grid gap-px bg-border p-0 sm:grid-cols-2"
-      >
-        {state.data.usage.map((item) => (
-          <div
-            key={item.dimension}
-            className="bg-card grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-5 px-4 py-4 text-sm"
-          >
-            <p className="font-medium">{labels.usage[item.dimension]}</p>
-            <dl className="contents">
-              <div className="text-right">
-                <dt className="text-muted-foreground text-xs">
-                  {labels.usage.used}
-                </dt>
-                <dd className="mt-1 font-semibold tabular-nums">
-                  {formatUsageValue(item.dimension, item.used, locale)}
-                </dd>
-              </div>
-              <div className="text-right">
-                <dt className="text-muted-foreground text-xs">
-                  {labels.usage.reserved}
-                </dt>
-                <dd className="mt-1 font-semibold tabular-nums">
-                  {formatUsageValue(item.dimension, item.reserved, locale)}
-                </dd>
-              </div>
-            </dl>
-          </div>
-        ))}
+
+      <AdminSection title={labels.usage.title} contentClassName="p-3">
+        <ul className="grid gap-2 sm:grid-cols-2">
+          {state.data.usage.map((item) => {
+            const used = formatUsageValue(item.dimension, item.used, locale);
+            const reserved = formatUsageValue(
+              item.dimension,
+              item.reserved,
+              locale,
+            );
+            return (
+              <li
+                key={item.dimension}
+                className="bg-muted/35 flex min-w-0 items-baseline justify-between gap-4 rounded-lg px-3.5 py-3.5"
+              >
+                <p className="text-sm font-medium">
+                  {labels.usage[item.dimension]}
+                </p>
+                <p
+                  className="text-sm font-semibold tracking-tight tabular-nums"
+                  aria-label={`${labels.usage.used} ${used}, ${labels.usage.reserved} ${reserved}`}
+                >
+                  <span>{used}</span>
+                  <span className="text-muted-foreground mx-1.5 font-normal">
+                    /
+                  </span>
+                  <span className="text-muted-foreground font-medium">
+                    {reserved}
+                  </span>
+                </p>
+              </li>
+            );
+          })}
+        </ul>
       </AdminSection>
+
       <AdminSection
         title={labels.channels.title}
         contentClassName={
@@ -222,35 +259,16 @@ export function OperationsOverviewStateView({
         ) : (
           <ul
             data-slot="admin-channel-grid"
-            className="bg-border grid gap-px sm:grid-cols-2 lg:grid-cols-3"
+            className="grid gap-px bg-transparent p-3 sm:grid-cols-2 lg:grid-cols-4"
           >
-            {state.data.channel_providers.map((provider, index) => (
+            {state.data.channel_providers.map((provider) => (
               <li
                 key={provider.provider}
-                className={cn(
-                  "bg-card flex min-w-0 items-start justify-between gap-3 px-4 py-3",
-                  index === state.data.channel_providers.length - 1 &&
-                    state.data.channel_providers.length % 2 === 1 &&
-                    "sm:col-span-2",
-                  index === state.data.channel_providers.length - 1 &&
-                    state.data.channel_providers.length % 3 === 1 &&
-                    "lg:col-span-3",
-                  index === state.data.channel_providers.length - 1 &&
-                    state.data.channel_providers.length % 3 === 2 &&
-                    "lg:col-span-2",
-                )}
+                className="bg-muted/35 flex min-w-0 items-center justify-between gap-3 rounded-lg px-3.5 py-3"
               >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">
-                    {provider.provider}
-                  </p>
-                  <p className="text-muted-foreground mt-1 text-xs">
-                    {labels.channels.checkedAt.replace(
-                      "{time}",
-                      new Date(provider.checked_at).toLocaleString(locale),
-                    )}
-                  </p>
-                </div>
+                <p className="truncate text-sm font-medium">
+                  {provider.provider}
+                </p>
                 <AdminStatus status={provider.status}>
                   {readinessState(provider.status)}
                 </AdminStatus>
@@ -279,10 +297,7 @@ function AuthorizedOperationsOverview({ accountId }: { accountId: string }) {
       : { status: "ready", data: overview.data };
   return (
     <AdminPage>
-      <AdminPageHeader
-        title={t.adminOperations.overview.title}
-        description={t.adminOperations.overview.description}
-      />
+      <AdminPageHeader title={t.adminOperations.overview.title} />
       <OperationsOverviewStateView
         state={state}
         onRetry={() => void overview.refetch()}

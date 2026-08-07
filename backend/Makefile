@@ -30,6 +30,9 @@ format:
 setup-db:
 	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py
 
+upgrade-db:
+	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/upgrade_postgres.py $(ARGS)
+
 check-db:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
 

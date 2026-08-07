@@ -14,6 +14,7 @@ from app.audit.sinks import TrustedOperationAuditSink
 from app.quotas.integration import ProjectQuotaEnforcer
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
+    MemoryEpisodeRow,
     MemoryHistoryEntryRow,
     RunMemoryContextSnapshotRow,
 )
@@ -462,6 +463,14 @@ async def purge_private_scope(
         delete(MemoryHistoryEntryRow).where(
             MemoryHistoryEntryRow.project_id == project_id,
             *(() if owner_user_id is None else (MemoryHistoryEntryRow.owner_user_id == owner_user_id,)),
+        )
+    )
+    # The episode archive carries no cascading references and is deleted by
+    # exact scope, like the history backlog above.
+    await session.execute(
+        delete(MemoryEpisodeRow).where(
+            MemoryEpisodeRow.project_id == project_id,
+            *(() if owner_user_id is None else (MemoryEpisodeRow.owner_user_id == owner_user_id,)),
         )
     )
     # Version and Dream-run rows cascade from the one current document row.

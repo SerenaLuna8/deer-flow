@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
@@ -112,6 +112,55 @@ class CredentialGrantMigrationView:
     credential_id: uuid.UUID
     credential_version_id: uuid.UUID
     migrated_count: int
+    migrated_model_count: int = 0
+
+
+@dataclass(frozen=True)
+class CredentialPendingMigrationView:
+    """How many references ``migrate_grants`` would still have to move."""
+
+    total: int
+    system_model_count: int
+
+
+@dataclass(frozen=True)
+class CredentialReplacementView:
+    """A new Credential version plus what it left behind on the old one.
+
+    Replacement never moves a reference, so the caller has to be told how much
+    is still resolving the superseded envelope. ``pending_migration`` is
+    ``None`` only when the count cannot be derived at all.
+    """
+
+    version: CredentialVersionView
+    pending_migration: CredentialPendingMigrationView | None
+
+
+class SystemModelMigrationIncompatible(Exception):
+    """The locked system model catalog cannot move onto the target version."""
+
+
+class BoundSystemModelMigration(Protocol):
+    """Locked system model catalog for one Credential migration transaction."""
+
+    async def lock_pinned_models(self, credential_id: uuid.UUID) -> int: ...
+
+    async def count_stale_pins(
+        self,
+        credential_id: uuid.UUID,
+        target_version_id: uuid.UUID,
+    ) -> int: ...
+
+    async def repoint(
+        self,
+        target_version: CredentialVersionRow,
+        *,
+        user_id: uuid.UUID,
+    ) -> int: ...
+
+
+class SystemModelMigrationPort(Protocol):
+    def bind(self, session: AsyncSession) -> BoundSystemModelMigration: ...
 
 
 @dataclass(frozen=True)
@@ -129,10 +178,12 @@ class CredentialService:
         *,
         keyring: CredentialKeyring | None = None,
         governance_sink: SharedAssetGovernanceEventSink | None = None,
+        system_models: SystemModelMigrationPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._keyring = keyring
         self._governance_sink = governance_sink or SharedAssetGovernanceEventSink()
+        self._system_models = system_models
 
     async def create(
         self,
@@ -205,14 +256,14 @@ class CredentialService:
         payload: object,
         *,
         expected_credential_version: int,
-    ) -> CredentialVersionView:
+    ) -> CredentialReplacementView:
         self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
         payload_schema = self._payload_schema(actor, payload)
         scope, project_id = self._scope(actor)
         version_id = uuid.uuid4()
         envelope = self._encrypt(actor, payload, scope, project_id, version_id)
 
-        async def operation(repository: CredentialRepository) -> CredentialVersionView:
+        async def operation(repository: CredentialRepository) -> CredentialReplacementView:
             credential = await self._get_credential(repository, actor, credential_id, for_update=True)
             self._require_expected_version(actor, credential, expected_credential_version)
             if credential.status != "active":
@@ -252,12 +303,15 @@ class CredentialService:
             credential.current_version_id = version.id
             credential.version += 1
             await repository.session.flush()
-            return self._version_view(version)
+            return CredentialReplacementView(
+                version=self._version_view(version),
+                pending_migration=await self._pending_migration(repository, actor, credential, version.id),
+            )
 
         return await self._execute(
             actor,
             operation,
-            governance=lambda session, result: self._record_governance(session, actor, credential_id, result.id, "credential.replace"),
+            governance=lambda session, result: self._record_governance(session, actor, credential_id, result.version.id, "credential.replace"),
         )
 
     async def revoke(
@@ -349,6 +403,9 @@ class CredentialService:
         self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
 
         async def operation(repository: CredentialRepository) -> CredentialGrantMigrationView:
+            # System models lock catalog state before the Credential, matching
+            # the catalog service's order so the two can never deadlock.
+            models = await self._bind_system_models(repository.session, actor, credential_id)
             credential = await self._get_credential(repository, actor, credential_id, for_update=True)
             self._require_expected_version(actor, credential, expected_credential_version)
             if credential.status != "active":
@@ -385,10 +442,17 @@ class CredentialService:
                 user_id=actor.user_id,
                 migrated_at=migrated_at,
             )
+            migrated_models = 0
+            if models is not None:
+                try:
+                    migrated_models = await models.repoint(current, user_id=actor.user_id)
+                except SystemModelMigrationIncompatible:
+                    raise AssetValidationFailed(actor.request_id) from None
             return CredentialGrantMigrationView(
                 credential_id=credential.id,
                 credential_version_id=current.id,
                 migrated_count=len(stale_grants) + len(stale_skill_bindings),
+                migrated_model_count=migrated_models,
             )
 
         return await self._execute(
@@ -490,6 +554,66 @@ class CredentialService:
             raise AssetStorageUnavailable(actor.request_id) from None
         except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(actor.request_id) from None
+
+    async def _bind_system_models(
+        self,
+        session: AsyncSession,
+        actor: _Actor,
+        credential_id: uuid.UUID,
+    ) -> BoundSystemModelMigration | None:
+        """Lock the system models pinned to this Credential, system scope only.
+
+        Only a system-scope Credential can back a system model, so a project
+        migration never pays for the singleton catalog lock. A system migration
+        without the port would report success while leaving every model on the
+        superseded key, so it fails closed instead.
+        """
+
+        scope, project_id = self._scope(actor)
+        if scope is not AssetScope.SYSTEM or project_id is not None:
+            return None
+        if self._system_models is None:
+            raise AssetStorageUnavailable(actor.request_id)
+        bound = self._system_models.bind(session)
+        try:
+            await bound.lock_pinned_models(credential_id)
+        except SystemModelMigrationIncompatible:
+            raise AssetStorageUnavailable(actor.request_id) from None
+        return bound
+
+    async def _pending_migration(
+        self,
+        repository: CredentialRepository,
+        actor: _Actor,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+    ) -> CredentialPendingMigrationView | None:
+        """Count exactly the references ``migrate_grants`` would move.
+
+        This is a preview, so it reads without locking: replacement stays out
+        of the migration lock graph and cannot deadlock against a concurrent
+        model edit. Only a system-scope Credential can back a system model, so
+        a project replacement never touches the singleton catalog. A system
+        replacement whose model port is unwired reports nothing at all, because
+        a total covering only grants would understate the very drift this
+        report exists to surface.
+        """
+
+        scope, project_id = self._scope(actor)
+        system_model_count = 0
+        if scope is AssetScope.SYSTEM and project_id is None:
+            if self._system_models is None:
+                return None
+            system_model_count = await self._system_models.bind(repository.session).count_stale_pins(
+                uuid.UUID(str(credential.id)),
+                target_version_id,
+            )
+        stale_grants = await repository.count_stale_grants(credential, target_version_id)
+        stale_skill_bindings = await repository.count_stale_skill_bindings(credential, target_version_id)
+        return CredentialPendingMigrationView(
+            total=stale_grants + stale_skill_bindings + system_model_count,
+            system_model_count=system_model_count,
+        )
 
     @staticmethod
     async def _get_credential(

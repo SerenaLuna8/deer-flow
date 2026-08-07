@@ -5,7 +5,7 @@
 .PHONY: \
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
-	setup-db check-db reconcile-usage rotate-credentials import-project-skills \
+	setup-db upgrade-db check-db reconcile-usage rotate-credentials import-project-skills \
 	test \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
@@ -57,6 +57,7 @@ help:
 	@echo ""
 	@echo "PostgreSQL 与运维："
 	@echo "  make setup-db                         空库安装当前 head 并初始化"
+	@echo "  make upgrade-db                       显式升级存量库到迁移链头（先备份）"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make reconcile-usage ARGS=...         校准配额用量"
 	@echo "  make rotate-credentials ARGS=...      轮换 Credential envelope"
@@ -91,6 +92,9 @@ doctor:
 # PostgreSQL and operations
 setup-db:
 	@$(MAKE) -C backend setup-db
+
+upgrade-db:
+	@$(MAKE) -C backend upgrade-db ARGS="$(ARGS)"
 
 reconcile-usage:
 	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"

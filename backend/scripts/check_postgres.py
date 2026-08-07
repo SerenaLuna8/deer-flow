@@ -59,6 +59,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "memory_document_versions",
     "memory_documents",
     "memory_dream_runs",
+    "memory_episodes",
     "memory_history_entries",
     "mcp_server_versions",
     "mcp_servers",
@@ -125,9 +126,11 @@ class PostgresCheckResult:
     head_revision: str | None = None
     revision_matches: bool = False
     missing_tables: tuple[str, ...] = ()
+    pg_trgm_installed: bool = False
     schema_state: Literal[
         "ready",
         "uninitialized",
+        "upgrade_required",
         "recreate_required",
         "unavailable",
     ] = "unavailable"
@@ -136,7 +139,7 @@ class PostgresCheckResult:
 
     @property
     def healthy(self) -> bool:
-        return self.connected and self.schema_state == "ready" and self.revision_matches and not self.missing_tables and not self.error
+        return self.connected and self.schema_state == "ready" and self.revision_matches and not self.missing_tables and self.pg_trgm_installed and not self.error
 
 
 def get_schema_marker() -> str:
@@ -154,6 +157,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
     try:
         async with engine.connect() as connection:
             server_version = await connection.scalar(text("SELECT version()"))
+            pg_trgm_installed = bool(await connection.scalar(text("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")))
             has_revision_table = await connection.scalar(text("SELECT to_regclass('alembic_version') IS NOT NULL"))
             current_revision = await connection.scalar(text("SELECT version_num FROM alembic_version")) if has_revision_table else None
             rows = await connection.execute(
@@ -175,6 +179,9 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                 if database_state == "current":
                     schema_state = "ready"
                     error = ""
+                elif database_state == "behind":
+                    schema_state = "upgrade_required"
+                    error = f"数据库处于已知历史 revision（{current_revision}），链头为 {expected_marker}；请先备份数据库，再运行 `make upgrade-db`"
                 else:
                     schema_state = "uninitialized"
                     error = "数据库尚未初始化；请运行 `make setup-db`"
@@ -187,6 +194,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                 head_revision=expected_marker,
                 revision_matches=current_revision == expected_marker,
                 missing_tables=missing_tables,
+                pg_trgm_installed=pg_trgm_installed,
                 schema_state=schema_state,
                 error=error,
             )
@@ -221,6 +229,7 @@ def print_result(result: PostgresCheckResult) -> None:
     print(f"当前 Schema marker: {result.current_revision or '缺失'}")
     print(f"目标 Schema marker: {result.head_revision or '未知'}")
     print(f"Schema 状态: {result.schema_state}")
+    print(f"pg_trgm 扩展: {'已安装' if result.pg_trgm_installed else '缺失'}")
     if result.missing_tables:
         print(f"缺失表: {', '.join(result.missing_tables)}")
     if result.error:

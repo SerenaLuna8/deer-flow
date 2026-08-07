@@ -2,6 +2,7 @@
 
 import {
   keepPreviousData,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -17,15 +18,24 @@ import {
   dreamProjectMemory,
   getProjectMemory,
   getProjectMemoryVersion,
+  listProjectMemoryEpisodes,
+  listProjectMemoryPending,
   listProjectMemoryVersions,
+  MEMORY_EPISODE_PAGE_SIZE,
+  MEMORY_EPISODE_QUERY_MAX_LENGTH,
+  MEMORY_EPISODE_SEARCH_LIMIT,
   MEMORY_VERSION_PAGE_SIZE,
   projectMemoryDocumentQueryKey,
+  projectMemoryEpisodesQueryKey,
   projectMemoryMutationKey,
+  projectMemoryPendingQueryKey,
   projectMemoryPermissions,
   projectMemoryRootQueryKey,
   projectMemoryVersionQueryKey,
   projectMemoryVersionsQueryKey,
   restoreProjectMemoryVersion,
+  type MemoryEpisodesFilter,
+  type MemoryEpisodeTag,
 } from "@/core/private-work/memory";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { runPrivateWorkAbortable } from "@/core/private-work/types";
@@ -50,6 +60,8 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
   const [versionPage, setVersionPage] = useState(0);
   const previousDreamRunningRef = useRef(false);
   const selectedVersion = parseSelectedVersion(searchParams.get("version"));
+  const initialTab =
+    searchParams.get("tab") === "archive" ? "archive" : "records";
   const versionRequest = useMemo(
     () => ({
       limit: MEMORY_FETCH_LIMIT,
@@ -96,6 +108,64 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       getProjectMemoryVersion(privateWork, selectedVersion!, signal),
     enabled: permissions.canRead && selectedVersion !== null,
   });
+  const pendingQuery = useQuery({
+    queryKey: projectMemoryPendingQueryKey(scope),
+    queryFn: ({ signal }) => listProjectMemoryPending(privateWork, {}, signal),
+    enabled: permissions.canRead,
+  });
+
+  const [episodeSearchInput, setEpisodeSearchInput] = useState("");
+  const [episodeQuery, setEpisodeQuery] = useState<string | null>(null);
+  const [episodeTags, setEpisodeTags] = useState<readonly MemoryEpisodeTag[]>(
+    [],
+  );
+  const episodesFilter = useMemo<MemoryEpisodesFilter>(
+    () => ({
+      ...(episodeQuery ? { q: episodeQuery } : {}),
+      ...(episodeTags.length ? { tags: [...episodeTags] } : {}),
+    }),
+    [episodeQuery, episodeTags],
+  );
+  const episodesQuery = useInfiniteQuery({
+    queryKey: projectMemoryEpisodesQueryKey(scope, episodesFilter),
+    queryFn: ({ signal, pageParam }) =>
+      listProjectMemoryEpisodes(
+        privateWork,
+        {
+          ...episodesFilter,
+          ...(pageParam ? { before: pageParam } : {}),
+          limit: episodeQuery
+            ? MEMORY_EPISODE_SEARCH_LIMIT
+            : MEMORY_EPISODE_PAGE_SIZE,
+        },
+        signal,
+      ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => {
+      // Ranked search has no stable cursor; browse pages by occurred-at.
+      if (episodeQuery) return undefined;
+      if (lastPage.items.length < MEMORY_EPISODE_PAGE_SIZE) return undefined;
+      return lastPage.items[lastPage.items.length - 1]?.occurredAt;
+    },
+    enabled: permissions.canRead,
+  });
+  const episodeItems = useMemo(
+    () => episodesQuery.data?.pages.flatMap((page) => page.items) ?? [],
+    [episodesQuery.data],
+  );
+  const submitEpisodeSearch = useCallback(() => {
+    const trimmed = episodeSearchInput
+      .trim()
+      .slice(0, MEMORY_EPISODE_QUERY_MAX_LENGTH);
+    setEpisodeQuery(trimmed ? trimmed : null);
+  }, [episodeSearchInput]);
+  const toggleEpisodeTag = useCallback((tag: MemoryEpisodeTag) => {
+    setEpisodeTags((current) =>
+      current.includes(tag)
+        ? current.filter((value) => value !== tag)
+        : [...current, tag],
+    );
+  }, []);
 
   const refreshMemory = useCallback(
     () =>
@@ -197,6 +267,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
 
   return (
     <MemoryDocumentWorkbench
+      initialTab={initialTab}
       document={{
         data: documentQuery.data,
         error: documentQuery.error,
@@ -221,6 +292,27 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
         retry: () => void detailQuery.refetch(),
         selectedVersion,
         select: selectVersion,
+      }}
+      episodes={{
+        items: episodeItems,
+        error: episodesQuery.error,
+        isLoading: episodesQuery.isLoading,
+        retry: () => void episodesQuery.refetch(),
+        searchInput: episodeSearchInput,
+        setSearchInput: setEpisodeSearchInput,
+        submitSearch: submitEpisodeSearch,
+        activeQuery: episodeQuery,
+        tags: episodeTags,
+        toggleTag: toggleEpisodeTag,
+        hasMore: episodesQuery.hasNextPage,
+        loadMore: () => void episodesQuery.fetchNextPage(),
+        loadingMore: episodesQuery.isFetchingNextPage,
+      }}
+      pending={{
+        items: pendingQuery.data?.items ?? [],
+        error: pendingQuery.error,
+        isLoading: pendingQuery.isLoading,
+        retry: () => void pendingQuery.refetch(),
       }}
       actions={{
         canDream: permissions.canDream,

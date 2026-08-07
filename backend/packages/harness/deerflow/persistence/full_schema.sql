@@ -4,6 +4,10 @@ BEGIN;
 -- Applied only by `make setup-db` to an empty database.
 -- This file is not an incremental migration and must remain transaction-safe.
 
+-- Trusted extension for trigram search over the Memory episode archive; a
+-- regular database owner role can create it without superuser rights.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE TABLE alembic_version (
     version_num VARCHAR(32) NOT NULL,
     CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
@@ -65,9 +69,9 @@ CREATE TABLE jobs (
     completed_at TIMESTAMP WITH TIME ZONE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (id),
-    CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_dream' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
-    CONSTRAINT ck_jobs_memory_namespace CHECK ((job_type = 'memory_dream') = (namespace IS NOT NULL)),
-    CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_dream')),
+    CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_dream' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_seal' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
+    CONSTRAINT ck_jobs_memory_namespace CHECK ((job_type IN ('memory_dream', 'memory_seal')) = (namespace IS NOT NULL)),
+    CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_dream', 'memory_seal')),
     CONSTRAINT ck_jobs_retry_safety CHECK (retry_safety IN ('safe', 'unknown', 'unsafe')),
     CONSTRAINT ck_jobs_status CHECK (status IN ('queued', 'leased', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'dead')),
     CONSTRAINT ck_jobs_attempts CHECK (attempt_count >= 0 AND max_attempts >= 1),
@@ -83,6 +87,8 @@ CREATE INDEX ix_jobs_active_lease ON jobs (lease_expires_at, id) WHERE status IN
 CREATE INDEX ix_jobs_claim ON jobs (status, available_at, priority DESC, created_at);
 
 CREATE INDEX ix_jobs_private_scope ON jobs (project_id, owner_user_id, created_at);
+
+CREATE UNIQUE INDEX uq_jobs_active_memory_seal ON jobs (project_id, owner_user_id, namespace) WHERE job_type = 'memory_seal' AND status IN ('queued', 'leased', 'running', 'retry_wait');
 
 CREATE TABLE project_invitation_rate_limits (
     key_hash CHAR(64) NOT NULL,
@@ -1163,6 +1169,7 @@ CREATE TABLE threads_meta (
     agent_scope VARCHAR(16) NOT NULL,
     frozen_at TIMESTAMP WITH TIME ZONE,
     deleted_at TIMESTAMP WITH TIME ZONE,
+    memory_sealed_at TIMESTAMP WITH TIME ZONE,
     checkpoint_delete_status VARCHAR(24) DEFAULT 'not_requested' NOT NULL,
     version BIGINT DEFAULT 1 NOT NULL,
     PRIMARY KEY (thread_id),
@@ -2728,15 +2735,17 @@ CREATE TABLE memory_history_entries (
     owner_user_id VARCHAR(36) NOT NULL,
     namespace VARCHAR(255) NOT NULL,
     thread_id VARCHAR(64) NOT NULL,
-    source_checkpoint_id VARCHAR(128) NOT NULL,
-    committed_checkpoint_id VARCHAR(128) NOT NULL,
+    origin VARCHAR(8) DEFAULT 'snip' NOT NULL,
+    source_run_id VARCHAR(64),
+    source_checkpoint_id VARCHAR(128),
+    committed_checkpoint_id VARCHAR(128),
     source_digest CHAR(64) NOT NULL,
     status VARCHAR(16) DEFAULT 'pending' NOT NULL,
     tagged_text TEXT,
     content_digest CHAR(64) NOT NULL,
     preference_version BIGINT NOT NULL,
     snip_prompt_version VARCHAR(64) NOT NULL,
-    summary_model_ref UUID NOT NULL,
+    summary_model_ref UUID,
     dream_job_id UUID,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     consumed_at TIMESTAMP WITH TIME ZONE,
@@ -2750,7 +2759,8 @@ CREATE TABLE memory_history_entries (
     CONSTRAINT fk_memory_history_entries_dream_job FOREIGN KEY(dream_job_id, project_id, owner_user_id, namespace) REFERENCES jobs (id, project_id, owner_user_id, namespace) ON DELETE RESTRICT,
     CONSTRAINT fk_memory_history_entries_summary_model FOREIGN KEY(summary_model_ref) REFERENCES system_model_config_versions (id) ON DELETE RESTRICT,
     CONSTRAINT ck_memory_history_entries_namespace CHECK (namespace <> ''),
-    CONSTRAINT ck_memory_history_entries_checkpoints CHECK (source_checkpoint_id <> '' AND committed_checkpoint_id <> ''),
+    CONSTRAINT ck_memory_history_entries_origin CHECK (origin IN ('snip', 'tool')),
+    CONSTRAINT ck_memory_history_entries_origin_source CHECK ((origin = 'snip' AND source_run_id IS NULL AND source_checkpoint_id IS NOT NULL AND source_checkpoint_id <> '' AND committed_checkpoint_id IS NOT NULL AND committed_checkpoint_id <> '' AND summary_model_ref IS NOT NULL) OR (origin = 'tool' AND source_run_id IS NOT NULL AND source_run_id <> '' AND source_checkpoint_id IS NULL AND committed_checkpoint_id IS NULL AND summary_model_ref IS NULL)),
     CONSTRAINT ck_memory_history_entries_digests CHECK (source_digest ~ '^[0-9a-f]{64}$' AND content_digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_memory_history_entries_preference_version CHECK (preference_version >= 1),
     CONSTRAINT ck_memory_history_entries_contract CHECK (snip_prompt_version <> ''),
@@ -2768,8 +2778,8 @@ CREATE TABLE memory_dream_runs (
     owner_user_id VARCHAR(36) NOT NULL,
     namespace VARCHAR(255) NOT NULL,
     trigger VARCHAR(16) NOT NULL,
-    history_from BIGINT NOT NULL,
-    history_to BIGINT NOT NULL,
+    history_from BIGINT,
+    history_to BIGINT,
     history_count INTEGER NOT NULL,
     history_digest CHAR(64) NOT NULL,
     base_document_version BIGINT NOT NULL,
@@ -2790,8 +2800,8 @@ CREATE TABLE memory_dream_runs (
     CONSTRAINT fk_memory_dream_runs_document FOREIGN KEY(project_id, owner_user_id, namespace) REFERENCES memory_documents (project_id, owner_user_id, namespace) ON DELETE CASCADE,
     CONSTRAINT fk_memory_dream_runs_model FOREIGN KEY(model_ref) REFERENCES system_model_config_versions (id) ON DELETE RESTRICT,
     CONSTRAINT ck_memory_dream_runs_namespace CHECK (namespace <> ''),
-    CONSTRAINT ck_memory_dream_runs_trigger CHECK (trigger IN ('auto_dream', 'manual_dream')),
-    CONSTRAINT ck_memory_dream_runs_history CHECK (history_count BETWEEN 1 AND 20 AND history_from >= 1 AND history_to >= history_from),
+    CONSTRAINT ck_memory_dream_runs_trigger CHECK (trigger IN ('auto_dream', 'manual_dream', 'budget_rewrite')),
+    CONSTRAINT ck_memory_dream_runs_history CHECK ((trigger = 'budget_rewrite' AND history_count = 0 AND history_from IS NULL AND history_to IS NULL) OR (trigger IN ('auto_dream', 'manual_dream') AND history_count BETWEEN 1 AND 20 AND history_from >= 1 AND history_to >= history_from)),
     CONSTRAINT ck_memory_dream_runs_digests CHECK (history_digest ~ '^[0-9a-f]{64}$' AND base_content_digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_memory_dream_runs_versions CHECK (base_document_version >= 0 AND preference_version >= 1 AND policy_revision >= 1),
     CONSTRAINT ck_memory_dream_runs_contract CHECK (prompt_version <> ''),
@@ -2813,6 +2823,7 @@ CREATE TABLE memory_document_versions (
     history_count INTEGER,
     prompt_version VARCHAR(64),
     model_ref UUID,
+    needs_review BOOLEAN DEFAULT false NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     CONSTRAINT pk_memory_document_versions PRIMARY KEY (project_id, owner_user_id, namespace, version),
     CONSTRAINT fk_memory_document_versions_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
@@ -2825,13 +2836,39 @@ CREATE TABLE memory_document_versions (
     CONSTRAINT ck_memory_document_versions_version CHECK (version >= 1),
     CONSTRAINT ck_memory_document_versions_digest CHECK (content_digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_memory_document_versions_content_size CHECK (char_length(content) <= 16000),
-    CONSTRAINT ck_memory_document_versions_trigger CHECK (trigger IN ('auto_dream', 'manual_dream', 'restore')),
-    CONSTRAINT ck_memory_document_versions_source CHECK ((trigger = 'restore' AND dream_job_id IS NULL AND history_from IS NULL AND history_to IS NULL AND history_count IS NULL AND prompt_version IS NULL AND model_ref IS NULL) OR (trigger IN ('auto_dream', 'manual_dream') AND dream_job_id IS NOT NULL AND history_from >= 1 AND history_to >= history_from AND history_count BETWEEN 1 AND 20 AND prompt_version IS NOT NULL AND prompt_version <> '' AND model_ref IS NOT NULL))
+    CONSTRAINT ck_memory_document_versions_trigger CHECK (trigger IN ('auto_dream', 'manual_dream', 'budget_rewrite', 'restore')),
+    CONSTRAINT ck_memory_document_versions_source CHECK ((trigger = 'restore' AND dream_job_id IS NULL AND history_from IS NULL AND history_to IS NULL AND history_count IS NULL AND prompt_version IS NULL AND model_ref IS NULL) OR (trigger = 'budget_rewrite' AND dream_job_id IS NOT NULL AND history_from IS NULL AND history_to IS NULL AND history_count = 0 AND prompt_version IS NOT NULL AND prompt_version <> '' AND model_ref IS NOT NULL) OR (trigger IN ('auto_dream', 'manual_dream') AND dream_job_id IS NOT NULL AND history_from >= 1 AND history_to >= history_from AND history_count BETWEEN 1 AND 20 AND prompt_version IS NOT NULL AND prompt_version <> '' AND model_ref IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX uq_memory_document_versions_dream_job ON memory_document_versions (dream_job_id) WHERE dream_job_id IS NOT NULL;
 
 ALTER TABLE memory_dream_runs ADD CONSTRAINT fk_memory_dream_runs_result_version FOREIGN KEY(project_id, owner_user_id, namespace, result_version) REFERENCES memory_document_versions (project_id, owner_user_id, namespace, version) DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE memory_episodes (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    namespace VARCHAR(255) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    origin VARCHAR(8) NOT NULL,
+    tagged_text TEXT NOT NULL,
+    content_digest CHAR(64) NOT NULL,
+    occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    consumed_dream_job_id UUID NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT fk_memory_episodes_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_memory_episodes_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_memory_episodes_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT ck_memory_episodes_namespace CHECK (namespace <> ''),
+    CONSTRAINT ck_memory_episodes_origin CHECK (origin IN ('snip', 'tool')),
+    CONSTRAINT ck_memory_episodes_text CHECK (tagged_text <> '' AND char_length(tagged_text) <= 1000),
+    CONSTRAINT ck_memory_episodes_digest CHECK (content_digest ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX ix_memory_episodes_scope_time ON memory_episodes (project_id, owner_user_id, namespace, occurred_at DESC, id DESC);
+
+CREATE INDEX ix_memory_episodes_trgm ON memory_episodes USING gin (tagged_text gin_trgm_ops);
 
 CREATE TABLE run_memory_context_snapshots (
     project_id UUID NOT NULL,
@@ -2856,6 +2893,6 @@ CREATE TABLE run_memory_context_snapshots (
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('full_schema_v4');
+INSERT INTO alembic_version (version_num) VALUES ('full_schema_v5');
 
 COMMIT;

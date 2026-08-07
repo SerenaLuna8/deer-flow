@@ -36,7 +36,6 @@ import {
   getProjectDefaultAgent,
   getProjectSkillCredentialBindings,
   getProjectSkillVersionFile,
-  getAdminCredentialRotationStatus,
   importProjectSkillArchive,
   listAdminAssetVersions,
   listAdminAssets,
@@ -65,7 +64,6 @@ import {
 import {
   adminAssetKey,
   adminAssetVersionsKey,
-  adminCredentialRotationStatusKey,
   adminProjectAssetKey,
   adminProjectAssetVersionsKey,
   projectAssetKey,
@@ -89,7 +87,6 @@ import type {
   AssetListKind,
   CreateConfiguredMcpInput,
   CreateAssetInput,
-  CredentialRotationStatus,
   ConfigureSystemMcpCredentialGrantsInput,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
@@ -326,13 +323,6 @@ export function useSystemAssetCatalog(
   return useQuery<AdminAssetList>({
     queryKey: systemCatalogKey(accountId, kind),
     queryFn: ({ signal }) => listSystemAssetCatalog(kind, signal),
-  });
-}
-
-export function useAdminCredentialRotationStatus(accountId: string) {
-  return useQuery<CredentialRotationStatus>({
-    queryKey: adminCredentialRotationStatusKey(accountId),
-    queryFn: ({ signal }) => getAdminCredentialRotationStatus(signal),
   });
 }
 

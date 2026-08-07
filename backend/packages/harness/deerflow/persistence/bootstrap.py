@@ -21,7 +21,17 @@ from deerflow.persistence.final_schema_contract import (
     verify_m7_catalog,
 )
 
-CURRENT_SCHEMA_REVISION = "full_schema_v4"
+# Ordered incremental migration chain, root -> head. Every released revision
+# id lives here; ``backend/tests/test_schema_migration_parity.py`` pins this
+# tuple to the actual scripts under ``backend/migrations/versions``. The head
+# is the only marker the runtime accepts; any known ancestor classifies as
+# "behind" (explicit ``make upgrade-db`` required), and anything else stays
+# fail-closed.
+KNOWN_CHAIN_REVISIONS: tuple[str, ...] = ("full_schema_v5",)
+
+# The migration-chain head revision id. ``full_schema.sql`` stamps exactly
+# this marker, so a fresh install is always already at head.
+CURRENT_SCHEMA_REVISION = KNOWN_CHAIN_REVISIONS[-1]
 # Current-schema alias retained for the M7 readiness contract.
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
@@ -52,6 +62,15 @@ class SchemaSetupRequired(RuntimeError):
         super().__init__("DATABASE_SETUP_REQUIRED: run `make setup-db` before starting ActWeave")
 
 
+class SchemaUpgradeRequired(RuntimeError):
+    """A behind database needs an explicit, operator-driven migration run."""
+
+    code = "DATABASE_UPGRADE_REQUIRED"
+
+    def __init__(self, current_marker: str) -> None:
+        super().__init__(f"DATABASE_UPGRADE_REQUIRED: database is at {current_marker} but the current chain head is {CURRENT_SCHEMA_REVISION}; back up the database and run `make upgrade-db`")
+
+
 async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
     rows = await connection.execute(
         text(
@@ -67,21 +86,30 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
 
 async def classify_database(
     connection: AsyncConnection,
-) -> Literal["empty", "current"]:
+) -> Literal["empty", "current", "behind"]:
     """Classify a database without mutation.
 
-    Only an empty schema or the exact current full-schema catalog is accepted.
-    Every other nonempty schema requires explicit recreation.
+    Three accepted states: empty (installable), the exact chain-head catalog
+    (current), or a database stamped with a known ancestor revision (behind —
+    upgradable only through explicit ``make upgrade-db``). Every other
+    nonempty schema stays fail-closed and requires explicit recreation. A
+    behind database deliberately skips the head catalog contract: its older
+    catalog is verified by the migration run itself, whose post-upgrade check
+    re-enters the "current" branch here.
     """
 
     objects = await inventory_user_schema_objects(connection)
     if not objects:
         return "empty"
-    if not inventory_is_m7_allowed(objects) or "relation:r:alembic_version" not in objects:
+    if "relation:r:alembic_version" not in objects:
         raise M7RecreateRequired()
 
     markers = tuple(str(value) for value in (await connection.execute(text("SELECT version_num FROM alembic_version ORDER BY version_num"))).scalars())
-    if markers != (CURRENT_SCHEMA_REVISION,) or not await verify_m7_catalog(connection):
+    if len(markers) != 1 or markers[0] not in KNOWN_CHAIN_REVISIONS:
+        raise M7RecreateRequired()
+    if markers[0] != CURRENT_SCHEMA_REVISION:
+        return "behind"
+    if not inventory_is_m7_allowed(objects) or not await verify_m7_catalog(connection):
         raise M7RecreateRequired()
     return "current"
 
@@ -153,11 +181,20 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
     async with _postgres_lock(engine):
         async with engine.connect() as connection:
             state = await classify_database(connection)
+        if state == "behind":
+            # Setup never migrates: `make upgrade-db` is the only upgrade path.
+            raise SchemaUpgradeRequired(await _single_marker(engine))
         if state == "empty":
             await _install_full_schema(engine)
         async with engine.connect() as connection:
             if await classify_database(connection) != "current":
                 raise M7RecreateRequired()
+
+
+async def _single_marker(engine: AsyncEngine) -> str:
+    async with engine.connect() as connection:
+        marker = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+    return str(marker)
 
 
 async def validate_schema(engine: AsyncEngine) -> None:
@@ -169,14 +206,18 @@ async def validate_schema(engine: AsyncEngine) -> None:
         state = await classify_database(connection)
     if state == "current":
         return
+    if state == "behind":
+        raise SchemaUpgradeRequired(await _single_marker(engine))
     raise SchemaSetupRequired()
 
 
 __all__ = [
     "CURRENT_SCHEMA_REVISION",
+    "KNOWN_CHAIN_REVISIONS",
     "M7RecreateRequired",
     "M7_FINAL_SCHEMA_REVISION",
     "SchemaSetupRequired",
+    "SchemaUpgradeRequired",
     "bootstrap_schema",
     "classify_database",
     "list_user_relations",

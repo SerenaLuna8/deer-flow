@@ -318,6 +318,7 @@ class PrivateRunAdmissionService:
             model_catalog=model_catalog,
             runtime_policy=runtime_policy,
             endpoint_policy=endpoint_policy,
+            audit=(audit if callable(getattr(audit, "memory_injection_skipped", None)) else None),
         )
         self._quota = quota or _NoopPrivateRunAdmissionQuota()
         self._audit = audit or _NoopPrivateRunAdmissionAudit()

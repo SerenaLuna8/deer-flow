@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import logging
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -25,6 +26,7 @@ from deerflow.guardrails.provider import (
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.change_signal import wait_for_change
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -248,33 +250,67 @@ def _trusted_skill_scoped_secrets(
     return copied
 
 
-async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
-    """Poll until the background subagent reaches a terminal status or we run out of polls."""
-    for _ in range(max_polls):
-        result = get_background_task_result(task_id)
-        if result is None:
-            return None
-        if _is_subagent_terminal(result):
-            return result
-        await asyncio.sleep(5)
-    return None
+# Heartbeat upper bound for event-driven subagent waiting (U8). Terminal and
+# progress transitions wake waiters immediately through SubagentChangeSignal;
+# the heartbeat only bounds staleness when a notification was debounced away
+# or the writer died without a terminal transition.
+_SUBAGENT_WAIT_HEARTBEAT_SECONDS = 5.0
 
 
-async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, max_polls: int) -> None:
-    """Keep polling a cancelled subagent until it can be safely removed."""
-    cleanup_poll_count = 0
-    while True:
-        result = get_background_task_result(task_id)
-        if result is None:
-            return
-        if _is_subagent_terminal(result):
-            cleanup_background_task(task_id)
-            return
-        if cleanup_poll_count >= max_polls:
-            logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
-            return
-        await asyncio.sleep(5)
-        cleanup_poll_count += 1
+def _subscribe_subagent_changes(result: Any):
+    """Return ``(signal, event)`` for a result carrying a change signal.
+
+    Duck-typed so tests (and any legacy result object without the signal)
+    degrade to pure heartbeat polling instead of failing.
+    """
+
+    signal = getattr(result, "changes", None)
+    if signal is None or not callable(getattr(signal, "subscribe", None)):
+        return None, None
+    return signal, signal.subscribe()
+
+
+async def _await_subagent_terminal(task_id: str, wait_budget_seconds: float) -> Any | None:
+    """Wait until the background subagent reaches a terminal status or the deadline passes."""
+    deadline = time.monotonic() + wait_budget_seconds
+    signal = None
+    change_event = None
+    try:
+        while True:
+            if change_event is not None:
+                change_event.clear()
+            result = get_background_task_result(task_id)
+            if result is None:
+                return None
+            if _is_subagent_terminal(result):
+                return result
+            if change_event is None:
+                signal, change_event = _subscribe_subagent_changes(result)
+                if change_event is not None:
+                    # Re-read state: the terminal latch covers transitions
+                    # that raced between the read above and the subscribe.
+                    continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            slice_seconds = min(_SUBAGENT_WAIT_HEARTBEAT_SECONDS, remaining)
+            if change_event is not None:
+                await wait_for_change(change_event, heartbeat_seconds=slice_seconds)
+            else:
+                await asyncio.sleep(slice_seconds)
+    finally:
+        if signal is not None and change_event is not None:
+            signal.unsubscribe(change_event)
+
+
+async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, wait_budget_seconds: float) -> None:
+    """Keep watching a cancelled subagent until it can be safely removed."""
+    terminal = await _await_subagent_terminal(task_id, wait_budget_seconds)
+    if terminal is not None:
+        cleanup_background_task(task_id)
+        return
+    if get_background_task_result(task_id) is not None:
+        logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {wait_budget_seconds:.0f}s")
 
 
 def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, task_id: str) -> None:
@@ -290,9 +326,9 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, tas
         )
 
 
-def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int) -> None:
+def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, wait_budget_seconds: float) -> None:
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
-    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, max_polls))
+    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, wait_budget_seconds))
     cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, task_id=task_id))
 
 
@@ -690,14 +726,18 @@ async def task_tool(
     # Use tool_call_id as task_id for better traceability
     task_id = executor.execute_async(prompt, task_id=tool_call_id)
 
-    # Poll for task completion in backend (removes need for LLM to poll)
-    poll_count = 0
+    # Wait for task completion in backend (removes need for LLM to poll).
+    # Event-driven (U8): the subagent wakes this waiter on progress/terminal
+    # transitions; the heartbeat only bounds staleness as a safety net.
     last_status = None
     last_message_count = 0  # Track how many AI messages we've already sent
-    # Polling timeout: execution timeout + 60s buffer, checked every 5s
-    max_poll_count = (config.timeout_seconds + 60) // 5
+    # Wait budget: execution timeout + 60s buffer as a safety net in case the
+    # thread-pool timeout fails to fire.
+    wait_budget_seconds = float(config.timeout_seconds + 60)
+    wait_started = time.monotonic()
+    deadline = wait_started + wait_budget_seconds
 
-    logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
+    logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, wait_budget={wait_budget_seconds:.0f}s)")
 
     writer = get_stream_writer()
     # Send Task Started message'
@@ -710,8 +750,14 @@ async def task_tool(
         }
     )
 
+    change_signal = None
+    change_event = None
     try:
         while True:
+            if change_event is not None:
+                # Clear before reading state so a notify that lands after the
+                # read is never lost — it re-sets the event for the next wait.
+                change_event.clear()
             result = get_background_task_result(task_id)
 
             if result is None:
@@ -777,7 +823,7 @@ async def task_tool(
                         "model_name": effective_model,
                     }
                 )
-                logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
+                logger.info(f"[trace={trace_id}] Task {task_id} completed after {time.monotonic() - wait_started:.1f}s")
                 cleanup_background_task(task_id)
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
@@ -858,16 +904,23 @@ async def task_tool(
                     usage=usage,
                 )
 
-            # Still running, wait before next poll
-            await asyncio.sleep(5)
-            poll_count += 1
+            # Still running. Subscribe once, then wait for a change event
+            # (with a heartbeat upper bound) instead of fixed-interval polling.
+            if change_event is None:
+                change_signal, change_event = _subscribe_subagent_changes(result)
+                if change_event is not None:
+                    # Re-read state: a transition may have raced the subscribe
+                    # (the terminal latch in subscribe() covers most of this,
+                    # but a fresh read also picks up new progress messages).
+                    continue
 
-            # Polling timeout as a safety net (in case thread pool timeout doesn't work)
-            # Set to execution timeout + 60s buffer, in 5s poll intervals
-            # This catches edge cases where the background task gets stuck
-            if poll_count > max_poll_count:
+            remaining = deadline - time.monotonic()
+            # Wait-budget timeout as a safety net (in case thread pool timeout
+            # doesn't work). This catches edge cases where the background task
+            # gets stuck.
+            if remaining <= 0:
                 timeout_minutes = config.timeout_seconds // 60
-                logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
+                logger.error(f"[trace={trace_id}] Task {task_id} wait budget exhausted after {time.monotonic() - wait_started:.0f}s (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -883,7 +936,7 @@ async def task_tool(
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.
                 request_cancel_background_task(task_id)
-                _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
+                _schedule_deferred_subagent_cleanup(task_id, trace_id, wait_budget_seconds)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
@@ -892,6 +945,12 @@ async def task_tool(
                     model_name=effective_model,
                     usage=usage,
                 )
+
+            slice_seconds = min(_SUBAGENT_WAIT_HEARTBEAT_SECONDS, remaining)
+            if change_event is not None:
+                await wait_for_change(change_event, heartbeat_seconds=slice_seconds)
+            else:
+                await asyncio.sleep(slice_seconds)
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.
         request_cancel_background_task(task_id)
@@ -901,7 +960,7 @@ async def task_tool(
         # before the parent worker persists get_completion_data().
         terminal_result = None
         try:
-            terminal_result = await asyncio.shield(_await_subagent_terminal(task_id, max_poll_count))
+            terminal_result = await asyncio.shield(_await_subagent_terminal(task_id, wait_budget_seconds))
         except asyncio.CancelledError:
             pass
 
@@ -912,9 +971,12 @@ async def task_tool(
         if final_result is not None and _is_subagent_terminal(final_result):
             cleanup_background_task(task_id)
         else:
-            _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
+            _schedule_deferred_subagent_cleanup(task_id, trace_id, wait_budget_seconds)
         _subagent_usage_cache.pop(tool_call_id, None)
         raise
     except Exception:
         _subagent_usage_cache.pop(tool_call_id, None)
         raise
+    finally:
+        if change_signal is not None and change_event is not None:
+            change_signal.unsubscribe(change_event)

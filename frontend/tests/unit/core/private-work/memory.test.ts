@@ -4,10 +4,16 @@ import {
   dreamProjectMemory,
   getProjectMemory,
   getProjectMemoryVersion,
+  listProjectMemoryEpisodes,
+  listProjectMemoryPending,
   listProjectMemoryVersions,
   memoryDocumentSchema,
   memoryDreamResultSchema,
+  memoryEpisodeSchema,
+  memoryPendingEntrySchema,
   memoryVersionDetailSchema,
+  projectMemoryEpisodesQueryKey,
+  projectMemoryPendingQueryKey,
   projectMemoryPermissions,
   projectMemoryVersionsQueryKey,
   restoreProjectMemoryVersion,
@@ -28,6 +34,7 @@ const version = {
   trigger: "manual_dream",
   historyCount: 2,
   changed: true,
+  needsReview: false,
   createdAt: TIMESTAMP,
 };
 
@@ -58,6 +65,7 @@ describe("project Memory document client", () => {
           updatedAt: TIMESTAMP,
           pendingCount: 4,
           dreamRunning: false,
+          injectionStatus: "ok",
         }),
     );
     rs.stubGlobal("fetch", fetcher);
@@ -65,6 +73,7 @@ describe("project Memory document client", () => {
     const result = await getProjectMemory(access, controller.signal);
 
     expect(result.pendingCount).toBe(4);
+    expect(result.injectionStatus).toBe("ok");
     const [input, init] = fetcher.mock.calls[0]!;
     const url = new URL(requestURL(input), "http://local.test");
     expect(url.pathname).toBe(`/api/projects/${PROJECT_ID}/memory`);
@@ -163,7 +172,18 @@ describe("project Memory document client", () => {
         updatedAt: TIMESTAMP,
         pendingCount: 0,
         dreamRunning: false,
+        injectionStatus: "ok",
         ownerUserId: ACCOUNT_ID,
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryDocumentSchema.safeParse({
+        content: "ok",
+        version: 1,
+        updatedAt: TIMESTAMP,
+        pendingCount: 0,
+        dreamRunning: false,
+        injectionStatus: "partial",
       }).success,
     ).toBe(false);
     expect(
@@ -188,6 +208,7 @@ describe("project Memory document client", () => {
         updatedAt: TIMESTAMP,
         pendingCount: 0,
         dreamRunning: false,
+        injectionStatus: "ok",
         namespace: "default",
       }),
     );
@@ -209,6 +230,171 @@ describe("project Memory document client", () => {
       listProjectMemoryVersions(access, { limit: 101, offset: 0 }),
     ).rejects.toThrow();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  test("searches the archive with exact filters and scoped keys", async () => {
+    const controller = new AbortController();
+    const episode = {
+      id: JOB_ID,
+      threadId: "thread-1",
+      origin: "snip",
+      taggedText: "- [durable] deployment target is region-eu",
+      occurredAt: TIMESTAMP,
+      createdAt: TIMESTAMP,
+    };
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({ items: [episode] }),
+    );
+    rs.stubGlobal("fetch", fetcher);
+
+    const result = await listProjectMemoryEpisodes(
+      access,
+      {
+        q: "deployment",
+        tags: ["durable", "permanent"],
+        before: TIMESTAMP,
+        limit: 20,
+      },
+      controller.signal,
+    );
+
+    expect(result.items).toEqual([episode]);
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(requestURL(input), "http://local.test");
+    expect(url.pathname).toBe(`/api/projects/${PROJECT_ID}/memory/episodes`);
+    expect(url.searchParams.get("q")).toBe("deployment");
+    expect(url.searchParams.getAll("tags")).toEqual(["durable", "permanent"]);
+    expect(url.searchParams.get("before")).toBe(TIMESTAMP);
+    expect(url.searchParams.get("limit")).toBe("20");
+    expect(init?.signal).toBe(controller.signal);
+    expect(
+      projectMemoryEpisodesQueryKey(access.scope, {
+        q: "deployment",
+        tags: ["permanent", "durable"],
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        ACCOUNT_ID,
+        PROJECT_ID,
+        "memory",
+        "episodes",
+        "deployment",
+        "durable,permanent",
+      ]),
+    );
+  });
+
+  test("rejects out-of-contract archive inputs and responses", async () => {
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({ items: [] }),
+    );
+    rs.stubGlobal("fetch", fetcher);
+
+    await expect(
+      listProjectMemoryEpisodes(access, { q: "x".repeat(201), limit: 20 }),
+    ).rejects.toThrow();
+    await expect(
+      listProjectMemoryEpisodes(access, {
+        tags: ["skip" as never],
+        limit: 20,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      listProjectMemoryEpisodes(access, { limit: 51 }),
+    ).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+
+    expect(
+      memoryEpisodeSchema.safeParse({
+        id: JOB_ID,
+        threadId: "thread-1",
+        origin: "manual",
+        taggedText: "- [durable] x",
+        occurredAt: TIMESTAMP,
+        createdAt: TIMESTAMP,
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryEpisodeSchema.safeParse({
+        id: JOB_ID,
+        threadId: "thread-1",
+        origin: "snip",
+        taggedText: "- [durable] x",
+        occurredAt: TIMESTAMP,
+        createdAt: TIMESTAMP,
+        ownerUserId: ACCOUNT_ID,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("reads the pending backlog with bounded pagination and scoped keys", async () => {
+    const controller = new AbortController();
+    const entry = {
+      sequence: 41,
+      origin: "tool",
+      taggedText: "- [durable] deployment target is region-eu",
+      createdAt: TIMESTAMP,
+    };
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({ items: [entry] }),
+    );
+    rs.stubGlobal("fetch", fetcher);
+
+    const result = await listProjectMemoryPending(
+      access,
+      {},
+      controller.signal,
+    );
+
+    expect(result.items).toEqual([entry]);
+    const [input, init] = fetcher.mock.calls[0]!;
+    const url = new URL(requestURL(input), "http://local.test");
+    expect(url.pathname).toBe(`/api/projects/${PROJECT_ID}/memory/pending`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      limit: "50",
+      offset: "0",
+    });
+    expect(init?.signal).toBe(controller.signal);
+    expect(projectMemoryPendingQueryKey(access.scope)).toEqual(
+      expect.arrayContaining([ACCOUNT_ID, PROJECT_ID, "memory", "pending"]),
+    );
+  });
+
+  test("rejects out-of-contract pending inputs and responses", async () => {
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json({ items: [] }),
+    );
+    rs.stubGlobal("fetch", fetcher);
+
+    await expect(
+      listProjectMemoryPending(access, { limit: 101 }),
+    ).rejects.toThrow();
+    await expect(
+      listProjectMemoryPending(access, { offset: -1 }),
+    ).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+
+    expect(
+      memoryPendingEntrySchema.safeParse({
+        sequence: 41,
+        origin: "manual",
+        taggedText: "- [durable] x",
+        createdAt: TIMESTAMP,
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryPendingEntrySchema.safeParse({
+        sequence: 41,
+        origin: "tool",
+        taggedText: "- [durable] x",
+        createdAt: TIMESTAMP,
+        ownerUserId: ACCOUNT_ID,
+      }).success,
+    ).toBe(false);
   });
 
   test("maps capabilities without inferring roles", () => {

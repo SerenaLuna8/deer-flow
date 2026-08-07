@@ -66,7 +66,6 @@ import {
   revokeAdminCredential,
   useAdminAssets,
   useAdminAssetVersions,
-  useAdminCredentialRotationStatus,
   useConfigureAdminMcpCredentialGrants,
   type AdminAssetList,
   type AdminCredentialList,
@@ -76,6 +75,7 @@ import {
   type ConfigureSystemMcpCredentialGrantsInput,
   type CreateCredentialInput,
   type CredentialMetadata,
+  type CredentialPendingMigration,
   type ReplaceCredentialInput,
 } from "@/core/shared-assets";
 import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
@@ -93,13 +93,11 @@ import {
   adminCredentialTypeLabel,
   adminMcpTransportLabel,
   adminAssetErrorMessage,
+  credentialPendingMigrationMessage,
   filterAndSortAdminAssets,
   filterSystemAdminCatalogItems,
   type AdminAssetCatalogFilters,
-  type AdminAssetPublicationFilter,
-  type AdminAssetUpdatedSort,
 } from "./admin-asset-view-model";
-import { CredentialRotationStatusCard } from "./credential-rotation-status";
 
 export {
   adminAssetErrorMessage,
@@ -226,31 +224,19 @@ export function AdminTechnicalValue({
   );
 }
 
-function systemPageCopy(
+function systemPageTitle(
   kind: AssetListKind,
   pages: Translations["adminAssets"]["pages"],
 ) {
   switch (kind) {
     case "agents":
-      return {
-        title: pages.system.agentsTitle,
-        description: pages.system.agentsDescription,
-      };
+      return pages.system.agentsTitle;
     case "skills":
-      return {
-        title: pages.system.skillsTitle,
-        description: pages.system.skillsDescription,
-      };
+      return pages.system.skillsTitle;
     case "mcp-servers":
-      return {
-        title: pages.system.mcpTitle,
-        description: pages.system.mcpDescription,
-      };
+      return pages.system.mcpTitle;
     case "credentials":
-      return {
-        title: pages.system.credentialsTitle,
-        description: pages.system.credentialsDescription,
-      };
+      return pages.system.credentialsTitle;
   }
 }
 
@@ -1005,6 +991,8 @@ function SelectedAssetDetail({
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [migrationOpen, setMigrationOpen] = useState(false);
+  const [pendingMigration, setPendingMigration] =
+    useState<CredentialPendingMigration | null>(null);
   const [deleteSnapshot, setDeleteSnapshot] =
     useState<CredentialDeleteSnapshot | null>(null);
 
@@ -1014,6 +1002,22 @@ function SelectedAssetDetail({
   return (
     <div className="min-w-0 flex-1 overflow-y-auto px-5 pb-8">
       <section className="min-w-0 space-y-4 py-5">
+        {credential && secureWrite ? (
+          <CredentialWriteNotice
+            message={credentialPendingMigrationMessage(
+              pendingMigration,
+              t.adminAssets.common,
+            )}
+            action={{
+              label: t.adminAssets.common.migrateReferences,
+              disabled: secureWrite.pending,
+              onClick: () => {
+                secureWrite.clearError();
+                setMigrationOpen(true);
+              },
+            }}
+          />
+        ) : null}
         {asset ? (
           <dl className="grid min-w-0 gap-4 rounded-xl border p-4 sm:grid-cols-2">
             <AdminTechnicalValue
@@ -1165,8 +1169,15 @@ function SelectedAssetDetail({
             errorMessage={secureWrite.errorMessage}
             onOpenChange={setReplaceOpen}
             onReplace={(input: ReplaceCredentialInput) => {
+              setPendingMigration(null);
               void secureWrite
-                .run(() => replaceAdminCredential(credential.id, input))
+                .run(async () => {
+                  const replaced = await replaceAdminCredential(
+                    credential.id,
+                    input,
+                  );
+                  setPendingMigration(replaced.pending_migration);
+                })
                 .then((success) => {
                   if (!success) return;
                   setReplaceOpen(false);
@@ -1188,7 +1199,11 @@ function SelectedAssetDetail({
                     }),
                   t.adminAssets.common.migrationSuccess,
                 )
-                .then((success) => success && setMigrationOpen(false));
+                .then((success) => {
+                  if (!success) return;
+                  setPendingMigration(null);
+                  setMigrationOpen(false);
+                });
             }}
           />
           <CredentialRevokeDialog
@@ -1268,18 +1283,19 @@ function CredentialCatalogDirectory({
   items,
   selectedId,
   onSelect,
+  toolbarAction,
 }: {
   items: CredentialMetadata[];
   selectedId: string | null;
   onSelect: (item: CredentialMetadata) => void;
+  toolbarAction?: ReactNode;
 }) {
   const { locale, t } = useI18n();
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<AdminCatalogStatus>("all");
   const [requestedPage, setRequestedPage] = useState(1);
   const filteredItems = useMemo(
     () =>
-      filterAdminCatalogItems(items, query, status)
+      filterAdminCatalogItems(items, query, "all")
         .map((item, index) => ({ item, index }))
         .sort((left, right) => {
           const timeDifference =
@@ -1290,21 +1306,17 @@ function CredentialCatalogDirectory({
             : timeDifference;
         })
         .map(({ item }) => item),
-    [items, query, status],
+    [items, query],
   );
   const page = adminAssetCatalogPage(filteredItems, requestedPage);
-  const statuses = useMemo(
-    () => Array.from(new Set(items.map((item) => item.status))),
-    [items],
-  );
   const visibleFrom = page.totalItems === 0 ? 0 : (page.page - 1) * 20 + 1;
   const visibleTo =
     page.totalItems === 0 ? 0 : visibleFrom + page.items.length - 1;
 
   return (
     <div className="min-w-0 space-y-3">
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_11rem]">
-        <label className="relative min-w-0">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <label className="relative min-w-0 flex-1 basis-60">
           <SearchIcon
             aria-hidden
             className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2"
@@ -1320,22 +1332,7 @@ function CredentialCatalogDirectory({
             className="pl-9"
           />
         </label>
-        <select
-          value={status}
-          onChange={(event) => {
-            setStatus(event.currentTarget.value as AdminCatalogStatus);
-            setRequestedPage(1);
-          }}
-          aria-label={t.adminAssets.diff.status}
-          className="border-input bg-background h-9 min-w-0 rounded-md border px-3 text-sm"
-        >
-          <option value="all">{t.adminAssets.catalog.filterAll}</option>
-          {statuses.map((itemStatus) => (
-            <option key={itemStatus} value={itemStatus}>
-              {t.adminAssets.status[itemStatus]}
-            </option>
-          ))}
-        </select>
+        {toolbarAction}
       </div>
 
       <div
@@ -1620,14 +1617,18 @@ function SystemCatalogDirectory({
   selectedId: string | null;
 }) {
   const { locale, t } = useI18n();
-  const [filters, setFilters] = useState<AdminAssetCatalogFilters>({
-    query: "",
-    status: "all",
-    publication: "all",
-    updatedSort: "newest",
-  });
+  const [query, setQuery] = useState("");
   const [requestedPage, setRequestedPage] = useState(1);
   const summary = useMemo(() => adminAssetCatalogSummary(items), [items]);
+  const filters = useMemo<AdminAssetCatalogFilters>(
+    () => ({
+      query,
+      status: "all",
+      publication: "all",
+      updatedSort: "newest",
+    }),
+    [query],
+  );
   const filteredItems = useMemo(
     () => filterAndSortAdminAssets(items, filters),
     [filters, items],
@@ -1636,22 +1637,13 @@ function SystemCatalogDirectory({
     () => adminAssetCatalogPage(filteredItems, requestedPage),
     [filteredItems, requestedPage],
   );
-  const statusOptions = useMemo(
-    () => Array.from(new Set(items.map((item) => item.status))),
-    [items],
-  );
-  const meta = systemPageCopy(kind, t.adminAssets.pages);
+  const title = systemPageTitle(kind, t.adminAssets.pages);
   const visibleFrom =
     catalogPage.totalItems === 0 ? 0 : (catalogPage.page - 1) * 20 + 1;
   const visibleTo =
     catalogPage.totalItems === 0
       ? 0
       : visibleFrom + catalogPage.items.length - 1;
-
-  function updateFilters(patch: Partial<AdminAssetCatalogFilters>) {
-    setFilters((current) => ({ ...current, ...patch }));
-    setRequestedPage(1);
-  }
 
   return (
     <div className="min-w-0 space-y-4">
@@ -1663,7 +1655,6 @@ function SystemCatalogDirectory({
         <SystemCatalogMetric
           label={t.adminAssets.catalog.catalogReady}
           value={t.adminAssets.common.active}
-          detail={t.adminAssets.catalog.catalogReadyDetail}
           icon={
             <span className="border-success/30 bg-success/10 text-success flex size-7 shrink-0 items-center justify-center rounded-full border">
               <CheckCircle2Icon aria-hidden className="size-4" />
@@ -1673,7 +1664,6 @@ function SystemCatalogDirectory({
         <SystemCatalogMetric
           label={t.adminAssets.catalog.totalAssets}
           value={summary.total}
-          detail={t.adminAssets.pages.runtimeReadOnly}
         />
         <SystemCatalogMetric
           label={t.adminAssets.catalog.activeAssets}
@@ -1707,90 +1697,32 @@ function SystemCatalogDirectory({
         />
       </section>
 
-      <section className="min-w-0 space-y-3">
-        <div className="min-w-0">
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold">
-              {t.adminAssets.catalog.systemAssets}
-            </h2>
-            <p className="text-muted-foreground mt-1 text-xs">
-              {t.adminAssets.catalog.systemAssetsDescription}
-            </p>
-          </div>
-        </div>
-
-        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 lg:flex lg:flex-row lg:flex-wrap">
-          <label className="relative min-w-0 sm:col-span-2 lg:w-60">
+      <section
+        aria-label={t.adminAssets.catalog.systemAssets}
+        className="min-w-0 space-y-3"
+      >
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <label className="relative min-w-0 flex-1 basis-60">
             <SearchIcon
               aria-hidden
               className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2"
             />
             <Input
-              value={filters.query}
-              onChange={(event) =>
-                updateFilters({ query: event.currentTarget.value })
-              }
+              value={query}
+              onChange={(event) => {
+                setQuery(event.currentTarget.value);
+                setRequestedPage(1);
+              }}
               aria-label={t.adminAssets.catalog.searchPlaceholder}
               placeholder={t.adminAssets.catalog.searchPlaceholder}
               className="pl-9"
             />
           </label>
-          <select
-            value={filters.status}
-            onChange={(event) =>
-              updateFilters({
-                status: event.currentTarget
-                  .value as AdminAssetCatalogFilters["status"],
-              })
-            }
-            aria-label={t.adminAssets.catalog.lifecycleStatus}
-            className="border-input bg-background h-9 min-w-0 rounded-md border px-3 text-sm lg:w-32"
-          >
-            <option value="all">{t.adminAssets.catalog.filterAll}</option>
-            {statusOptions.map((status) => (
-              <option key={status} value={status}>
-                {t.adminAssets.status[status]}
-              </option>
-            ))}
-          </select>
-          <select
-            data-testid="admin-asset-publication-filter"
-            value={filters.publication}
-            onChange={(event) =>
-              updateFilters({
-                publication: event.currentTarget
-                  .value as AdminAssetPublicationFilter,
-              })
-            }
-            aria-label={t.adminAssets.catalog.publicationFilter}
-            className="border-input bg-background h-9 min-w-0 rounded-md border px-3 text-sm lg:w-36"
-          >
-            <option value="all">{t.adminAssets.catalog.publicationAll}</option>
-            <option value="published">
-              {t.adminAssets.catalog.publishedOnly}
-            </option>
-            <option value="unpublished">
-              {t.adminAssets.catalog.unpublishedOnly}
-            </option>
-          </select>
-          <select
-            value={filters.updatedSort}
-            onChange={(event) =>
-              updateFilters({
-                updatedSort: event.currentTarget.value as AdminAssetUpdatedSort,
-              })
-            }
-            aria-label={t.adminAssets.catalog.updatedSort}
-            className="border-input bg-background h-9 min-w-0 rounded-md border px-3 text-sm lg:w-40"
-          >
-            <option value="newest">{t.adminAssets.catalog.newestFirst}</option>
-            <option value="oldest">{t.adminAssets.catalog.oldestFirst}</option>
-          </select>
           <Button
             type="button"
             variant="outline"
             size="icon"
-            className="shrink-0 self-end lg:ml-auto"
+            className="shrink-0"
             aria-label={
               refreshing
                 ? t.adminAssets.catalog.refreshing
@@ -1877,7 +1809,7 @@ function SystemCatalogDirectory({
                   <thead className="bg-muted/35 text-muted-foreground">
                     <tr className="border-border/70 border-b">
                       <th className="w-[20%] px-4 py-2.5 text-xs font-medium">
-                        {meta.title}
+                        {title}
                       </th>
                       <th className="w-[19%] px-3 py-2.5 text-xs font-medium">
                         {t.adminAssets.catalog.identifier}
@@ -2235,6 +2167,36 @@ export function CredentialWriteError({ message }: { message: string | null }) {
   );
 }
 
+export function CredentialWriteNotice({
+  message,
+  action,
+}: {
+  message: string | null;
+  action?: { label: string; onClick: () => void; disabled?: boolean };
+}) {
+  if (!message) return null;
+  return (
+    <div
+      role="status"
+      data-testid="credential-write-notice"
+      className="border-border bg-muted/30 text-muted-foreground mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm"
+    >
+      <span className="min-w-0">{message}</span>
+      {action ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={action.disabled}
+          onClick={action.onClick}
+        >
+          {action.label}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function CredentialList({
   accountId,
   data,
@@ -2246,77 +2208,31 @@ function CredentialList({
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const secureWrite = useSecureCredentialWrite(accountId);
-  const rotationStatus = useAdminCredentialRotationStatus(accountId);
   const items = filterSystemAdminCatalogItems(data.items);
   const selected =
     items.find((credential) => credential.id === selectedId) ?? null;
 
   return (
     <div className="min-w-0">
-      <div className="mb-4">
-        {rotationStatus.isLoading ? (
-          <Skeleton className="h-24 w-full" />
-        ) : rotationStatus.error ? (
-          <div className="border-destructive/30 bg-destructive/5 rounded-xl border p-4">
-            <ErrorNotice error={rotationStatus.error} />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              disabled={rotationStatus.isFetching}
-              onClick={() => void rotationStatus.refetch()}
-            >
-              <RefreshCwIcon
-                aria-hidden
-                className={cn(
-                  "size-3.5",
-                  rotationStatus.isFetching &&
-                    "animate-spin motion-reduce:animate-none",
-                )}
-              />
-              {rotationStatus.isFetching
-                ? t.adminAssets.common.retrying
-                : t.adminAssets.common.retry}
-            </Button>
-          </div>
-        ) : rotationStatus.data ? (
-          <CredentialRotationStatusCard status={rotationStatus.data} />
-        ) : null}
-      </div>
       <CredentialWriteError message={secureWrite.errorMessage} />
-      {secureWrite.noticeMessage ? (
-        <p
-          role="status"
-          className="border-border bg-muted/30 text-muted-foreground mb-6 rounded-xl border px-4 py-3 text-sm"
-        >
-          {secureWrite.noticeMessage}
-        </p>
-      ) : null}
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <p className="text-muted-foreground text-xs">
-          {t.adminAssets.pages.credentialCount(items.length)}
-        </p>
-        <Button
-          type="button"
-          onClick={() => {
-            secureWrite.clearError();
-            setCreateOpen(true);
-          }}
-        >
-          <PlusIcon aria-hidden className="size-4" />
-          {t.adminAssets.common.createCredential}
-        </Button>
-      </div>
-      {items.length === 0 ? (
-        <EmptyState label={t.adminAssets.navigation.credential} />
-      ) : (
-        <CredentialCatalogDirectory
-          items={items}
-          selectedId={selectedId}
-          onSelect={(credential) => setSelectedId(credential.id)}
-        />
-      )}
+      <CredentialWriteNotice message={secureWrite.noticeMessage} />
+      <CredentialCatalogDirectory
+        items={items}
+        selectedId={selectedId}
+        onSelect={(credential) => setSelectedId(credential.id)}
+        toolbarAction={
+          <Button
+            type="button"
+            onClick={() => {
+              secureWrite.clearError();
+              setCreateOpen(true);
+            }}
+          >
+            <PlusIcon aria-hidden className="size-4" />
+            {t.adminAssets.common.createCredential}
+          </Button>
+        }
+      />
       <SelectedAssetSheet
         accountId={accountId}
         kind="credentials"
@@ -2336,21 +2252,6 @@ function CredentialList({
             .then((success) => success && setCreateOpen(false));
         }}
       />
-    </div>
-  );
-}
-
-function EmptyState({ label }: { label: string }) {
-  const { t } = useI18n();
-  return (
-    <div className="border-border/70 bg-muted/20 rounded-xl border border-dashed px-6 py-12 text-center">
-      <ArchiveIcon
-        aria-hidden
-        className="text-muted-foreground mx-auto size-8"
-      />
-      <p className="mt-3 font-medium">
-        {t.adminAssets.pages.emptySystem(label)}
-      </p>
     </div>
   );
 }
@@ -2401,28 +2302,16 @@ function AuthenticatedAdminAssetPage({
 }) {
   const { t } = useI18n();
   const query = useAdminAssets(accountId, kind);
-  const meta = systemPageCopy(kind, t.adminAssets.pages);
+  const title = systemPageTitle(kind, t.adminAssets.pages);
   const Icon = PAGE_META[kind].icon;
 
   return (
     <AdminPage className="max-w-[96rem]">
-      <header
-        data-testid="admin-asset-breadcrumb"
-        className="min-w-0 space-y-1"
-      >
+      <header data-testid="admin-asset-breadcrumb" className="min-w-0">
         <div className="flex min-w-0 items-center gap-2 text-sm">
           <Icon aria-hidden className="text-muted-foreground size-4 shrink-0" />
-          <span className="text-muted-foreground">
-            {t.adminAssets.pages.systemEyebrow}
-          </span>
-          <span aria-hidden className="text-border">
-            /
-          </span>
-          <h1 className="truncate font-semibold">{meta.title}</h1>
+          <h1 className="truncate font-semibold">{title}</h1>
         </div>
-        <p className="text-muted-foreground max-w-3xl text-sm leading-5">
-          {meta.description}
-        </p>
       </header>
       {query.isLoading ? (
         <div

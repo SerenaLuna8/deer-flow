@@ -42,6 +42,7 @@ FINAL_REQUIRED_RELATIONS = (
     "memory_documents",
     "memory_dream_runs",
     "memory_document_versions",
+    "memory_episodes",
     "run_memory_context_snapshots",
     "run_events",
     "project_usage_ledger",

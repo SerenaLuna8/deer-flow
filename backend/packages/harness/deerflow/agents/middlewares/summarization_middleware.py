@@ -28,10 +28,12 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_CONTEXT_KEY,
     SNIP_ARCHIVE_PROMPT,
+    SNIP_RETRY_REINFORCEMENT,
     MemoryArchiveReceipt,
     SnipArchiveContext,
     SnipOutputInvalid,
     build_memory_archive_receipt,
+    parse_snip_dual_output,
     validate_snip_output,
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
@@ -55,6 +57,19 @@ class ContextCompactionResult:
     preserved_messages: tuple[AnyMessage, ...]
     total_tokens: int
     memory_archive_receipt: MemoryArchiveReceipt | None
+
+
+@dataclass(frozen=True)
+class _SnipSummary:
+    """One validated SNIP response split into its two destinations.
+
+    ``continuity`` only ever becomes the Thread ``summary_text``; ``tagged_text``
+    is the sole input to the memory archive receipt. Under the single-segment
+    contract (custom summary prompts) both fields hold the same tagged document.
+    """
+
+    continuity: str
+    tagged_text: str
 
 
 class ContextTriggerUsage(TypedDict):
@@ -127,16 +142,30 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         existing_tags = list((getattr(self.model, "config", None) or {}).get("tags") or [])
         merged_tags = [*existing_tags, TAG_NOSTREAM] if TAG_NOSTREAM not in existing_tags else existing_tags
         self._summary_model = self.model.with_config(tags=merged_tags)
+        # The dual-segment contract (continuity prose + tagged facts) only
+        # applies to the packaged SNIP prompt. Deployments that construct this
+        # middleware with a custom summary prompt keep the original
+        # single-segment semantics.
+        self._dual_output_contract = self.summary_prompt == SNIP_ARCHIVE_PROMPT
+
+    def _parse_snip_response(self, raw: str) -> _SnipSummary:
+        if self._dual_output_contract:
+            continuity, tagged_text = parse_snip_dual_output(raw)
+            return _SnipSummary(continuity=continuity, tagged_text=tagged_text)
+        tagged_text = validate_snip_output(raw)
+        return _SnipSummary(continuity=tagged_text, tagged_text=tagged_text)
 
     @override
     def _create_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
-        return self._summarize_with(messages_to_summarize)
+        summary = self._summarize_with(messages_to_summarize)
+        return None if summary is None else summary.continuity
 
     @override
     async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
-        return await self._asummarize_with(messages_to_summarize)
+        summary = await self._asummarize_with(messages_to_summarize)
+        return None if summary is None else summary.continuity
 
-    def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> _SnipSummary | None:
         """Mirror the parent ``_create_summary`` but invoke the nostream-tagged model.
 
         We do not swap ``self.model`` at the instance level: the agent/middleware is
@@ -149,18 +178,23 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
         if prompt is None:
             return None
-        try:
-            response = self._summary_model.invoke(
-                prompt,
-                config={"metadata": {"lc_source": "summarization"}},
-            )
-            return validate_snip_output(response.text)
-        except SnipOutputInvalid:
-            logger.warning("SNIP model returned invalid output; skipping compaction this turn")
-            return None
-        except Exception:
-            logger.exception("SNIP generation failed; skipping compaction this turn")
-            return None
+        # Bounded repair: at most two model calls per compaction attempt. The
+        # retry reuses the same input plus a format reinforcement block and
+        # never echoes the invalid output.
+        for attempt_prompt in (prompt, f"{prompt}\n\n{SNIP_RETRY_REINFORCEMENT}"):
+            try:
+                response = self._summary_model.invoke(
+                    attempt_prompt,
+                    config={"metadata": {"lc_source": "summarization"}},
+                )
+                return self._parse_snip_response(response.text)
+            except SnipOutputInvalid:
+                continue
+            except Exception:
+                logger.exception("SNIP generation failed; skipping compaction this turn")
+                return None
+        logger.warning("SNIP model returned invalid output twice; skipping compaction this turn")
+        return None
 
     async def _asummarize_with(
         self,
@@ -168,35 +202,41 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         previous_summary: str | None = None,
         *,
         authorization_context: object | None = None,
-    ) -> str | None:
+    ) -> _SnipSummary | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         if not messages_to_summarize:
             return None
         prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
         if prompt is None:
             return None
-        try:
+        # Bounded repair: at most two model calls per compaction attempt. The
+        # retry reuses the same input plus a format reinforcement block and
+        # never echoes the invalid output. The authorization boundary is
+        # re-checked before every model call.
+        for attempt_prompt in (prompt, f"{prompt}\n\n{SNIP_RETRY_REINFORCEMENT}"):
             try:
-                parent_config = get_config()
-            except RuntimeError:
-                parent_config = {}
-            await check_authorization_boundary(
-                authorization_context or parent_config.get("context"),
-                "before_model_call",
-            )
-            response = await self._summary_model.ainvoke(
-                prompt,
-                config={"metadata": {"lc_source": "summarization"}},
-            )
-            return validate_snip_output(response.text)
-        except AuthorizationRevoked:
-            raise
-        except SnipOutputInvalid:
-            logger.warning("SNIP model returned invalid output; skipping compaction this turn")
-            return None
-        except Exception:
-            logger.exception("SNIP generation failed; skipping compaction this turn")
-            return None
+                try:
+                    parent_config = get_config()
+                except RuntimeError:
+                    parent_config = {}
+                await check_authorization_boundary(
+                    authorization_context or parent_config.get("context"),
+                    "before_model_call",
+                )
+                response = await self._summary_model.ainvoke(
+                    attempt_prompt,
+                    config={"metadata": {"lc_source": "summarization"}},
+                )
+                return self._parse_snip_response(response.text)
+            except AuthorizationRevoked:
+                raise
+            except SnipOutputInvalid:
+                continue
+            except Exception:
+                logger.exception("SNIP generation failed; skipping compaction this turn")
+                return None
+        logger.warning("SNIP model returned invalid output twice; skipping compaction this turn")
+        return None
 
     @staticmethod
     def _summary_count_message(summary_text: str) -> HumanMessage:
@@ -656,7 +696,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _receipt(
         self,
         prepared: _PreparedCompaction,
-        summary: str,
+        tagged_text: str,
         runtime: Runtime,
     ) -> MemoryArchiveReceipt | None:
         archive_context = self._archive_context(runtime)
@@ -674,7 +714,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             ),
             previous_summary=prepared.previous_summary,
             messages=prepared.source_messages,
-            tagged_text=summary,
+            tagged_text=tagged_text,
         )
 
     def compact_state(
@@ -694,12 +734,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if summary is None:
             return None
         try:
-            receipt = self._receipt(prepared, summary, runtime)
+            receipt = self._receipt(prepared, summary.tagged_text, runtime)
         except (SnipOutputInvalid, ValueError):
             logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
             return None
         return ContextCompactionResult(
-            summary_text=summary,
+            summary_text=summary.continuity,
             messages_to_summarize=prepared.source_messages,
             preserved_messages=prepared.preserved_messages,
             total_tokens=prepared.total_tokens,
@@ -724,12 +764,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if summary is None:
             return None
         try:
-            receipt = self._receipt(prepared, summary, runtime)
+            receipt = self._receipt(prepared, summary.tagged_text, runtime)
         except (SnipOutputInvalid, ValueError):
             logger.warning("SNIP receipt identity invalid; skipping compaction this turn")
             return None
         return ContextCompactionResult(
-            summary_text=summary,
+            summary_text=summary.continuity,
             messages_to_summarize=prepared.source_messages,
             preserved_messages=prepared.preserved_messages,
             total_tokens=prepared.total_tokens,

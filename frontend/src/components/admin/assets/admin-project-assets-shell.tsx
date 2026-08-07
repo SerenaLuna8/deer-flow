@@ -4,7 +4,6 @@ import {
   ArrowLeftIcon,
   BotIcon,
   KeyRoundIcon,
-  LockKeyholeIcon,
   NetworkIcon,
   SparklesIcon,
 } from "lucide-react";
@@ -44,7 +43,7 @@ export function AdminProjectAssetsShell({
             data-testid="admin-project-assets-context"
             className="grid min-w-0 gap-3 border-b py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"
           >
-            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:gap-4">
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
               <Link
                 href="/admin/projects"
                 className="text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex h-8 w-fit shrink-0 items-center gap-1 text-sm focus-visible:rounded-sm focus-visible:ring-2 focus-visible:outline-none"
@@ -54,20 +53,11 @@ export function AdminProjectAssetsShell({
               </Link>
               <span
                 aria-hidden
-                className="bg-border mt-2 hidden h-4 w-px sm:block"
+                className="bg-border hidden h-4 w-px shrink-0 sm:block"
               />
-              <div className="min-w-0">
-                <p className="text-sm font-semibold">
-                  {t.adminAssets.shell.projectGovernance}
-                </p>
-                <p className="text-muted-foreground mt-0.5 max-w-3xl text-xs">
-                  <LockKeyholeIcon
-                    aria-hidden
-                    className="mr-1 inline size-3.5"
-                  />
-                  {t.adminAssets.shell.projectBoundary}
-                </p>
-              </div>
+              <p className="flex h-8 min-w-0 items-center truncate text-sm font-semibold">
+                {t.adminAssets.shell.projectGovernance}
+              </p>
             </div>
             <div
               className="border-border bg-muted/45 min-w-0 rounded-md border px-3 py-2 text-xs sm:whitespace-nowrap"

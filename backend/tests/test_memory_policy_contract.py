@@ -13,10 +13,12 @@ FINAL_MEMORY_FIELDS = {
     "model_name",
     "dream_interval_minutes",
     "max_injection_tokens",
+    "idle_seal_minutes",
+    "episode_retention_days",
 }
 
 
-def test_memory_policy_has_only_the_final_four_fields() -> None:
+def test_memory_policy_has_only_the_final_six_fields() -> None:
     policy = MemoryPolicy()
 
     assert set(type(policy).model_fields) == FINAL_MEMORY_FIELDS
@@ -25,6 +27,8 @@ def test_memory_policy_has_only_the_final_four_fields() -> None:
         "model_name": None,
         "dream_interval_minutes": 120,
         "max_injection_tokens": 2_000,
+        "idle_seal_minutes": 1_440,
+        "episode_retention_days": 365,
     }
 
 
@@ -37,6 +41,8 @@ def test_materialized_memory_config_matches_the_final_policy_contract() -> None:
         "model_name": None,
         "dream_interval_minutes": 120,
         "max_injection_tokens": 2_000,
+        "idle_seal_minutes": 1_440,
+        "episode_retention_days": 365,
     }
 
 
@@ -68,6 +74,8 @@ def test_runtime_policy_strictly_rejects_every_removed_memory_field(field: str) 
             "model_name": None,
             "dream_interval_minutes": 120,
             "max_injection_tokens": 2_000,
+            "idle_seal_minutes": 1_440,
+            "episode_retention_days": 365,
             field: False,
         }
     }
@@ -80,3 +88,29 @@ def test_runtime_policy_strictly_rejects_every_removed_memory_field(field: str) 
 def test_dream_interval_is_bounded(value: int) -> None:
     with pytest.raises(ValueError):
         MemoryPolicy(dream_interval_minutes=value)
+
+
+@pytest.mark.parametrize("value", [-1, 1, 29, 10_081])
+def test_idle_seal_minutes_must_be_zero_or_in_range(value: int) -> None:
+    with pytest.raises(ValueError):
+        MemoryPolicy(idle_seal_minutes=value)
+
+
+@pytest.mark.parametrize("value", [0, 30, 1_440, 10_080])
+def test_idle_seal_minutes_accepts_zero_and_the_documented_range(value: int) -> None:
+    assert MemoryPolicy(idle_seal_minutes=value).idle_seal_minutes == value
+    assert MemoryConfig(idle_seal_minutes=value).idle_seal_minutes == value
+
+
+@pytest.mark.parametrize("value", [-1, 1, 29, 3_651])
+def test_episode_retention_days_must_be_zero_or_in_range(value: int) -> None:
+    with pytest.raises(ValueError):
+        MemoryPolicy(episode_retention_days=value)
+    with pytest.raises(ValueError):
+        MemoryConfig(episode_retention_days=value)
+
+
+@pytest.mark.parametrize("value", [0, 30, 365, 3_650])
+def test_episode_retention_days_accepts_zero_and_the_documented_range(value: int) -> None:
+    assert MemoryPolicy(episode_retention_days=value).episode_retention_days == value
+    assert MemoryConfig(episode_retention_days=value).episode_retention_days == value

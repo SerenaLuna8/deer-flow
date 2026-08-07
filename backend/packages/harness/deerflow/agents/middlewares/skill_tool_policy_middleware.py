@@ -70,6 +70,13 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
     run-long priority, so later reads cannot widen the user-selected Skill's
     authority.
 
+    Verified-read activation is additionally bounded by
+    ``read_evidence_ttl_calls``: evidence older than that many lead model calls
+    is no longer consumed, which restores the pre-activation default tool set.
+    Expiry only ever widens back to the Run-start default — it never grants new
+    authority — and slash activation is exempt because it encodes explicit user
+    intent (D10).
+
     The registry is derived exclusively from ``runtime_skills`` materialized
     for the admitted Run. This middleware never consults global or file-backed
     Skill storage.
@@ -84,6 +91,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         slash_source_owner_token: str,
         available_skills: set[str] | None = None,
         skill_file_read_tool_names: Collection[str] | None = None,
+        read_evidence_ttl_calls: int = 12,
     ) -> None:
         super().__init__()
         if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
@@ -92,6 +100,8 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             raise ValueError("runtime_skills_container_path must be a non-empty string")
         if len(runtime_skill_version_ids) != len(runtime_skills) or any(not isinstance(version_id, str) or not version_id for version_id in runtime_skill_version_ids):
             raise ValueError("runtime_skill_version_ids must identify every exact runtime Skill")
+        if type(read_evidence_ttl_calls) is not int or read_evidence_ttl_calls < 0:
+            raise ValueError("read_evidence_ttl_calls must be a non-negative integer")
 
         self._runtime_skills = tuple(runtime_skills)
         self._runtime_skill_version_ids = tuple(runtime_skill_version_ids)
@@ -99,6 +109,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._slash_source_owner_token = slash_source_owner_token
         self._skill_file_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
+        self._read_evidence_ttl_calls = read_evidence_ttl_calls
         self._decision_owner_token = secrets.token_urlsafe(24)
         self._registry_by_path = {
             posixpath.normpath(skill.get_container_file_path(runtime_skills_container_path)): (skill, version_id)
@@ -124,6 +135,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         paths = read_verified_skill_source_paths(
             context,
             owner_token=self._slash_source_owner_token,
+            ttl_calls=self._read_evidence_ttl_calls,
         )
         if paths is None:
             logger.warning("Verified Skill read evidence is malformed or unauthenticated; failing closed")
@@ -318,23 +330,55 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
 
         tools = [tool for tool in request.tools if getattr(tool, "name", None) in allowed]
         if len(tools) < len(request.tools):
-            logger.debug(
-                "Skill policy filtered %d lead tool schema(s)",
-                len(request.tools) - len(tools),
+            source, active_paths = resolved_policy
+            # Schema filtering is invisible to the model and the user, so every
+            # narrowing decision is logged with the exact admitted version IDs
+            # and the resulting tool budget to keep "the Agent suddenly lost a
+            # tool" diagnosable.
+            logger.info(
+                "Skill tool policy narrowed lead tools: source=%s active_paths=%s versions=%s allowed=%d of %d ttl_calls=%d",
+                source,
+                list(active_paths),
+                self._exact_versions_for_paths(active_paths),
+                len(tools),
+                len(request.tools),
+                self._read_evidence_ttl_calls,
             )
         return request.override(tools=tools)
 
-    @staticmethod
+    def _restricting_skill_names(self, paths: tuple[str, ...]) -> list[str]:
+        active_skills, _policy_failed = self._active_skills_for_paths(paths)
+        restricting = sorted(skill.name for skill in active_skills if skill.allowed_tools is not None)
+        return restricting or sorted(skill.name for skill in active_skills)
+
     def _blocked_tool_message(
+        self,
         request: ToolCallRequest,
         *,
         allowed: set[str] | None,
+        policy: _PolicySignature,
     ) -> ToolMessage | None:
         name = str(request.tool_call.get("name") or "")
         if allowed is None or not name or name in allowed:
             return None
+        source, paths = policy
+        detail: str
+        if source == _POLICY_SOURCE_SLASH:
+            skill_names = ", ".join(self._restricting_skill_names(paths)) or "the slash-activated Skill"
+            detail = f"The slash-activated Skill ({skill_names}) declares 'allowed-tools', which narrows the lead toolset for the rest of this run."
+        elif source == _POLICY_SOURCE_VERIFIED_READ:
+            skill_names = ", ".join(self._restricting_skill_names(paths)) or "an active Skill"
+            detail = (
+                f"Active Skill(s) {skill_names} declare 'allowed-tools', which narrows the lead toolset"
+                " while their read activation is fresh. Re-read that SKILL.md entry file"
+                " (or activate the Skill with its /slash command) to refresh activation."
+            )
+            if self._read_evidence_ttl_calls > 0:
+                detail += f" Without a fresh read, this restriction expires automatically after {self._read_evidence_ttl_calls} model calls and the default toolset returns."
+        else:
+            detail = "Skill read evidence could not be validated, so only always-available tools remain until a Skill entry file is read again."
         return ToolMessage(
-            content=(f"Error: Tool '{name}' is not allowed by the active skill policy."),
+            content=(f"Error: Tool '{name}' is not allowed by the active skill policy. {detail}"),
             tool_call_id=str(request.tool_call.get("id") or "missing_tool_call_id"),
             name=name,
             status="error",
@@ -474,7 +518,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             self._record_successful_skill_read(request, result)
             return result
         allowed = self._allowed_names(request, policy=policy)
-        blocked = self._blocked_tool_message(request, allowed=allowed)
+        blocked = self._blocked_tool_message(request, allowed=allowed, policy=policy)
         if blocked is not None:
             return blocked
         result = self._filter_tool_search_result(
@@ -500,7 +544,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             self._record_successful_skill_read(request, result)
             return result
         allowed = self._allowed_names(request, policy=policy)
-        blocked = self._blocked_tool_message(request, allowed=allowed)
+        blocked = self._blocked_tool_message(request, allowed=allowed, policy=policy)
         if blocked is not None:
             return blocked
         result = await handler(request)

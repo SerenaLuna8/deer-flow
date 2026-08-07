@@ -1,4 +1,4 @@
-config_version: 35
+config_version: 36
 log_level: info
 logging:
   enhance:
@@ -79,6 +79,10 @@ mcp_security:
   egress_proxy_url: null
   discovery_timeout_seconds: 15
   tool_call_timeout_seconds: 60
+  # Reuse one initialized project MCP transport session per Run and exact
+  # snapshot/grant closure. PostgreSQL snapshot + grant revalidation still runs
+  # before every call; set false to restore one-shot connect-per-call.
+  run_session_reuse: true
 tool_output:
   storage_subdir: .tool-results
 uploads:
@@ -96,6 +100,9 @@ sandbox:
   # provisioner_api_key: $PROVISIONER_API_KEY
 skills:
   container_path: /mnt/skills
+  # Verified-read Skill activation evidence expires after this many lead model
+  # calls (slash activation is exempt). 0 keeps evidence for the whole Run.
+  read_evidence_ttl_calls: 12
 summarization:
   # Deployment-owned prompt text remains in YAML; enablement, thresholds and
   # model selection are managed at /admin/settings/system.
@@ -131,3 +138,7 @@ worker:
   shutdown_grace_seconds: 30
   retry_initial_seconds: 2
   retry_max_seconds: 300
+  stream:
+    # Merge root assistant text deltas for at most this many milliseconds
+    # (or 4 KiB) per durable frame. 0 disables coalescing (per-token frames).
+    text_delta_flush_ms: 75

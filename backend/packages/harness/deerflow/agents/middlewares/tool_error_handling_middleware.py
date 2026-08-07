@@ -218,6 +218,30 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         return normalize_tool_result(self._maybe_stamp(result, request))
 
 
+def build_sandbox_infrastructure(
+    *,
+    lazy_init: bool = True,
+    include_uploads: bool = True,
+) -> list[AgentMiddleware]:
+    """Thread-scoped sandbox base shared by the lead, subagent, and SDK chains.
+
+    Order is behavior: ThreadData must precede Sandbox so ``thread_id`` exists
+    before sandbox setup, and Uploads sits between them because it reads the
+    thread identity and feeds workspace files the sandbox mounts. Every
+    assembly path takes this trio from here so the ordering cannot fork.
+    """
+    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    middlewares: list[AgentMiddleware] = [ThreadDataMiddleware(lazy_init=lazy_init)]
+    if include_uploads:
+        from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+
+        middlewares.append(UploadsMiddleware())
+    middlewares.append(SandboxMiddleware(lazy_init=lazy_init))
+    return middlewares
+
+
 def _build_runtime_middlewares(
     *,
     app_config: AppConfig,
@@ -228,10 +252,8 @@ def _build_runtime_middlewares(
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
-    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
-    from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
     # InputSanitizationMiddleware is first so it becomes the outermost
@@ -249,14 +271,10 @@ def _build_runtime_middlewares(
     ]
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
-    thread_hooks: list[AgentMiddleware] = [
-        ThreadDataMiddleware(lazy_init=lazy_init),
-    ]
-    if include_uploads:
-        from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
-
-        thread_hooks.append(UploadsMiddleware())
-    thread_hooks.append(SandboxMiddleware(lazy_init=lazy_init))
+    thread_hooks = build_sandbox_infrastructure(
+        lazy_init=lazy_init,
+        include_uploads=include_uploads,
+    )
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []

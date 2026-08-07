@@ -17,23 +17,30 @@ PostgreSQL `lower(email)` 唯一索引保护。`auth.local.allow_registration` �
 持久化，普通公网 HTTP 默认仍使用 session cookie，access 与 CSRF cookie 始终采用同一次策略。
 
 项目 Memory 保存在 PostgreSQL，并始终受 account、project、owner 与 namespace 作用域约束。
-Thread 自动压缩和 `/compact` 共用一次 SNIP 模型调用：同一段带标签文本既成为 Thread 的
-`summary_text`，也通过 checkpoint 回执幂等激活为待整理 history，不再运行独立 Extractor。
+Thread 自动压缩和 `/compact` 共用同一 SNIP 提示词，每次压缩至多两次模型调用（输出格式无效时
+追加一次修复重试）：同一段带标签文本既成为 Thread 的 `summary_text`，也通过 checkpoint 回执
+幂等激活为待整理 history，不再运行独立 Extractor。Agent 还可在对话中通过 `remember` 工具直接
+提出一条待整理记忆（有单 Run 与积压上限），通过只读 `recall_memory` 工具检索已归档的历史片段。
 Scheduler 或手动 `/Dream` 每次严格选择最老 20 条 history，由 Worker 的无外部工具 Dream
 执行器整理整份私有 Markdown 文档；文档、版本、真实 diff、cursor、history tombstone 和 Job
-终态在同一事务结算。聊天中的 `/Dream` 会先用专用 `keep=0` 把当前 Thread 的所有已完成回合
-分片归档，再准入同一 Dream 流程；这些内置命令不会作为普通聊天消息或 Agent Run 提交。
+终态在同一事务结算，被消费的 history 同时归档为可检索的 episode。文档超出注入预算且没有积压
+时，Scheduler 会准入一次空批次的 budget_rewrite Dream 把文档压回预算内。聊天中的 `/Dream`
+会先用专用 `keep=0` 把当前 Thread 的所有已完成回合分片归档，再准入同一 Dream 流程；闲置超过
+平台阈值的 Thread 由后台 `memory_seal` Job 复用同一屏障自动归档。这些内置命令不会作为普通
+聊天消息或 Agent Run 提交。
 
 新 Run 准入时会冻结一份完整 Memory 文档快照。Worker 在每次模型调用边界重新校验账号偏好、
 项目成员资格、Run/Job/lease 与冻结策略后，以隐藏的低权限 Human message 注入这份快照；同一 Run
-的重试和恢复不会漂移到更新后的文档，也不存在 Fact 检索、向量排序或 `memory_search`。系统设置
-中的“个性化 → 记忆”提供账号级启用开关与重置入口：关闭会在下一模型边界停止归档、Dream 和
-注入但不删除正文；重置会删除该账号保留项目中的长期 Memory/history/version/snapshot，仍保留
-Thread、聊天消息、文件和 Thread `summary_text`。
+的重试和恢复不会漂移到更新后的文档。超出注入预算的文档会降级为本次 Run 不注入并记录审计，
+而不是阻塞 Run。episodic 检索只有精确匹配、trigram 相似度与时近排序，没有向量排序或 Fact
+管道。系统设置中的“个性化 → 记忆”提供账号级启用开关与重置入口：关闭会在下一模型边界停止
+归档、Dream 和注入但不删除正文；重置会删除该账号保留项目中的长期 Memory/history/episode/
+version/snapshot，仍保留 Thread、聊天消息、文件和 Thread `summary_text`。
 
-项目 Memory 页面只展示当前文档、待整理数量、Dream 状态和可分页的真实版本/diff，并提供
-“立即整理”与基于当前版本 CAS 的恢复。旧 Source/Extractor/Candidate/Fact、v1/v2 Pipeline、
-hard-forget/export/status 管理面和搜索召回链路均不再存在。
+项目 Memory 页面展示当前文档、待整理列表、Dream 状态、可分页的真实版本/diff 和可搜索的
+历史归档（episode），并提供“立即整理”与基于当前版本 CAS 的恢复；大幅删除的版本会带
+待复核标记，超预算文档会显示降级横幅。旧 Source/Extractor/Candidate/Fact、v1/v2 Pipeline
+和 hard-forget/export/status 管理面均不再存在。
 
 Checkpoint 默认使用兼容的 `full` 表示，也可将全部 Gateway/Worker 同步配置为 `delta`
 以减少长会话的重复消息写入。Delta 状态始终通过项目作用域内的物化读取恢复；配置切换需要
@@ -70,7 +77,7 @@ UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次
 - 图片理解：当本次 Run 冻结的精确模型版本声明支持视觉时，Gateway 会在准入事务中把当前消息里经过服务端文件 authority 授权的附件精确元数据固定到 Run；图片随后直接、临时进入每次主 Agent 模型请求，无需模型先调用 `view_image`。Worker 重试或从 checkpoint 接管时必须重新恢复并精确匹配附件的 ID、版本、路径、大小、MIME 与内容校验和，附件被删除或发生任何漂移都会永久安全失败，不会静默退化成纯文本请求。历史图片仍可通过 `view_image` 重新查看。图片字节不会写入 Thread state 或 checkpoint，子 Agent 也不会自动继承当前图片。当前消息最多直达 4 张图片，单张和合计均不超过 20 MiB。
 - 执行过程：复杂任务结束后，可在最终回答前展开按时间顺序保留的全部思考、工具调用和子任务，最终回答所属模型调用的思考也作为最后一步收在其中；每次模型调用的思考保持为独立的“已思考（用时 X 秒）”区块，不会合并成普通执行步骤或重复显示。外层默认折叠以保持页面简洁；没有前序执行过程的直接回答仍保留独立思考区块，任务执行中会逐轮保留思考并自动展开当前轮次。
 - 思考时长：完成态显示 Worker 从模型流中观测到的实际思考区间；任务总耗时继续单独展示，包含模型等待、工具和子任务时间，不会冒充思考时长。
-- 资产治理：System/Project Agent、Skill、MCP 和 Credential 的版本化发布、绑定与准入快照；平台资产页只展示 System 资产，项目代管页只展示所选项目自建资产。
+- 资产治理：System/Project Agent、Skill、MCP 和 Credential 的版本化发布、绑定与准入快照；平台资产页只展示 System 资产，项目代管页只展示所选项目自建资产。替换系统凭据只会创建新版本，不会自动换绑；响应会带上服务端计算的待迁移引用数（含钉在旧密钥上的系统模型），管理员可在同一详情页立即迁移。
 - AI 创建 Skill：发送后立即显示用户消息和生成状态；补充信息可连续提交并自动保存，生成超过 60 秒时本地、Docker 与 Helm 入口都会继续等待服务端的受控结果。
 - Agent harness：Sub-Agent、Plan Mode、上下文压缩、长期 Memory、Guardrail、Tool Search 和循环检测。
 - Sandbox：支持 Local、容器和 Provisioner/Kubernetes provider；具体隔离能力取决于所选 provider。
@@ -148,7 +155,7 @@ Scheduler 和 Worker。
 
 ### 3. 初始化 PostgreSQL
 
-`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v4`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY`、`OPENCODE_API_KEY` 与 Credential keyring：DeepSeek V4 Flash 与 DeepSeek V4 Pro 共同引用一份加密 `model_api_key` Credential，GPT 5.6 Luna 使用单独加密的 OpenCode Credential，Flash 仍为默认模型；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v5`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY`、`OPENCODE_API_KEY` 与 Credential keyring：DeepSeek V4 Flash 与 DeepSeek V4 Pro 共同引用一份加密 `model_api_key` Credential，GPT 5.6 Luna 使用单独加密的 OpenCode Credential，Flash 仍为默认模型；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 在根目录 .env 中配置 DATABASE_URL、POSTGRES_ADMIN_URL、
@@ -158,7 +165,7 @@ make setup-db
 make check-db
 ```
 
-`make check-db` 只读校验 `full_schema_v4` marker 与必需对象。旧 marker、未知 marker、未纳管非空 schema 或 catalog drift 都不支持原地升级，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。
+`make check-db` 只读校验 schema marker 与必需对象，输出三态：`ready`（已在迁移链头）、`upgrade_required`（处于已知历史 revision，先备份数据库再运行 `make upgrade-db` 显式升级到链头）、其余未知 marker、未纳管非空 schema 或 catalog drift 保持 fail-closed，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。`make upgrade-db` 是唯一升级入口（不支持 downgrade），升级后会重算 catalog 校验，结果必须与全新安装完全一致；运行时进程永不自动迁移。
 
 ### 4. 启动
 
@@ -272,6 +279,7 @@ deer-flow/
 | `make dev` / `make start`                                     | 启动本地全栈                                            |
 | `make gateway` / `make worker` / `make scheduler`             | 单独启动后端进程                                        |
 | `make setup-db`                                               | 在空库执行完整 schema 并初始化 PostgreSQL               |
+| `make upgrade-db`                                             | 显式升级存量库到迁移链头（先备份，不支持 downgrade）    |
 | `make check-db`                                               | 只读检查 PostgreSQL marker 与必需对象                   |
 | `cd backend && make lint`                                     | 后端格式与静态检查                                      |
 | `cd frontend && pnpm check && pnpm test`                      | 前端 lint、类型检查与单元测试                           |

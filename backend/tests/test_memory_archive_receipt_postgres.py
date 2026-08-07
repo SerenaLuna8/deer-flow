@@ -396,7 +396,7 @@ async def test_real_stategraph_threshold_uses_runtime_checkpoint_and_activates_h
             as_node="memory_receipt_test",
         )
         model = FakeListChatModel(
-            responses=["- [durable] Runtime execution_info binds automatic compaction to its source checkpoint"],
+            responses=["<continuity>\nThe open turn continues after automatic compaction.\n</continuity>\n- [durable] Runtime execution_info binds automatic compaction to its source checkpoint"],
             custom_get_token_ids=lambda text: list(range(len(text))),
         )
         middleware = DeerFlowSummarizationMiddleware(
@@ -693,7 +693,7 @@ async def test_direct_dream_endpoint_drains_real_thread_and_activates_before_adm
             description=None,
             use=("langchain_core.language_models.fake_chat_models:FakeListChatModel"),
             model="snip-barrier-model",
-            responses=["- [durable] Direct Dream requests archive the Thread before admission"],
+            responses=["<continuity>\nThe thread is drained ahead of the Dream admission barrier.\n</continuity>\n- [durable] Direct Dream requests archive the Thread before admission"],
             custom_get_token_ids=lambda text: list(range(len(text))),
         )
         runtime_model._system_model_config_version_id = model_version_id

@@ -272,6 +272,21 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     en: "Memory document injection limit",
     unit: "Token",
   },
+  "agent_runtime.memory.idle_seal_minutes": {
+    zh: "空闲封存阈值",
+    en: "Idle seal threshold",
+    unit: "分钟",
+    hintZh: "线程空闲超过该时长后自动封存未归档回合进记忆，0 表示关闭。",
+    hintEn:
+      "Idle threads older than this are sealed into Memory capture; 0 disables.",
+  },
+  "agent_runtime.memory.episode_retention_days": {
+    zh: "归档条目保留期",
+    en: "Archived episode retention",
+    unit: "天",
+    hintZh: "历史归档条目的可检索保留天数，0 表示永久保留。",
+    hintEn: "Days archived episodes stay searchable; 0 keeps them forever.",
+  },
   "agent_runtime.tool_search.enabled": {
     zh: "启用工具按需发现",
     en: "Enable on-demand tool discovery",
@@ -1153,8 +1168,8 @@ function agentRuntimeGroups(locale: Locale) {
       title: locale === "zh-CN" ? "记忆" : "Memory",
       description:
         locale === "zh-CN"
-          ? "管理 Dream 模型、自动整理周期和文档注入上限。"
-          : "Manage the Dream model, automatic organization interval, and document injection limit.",
+          ? "管理 Dream 模型、自动整理周期、注入上限、空闲封存与归档保留期。"
+          : "Manage the Dream model, organization interval, injection limit, idle sealing, and episode retention.",
       icon: BrainIcon,
     },
     {
@@ -1480,6 +1495,20 @@ function AgentRuntimeEditor({
             min={100}
             max={8_000}
             onChange={(next) => update("memory.max_injection_tokens", next)}
+          />
+          <NumberField
+            name="agent_runtime.memory.idle_seal_minutes"
+            value={value.memory.idle_seal_minutes}
+            min={0}
+            max={10_080}
+            onChange={(next) => update("memory.idle_seal_minutes", next)}
+          />
+          <NumberField
+            name="agent_runtime.memory.episode_retention_days"
+            value={value.memory.episode_retention_days}
+            min={0}
+            max={3_650}
+            onChange={(next) => update("memory.episode_retention_days", next)}
           />
         </fieldset>
       </RuntimeGroup>
@@ -1955,7 +1984,6 @@ export function AdminSystemSettingsStateView({
       <AdminPageHeader
         eyebrow={labels.header.eyebrow}
         title={labels.header.title}
-        description={labels.header.description}
         actions={
           <Button
             type="button"

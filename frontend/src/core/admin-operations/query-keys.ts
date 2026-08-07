@@ -1,8 +1,17 @@
 import {
   accountIdSchema,
+  adminJobPageSizeSchema,
+  adminOperationsPageSizeSchema,
+  adminProjectsPageSizeSchema,
+  auditFiltersSchema,
+  DEFAULT_ADMIN_JOB_PAGE_SIZE,
+  DEFAULT_ADMIN_OPERATIONS_PAGE_SIZE,
   jobFiltersSchema,
   projectFiltersSchema,
+  type AdminAuditFilters,
   type AdminJobFilters,
+  type AdminJobPageSize,
+  type AdminOperationsPageSize,
   type AdminProjectFilters,
 } from "./types";
 
@@ -23,12 +32,14 @@ export function adminProjectsQueryKey(
   accountId: string,
   cursor: string | null = null,
   filters: AdminProjectFilters = {},
+  limit = 50,
 ) {
   return [
     ...adminOperationsRoot(accountId),
     "projects",
     cursor,
     projectFiltersSchema.parse(filters),
+    adminProjectsPageSizeSchema.parse(limit),
   ] as const;
 }
 
@@ -36,20 +47,30 @@ export function adminJobsQueryKey(
   accountId: string,
   cursor: string | null = null,
   filters: AdminJobFilters = {},
+  limit: AdminJobPageSize = DEFAULT_ADMIN_JOB_PAGE_SIZE,
 ) {
   return [
     ...adminOperationsRoot(accountId),
     "jobs",
     cursor,
     jobFiltersSchema.parse(filters),
+    adminJobPageSizeSchema.parse(limit),
   ] as const;
 }
 
 export function adminAuditQueryKey(
   accountId: string,
   cursor: string | null = null,
+  filters: AdminAuditFilters = {},
+  limit: AdminOperationsPageSize = DEFAULT_ADMIN_OPERATIONS_PAGE_SIZE,
 ) {
-  return [...adminOperationsRoot(accountId), "audit", cursor] as const;
+  return [
+    ...adminOperationsRoot(accountId),
+    "audit",
+    cursor,
+    auditFiltersSchema.parse(filters),
+    adminOperationsPageSizeSchema.parse(limit),
+  ] as const;
 }
 
 export function safeRequeueMutationKey(accountId: string) {

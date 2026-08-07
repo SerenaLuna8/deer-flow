@@ -8,6 +8,29 @@ global singletons.  It is the SDK-level entry point sitting between the raw
 Note: the factory assembly itself is config-free, but some injected runtime
 components (e.g. ``task_tool`` for subagent) may still read global config at
 invocation time.  Full config-free runtime is a Phase 2 goal.
+
+Relationship to the production lead chain
+-----------------------------------------
+
+The SDK chain is a deliberately smaller composition than ``build_middlewares``
+(``lead_agent/agent.py``), not a drifted copy of it. Shared subsequences
+delegate to the same builders (the ThreadData → Uploads → Sandbox trio comes
+from ``build_sandbox_infrastructure``), and for every middleware class both
+paths include, the relative order is pinned by
+``tests/test_agent_assembly_golden.py``.
+
+Deliberately lead-only (absent here by design):
+
+- runtime security wrappers — InputSanitization, ToolOutputBudget,
+  ToolResultSanitization, LLMErrorHandling, SandboxAudit, ReadBeforeWrite,
+  ToolProgress (they assume the private Run authorization runtime);
+- private-context composition — DynamicContext, SkillActivation,
+  SkillToolPolicy, DurableContext;
+- provider/runtime hardening — SystemMessageCoalescing, SafetyFinishReason,
+  TokenUsage.
+
+SDK users opt into extra behavior through ``extra_middleware`` (positioned
+via ``@Next``/``@Prev``) or take full control with ``middleware=``.
 """
 
 from __future__ import annotations
@@ -189,25 +212,16 @@ def _assemble_from_features(
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
-    """Build an ordered middleware chain + extra tools from *feat*.
+    """Map feature switches onto the shared builders and compose the SDK chain.
 
-    Middleware order matches ``make_lead_agent`` (14 middlewares):
-
-      0-2. Sandbox infrastructure (ThreadData → Uploads → Sandbox)
-      3.   DanglingToolCallMiddleware (always)
-      4.   GuardrailMiddleware (guardrail feature)
-      5.   ToolErrorHandlingMiddleware (always)
-      6.   SummarizationMiddleware (summarization feature)
-      7.   TodoMiddleware (plan_mode parameter)
-      8.   TitleMiddleware (auto_title feature)
-      9.   Custom memory middleware (memory feature)
-      10.  ViewImageMiddleware (vision feature)
-      11.  SubagentLimitMiddleware (subagent feature)
-      12.  LoopDetectionMiddleware (loop_detection feature)
-      13.  ClarificationMiddleware (always last)
+    The exact sequence is pinned by ``SDK_GOLDEN_CHAIN`` in
+    ``tests/test_agent_assembly_golden.py``; changing this composition must
+    change that golden list in the same commit. The module docstring records
+    which lead-chain middlewares are deliberately absent here.
 
     Two-phase ordering:
-      1. Built-in chain — fixed sequential append.
+      1. Built-in chain — fixed sequential append; shared subsequences come
+         from the same builders the lead chain uses.
       2. Extra middleware — inserted via @Next/@Prev.
 
     Each feature value is handled as:
@@ -219,46 +233,44 @@ def _assemble_from_features(
     chain: list[AgentMiddleware] = []
     extra_tools: list[BaseTool] = []
 
-    # --- [0-2] Sandbox infrastructure ---
+    # --- Sandbox infrastructure (shared trio: ThreadData → Uploads → Sandbox) ---
     if feat.sandbox is not False:
         if isinstance(feat.sandbox, AgentMiddleware):
             chain.append(feat.sandbox)
         else:
-            from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
-            from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
-            from deerflow.sandbox.middleware import SandboxMiddleware
+            from deerflow.agents.middlewares.tool_error_handling_middleware import (
+                build_sandbox_infrastructure,
+            )
 
-            chain.append(ThreadDataMiddleware(lazy_init=True))
-            chain.append(UploadsMiddleware())
-            chain.append(SandboxMiddleware(lazy_init=True))
+            chain.extend(build_sandbox_infrastructure(lazy_init=True))
 
-    # --- [3] DanglingToolCall (always) ---
+    # --- DanglingToolCall (always) ---
     chain.append(DanglingToolCallMiddleware())
 
-    # --- [4] Guardrail ---
+    # --- Guardrail ---
     if feat.guardrail is not False:
         if isinstance(feat.guardrail, AgentMiddleware):
             chain.append(feat.guardrail)
         else:
             raise ValueError("guardrail=True requires a custom AgentMiddleware instance (no built-in GuardrailMiddleware yet)")
 
-    # --- [5] ToolErrorHandling (always) ---
+    # --- ToolErrorHandling (always) ---
     chain.append(ToolErrorHandlingMiddleware())
 
-    # --- [6] Summarization ---
+    # --- Summarization ---
     if feat.summarization is not False:
         if isinstance(feat.summarization, AgentMiddleware):
             chain.append(feat.summarization)
         else:
             raise ValueError("summarization=True requires a custom AgentMiddleware instance (SummarizationMiddleware needs a model argument)")
 
-    # --- [7] TodoMiddleware (plan_mode) ---
+    # --- TodoMiddleware (plan_mode) ---
     if plan_mode:
         from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 
         chain.append(TodoMiddleware(system_prompt=_TODO_SYSTEM_PROMPT, tool_description=_TODO_TOOL_DESCRIPTION))
 
-    # --- [8] Auto Title ---
+    # --- Auto Title ---
     if feat.auto_title is not False:
         if isinstance(feat.auto_title, AgentMiddleware):
             chain.append(feat.auto_title)
@@ -267,14 +279,14 @@ def _assemble_from_features(
 
             chain.append(TitleMiddleware())
 
-    # --- [9] Memory ---
+    # --- Memory ---
     if feat.memory is not False:
         if isinstance(feat.memory, AgentMiddleware):
             chain.append(feat.memory)
         else:
             raise ValueError("memory=True requires a custom AgentMiddleware instance (no built-in memory middleware)")
 
-    # --- [10] Image checkpoint cleanup / optional vision injection ---
+    # --- Image checkpoint cleanup / optional vision injection ---
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):
             chain.append(feat.vision)
@@ -294,7 +306,7 @@ def _assemble_from_features(
 
         chain.append(ViewImageMiddleware(enable_injection=False))
 
-    # --- [11] Subagent ---
+    # --- Subagent ---
     if feat.subagent is not False:
         if isinstance(feat.subagent, AgentMiddleware):
             chain.append(feat.subagent)
@@ -306,7 +318,7 @@ def _assemble_from_features(
 
         extra_tools.append(task_tool)
 
-    # --- [12] LoopDetection ---
+    # --- LoopDetection ---
     if feat.loop_detection is not False:
         if isinstance(feat.loop_detection, AgentMiddleware):
             chain.append(feat.loop_detection)
@@ -316,7 +328,7 @@ def _assemble_from_features(
 
             chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
 
-    # --- [13] TokenBudget ---
+    # --- TokenBudget ---
     if feat.token_budget is not False:
         if isinstance(feat.token_budget, AgentMiddleware):
             chain.append(feat.token_budget)
@@ -326,7 +338,7 @@ def _assemble_from_features(
 
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
 
-    # --- [14] Clarification (always last among built-ins) ---
+    # --- Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
     extra_tools.append(ask_clarification_tool)
 

@@ -4,6 +4,7 @@ from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     MemoryDocumentVersionRow,
     MemoryDreamRunRow,
+    MemoryEpisodeRow,
     MemoryHistoryEntryRow,
     RunMemoryContextSnapshotRow,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "MemoryDocumentVersionRow",
     "MemoryDocumentVersionRecord",
     "MemoryDreamRunRow",
+    "MemoryEpisodeRow",
     "MemoryHistoryEntryRow",
     "MemoryHistoryActivation",
     "MemoryHistoryActivationResult",

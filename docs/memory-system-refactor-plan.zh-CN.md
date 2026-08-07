@@ -1,10 +1,9 @@
 # DeerFlow 记忆系统最终改造方案与执行计划
 
-- 日期：2026-08-05
-- 状态：已完成（PR1～PR5 应用实现、清理与真实模型/UI 验收全部完成）
-- 完成日期：2026-08-06
-- 执行分支：`codex/memory-system-refactor`
-- 基线分支：`dev`
+- 立项日期：2026-08-05
+- 状态：**应用层完成，后端核心门禁已通过（0 skip），Replay E2E 仍未运行**。PR1～PR5 的应用实现、旧链路清理和第 14.4 节真实模型/UI 验收已完成；真实 PostgreSQL 后端核心门禁已于 2026-08-06 跑到 `975 passed, 0 failed, 0 skipped`，详见 18.1 节。
+- 应用层完成日期：2026-08-06
+- 执行分支：`codex/memory-system-refactor`（历史信息；该分支与基线 `dev` 均已不在当前仓库中，当前检出为 `main`，最接近的远程为 `upstream/2.0.x-dev`）
 - 适用范围：`project_id + owner_user_id + namespace` 下的用户私有项目记忆
 - 参考实现：nanobot SNIP 压缩归档与 Dream 整理模式
 - 替代范围：本文整体替代此前的 Source → Extractor → Candidate → Fact 方案
@@ -342,7 +341,7 @@ If nothing noteworthy happened, output: (nothing)
 
 DeerFlow 只把原文中的 `cross-file` 改成适合单文档的 `long-term-memory`，并在外围增加长度、格式和失败语义，不改变 SNIP 的判断规则。
 
-调用时在输入数据前附加固定的 DeerFlow 输出合同，不增加第二次模型调用：
+紧接在上面这段之后，同一个文件里还写着固定的 DeerFlow 输出合同和输入占位符，不增加第二次模型调用：
 
 ```text
 The input contains a Previous Summary and a New Conversation Segment.
@@ -351,7 +350,12 @@ Keep the final output within 1000 characters.
 When space is limited, retain corrections and preferences first, then permanent
 facts, durable decisions/solutions, and only the newest active ephemeral state.
 Drop stale events, environment details, and skip items first.
+
+Input:
+{messages}
 ```
+
+这两段是**同一个 `snip_archive.md` 的连续正文**，由 `SNIP_ARCHIVE_PROMPT` 一次性整体加载；`snip.py` 不在运行时追加任何前缀或后缀，待压缩内容只通过结尾的 `{messages}` 占位符注入。提示词版本为 `SNIP_ARCHIVE_PROMPT_VERSION = "snip-archive-prompt-v1"`，`backend/tests/test_memory_snip.py` 对整份文件有快照断言。
 
 ### 6.4 输出校验
 
@@ -401,6 +405,12 @@ LangGraph checkpointer 使用独立 psycopg 连接，业务表使用 SQLAlchemy 
 - `summary_text` 与 history 使用同一份模型输出；
 - 不需要再增加 Source Batch、Extraction Generation 或 Candidate 表。
 
+实现上还有三条不能违反的边界：
+
+1. **source checkpoint 的唯一权威来源是 LangGraph `runtime.execution_info.checkpoint_id`。** 自动压缩路径按它计算 `source_digest`；显式传入的 archive context 必须与它精确相等，否则失败关闭。只有在 runtime 执行信息不可用时，才回退到 legacy 的可配置值。
+2. **只有持久化的 `aput` 才能激活回执。** `aget` 和下一次直接 `aput` 只对**当前** checkpoint tuple 做幂等补激活；绝不扫描 checkpoint 历史去找未激活的回执，否则会把早已消费甚至已被 reset 的内容重新翻出来。
+3. **回执不得复制进 branch。** branch 写入的是重放基线和选定状态两个目标 checkpoint，若把来源回执一起复制过去，同一段归档会在两条分支上各激活一次。
+
 ### 6.6 Thread Context 最终如何存储
 
 Thread 的短期对话上下文仍由 LangGraph checkpoint 保存：
@@ -436,6 +446,8 @@ memory_archive_receipt = 只供持久化修复使用的内部回执
 - SNIP/存储真正失败：返回错误，不伪装成 Dream 成功；
 - `/Dream` 自身不写入聊天消息，也不创建普通 Agent Run。
 
+这是**服务端屏障，不是前端约定**——前端只负责识别命令，"排空后再准入"由 Gateway 保证。因为模型压缩必须在数据库事务之外进行，屏障拆成两段：先在事务外做完压缩，再开一个短事务，在其中锁定已授权的 Thread head、修复该 head 的当前回执、拒绝存在活动 Run、并确认没有残留的完整回合，确认通过后在**同一个事务内**准入 Dream。若在此期间 head 被新消息抢占，则重新排空一轮，最多三次有界 seal 尝试；仍未收敛就失败关闭，绝不跳过未归档内容直接准入。
+
 因此 `/Dream` 能处理刚结束的短对话，不会因为普通 summarization `keep=20` 而显示“没有待整理内容”。Memory 页面上的“立即整理”没有 Thread 上下文，只处理已经存在的 backlog。
 
 ### 7.2 Dream 准入
@@ -465,6 +477,17 @@ Worker 只读取准入时冻结的：
 - 当前长期记忆文档，最多 16000 字符，并且不得超过注入 token 预算；
 - 最老 20 条 history，每条最多 1000 字符，不再截断；
 - 固定 Dream system prompt。
+
+冻结输入由 `render_dream_input()` 渲染为一个 `<dream-input>` 数据块，其中同时给出硬上限和目标预算四个标签：
+
+| 标签 | 取值 | 含义 |
+|---|---|---|
+| `<character-limit>` | 固定 16000 | 文档硬字符上限 |
+| `<token-limit>` | `max_injection_tokens` | 文档硬 token 上限 |
+| `<target-token-limit>` | 硬上限的 90% | 要求模型写入时遵守的目标 token 预算 |
+| `<target-character-limit>` | `min(16000, target_token)` | 要求模型写入时遵守的目标字符预算 |
+
+目标预算不是硬上限的同义词：提示词要求模型写到目标以内，而服务端 `validate_memory_document()` 按硬上限判定。留出 10% 余量是为了让模型的自估偏差不会立刻撞上硬上限，也让下面 7.7 的重写反馈有可收敛的空间。
 
 每条 history 带服务器编号，例如：
 
@@ -531,9 +554,11 @@ Dream 不再输出 confidence 或结构化 Fact 操作，而是维护整份文�
 
 ### 7.6 固定 Dream 提示词
 
-计划保存为：
+保存为：
 
 `backend/packages/harness/deerflow/agents/memory/prompts/dream.md`
+
+当前版本号为 `DREAM_PROMPT_VERSION = "dream-prompt-v2"`。修改这个文件的正文必须同时升版本号：Worker 在 `_input()` 中用 `work.prompt_version != DREAM_PROMPT_VERSION` 拒绝已冻结的 Dream 工作，版本号不升会让两份不同的提示词共用同一个 `prompt_version`，`memory_dream_runs` 的审计含义随之失真。
 
 ```text
 You are DeerFlow Dream, a long-term memory consolidation engine.
@@ -578,6 +603,13 @@ Editing rules:
 - Keep architecture decisions until explicitly superseded.
 - Keep stable user preferences until explicitly corrected.
 - The final document must fit both the character limit and token budget.
+- Treat <target-token-limit> as the required writing budget. The complete
+  replacement must be at or below that target, not merely below the hard limit.
+- The complete document must not exceed <target-character-limit>. Use this exact
+  character ceiling while rewriting instead of estimating tokenization yourself.
+- A rejected replacement was not saved. Never resubmit an unchanged rejected draft.
+  Rewrite the complete document and prune lower-priority, stale, superseded, or
+  duplicate facts before calling replace_memory_document again.
 - Never rely on server-side truncation; prune and rewrite the document yourself.
 
 Read the current document before editing. If changes are needed, call
@@ -589,6 +621,8 @@ server-computed document diff prove a change.
 ```
 
 `Current Memory`、20 条 `Conversation History`、字符/token 上限和版本号由 Worker 作为清晰分隔的数据块附在 system prompt 后，不允许 history 自己覆盖上述固定规则。
+
+account-global 那条 scope 规则是 2.6 节授权边界在提示词层的落地。真正的隔离仍然由服务端作用域绑定保证（Dream 工具没有 path/project/owner/namespace 参数，作用域由 Job 固定），提示词只是同一条边界的纵深防御；`backend/tests/test_memory_dream.py` 对它有固定断言，改提示词时不得顺手删掉。
 
 ### 7.7 Dream 临时 Session 与工具
 
@@ -604,14 +638,25 @@ replace_memory_document(content)
 工具边界：
 
 - 无 path、project、owner、namespace 参数，作用域由 Job 固定；
-- `read_memory_document` 只读取冻结的当前文档；
+- `read_memory_document` 只读取冻结的当前文档，且必须先读后写；
 - `replace_memory_document` 只修改进程内草稿，不立即写数据库；
 - 不提供文件、Shell、Web、MCP、Skill、Subagent 或普通聊天工具；
-- Session 正常完成且没有工具错误时，最终草稿才有资格结算；
 - 正常完成但没有调用 replace，视为无修改成功，仍消费本批 history；
 - 模型工具循环设置固定超时和最大轮数，防止无限运行。
 
 Dream 可能因为工具调用产生多次模型往返；“一次调用”只适用于阶段一 SNIP，不适用于 Dream 工具循环。
+
+#### 草稿被拒绝时的重写循环
+
+`replace_memory_document` 的校验失败**不是终态失败**。`validate_memory_document()` 在章节非法、残留 `[H:n]`/标签、超字符或超 token 时抛出 `MemoryDocumentInvalid`，Runner 会把它转成模型可消费的反馈并继续本轮 Job：
+
+1. 回一条 ToolMessage 说明拒绝原因，超预算时带上"至少还需删减多少 token / 多少字符"；
+2. 再追加一条 HumanMessage 修订指令，重申 `<target-token-limit>` 和 `<target-character-limit>`；
+3. 对提交内容取 SHA-256，若与此前被拒草稿重复，反馈里明确标注"same rejected draft; it was not saved"，防止模型原样重交；
+4. 连续 2 次**超预算**拒绝后进入一次性的 fresh-regeneration：丢弃全部对话上下文、把草稿复位为冻结原文，只保留 system prompt + 冻结输入 + 一条重来指令。每个 Job 最多触发一次；
+5. 模型在被拒后若不带工具调用直接收尾，会被再追加一条修订指令要求它真正重交，而不是当作"无修改成功"结算。
+
+整个循环有界于 `DEFAULT_DREAM_MAX_ROUNDS = 8` 轮和 `DEFAULT_DREAM_TIMEOUT_SECONDS = 120` 秒，耗尽分别抛出 `MEMORY_DREAM_ROUND_LIMIT` 和 `MEMORY_DREAM_TIMEOUT`。只有以下情况才是本次 Dream 的终态失败：轮数或超时耗尽、模型返回非 AIMessage（`MEMORY_DREAM_MODEL_INVALID`）、工具名/调用结构非法（`MEMORY_DREAM_TOOL_INVALID`）、工具抛出非校验类异常（`MEMORY_DREAM_TOOL_FAILED`）、以及一次 replace 都没成功却已读完文档收尾时的 `MEMORY_DREAM_READ_REQUIRED`。这些都按 7.8 的失败路径回滚，不消费 history。
 
 ### 7.8 Dream 结算事务
 
@@ -691,8 +736,11 @@ project 条件后退化为 owner 全局读取。
 UNIQUE(project_id, owner_user_id, namespace, thread_id, source_digest)
 CHECK(namespace <> '')
 CHECK(tagged_text IS NULL OR char_length(tagged_text) <= 1000)
-CHECK((status IN ('pending', 'processing') AND tagged_text IS NOT NULL)
-   OR (status = 'consumed' AND tagged_text IS NULL))
+
+-- ck_memory_history_entries_lifecycle：三个状态各自绑定正文、Dream Job 和消费时间
+CHECK((status = 'pending'    AND tagged_text IS NOT NULL AND dream_job_id IS NULL     AND consumed_at IS NULL)
+   OR (status = 'processing' AND tagged_text IS NOT NULL AND dream_job_id IS NOT NULL AND consumed_at IS NULL)
+   OR (status = 'consumed'   AND tagged_text IS NULL     AND dream_job_id IS NOT NULL AND consumed_at IS NOT NULL))
 ```
 
 保留 consumed tombstone 是 checkpoint 回执幂等所必需的最小元数据：若整行删除，读取旧 checkpoint 时同一回执会再次插入并“复活”已经整理过的内容。reset 会连 tombstone 一起删除，同时通过递增的账户偏好版本使旧 checkpoint 回执失效。
@@ -815,11 +863,11 @@ reset 或恢复语义。Worker 必须能区分两个低权限数据块及其版�
 删除旧 `/v2/candidates`、`/v2/facts`、hard-forget、export、pipeline status 等接口，收敛为：
 
 ```text
-GET  /api/projects/{project}/memory
-POST /api/projects/{project}/memory/dream
-GET  /api/projects/{project}/memory/versions
-GET  /api/projects/{project}/memory/versions/{version}
-POST /api/projects/{project}/memory/versions/{version}/restore
+GET  /api/projects/{project_id}/memory
+POST /api/projects/{project_id}/memory/dream
+GET  /api/projects/{project_id}/memory/versions
+GET  /api/projects/{project_id}/memory/versions/{version}
+POST /api/projects/{project_id}/memory/versions/{version}/restore
 ```
 
 `POST .../memory/dream` 可接收服务器校验后的当前 `thread_id`：
@@ -971,12 +1019,12 @@ staleness_protected_categories
 
 最终 `MemoryPolicy` 只保留：
 
-| 配置 | 默认 | 用途 |
-|---|---:|---|
-| `enabled` | `true` | 平台总开关 |
-| `model_name` | 默认模型 | Dream 使用的模型；SNIP 使用 summarization 模型 |
-| `dream_interval_minutes` | `120` | Scheduler 自动 Dream 间隔 |
-| `max_injection_tokens` | `2000` | 文档写入和完整注入的共同 token 上限 |
+| 配置 | 默认 | 取值范围 | 用途 |
+|---|---:|---|---|
+| `enabled` | `true` | — | 平台总开关 |
+| `model_name` | `None` | 活动 system model | Dream 使用的模型；`None` 表示运行时解析为默认模型。SNIP 始终使用 summarization 模型 |
+| `dream_interval_minutes` | `120` | `15..1440` | Scheduler 自动 Dream 间隔 |
+| `max_injection_tokens` | `2000` | `100..8000` | 文档写入和完整注入的共同 token 上限 |
 
 这四个字段只是平台运行上限，不是账户画像字段。平台管理员不能通过 Memory Policy 创建、
 查看或注入用户偏好，也不能开启跨项目共享。
@@ -1057,10 +1105,22 @@ Job 类型删除：
 - `backend/packages/harness/deerflow/agents/memory/prompts/dream.md`
 - `backend/packages/harness/deerflow/persistence/private_work/memory_document_model.py`
 - `backend/packages/harness/deerflow/persistence/private_work/memory_document_repository.py`
-- `backend/app/private_work/memory_compaction_archive.py`
+- `backend/app/private_work/memory_service.py`
 - `backend/app/private_work/memory_dream_service.py`
+- `backend/app/private_work/memory_authority.py`
 - `backend/app/worker/memory_dream.py`
 - 简化后的 Memory 页面、版本抽屉和 API client
+
+归档回执**没有**独立模块，它的逻辑按职责分散在四处，改这条链路时要四个一起看：
+
+| 职责 | 位置 |
+|---|---|
+| 回执类型、key 与构造 | `agents/memory/snip.py`（`MemoryArchiveReceipt`、`build_memory_archive_receipt()`） |
+| 与 `summary_text` 同一次 State 更新写入 | `agents/middlewares/summarization_middleware.py` |
+| checkpoint 写入后的幂等激活与失败修复 | `backend/app/private_work/checkpointer.py`（`ProjectScopedCheckpointer`） |
+| 落库 | `memory_document_repository.activate_history()` |
+
+长期文档的注入侧同理：`agents/middlewares/dynamic_context_middleware.py` 负责渲染隐藏低权限 HumanMessage，`backend/app/private_work/snapshot_repository.py` 负责在 Run 准入时冻结快照。
 
 ### 12.3 必须同步修改
 
@@ -1107,7 +1167,9 @@ rg -n "memory_(source_batches|source_items|extraction_generations|consolidation_
 rg -n "consolidation_interval_minutes|candidate_retention_days|memory\.search_enabled|memory\.debounce_seconds|memory\.max_facts|memory\.fact_confidence_threshold|memory\.injection_enabled|memory\.token_counting|memory\.guaranteed_categories|memory\.guaranteed_token_budget|memory\.staleness_" backend/app backend/packages/harness/deerflow frontend/src
 ```
 
-该命令对运行时代码、schema、前端和当前文档的预期结果必须为空；如果测试迁移说明需要提及旧名称，只能放在明确的历史删除断言中。还必须检查 FastAPI OpenAPI 路由清单和 Next.js 构建，证明旧入口不可访问且没有死引用。
+这两条命令对**运行时代码、schema 和前端**的预期结果必须为空。唯一允许的例外是契约测试中明确的"历史删除断言"——目前第一条会命中 `backend/tests/test_memory_document_contract.py` 的 `REMOVED_MEMORY_TABLES`/已删除 Job 类型清单和 `backend/tests/test_memory_policy_contract.py` 的 strict 拒绝清单，这些是**故意**保留旧名称以证明它们已被删除，不算残留。第二条应完全为空。核对时逐条确认命中都落在这类断言里，而不是简单地要求输出为空。
+
+注意本文自身也大量提及旧名称，因此扫描范围只覆盖 `backend` 和 `frontend`，不要扩展到 `docs/`。还必须检查 FastAPI OpenAPI 路由清单和 Next.js 构建，证明旧入口不可访问且没有死引用。
 
 ## 13. 分 PR 执行计划
 
@@ -1505,22 +1567,27 @@ rg -n "consolidation_interval_minutes|candidate_retention_days|memory\.search_en
 
 ### 14.5 最终门禁命令
 
-实际执行时使用当前仓库命令，不把缺少真实 PostgreSQL 的结果算作完整通过：
+实际执行时使用当前仓库命令，不把缺少真实 PostgreSQL 的结果算作完整通过。以下全部从仓库根目录开始，`$REPO` 即仓库根：
 
 ```bash
-cd /Users/jiangfeng/deer-flow/backend
+cd "$REPO/backend"
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest tests/ -q
 
-cd /Users/jiangfeng/deer-flow
+cd "$REPO"
 set -a
 . ./.env
 set +a
+# 核心门禁要求 POSTGRES_TEST_URL 指向名为 postgres 的维护库，且该连接
+# 必须有权创建/销毁随机 deerflow_test_* 库。backend/tests/support/core_gate_plugin.py
+# 会在 pytest 收集前校验库名，不满足时以 exit 4 直接拒绝。
+# 本仓库 .env 中的 POSTGRES_ADMIN_URL 已指向 postgres 维护库且角色具备 CREATEDB，
+# 下面这行成立；换环境时若它指向业务库，必须改用可丢弃的维护连接，不得授予权限绕过。
 test -n "$POSTGRES_ADMIN_URL"
 POSTGRES_TEST_URL="$POSTGRES_ADMIN_URL" make test
 
-cd /Users/jiangfeng/deer-flow/frontend
+cd "$REPO/frontend"
 pnpm format
 pnpm test
 pnpm check
@@ -1535,7 +1602,7 @@ DATABASE_URL="$REPLAY_DATABASE_URL" CI=1 pnpm exec playwright test \
   tests/e2e-real-backend/real-backend-render.spec.ts \
   -c playwright.real-backend.config.ts
 
-cd /Users/jiangfeng/deer-flow
+cd "$REPO"
 make check-db
 make dev
 ```
@@ -1554,7 +1621,7 @@ Replay E2E 的 `DATABASE_URL` 必须指向独立、可写且库名以 `deerflow_
 最终方式：
 
 1. Codex 只负责应用代码、schema 定义、测试代码和应用层验证，使用根目录 `.env` 已有连接；不管理数据库角色、角色属性或授权，不做手工 schema 修补、数据回填或业务数据迁移，也不打印连接串或凭据。
-2. 代码阶段的真实 PostgreSQL 门禁可把 `.env` 中既有 `POSTGRES_ADMIN_URL` 作为 `POSTGRES_TEST_URL` 使用。创建和回收仅限测试夹具自动管理的随机 `deerflow_test_*`，绝不连接或改动业务库。
+2. 代码阶段的真实 PostgreSQL 门禁可把 `.env` 中既有 `POSTGRES_ADMIN_URL` 作为 `POSTGRES_TEST_URL` 使用，前提是它指向名为 `postgres` 的维护库——`backend/tests/support/core_gate_plugin.py` 会在 pytest 收集前校验库名并对业务库以 exit 4 拒绝。创建和回收仅限测试夹具自动管理的随机 `deerflow_test_*`，绝不连接或改动业务库。
 3. 如果既有测试连接缺少随机测试库生命周期所需权限，Codex 只报告具体失败和未通过门禁；由用户、DBA 或环境所有者提供符合仓库测试合同的既有授权连接，Codex 不自行授予 `CREATEDB` 或其他权限。
 4. 现有 `DATABASE_URL` 对应开发库从 `full_schema_v3` 到 `full_schema_v4` 没有原地升级路径。默认由用户、DBA 或环境所有者停栈并交付空目标；如果用户已对精确的 `.env` 开发库明确授权 reset，Codex 可停栈并运行当前 checkout 的完整 `make setup-db` 流程。该授权不延伸到数据库角色、权限或其他数据库。
 5. 初始化后，Codex 使用既有 `DATABASE_URL` 运行只读 `make check-db`，确认 `full_schema_v4` marker、必需表和系统目录，再启动 `make dev` 做应用层真实环境测试。
@@ -1576,9 +1643,9 @@ Replay E2E 的 `DATABASE_URL` 必须指向独立、可写且库名以 `deerflow_
 8. 不声称真实环境通过，除非完整栈、真实 PostgreSQL 和真实模型对话确实执行过。
 9. 当前工作区已有改动属于用户；实现时逐文件核对，不使用 destructive git 命令覆盖。
 
-## 17. 完成定义（已满足）
+## 17. 完成定义（应用层已满足）
 
-以下应用层条件均已满足，记忆重构 PR1～PR5 已完成：
+以下**应用层**条件均已满足。它们不包含 14.5 节的独立 PostgreSQL 核心门禁和 Replay E2E，那两项的当前状态见 18 节。
 
 - 每次正常压缩尝试只有一次 SNIP 模型调用，没有独立 Extractor 调用；
 - 非 `(nothing)` 的 SNIP 输出同时且原样成为 Thread summary 和一条 history；
@@ -1594,11 +1661,13 @@ Replay E2E 的 `DATABASE_URL` 必须指向独立、可写且库名以 `deerflow_
 - `deerflow` 业务库按 `full_schema_v4` 完整初始化，应用层门禁和真实长对话验收通过；
 - `README.md` 与 AGENTS 文档准确描述最终实现。
 
-以上条件均已满足，PR1～PR5 状态正式标记为完成。本文保留为最终实现与验收记录；后续变更若与本文冲突，应先更新并重新确认本文，不能重新引入旧 Candidate / Fact 方案。
+以上应用层条件均已满足，PR1～PR5 的实现工作结束；但按 13 节 PR5 和 16.8 条自己设定的标准，在真实 PostgreSQL 核心门禁跑到 0 skip 之前，整体不能算发布就绪。
 
-## 18. 2026-08-05 执行记录
+本文是历史决策与验收记录，**不是运行时不变量的权威来源**。记忆系统当前生效的不变量以 `backend/AGENTS.md` 的 "Project Memory runtime" 一节为准；两者冲突时以 `AGENTS.md` 和代码为准，并回头修正本文。后续变更不得重新引入旧 Candidate / Fact 方案。
 
-PR1～PR5 的应用代码、清理和第 14.4 节真实模型/UI 验收均已完成，本计划状态为完成。独立 disposable PostgreSQL 发布环境认证不属于本计划的应用层完成条件，也不扩大 Codex 的应用层职责或授权修改数据库角色与权限。
+## 18. 执行记录（2026-08-05 立项，2026-08-06 收尾）
+
+PR1～PR5 的应用代码、清理和第 14.4 节真实模型/UI 验收均已完成。独立 disposable PostgreSQL 核心门禁与 Replay E2E 仍未通过，作为独立发布环境认证保留在本节末尾；它们不扩大 Codex 的应用层职责，也不授权修改数据库角色与权限。
 
 | 阶段 | 状态 | 已落地结果 |
 |---|---|---|
@@ -1626,18 +1695,28 @@ PR1～PR5 的应用代码、清理和第 14.4 节真实模型/UI 验收均已完
 1. Gateway schema probe 的只读 `SELECT` 会自动开启事务，请求依赖在进入业务服务或 streaming body 后仍占用连接；历史消息 feedback 并发最终耗尽连接池。现已让 probe 使用显式短事务，并把 Project session 依赖收口到 function scope；聚焦回归 15 个通过，后续 15 轮真实运行未再出现 30 秒 pool timeout。
 2. 已回答的 `ask_clarification` continuation 曾被误判为新的物理用户回合，导致来源回合以 ToolMessage 结尾，`_complete_turn_ranges()` 从 Thread 头返回空集合并永久阻塞后续 compaction。现只把服务端隐藏、结构有效、与 request/tool-call 精确匹配的回复合并到原逻辑回合；未回答、缺最终 AI、错 request、可见伪回复和缺工具结果均 fail closed。compaction 聚焦回归 21 个通过，SNIP/clarification/human-input 联合回归 `94 passed, 2 skipped`，并由上述真实关闭态 `/compact` 重新证明。
 
-当前 checkout 门禁证据：
+2026-08-06 收尾时的门禁证据（**历史快照**，按根 `AGENTS.md` 的 checkout-sensitive 规则，它不认证任何后续 checkout；每次改动后必须重跑当前门禁）：
 
 - 最新 compaction + Gateway lifecycle 合并聚焦集合 `24 passed`；完整非 PostgreSQL 后端回归 `878 passed, 37 skipped`；`ruff check` 与 `ruff format --check` 对 723 个文件通过。37 个 skip 不能冒充真实 PostgreSQL 发布门禁。
 - 前端 Prettier、`pnpm check`、`151 passed, 0 skipped` 全部通过；production/static build 各完成 76/76 页面；production Chromium E2E `1 passed`，static Chromium E2E `2 passed`。
 - 当前 Gateway OpenAPI 只包含最终 Memory 文档、Dream、版本/恢复和账户 reset 操作，旧 URL 返回 404；production/static 发布产物中的旧 V2 Memory 字符串均为 0；harness wheel 已确认包含最终 Dream/SNIP 模块和 prompts。
 - `git diff --check` 通过；只读 `make check-db` 确认 `deerflow`、`full_schema_v4` 与必需对象 ready。完整应用栈在构建前正常停止，最终门禁后已重新启动，Nginx 与 Gateway `/health` 均返回 healthy。
 
-独立外部发布环境说明（不阻塞本计划完成状态）：
+独立外部发布环境门禁（当时状态，已被 18.1 节的重跑取代其中第 1 项）：
 
-1. 真实 PostgreSQL 核心门禁上次结果为 `848 passed, 1 failed, 35 errors, 0 skipped`；36 项均停在夹具创建随机 `deerflow_test_*` 的入口，尚未执行对应应用断言。必须由符合仓库测试合同的既有 disposable PostgreSQL 连接重跑到 0 skip。
-2. `backend/tests/_replay_fixture.py` 本次有改动并命中 Replay E2E workflow；该门禁同样要求独立可写的 `deerflow_test_replay_*`，不得改用业务 `deerflow`，也不得通过修改角色属性或授权绕过。
+1. 真实 PostgreSQL 核心门禁上次结果为 `848 passed, 1 failed, 35 errors, 0 skipped`；36 项均停在夹具创建随机 `deerflow_test_*` 的入口，尚未执行对应应用断言。必须由符合仓库测试合同的既有 disposable PostgreSQL 连接重跑到 0 skip。**（已于 18.1 节解决。）**
+2. `backend/tests/_replay_fixture.py` 本次有改动并命中 Replay E2E workflow；该门禁同样要求独立可写的 `deerflow_test_replay_*`，不得改用业务 `deerflow`，也不得通过修改角色属性或授权绕过。**（仍未运行。）**
 
 2026-08-06 继续执行时，用户再次明确授权精确业务库 `deerflow` 可删除重建。只读检查确认该库仍为健康的 `full_schema_v4`，因此没有执行无收益的再次清空；随后使用该库重新启动完整开发栈，Nginx 与 Gateway `/health` 均返回 healthy。两项独立外部门禁分别做了“写入前”真实前置校验：把业务 URL 传给核心门禁时，在 pytest 启动前以 exit 4 拒绝并要求库名 `postgres`；把业务 URL 传给 Replay 校验器时，在数据库连接前以 exit 4 拒绝并要求 `deerflow_test_replay_*`。删除重建业务库不会改变这两个合同，也不会赋予当前连接创建随机测试库的能力，因此未修改保护代码、数据库角色或授权。
 
-因此，PR1～PR5 的应用实现和真实应用验收均已完成，本文正式标记为完成。外部 disposable PostgreSQL 核心 0-skip 与 Replay E2E 保留为独立发布环境认证，不影响本计划的完成状态。
+因此，PR1～PR5 的应用实现和真实应用验收均已完成；外部 disposable PostgreSQL 核心 0-skip 与 Replay E2E 仍未通过，本文状态为"应用层完成、发布门禁未通过"。
+
+### 18.1 2026-08-06 之后的修正记录
+
+- 补上 Dream 提示词缺失的 account-global scope 规则（2.6 节授权边界在提示词层的落地），`DREAM_PROMPT_VERSION` 随之从 `dream-prompt-v1` 升到 `dream-prompt-v2`，并在 `backend/tests/test_memory_dream.py` 中加了固定断言。此前该规则只存在于本文，代码和测试中都没有。
+- 按当前代码复核并修正本文与实现脱节的部分：7.6 的提示词全文、7.7 的草稿拒绝重写循环、7.3 的目标预算标签、6.3 的 SNIP 输出合同位置、6.5 的 checkpoint 三条边界、7.1 的 `/Dream` 服务端屏障、12.2 的文件地图（原先列出的 `memory_compaction_archive.py` 从未存在），以及 8.1、10.1、11.2、12.4、14.5 的若干细节。
+
+**真实 PostgreSQL 后端核心门禁已通过。** 使用根 `.env` 既有的 `POSTGRES_ADMIN_URL`（指向本机 `postgres` 维护库，角色具备 CREATEDB）作为 `POSTGRES_TEST_URL` 运行
+`POSTGRES_TEST_URL="$POSTGRES_ADMIN_URL" make test`，结果为 `collected=975 passed=975 failed=0 skipped=0`，用时约 43 秒。此前 18 节记录的 36 项夹具入口失败不再出现——那次是连接不满足测试合同，不是应用缺陷。运行后核对：随机 `deerflow_test_*` 全部由夹具自动回收（残留 0 个），业务库 `deerflow` 未被连接或改动，只读 `make check-db` 仍报告 `full_schema_v4` ready。全程未修改数据库角色、角色属性或授权。
+
+剩余未完成的门禁只有 Replay E2E：它要求独立可写、库名以 `deerflow_test_replay_` 开头的目标，`REPLAY_DATABASE_URL` 当前未在 `.env` 中配置，因此保持未运行。

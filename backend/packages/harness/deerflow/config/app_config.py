@@ -99,6 +99,8 @@ DATABASE_RUNTIME_POLICY_PATHS = frozenset(
         "max_recursion_limit",
         "memory.enabled",
         "memory.dream_interval_minutes",
+        "memory.episode_retention_days",
+        "memory.idle_seal_minutes",
         "memory.max_injection_tokens",
         "memory.model_name",
         "read_before_write.enabled",

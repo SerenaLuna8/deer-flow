@@ -173,6 +173,7 @@ async def test_finalize_retry_returns_the_existing_version_without_resettling() 
         history_count=2,
         prompt_version=DREAM_PROMPT_VERSION,
         model_ref=_frozen().model_version_id,
+        needs_review=False,
         created_at=NOW,
     )
     repository = MemoryDocumentRepository(

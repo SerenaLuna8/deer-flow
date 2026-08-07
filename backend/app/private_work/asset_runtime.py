@@ -32,6 +32,11 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.mcp_run_sessions import (
+    McpRunSession,
+    McpRunSessionCache,
+    McpRunSessionKey,
+)
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_admission import AdmittedPrivateRun
 from app.private_work.run_repository import PrivateRunRepository
@@ -914,6 +919,7 @@ class PrivateAgentRuntime:
         "_discovery_timeout_seconds",
         "_endpoint_policy",
         "_http_client_factory",
+        "_mcp_run_sessions",
         "_mcp_snapshots",
         "_mcp_tools",
         "_mcp_tools_by_version",
@@ -946,12 +952,14 @@ class PrivateAgentRuntime:
         all_skill_manifests: tuple[PrivateSkillManifest, ...] | None = None,
         all_skills: tuple[Skill, ...] | None = None,
         delegate_model_names: Mapping[uuid.UUID, str] | None = None,
+        run_session_reuse: bool = True,
     ) -> None:
         self._context = context
         self._run_id = run_id
         self._resolver = resolver
         self._session_factory = session_factory
         self._mcp_snapshots = mcp_snapshots
+        self._mcp_run_sessions = McpRunSessionCache() if run_session_reuse else None
         self._delegate_manifests = delegate_manifests
         self._delegate_model_names = None if delegate_model_names is None else dict(delegate_model_names)
         self._authorization_boundary = authorization_boundary
@@ -1451,7 +1459,23 @@ class PrivateAgentRuntime:
                     public_error_code=error_code,
                 )
 
+    def _mcp_session_key(self, version_id: uuid.UUID) -> McpRunSessionKey | None:
+        """Bind session reuse to the exact snapshot and grant closure."""
+        if self._mcp_run_sessions is None:
+            return None
+        snapshot = next((item for item in self._mcp_snapshots if item.version_id == version_id), None)
+        if snapshot is None:
+            return None
+        return (
+            snapshot.version_id,
+            snapshot.checksum,
+            mcp_grant_closure_digest(snapshot.credential_grant_ids),
+        )
+
     def _proxy_tool(self, schema: _DiscoveredMcpTool) -> StructuredTool:
+        session_key = self._mcp_session_key(schema.version_id)
+        session_cache = self._mcp_run_sessions if session_key is not None else None
+
         async def invoke(**arguments):
             return await self.invoke_with_mcp_material(
                 schema.version_id,
@@ -1465,6 +1489,8 @@ class PrivateAgentRuntime:
                     http_client_factory=self._http_client_factory,
                     discovery_timeout_seconds=self._discovery_timeout_seconds,
                     tool_call_timeout_seconds=self._tool_call_timeout_seconds,
+                    session_cache=session_cache,
+                    session_key=session_key,
                 ),
             )
 
@@ -1596,28 +1622,37 @@ class PrivateAgentRuntime:
         inspect_value(result)
 
     @staticmethod
-    async def _with_one_shot_mcp_tools(
+    async def _close_project_mcp_client(client: object) -> None:
+        if client is None:
+            return
+        close = getattr(client, "aclose", None)
+        if not callable(close):
+            return
+        try:
+            async with asyncio.timeout(_MCP_CLOSE_TIMEOUT_SECONDS):
+                await close()
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _open_project_mcp_session(
         version_id: uuid.UUID,
         definition: Mapping[str, object],
         material: Mapping[str, Mapping[str, object]],
-        operation: Callable[
-            [
-                tuple[object, ...],
-                list[str],
-            ],
-            Awaitable[Any],
-        ],
         authorization_boundary: object | None = None,
         *,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
-        operation_timeout_seconds: int | None = None,
-    ) -> Any:
+    ) -> McpRunSession:
+        """Open one initialized project MCP session (a single handshake).
+
+        Returns ``(client, tools, derived_secrets)``. The derived-secrets list
+        is live: the OAuth interceptor keeps appending refreshed tokens to it,
+        so result sanitization always sees the current closure. The caller
+        owns closing the client.
+        """
         discovery_timeout_seconds = _validated_mcp_runtime_timeout(discovery_timeout_seconds)
-        if operation_timeout_seconds is not None:
-            operation_timeout_seconds = _validated_mcp_runtime_timeout(operation_timeout_seconds)
         client = None
-        merged_config = None
         derived_secrets: list[str] = []
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -1709,6 +1744,43 @@ class PrivateAgentRuntime:
                     remote_tools = tuple(await client.get_tools(server_name=server_name))
             except TimeoutError:
                 raise PrivateWorkUnavailable("unknown") from None
+            return client, remote_tools, derived_secrets
+        except BaseException:
+            await PrivateAgentRuntime._close_project_mcp_client(client)
+            derived_secrets.clear()
+            raise
+
+    @staticmethod
+    async def _with_one_shot_mcp_tools(
+        version_id: uuid.UUID,
+        definition: Mapping[str, object],
+        material: Mapping[str, Mapping[str, object]],
+        operation: Callable[
+            [
+                tuple[object, ...],
+                list[str],
+            ],
+            Awaitable[Any],
+        ],
+        authorization_boundary: object | None = None,
+        *,
+        http_client_factory: SecureMcpHttpClientFactory | None = None,
+        discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
+        operation_timeout_seconds: int | None = None,
+    ) -> Any:
+        if operation_timeout_seconds is not None:
+            operation_timeout_seconds = _validated_mcp_runtime_timeout(operation_timeout_seconds)
+        client = None
+        derived_secrets: list[str] = []
+        try:
+            client, remote_tools, derived_secrets = await PrivateAgentRuntime._open_project_mcp_session(
+                version_id,
+                definition,
+                material,
+                authorization_boundary,
+                http_client_factory=http_client_factory,
+                discovery_timeout_seconds=discovery_timeout_seconds,
+            )
             if operation_timeout_seconds is None:
                 return await operation(remote_tools, derived_secrets)
             try:
@@ -1717,15 +1789,7 @@ class PrivateAgentRuntime:
             except TimeoutError:
                 raise PrivateWorkUnavailable("unknown") from None
         finally:
-            if client is not None:
-                close = getattr(client, "aclose", None)
-                if callable(close):
-                    try:
-                        async with asyncio.timeout(_MCP_CLOSE_TIMEOUT_SECONDS):
-                            await close()
-                    except Exception:
-                        pass
-            merged_config = None
+            await PrivateAgentRuntime._close_project_mcp_client(client)
             client = None
             derived_secrets.clear()
 
@@ -1842,6 +1906,8 @@ class PrivateAgentRuntime:
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
         tool_call_timeout_seconds: int = _DEFAULT_MCP_TOOL_CALL_TIMEOUT_SECONDS,
+        session_cache: McpRunSessionCache | None = None,
+        session_key: McpRunSessionKey | None = None,
     ) -> Any:
         try:
 
@@ -1869,6 +1935,27 @@ class PrivateAgentRuntime:
                     extra_forbidden_values=tuple(derived_secrets or ()),
                 )
                 return result
+
+            if session_cache is not None and session_key is not None:
+                # Run-level session reuse (U3): DB-side revalidation already
+                # happened in invoke_with_mcp_material; only the transport
+                # handshake is skipped here.
+                async def open_session() -> McpRunSession:
+                    return await PrivateAgentRuntime._open_project_mcp_session(
+                        version_id,
+                        definition,
+                        material,
+                        authorization_boundary,
+                        http_client_factory=http_client_factory,
+                        discovery_timeout_seconds=discovery_timeout_seconds,
+                    )
+
+                return await session_cache.call(
+                    session_key,
+                    open_session,
+                    call_selected,
+                    call_timeout_seconds=_validated_mcp_runtime_timeout(tool_call_timeout_seconds),
+                )
 
             if authorization_boundary is None:
                 return await PrivateAgentRuntime._with_one_shot_mcp_tools(
@@ -2056,6 +2143,17 @@ class PrivateAgentRuntime:
         if getattr(self, "_closing", False):
             raise PrivateRuntimeCleanupError("Private runtime cleanup is already in progress")
         self._closing = True
+        # Run end: close reused MCP transports and clear their derived-secret
+        # closures before removing the skill tree. Best-effort by design.
+        sessions = getattr(self, "_mcp_run_sessions", None)
+        if sessions is not None:
+            try:
+                await sessions.aclose()
+            except Exception:
+                logger.warning(
+                    "Private MCP run-session cleanup failed for run %s",
+                    self._run_id,
+                )
         try:
             await asyncio.to_thread(
                 _remove_private_skill_tree,
@@ -2082,6 +2180,7 @@ class PrivateAssetRuntime:
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
         tool_call_timeout_seconds: int = _DEFAULT_MCP_TOOL_CALL_TIMEOUT_SECONDS,
+        run_session_reuse: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._resolver = resolver or ProjectAssetResolver(session_factory)
@@ -2094,6 +2193,7 @@ class PrivateAssetRuntime:
         self._http_client_factory = http_client_factory
         self._discovery_timeout_seconds = _validated_mcp_runtime_timeout(discovery_timeout_seconds)
         self._tool_call_timeout_seconds = _validated_mcp_runtime_timeout(tool_call_timeout_seconds)
+        self._run_session_reuse = bool(run_session_reuse)
 
     async def materialize(
         self,
@@ -2354,6 +2454,7 @@ class PrivateAssetRuntime:
                 all_skill_manifests=skill_manifests,
                 all_skills=skills,
                 delegate_model_names=delegate_model_names,
+                run_session_reuse=self._run_session_reuse,
             )
             await runtime.discover_mcp_tools()
             return runtime
@@ -2377,4 +2478,3 @@ class PrivateAssetRuntime:
             ):
                 raise PrivateWorkAssetStale(context.request_id) from None
             raise PrivateWorkUnavailable(context.request_id) from None
-        ("_delegate_manifests",)

@@ -165,6 +165,7 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
         "cursor": 0,
         "initial_frames": (),
         "cancel_on_disconnect": True,
+        "wakeup": None,
     }
 
 

@@ -33,6 +33,14 @@ class SkillsConfig(BaseModel):
         default=False,
         description=("When enabled, skill metadata is not injected into the system prompt. Instead, only skill names appear in <skill_index> and the LLM discovers details on demand via the describe_skill tool."),
     )
+    read_evidence_ttl_calls: int = Field(
+        default=12,
+        ge=0,
+        le=1000,
+        description=(
+            "Verified-read Skill activation evidence expires after this many lead model calls; expiry restores the pre-activation default tool set. Slash activation is exempt. 0 keeps evidence for the whole Run (legacy behavior)."
+        ),
+    )
 
     def get_skills_path(self) -> Path:
         """

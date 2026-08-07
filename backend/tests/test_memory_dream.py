@@ -41,11 +41,16 @@ def _document(*lines: str) -> str:
 
 
 def test_dream_prompt_and_document_sections_are_fixed() -> None:
-    assert DREAM_PROMPT_VERSION == "dream-prompt-v1"
+    assert DREAM_PROMPT_VERSION == "dream-prompt-v3"
     assert "Use only read_memory_document and replace_memory_document." in DREAM_PROMPT
+    assert "You must not create or update an account-global profile" in DREAM_PROMPT
+    assert "transfer memory from another project or namespace." in DREAM_PROMPT
     assert "Treat <target-token-limit> as the required writing budget." in DREAM_PROMPT
     assert "The complete document must not exceed <target-character-limit>." in DREAM_PROMPT
     assert "Never resubmit an unchanged rejected draft." in DREAM_PROMPT
+    assert "History entries marked origin=tool are model-proposed hints." in DREAM_PROMPT
+    assert "remain searchable as archived episodes" in DREAM_PROMPT
+    assert "this is a budget\nrewrite session" in DREAM_PROMPT
     assert tuple(line for line in DREAM_PROMPT.splitlines() if line.startswith("# ")) == MEMORY_DOCUMENT_SECTIONS
     assert EMPTY_MEMORY_DOCUMENT == "\n\n".join(MEMORY_DOCUMENT_SECTIONS)
 

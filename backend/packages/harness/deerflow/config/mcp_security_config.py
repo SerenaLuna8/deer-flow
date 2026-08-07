@@ -65,6 +65,14 @@ class McpSecurityConfig(BaseModel):
     )
     discovery_timeout_seconds: int = Field(default=15, ge=1, le=300)
     tool_call_timeout_seconds: int = Field(default=60, ge=1, le=300)
+    run_session_reuse: bool = Field(
+        default=True,
+        description=(
+            "Reuse one initialized project MCP transport session per Run and exact snapshot/grant closure. "
+            "Every call still revalidates the persisted snapshot and grants in PostgreSQL before dispatch; "
+            "disabling restores one-shot connect-per-call transport."
+        ),
+    )
     model_config = ConfigDict(extra="forbid")
 
     @field_validator("project_remote_allowed_networks")

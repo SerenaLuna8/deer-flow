@@ -1,7 +1,7 @@
 "use client";
 
-import { RotateCcwIcon, SearchIcon } from "lucide-react";
-import { useRef, useState, type ReactNode } from "react";
+import { RotateCcwIcon } from "lucide-react";
+import { useState, type ReactNode } from "react";
 
 import {
   AdminCursorPagination,
@@ -13,13 +13,16 @@ import {
   retreatAdminCursor,
 } from "@/components/admin/ui/admin-page";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { useAdminJobs, useSafeRequeue } from "@/core/admin-operations/api";
 import {
+  ADMIN_JOB_PAGE_SIZES,
   ADMIN_JOB_TYPES,
+  DEFAULT_ADMIN_JOB_PAGE_SIZE,
+  adminJobPageSizeSchema,
   jobFiltersSchema,
   type AdminJobFilters,
   type AdminJobPage,
+  type AdminJobPageSize,
 } from "@/core/admin-operations/types";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
@@ -31,6 +34,7 @@ import {
   AdminInlineAlert,
   AdminLoadingState,
   AdminMobileRecordList,
+  AdminProjectFilterSelect,
   AdminStatus,
   AdminCopyButton,
   AdminTechnicalValue,
@@ -88,24 +92,30 @@ export function AdminJobsStateView({
       ) : null}
       <AdminDataTable
         aria-label={labels.title}
-        className="min-w-[68rem] table-fixed"
+        className="min-w-[80rem] table-fixed"
         containerClassName="hidden xl:block"
       >
         <thead className="bg-muted/45 text-muted-foreground">
           <tr className="border-border/70 border-b">
-            <th className="w-[18%] px-3 py-2.5 text-xs font-medium">
+            <th className="w-[14%] px-3 py-2.5 text-xs font-medium">
               {labels.filters.type}
             </th>
-            <th className="w-[25%] px-3 py-2.5 text-xs font-medium">
+            <th className="w-[18%] px-3 py-2.5 text-xs font-medium">
               {localLabels.jobId}
             </th>
-            <th className="w-[20%] px-3 py-2.5 text-xs font-medium">
+            <th className="w-[10%] px-3 py-2.5 text-xs font-medium">
               {labels.filters.status}
             </th>
-            <th className="w-[23%] px-3 py-2.5 text-xs font-medium">
+            <th className="w-[12%] px-3 py-2.5 text-xs font-medium">
+              {labels.retrySafetyLabel}
+            </th>
+            <th className="w-[18%] px-3 py-2.5 text-xs font-medium">
+              {labels.errorLabel}
+            </th>
+            <th className="w-[16%] px-3 py-2.5 text-xs font-medium">
               {labels.filters.project}
             </th>
-            <th className="w-[14%] px-3 py-2.5 text-xs font-medium">
+            <th className="w-[12%] px-3 py-2.5 text-xs font-medium">
               <span className="sr-only">{labels.requeue}</span>
             </th>
           </tr>
@@ -133,24 +143,28 @@ export function AdminJobsStateView({
                     copyLabel={localLabels.copy}
                     copiedLabel={localLabels.copied}
                   />
-                  {job.public_error_code ? (
-                    <p className="text-destructive mt-1.5 truncate font-mono text-xs font-semibold">
-                      <span className="sr-only">
-                        {localLabels.publicErrorCode}:{" "}
-                      </span>
-                      {job.public_error_code}
-                    </p>
-                  ) : null}
                 </td>
                 <td className="px-3 py-2.5">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <AdminStatus status={job.status}>
-                      {labels.statuses[job.status]}
-                    </AdminStatus>
-                    <AdminStatus status={job.retry_safety}>
-                      {labels.retrySafety[job.retry_safety]}
-                    </AdminStatus>
-                  </div>
+                  <AdminStatus status={job.status}>
+                    {labels.statuses[job.status]}
+                  </AdminStatus>
+                </td>
+                <td className="px-3 py-2.5">
+                  <AdminStatus status={job.retry_safety}>
+                    {labels.retrySafety[job.retry_safety]}
+                  </AdminStatus>
+                </td>
+                <td className="px-3 py-2.5">
+                  {job.public_error_code ? (
+                    <p
+                      className="text-destructive truncate font-mono text-xs font-semibold"
+                      title={job.public_error_code}
+                    >
+                      {job.public_error_code}
+                    </p>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </td>
                 <td className="px-3 py-2.5">
                   <div className="flex min-w-0 items-center gap-2">
@@ -214,16 +228,21 @@ export function AdminJobsStateView({
                   <h2 className="min-w-0 text-sm font-semibold">
                     {labels.types[job.job_type]}
                   </h2>
-                  <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-                    <AdminStatus status={job.status}>
-                      {labels.statuses[job.status]}
-                    </AdminStatus>
-                    <AdminStatus status={job.retry_safety}>
-                      {labels.retrySafety[job.retry_safety]}
-                    </AdminStatus>
-                  </div>
+                  <AdminStatus status={job.status}>
+                    {labels.statuses[job.status]}
+                  </AdminStatus>
                 </header>
                 <dl className="grid gap-2 text-xs">
+                  <div>
+                    <dt className="text-muted-foreground">
+                      {labels.retrySafetyLabel}
+                    </dt>
+                    <dd className="mt-1">
+                      <AdminStatus status={job.retry_safety}>
+                        {labels.retrySafety[job.retry_safety]}
+                      </AdminStatus>
+                    </dd>
+                  </div>
                   <div>
                     <dt className="text-muted-foreground">
                       {localLabels.jobId}
@@ -263,16 +282,20 @@ export function AdminJobsStateView({
                       />
                     </dd>
                   </div>
-                  {job.public_error_code ? (
-                    <div>
-                      <dt className="text-muted-foreground">
-                        {localLabels.publicErrorCode}
-                      </dt>
-                      <dd className="text-destructive mt-0.5 font-mono font-semibold">
-                        {job.public_error_code}
-                      </dd>
-                    </div>
-                  ) : null}
+                  <div>
+                    <dt className="text-muted-foreground">
+                      {labels.errorLabel}
+                    </dt>
+                    <dd className="mt-0.5 font-mono font-semibold">
+                      {job.public_error_code ? (
+                        <span className="text-destructive">
+                          {job.public_error_code}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </dd>
+                  </div>
                 </dl>
                 {job.safe_to_requeue && onRequeue ? (
                   <Button
@@ -307,12 +330,12 @@ function idempotencyKey(): string {
 }
 
 export function parseAdminJobFilters(input: {
-  projectQuery: string;
+  projectId: string;
   status: string;
   type: string;
 }): AdminJobFilters | null {
   const result = jobFiltersSchema.safeParse({
-    project_query: input.projectQuery.trim() || undefined,
+    project_id: input.projectId || undefined,
     status: input.status || undefined,
     type: input.type || undefined,
   });
@@ -328,14 +351,15 @@ export function AdminJobs() {
 function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
   const { t } = useI18n();
   const localLabels = t.adminOperations.ui;
-  const projectQueryInputRef = useRef<HTMLInputElement>(null);
   const [pager, setPager] = useState(INITIAL_ADMIN_CURSOR_STATE);
   const [filters, setFilters] = useState<AdminJobFilters>({});
-  const [projectQuery, setProjectQuery] = useState("");
+  const [pageSize, setPageSize] = useState<AdminJobPageSize>(
+    DEFAULT_ADMIN_JOB_PAGE_SIZE,
+  );
+  const [projectId, setProjectId] = useState("");
   const [status, setStatus] = useState("");
   const [jobType, setJobType] = useState("");
-  const [filterError, setFilterError] = useState(false);
-  const jobs = useAdminJobs(accountId, pager.cursor, filters);
+  const jobs = useAdminJobs(accountId, pager.cursor, filters, pageSize);
   const requeue = useSafeRequeue(accountId);
   const state: AdminJobsState = jobs.isLoading
     ? { status: "loading" }
@@ -343,25 +367,29 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
       ? { status: "error" }
       : { status: "ready", data: jobs.data };
   const resetFilters = () => {
-    setProjectQuery("");
+    setProjectId("");
     setStatus("");
     setJobType("");
-    setFilterError(false);
     setPager(INITIAL_ADMIN_CURSOR_STATE);
+    setPageSize(DEFAULT_ADMIN_JOB_PAGE_SIZE);
     setFilters({});
+  };
+  const applyPageSize = (next: number) => {
+    const parsed = adminJobPageSizeSchema.safeParse(next);
+    if (!parsed.success || parsed.data === pageSize) return;
+    setPager(INITIAL_ADMIN_CURSOR_STATE);
+    setPageSize(parsed.data);
   };
   const hasFilters = Object.keys(filters).length > 0;
   const canResetFilters =
     hasFilters ||
-    projectQuery.trim().length > 0 ||
+    pageSize !== DEFAULT_ADMIN_JOB_PAGE_SIZE ||
+    projectId.length > 0 ||
     status.length > 0 ||
     jobType.length > 0;
   return (
     <AdminPage>
-      <AdminPageHeader
-        title={t.adminOperations.jobs.title}
-        description={t.adminOperations.jobs.description}
-      />
+      <AdminPageHeader title={t.adminOperations.jobs.title} />
       <AdminSection contentClassName="p-3">
         <form
           aria-label={t.adminOperations.jobs.filters.label}
@@ -369,48 +397,23 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
           onSubmit={(event) => {
             event.preventDefault();
             const parsed = parseAdminJobFilters({
-              projectQuery,
+              projectId,
               status,
               type: jobType,
             });
-            if (!parsed) {
-              setFilterError(true);
-              projectQueryInputRef.current?.focus();
-              return;
-            }
-            setFilterError(false);
+            if (!parsed) return;
             setPager(INITIAL_ADMIN_CURSOR_STATE);
             setFilters(parsed);
           }}
         >
-          <label className="relative min-w-0 sm:col-span-2 lg:w-80">
-            <span className="sr-only">
-              {t.adminOperations.jobs.filters.projectQuery}
-            </span>
-            <SearchIcon
-              aria-hidden
-              className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-            />
-            <Input
-              ref={projectQueryInputRef}
-              className="pl-9"
-              value={projectQuery}
-              onChange={(event) => setProjectQuery(event.target.value)}
-              placeholder={
-                t.adminOperations.jobs.filters.projectQueryPlaceholder
-              }
-              maxLength={120}
-              autoComplete="off"
-              spellCheck={false}
-              aria-invalid={filterError || undefined}
-              aria-describedby={
-                filterError ? "admin-job-filter-error" : undefined
-              }
-              aria-errormessage={
-                filterError ? "admin-job-filter-error" : undefined
-              }
-            />
-          </label>
+          <AdminProjectFilterSelect
+            accountId={accountId}
+            className="sm:col-span-2 lg:w-72"
+            value={projectId}
+            onChange={setProjectId}
+            label={t.adminOperations.jobs.filters.project}
+            allLabel={t.adminOperations.jobs.filters.allProjects}
+          />
           <label className="min-w-0 lg:w-40">
             <span className="sr-only">
               {t.adminOperations.jobs.filters.status}
@@ -478,14 +481,6 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
               {t.adminOperations.jobs.filters.clear}
             </Button>
           </div>
-          {filterError ? (
-            <AdminInlineAlert
-              id="admin-job-filter-error"
-              className="sm:col-span-2 lg:basis-full"
-            >
-              {t.adminOperations.jobs.filters.invalidQuery}
-            </AdminInlineAlert>
-          ) : null}
         </form>
       </AdminSection>
       <AdminJobsStateView
@@ -517,20 +512,30 @@ function AuthorizedAdminJobs({ accountId }: { accountId: string }) {
           });
         }}
       />
-      <AdminCursorPagination
-        state={pager}
-        nextCursor={jobs.data?.next_cursor ?? null}
-        busy={jobs.isFetching}
-        previousLabel={localLabels.previousPage}
-        nextLabel={t.adminOperations.jobs.older}
-        pageLabel={localLabels.page}
-        onPrevious={() => setPager((current) => retreatAdminCursor(current))}
-        onNext={() =>
-          setPager((current) =>
-            advanceAdminCursor(current, jobs.data?.next_cursor ?? null),
-          )
-        }
-      />
+      {state.status === "ready" ? (
+        <AdminCursorPagination
+          alwaysVisible
+          state={pager}
+          nextCursor={jobs.data?.next_cursor ?? null}
+          busy={jobs.isFetching}
+          itemCount={jobs.data?.items.length ?? 0}
+          itemCountLabel={localLabels.itemsOnPage}
+          pageSize={pageSize}
+          pageSizeOptions={ADMIN_JOB_PAGE_SIZES}
+          pageSizeLabel={localLabels.pageSize}
+          pageSizeOptionLabel={localLabels.pageSizeOption}
+          previousLabel={localLabels.previousPage}
+          nextLabel={localLabels.nextPage}
+          pageLabel={localLabels.page}
+          onPageSizeChange={applyPageSize}
+          onPrevious={() => setPager((current) => retreatAdminCursor(current))}
+          onNext={() =>
+            setPager((current) =>
+              advanceAdminCursor(current, jobs.data?.next_cursor ?? null),
+            )
+          }
+        />
+      ) : null}
     </AdminPage>
   );
 }

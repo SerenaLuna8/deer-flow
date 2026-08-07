@@ -13,6 +13,7 @@ const JOB_TYPES = [
   "retention_purge",
   "mcp_discovery",
   "memory_dream",
+  "memory_seal",
 ] as const;
 
 function agentRuntimeSettings() {
@@ -48,6 +49,8 @@ function agentRuntimeSettings() {
       model_name: null,
       dream_interval_minutes: 120,
       max_injection_tokens: 2_000,
+      idle_seal_minutes: 1_440,
+      episode_retention_days: 365,
     },
     tool_search: { enabled: true, auto_promote_top_k: 3 },
     tool_output: {
@@ -88,6 +91,8 @@ describe("admin contracts", () => {
       model_name: null,
       dream_interval_minutes: 120,
       max_injection_tokens: 2_000,
+      idle_seal_minutes: 1_440,
+      episode_retention_days: 365,
     });
     expect(
       agentRuntimeSettingsValueSchema.safeParse({
@@ -95,6 +100,40 @@ describe("admin contracts", () => {
         memory: { ...agentRuntimeSettings().memory, unexpected: true },
       }).success,
     ).toBe(false);
+    for (const invalid of [-1, 1, 29, 10_081]) {
+      expect(
+        agentRuntimeSettingsValueSchema.safeParse({
+          ...agentRuntimeSettings(),
+          memory: {
+            ...agentRuntimeSettings().memory,
+            idle_seal_minutes: invalid,
+          },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        ...agentRuntimeSettings(),
+        memory: { ...agentRuntimeSettings().memory, idle_seal_minutes: 0 },
+      }).success,
+    ).toBe(true);
+    for (const invalid of [-1, 1, 29, 3_651]) {
+      expect(
+        agentRuntimeSettingsValueSchema.safeParse({
+          ...agentRuntimeSettings(),
+          memory: {
+            ...agentRuntimeSettings().memory,
+            episode_retention_days: invalid,
+          },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        ...agentRuntimeSettings(),
+        memory: { ...agentRuntimeSettings().memory, episode_retention_days: 0 },
+      }).success,
+    ).toBe(true);
   });
 
   test("accepts every persisted job type in rows and filters", () => {

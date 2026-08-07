@@ -192,29 +192,52 @@ export function retreatAdminCursor(state: AdminCursorState): AdminCursorState {
 }
 
 export function AdminCursorPagination({
+  alwaysVisible = false,
   busy = false,
   className,
+  itemCount,
+  itemCountLabel,
   nextCursor,
   nextLabel,
   onNext,
+  onPageSizeChange,
   onPrevious,
   pageLabel,
+  pageSize,
+  pageSizeLabel,
+  pageSizeOptionLabel,
+  pageSizeOptions,
   previousLabel,
   state,
 }: {
+  alwaysVisible?: boolean;
   busy?: boolean;
   className?: string;
+  itemCount?: number;
+  itemCountLabel?: (count: number) => string;
   nextCursor: string | null;
   nextLabel: string;
   onNext: () => void;
+  onPageSizeChange?: (pageSize: number) => void;
   onPrevious: () => void;
   pageLabel: (page: number) => string;
+  pageSize?: number;
+  pageSizeLabel?: string;
+  pageSizeOptionLabel?: (pageSize: number) => string;
+  pageSizeOptions?: readonly number[];
   previousLabel: string;
   state: AdminCursorState;
 }) {
   const hasPrevious = state.history.length > 0;
   const hasNext = Boolean(nextCursor && nextCursor !== state.cursor);
-  if (!hasPrevious && !hasNext) return null;
+  const hasPageSize =
+    pageSize !== undefined &&
+    pageSizeOptions !== undefined &&
+    pageSizeOptions.length > 0 &&
+    onPageSizeChange !== undefined &&
+    pageSizeLabel !== undefined &&
+    pageSizeOptionLabel !== undefined;
+  if (!alwaysVisible && !hasPrevious && !hasNext && !hasPageSize) return null;
 
   return (
     <nav
@@ -225,32 +248,63 @@ export function AdminCursorPagination({
         className,
       )}
     >
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        disabled={!hasPrevious || busy}
-        onClick={onPrevious}
-      >
-        <ArrowLeftIcon aria-hidden className="size-3.5" />
-        {previousLabel}
-      </Button>
-      <span
-        aria-current="page"
-        className="text-muted-foreground text-xs font-medium tabular-nums"
-      >
-        {pageLabel(state.history.length + 1)}
-      </span>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        disabled={!hasNext || busy}
-        onClick={onNext}
-      >
-        {nextLabel}
-        <ArrowRightIcon aria-hidden className="size-3.5" />
-      </Button>
+      <div className="flex min-w-0 flex-wrap items-center gap-3">
+        {hasPageSize ? (
+          <label className="flex items-center gap-2">
+            <span className="text-muted-foreground text-xs font-medium">
+              {pageSizeLabel}
+            </span>
+            <select
+              aria-label={pageSizeLabel}
+              value={pageSize}
+              disabled={busy}
+              onChange={(event) =>
+                onPageSizeChange(Number(event.target.value))
+              }
+              className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 h-8 rounded-md border px-2 text-xs outline-none focus-visible:ring-[3px]"
+            >
+              {pageSizeOptions.map((option) => (
+                <option key={option} value={option}>
+                  {pageSizeOptionLabel(option)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {itemCount !== undefined && itemCountLabel ? (
+          <span className="text-muted-foreground text-xs tabular-nums">
+            {itemCountLabel(itemCount)}
+          </span>
+        ) : null}
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!hasPrevious || busy}
+          onClick={onPrevious}
+        >
+          <ArrowLeftIcon aria-hidden className="size-3.5" />
+          {previousLabel}
+        </Button>
+        <span
+          aria-current="page"
+          className="text-muted-foreground min-w-16 text-center text-xs font-medium tabular-nums"
+        >
+          {pageLabel(state.history.length + 1)}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!hasNext || busy}
+          onClick={onNext}
+        >
+          {nextLabel}
+          <ArrowRightIcon aria-hidden className="size-3.5" />
+        </Button>
+      </div>
     </nav>
   );
 }

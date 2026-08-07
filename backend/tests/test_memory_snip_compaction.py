@@ -14,6 +14,7 @@ from deerflow.agents.memory.snip import (
     SNIP_ARCHIVE_PROMPT,
     SNIP_ARCHIVE_PROMPT_VERSION,
     SNIP_NOTHING,
+    SNIP_RETRY_REINFORCEMENT,
     SnipArchiveContext,
     compute_snip_source_digest,
 )
@@ -33,6 +34,10 @@ class _RecordingModel(FakeListChatModel):
         self.prompts.append("\n".join(str(message.content) for message in messages))
         self.call_count += 1
         return super()._call(*args, **kwargs)
+
+
+def _dual(continuity: str, tagged: str) -> str:
+    return f"<continuity>\n{continuity}\n</continuity>\n{tagged}"
 
 
 def _model(*responses: str) -> _RecordingModel:
@@ -210,8 +215,9 @@ def _keep_zero_middleware(
 
 
 def test_compaction_uses_complete_turns_excludes_dynamic_reminders_and_calls_once() -> None:
-    output = "- [durable] The verified result is retained."
-    model = _model(output, "must-not-be-called")
+    continuity = "Goal: answer both lookups. Turns one and two are complete; turn three is still open."
+    tagged = "- [durable] The verified result is retained."
+    model = _model(_dual(continuity, tagged), "must-not-be-called")
     middleware = _middleware(model)
     messages = [
         SystemMessage(
@@ -259,9 +265,9 @@ def test_compaction_uses_complete_turns_excludes_dynamic_reminders_and_calls_onc
     assert "hidden memory two" not in model.prompts[0]
     assert "turn-1 user" in model.prompts[0]
     assert "turn-2 answer" in model.prompts[0]
-    assert result.summary_text == output
+    assert result.summary_text == continuity
     assert result.memory_archive_receipt is not None
-    assert result.memory_archive_receipt["tagged_text"] == output
+    assert result.memory_archive_receipt["tagged_text"] == tagged
     assert result.memory_archive_receipt["thread_id"] == "thread-1"
     assert result.memory_archive_receipt["source_checkpoint_id"] == "checkpoint-source"
     assert result.memory_archive_receipt["snip_prompt_version"] == SNIP_ARCHIVE_PROMPT_VERSION
@@ -273,7 +279,12 @@ def test_compaction_uses_complete_turns_excludes_dynamic_reminders_and_calls_onc
 
 
 def test_completed_clarification_continuation_is_one_compactable_logical_turn() -> None:
-    model = _model("- [durable] The completed clarification is retained.")
+    model = _model(
+        _dual(
+            "Deployment target clarified as staging; both turns are complete.",
+            "- [durable] The completed clarification is retained.",
+        )
+    )
     middleware = _keep_zero_middleware(model)
     messages = [
         SystemMessage(
@@ -421,7 +432,12 @@ def test_visible_structured_response_does_not_gain_continuation_authority() -> N
 
 
 def test_runtime_execution_checkpoint_authors_automatic_receipt() -> None:
-    model = _model("- [durable] Runtime checkpoint identity is authoritative.")
+    model = _model(
+        _dual(
+            "The old exchange is archived under the runtime checkpoint identity.",
+            "- [durable] Runtime checkpoint identity is authoritative.",
+        )
+    )
     middleware = _middleware(model)
     archive_context = _archive_context(source_checkpoint_id=None)
 
@@ -446,7 +462,12 @@ def test_runtime_execution_checkpoint_authors_automatic_receipt() -> None:
 
 
 def test_runtime_checkpoint_must_match_explicit_manual_source() -> None:
-    model = _model("- [durable] Mismatched identity must not be archived.")
+    model = _model(
+        _dual(
+            "The identity mismatch must abort the archive.",
+            "- [durable] Mismatched identity must not be archived.",
+        )
+    )
     middleware = _middleware(model)
 
     result = middleware.compact_state(
@@ -471,7 +492,7 @@ def test_runtime_checkpoint_must_match_explicit_manual_source() -> None:
 
 
 def test_compaction_never_splits_a_dangling_tool_turn() -> None:
-    model = _model("- [durable] First turn only.")
+    model = _model(_dual("Only the first complete turn is archived.", "- [durable] First turn only."))
     middleware = _middleware(model)
     messages = [
         HumanMessage(id="first-human", content="first"),
@@ -511,7 +532,7 @@ def test_compaction_never_splits_a_dangling_tool_turn() -> None:
 
 
 def test_tool_result_without_final_assistant_remains_uncompacted() -> None:
-    model = _model("- [durable] First turn only.")
+    model = _model(_dual("Only the first complete turn is archived.", "- [durable] First turn only."))
     middleware = _middleware(model)
     messages = [
         HumanMessage(id="first-human", content="first"),
@@ -555,7 +576,7 @@ def test_tool_result_without_final_assistant_remains_uncompacted() -> None:
 
 
 def test_prompt_budget_falls_back_to_an_earlier_whole_turn() -> None:
-    model = _model("- [durable] Only the first complete turn fits.")
+    model = _model(_dual("The prompt budget only admits the first turn.", "- [durable] Only the first complete turn fits."))
     middleware = _middleware(model)
     first_turn = [
         HumanMessage(id="first-human", content="first-user-unique"),
@@ -595,7 +616,7 @@ def test_prompt_budget_falls_back_to_an_earlier_whole_turn() -> None:
 
 
 def test_keep_zero_archives_every_complete_turn_but_preserves_open_tail() -> None:
-    model = _model("- [durable] All complete turns are cumulative.")
+    model = _model(_dual("Both complete turns are archived; one question is still open.", "- [durable] All complete turns are cumulative."))
     middleware = DeerFlowSummarizationMiddleware(
         model=model,
         trigger=("messages", 1),
@@ -654,7 +675,8 @@ async def test_prepare_keep_zero_reports_invalid_snip_as_compaction_failed(
 
     assert prepared.result.compacted is False
     assert prepared.result.reason == "compaction_failed"
-    assert model.call_count == 1
+    # Bounded repair: the invalid output is retried exactly once.
+    assert model.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -746,8 +768,103 @@ async def test_prepare_keep_zero_uses_not_enough_only_without_complete_turns(
     assert model.call_count == 0
 
 
-def test_invalid_snip_output_preserves_state_and_does_not_retry_model() -> None:
-    model = _model("Preamble\n- [durable] Invalid.", "must-not-be-called")
+def test_invalid_snip_output_repairs_once_with_reinforced_prompt() -> None:
+    continuity = "The repaired continuity summary is retained."
+    tagged = "- [durable] The repaired result is retained."
+    model = _model("Preamble\n- [durable] Invalid.", _dual(continuity, tagged), "must-not-be-called")
+    middleware = _middleware(model)
+
+    result = middleware.compact_state(
+        {
+            "messages": [
+                HumanMessage(id="old-human", content="old"),
+                AIMessage(id="old-ai", content="old answer"),
+                HumanMessage(id="current-human", content="current"),
+            ],
+            "summary_text": "- [permanent] Keep me.",
+        },
+        _runtime(archive_context=_archive_context()),
+        force=True,
+    )
+
+    assert result is not None
+    assert result.summary_text == continuity
+    assert result.memory_archive_receipt is not None
+    assert result.memory_archive_receipt["tagged_text"] == tagged
+    assert model.call_count == 2
+    assert SNIP_RETRY_REINFORCEMENT not in model.prompts[0]
+    assert model.prompts[1].endswith(SNIP_RETRY_REINFORCEMENT)
+    # The retry reuses the same input and never echoes the invalid output.
+    assert model.prompts[1].startswith(model.prompts[0])
+    assert "Preamble" not in model.prompts[1]
+
+
+def test_invalid_tagged_segment_with_valid_continuity_repairs_once() -> None:
+    continuity = "The tagged segment was repaired on the second attempt."
+    tagged = "- [durable] The repaired tagged segment is retained."
+    model = _model(
+        _dual("A valid continuity summary.", "prose instead of tagged lines"),
+        _dual(continuity, tagged),
+        "must-not-be-called",
+    )
+    middleware = _middleware(model)
+
+    result = middleware.compact_state(
+        {
+            "messages": [
+                HumanMessage(id="old-human", content="old"),
+                AIMessage(id="old-ai", content="old answer"),
+                HumanMessage(id="current-human", content="current"),
+            ],
+        },
+        _runtime(archive_context=_archive_context()),
+        force=True,
+    )
+
+    assert result is not None
+    assert result.summary_text == continuity
+    assert result.memory_archive_receipt is not None
+    assert result.memory_archive_receipt["tagged_text"] == tagged
+    assert model.call_count == 2
+    assert model.prompts[1].endswith(SNIP_RETRY_REINFORCEMENT)
+
+
+def test_custom_summary_prompt_keeps_single_segment_semantics() -> None:
+    output = "- [durable] Legacy single-segment output stays authoritative."
+    model = _model(output, "must-not-be-called")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 1),
+        keep=("messages", 1),
+        trim_tokens_to_summarize=20_000,
+        summary_prompt="Summarize the conversation.\n\n{messages}",
+    )
+
+    result = middleware.compact_state(
+        {
+            "messages": [
+                HumanMessage(id="old-human", content="old"),
+                AIMessage(id="old-ai", content="old answer"),
+                HumanMessage(id="current-human", content="current"),
+            ],
+        },
+        _runtime(archive_context=_archive_context()),
+        force=True,
+    )
+
+    assert result is not None
+    assert model.call_count == 1
+    assert result.summary_text == output
+    assert result.memory_archive_receipt is not None
+    assert result.memory_archive_receipt["tagged_text"] == output
+
+
+def test_twice_invalid_snip_output_preserves_state_after_two_calls() -> None:
+    model = _model(
+        "Preamble\n- [durable] Invalid.",
+        "Still invalid output",
+        "must-not-be-called",
+    )
     middleware = _middleware(model)
 
     result = middleware.compact_state(
@@ -764,11 +881,12 @@ def test_invalid_snip_output_preserves_state_and_does_not_retry_model() -> None:
     )
 
     assert result is None
-    assert model.call_count == 1
+    assert model.call_count == 2
 
 
-def test_nothing_updates_summary_but_clears_receipt() -> None:
-    model = _model(SNIP_NOTHING)
+def test_nothing_still_updates_continuity_summary_but_clears_receipt() -> None:
+    continuity = "Greetings exchanged; nothing durable happened yet."
+    model = _model(_dual(continuity, SNIP_NOTHING))
     middleware = _middleware(model)
 
     result = middleware.compact_state(
@@ -785,12 +903,12 @@ def test_nothing_updates_summary_but_clears_receipt() -> None:
     )
 
     assert result is not None
-    assert result.summary_text == SNIP_NOTHING
+    assert result.summary_text == continuity
     assert result.memory_archive_receipt is None
 
 
 def test_memory_disabled_still_compacts_without_receipt() -> None:
-    model = _model("- [durable] Thread summary remains available.")
+    model = _model(_dual("The thread summary survives without memory.", "- [durable] Thread summary remains available."))
     middleware = _middleware(model)
     disabled = SnipArchiveContext(
         enabled=False,

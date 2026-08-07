@@ -38,6 +38,7 @@ from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
     M7RecreateRequired,
     SchemaSetupRequired,
+    SchemaUpgradeRequired,
     bootstrap_schema,
 )
 
@@ -265,6 +266,9 @@ async def _bootstrap_existing(
     except M7RecreateRequired as exc:
         primary_error = exc
         raise PostgresSetupError(f"M7_RECREATE_REQUIRED: 非空目标库不是完整的 {CURRENT_SCHEMA_REVISION}；请显式重建目标数据库") from None
+    except SchemaUpgradeRequired as exc:
+        primary_error = exc
+        raise PostgresSetupError(f"DATABASE_UPGRADE_REQUIRED: 目标库处于已知历史 revision，setup-db 不执行迁移；请先备份数据库，再运行 `make upgrade-db`（链头 {CURRENT_SCHEMA_REVISION}）") from None
     except SchemaSetupRequired as exc:
         primary_error = exc
         raise PostgresSetupError("DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`") from None

@@ -25,6 +25,7 @@ from app.system_settings.repository import SystemModelRepository
 from deerflow.agents.memory.dream import (
     DREAM_PROMPT_VERSION,
     EMPTY_MEMORY_DOCUMENT,
+    estimate_memory_tokens,
 )
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.private_work.memory_document_repository import (
@@ -137,6 +138,7 @@ class MemoryDreamAdmissionService:
         trigger: MemoryDreamTrigger,
         now: datetime,
         runtime: tuple[AgentRuntimePolicyValue, int, object],
+        budget_only: bool = False,
     ) -> MemoryDreamAdmissionRecord:
         _policy, policy_revision, model = runtime
         try:
@@ -156,9 +158,25 @@ class MemoryDreamAdmissionService:
             model_payload_checksum=model.version.payload_checksum,
             prompt_version=DREAM_PROMPT_VERSION,
         )
-        return await self._repository(session).admit_dream(
+        repository = self._repository(session)
+        effective_trigger: MemoryDreamTrigger = trigger
+        if trigger in {"auto_dream", "manual_dream"}:
+            # The empty-batch budget rescue is a server-side decision: it is
+            # legal only when the current document exceeds the current budget
+            # and there is no pending history to consume. Requests carry no
+            # trigger input.
+            state = await repository.read_state(scope)
+            document = state.document
+            if state.pending_count == 0 and document is not None and document.version >= 1 and estimate_memory_tokens(document.content) > _policy.memory.max_injection_tokens:
+                effective_trigger = "budget_rewrite"
+        if budget_only and effective_trigger != "budget_rewrite":
+            # Budget discovery over-approximates; a scope that turns out to be
+            # inside budget (or gained pending work) must wait for the normal
+            # due rules instead of dreaming early.
+            return self._nothing_pending()
+        return await repository.admit_dream(
             scope,
-            trigger=trigger,
+            trigger=effective_trigger,
             frozen=frozen,
             initial_content=EMPTY_MEMORY_DOCUMENT,
             now=now,
@@ -186,12 +204,33 @@ class MemoryDreamAdmissionService:
             limit=max_jobs,
         )
 
+    async def list_budget_rewrite_scopes(
+        self,
+        session: AsyncSession,
+        *,
+        max_jobs: int = 100,
+    ) -> tuple[MemoryDocumentScope, ...]:
+        if type(max_jobs) is not int or not 1 <= max_jobs <= 100:
+            raise ValueError("Dream Scheduler batch is invalid")
+        policy_state = await self._platform_policy(
+            session,
+            for_update=False,
+        )
+        if policy_state is None:
+            return ()
+        policy, _policy_revision = policy_state
+        return await self._repository(session).list_budget_rewrite_scopes(
+            budget_tokens=policy.memory.max_injection_tokens,
+            limit=max_jobs,
+        )
+
     async def admit_scheduled_scope(
         self,
         session: AsyncSession,
         scope: MemoryDocumentScope,
         *,
         now: datetime,
+        require_due: bool = True,
     ) -> MemoryDreamAdmissionRecord:
         context = await resolve_project_context_in_transaction(
             session,
@@ -205,7 +244,7 @@ class MemoryDreamAdmissionService:
         if runtime is None:
             return self._nothing_pending()
         policy, _policy_revision, _model = runtime
-        if not await self._repository(session).is_scope_due(
+        if require_due and not await self._repository(session).is_scope_due(
             scope,
             now=now,
             interval_minutes=policy.memory.dream_interval_minutes,
@@ -217,6 +256,7 @@ class MemoryDreamAdmissionService:
             trigger="auto_dream",
             now=now,
             runtime=runtime,
+            budget_only=not require_due,
         )
 
 
@@ -247,15 +287,24 @@ class MemoryDreamSchedulerService:
                 now=now,
                 max_jobs=self._max_jobs_per_poll,
             )
+        async with self._sessions() as session, session.begin():
+            budget_scopes = await self._admission.list_budget_rewrite_scopes(
+                session,
+                max_jobs=self._max_jobs_per_poll,
+            )
+        seen = set(scopes)
+        candidates = [(scope, True) for scope in scopes]
+        candidates.extend((scope, False) for scope in budget_scopes if scope not in seen)
 
         admitted = 0
-        for scope in scopes:
+        for scope, require_due in candidates:
             try:
                 async with self._sessions() as session, session.begin():
                     result = await self._admission.admit_scheduled_scope(
                         session,
                         scope,
                         now=now,
+                        require_due=require_due,
                     )
             except (
                 AccountPersonalizationNotFound,

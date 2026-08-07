@@ -793,8 +793,20 @@ export const projectMcpEditableConfigurationResponseSchema = z
       });
     }
   });
-export const credentialVersionResponseSchema = z
-  .object({ data: credentialVersionSchema, request_id: z.string().min(1) })
+export const credentialPendingMigrationSchema = z
+  .object({
+    total: z.number().int().nonnegative(),
+    system_model_count: z.number().int().nonnegative(),
+  })
+  .strict();
+// Replacement only mints a version, so the server reports how many references
+// a migration would still have to move. Null means the count is unavailable.
+export const credentialReplacementResponseSchema = z
+  .object({
+    data: credentialVersionSchema,
+    pending_migration: credentialPendingMigrationSchema.nullable(),
+    request_id: z.string().min(1),
+  })
   .strict();
 export const versionResponseSchema = z
   .object({ data: assetVersionSchema, request_id: z.string().min(1) })
@@ -834,20 +846,6 @@ export const credentialMetadataSchema = z
     updated_at: z.string().datetime({ offset: true }),
   })
   .strict();
-
-export const credentialRotationStatusSchema = z
-  .object({
-    eligible_total: z.number().int().nonnegative(),
-    current: z.number().int().nonnegative(),
-    pending: z.number().int().nonnegative(),
-    status: z.enum(["current", "pending"]),
-  })
-  .strict()
-  .refine(
-    (value) =>
-      value.current + value.pending === value.eligible_total &&
-      (value.status === "pending" ? value.pending > 0 : value.pending === 0),
-  );
 
 const systemBindingItemSchema = z
   .object({
@@ -937,6 +935,7 @@ export const credentialGrantMigrationResponseSchema = z
     credential_id: assetIdSchema,
     credential_version_id: assetIdSchema,
     migrated_count: z.number().int().nonnegative(),
+    migrated_model_count: z.number().int().nonnegative(),
     request_id: z.string().min(1),
   })
   .strict();
@@ -1281,9 +1280,6 @@ export type VersionHistoryResponse = z.infer<
   typeof versionHistoryResponseSchema
 >;
 export type CredentialMetadata = z.infer<typeof credentialMetadataSchema>;
-export type CredentialRotationStatus = z.infer<
-  typeof credentialRotationStatusSchema
->;
 export type SystemBinding = z.infer<typeof systemBindingSchema>;
 export type ProjectAssetList = z.infer<typeof projectAssetListSchema>;
 export type ProjectCredentialList = z.infer<typeof projectCredentialListSchema>;
@@ -1299,6 +1295,12 @@ export type CredentialMutationResponse = z.infer<
 >;
 export type CredentialGrantMigrationResponse = z.infer<
   typeof credentialGrantMigrationResponseSchema
+>;
+export type CredentialPendingMigration = z.infer<
+  typeof credentialPendingMigrationSchema
+>;
+export type CredentialReplacementResponse = z.infer<
+  typeof credentialReplacementResponseSchema
 >;
 export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
 export type AgentInstructionsInput = z.input<

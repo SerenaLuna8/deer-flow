@@ -2,6 +2,21 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+DEFAULT_TEXT_DELTA_FLUSH_MS = 75
+
+
+class WorkerStreamConfig(BaseModel):
+    """Bounded coalescing policy for root text deltas on the durable stream."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text_delta_flush_ms: int = Field(
+        default=DEFAULT_TEXT_DELTA_FLUSH_MS,
+        ge=0,
+        le=5000,
+        description=("Root assistant text deltas are merged for at most this many milliseconds (or 4 KiB) before one durable frame is published. 0 disables coalescing and restores per-token frames."),
+    )
+
 
 class WorkerConfig(BaseModel):
     """Restart-required configuration for independent M6 Workers."""
@@ -16,6 +31,10 @@ class WorkerConfig(BaseModel):
     shutdown_grace_seconds: int = Field(default=30, ge=1, le=600)
     retry_initial_seconds: int = Field(default=2, ge=1, le=3600)
     retry_max_seconds: int = Field(default=300, ge=1, le=86400)
+    stream: WorkerStreamConfig = Field(
+        default_factory=WorkerStreamConfig,
+        description="Durable stream publication policy for this Worker.",
+    )
 
     @model_validator(mode="after")
     def validate_intervals(self) -> Self:
@@ -26,4 +45,4 @@ class WorkerConfig(BaseModel):
         return self
 
 
-__all__ = ["WorkerConfig"]
+__all__ = ["DEFAULT_TEXT_DELTA_FLUSH_MS", "WorkerConfig", "WorkerStreamConfig"]

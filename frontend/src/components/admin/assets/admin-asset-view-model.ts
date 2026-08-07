@@ -4,6 +4,7 @@ import {
   type AssetListKind,
   type AssetSummary,
   type AssetStatus,
+  type CredentialPendingMigration,
 } from "@/core/shared-assets";
 
 export const ADMIN_ASSET_PAGE_SIZE = 20;
@@ -27,6 +28,16 @@ export function filterAdminProjectCatalogItems<
   return items.filter(
     (item) => item.scope === "project" && item.project_id === projectId,
   );
+}
+
+export function credentialPendingMigrationMessage(
+  pending: CredentialPendingMigration | null,
+  copy: Translations["adminAssets"]["common"],
+): string | null {
+  // Nothing pending is a silent success; the count itself is server authority
+  // and is never recomputed from a version list here.
+  if (!pending || pending.total <= 0) return null;
+  return copy.pendingMigrationNotice(pending.total, pending.system_model_count);
 }
 
 type CredentialTypeCopy =

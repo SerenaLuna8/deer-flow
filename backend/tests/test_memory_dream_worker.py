@@ -155,6 +155,7 @@ class _Repository:
 
     async def finalize_dream(self, _scope, **kwargs):
         self.state.finalized.append(kwargs)
+        return SimpleNamespace(version=1, needs_review=False)
 
     async def release_dream(self, _scope, **kwargs):
         self.state.released.append(kwargs)
@@ -474,7 +475,7 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
     class Repository(_Repository):
         async def finalize_dream(self, scope, **kwargs):
             events.append("document")
-            await super().finalize_dream(scope, **kwargs)
+            return await super().finalize_dream(scope, **kwargs)
 
     policy = AgentRuntimePolicyValue(
         memory=MemoryPolicy(
@@ -504,6 +505,7 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
         work=work,
         content=EMPTY_MEMORY_DOCUMENT,
         max_tokens=2_000,
+        episode_retention_days=0,
     )
     await settlement.commit()
 

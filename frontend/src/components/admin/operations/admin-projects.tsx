@@ -455,10 +455,7 @@ function AuthorizedAdminProjects({ accountId }: { accountId: string }) {
   const hasFilters = Object.keys(filters).length > 0;
   return (
     <AdminPage>
-      <AdminPageHeader
-        title={t.adminOperations.projects.title}
-        description={t.adminOperations.projects.description}
-      />
+      <AdminPageHeader title={t.adminOperations.projects.title} />
       <AdminSection contentClassName="p-3">
         <form
           aria-label={t.adminOperations.projects.filters.apply}

@@ -29,6 +29,9 @@ class ThreadMetaRow(Base):
     agent_scope: Mapped[str] = mapped_column(String(16), nullable=False)
     frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Scheduling metadata for idle Memory sealing; not Memory content, so an
+    # account Memory reset intentionally leaves it in place.
+    memory_sealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     checkpoint_delete_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_requested", server_default="not_requested")
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
 

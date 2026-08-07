@@ -257,8 +257,13 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         context = require_issued_private_work_context(self._context)
         if receipt.get("project_id") != str(context.project_id) or receipt.get("owner_user_id") != str(context.user_id) or receipt.get("thread_id") != thread_id:
             raise ValueError("Checkpoint Memory receipt scope is invalid")
+        # Dual-segment SNIP: the checkpoint's summary_text carries the prose
+        # continuity segment while the receipt carries only the tagged segment,
+        # so the two texts are intentionally different. A receipt may still only
+        # ride a checkpoint that also carries a non-empty summary.
         tagged_text = receipt.get("tagged_text")
-        if not isinstance(tagged_text, str) or channel_values.get("summary_text") != tagged_text:
+        summary_text = channel_values.get("summary_text")
+        if not isinstance(tagged_text, str) or not isinstance(summary_text, str) or not summary_text.strip():
             raise ValueError("Checkpoint Memory receipt summary is invalid")
         committed_checkpoint_id = self._checkpoint_id(item.config)
         if committed_checkpoint_id is None:

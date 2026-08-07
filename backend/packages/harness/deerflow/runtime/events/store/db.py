@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 _EXECUTABLE_ROLES = frozenset({"admin", "editor", "runner", "channel_guest"})
 _STREAM_EVENT_NAME_METADATA_KEY = "stream_event_name"
 
+RUN_EVENTS_NOTIFY_CHANNEL = "run_events"
+"""LISTEN/NOTIFY channel that wakes durable SSE consumers after a stream commit.
+
+NOTIFY is only an alarm clock: the payload is the ``run_id`` and delivery rides
+the writing transaction's commit. Readers never trust it for data — a lost
+notification merely degrades a consumer to its poll-timeout fallback.
+"""
+
 
 class DbRunEventStore(RunEventStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
@@ -438,6 +446,17 @@ class DbRunEventStore(RunEventStore):
         )
 
     @staticmethod
+    async def _notify_stream_append(session: AsyncSession, run_id: str) -> None:
+        """Queue a consumer wakeup that is delivered with the caller's commit."""
+        bind = session.get_bind()
+        if bind is None or bind.dialect.name != "postgresql":
+            return
+        await session.execute(
+            text("SELECT pg_notify(:channel, :payload)"),
+            {"channel": RUN_EVENTS_NOTIFY_CHANNEL, "payload": run_id},
+        )
+
+    @staticmethod
     def _stream_event_storage(frame: StreamFrame) -> tuple[str, dict[str, object]]:
         """Return a bounded database event type plus lossless protocol metadata."""
         if frame.terminal:
@@ -538,6 +557,7 @@ class DbRunEventStore(RunEventStore):
         )
         session.add(row)
         await session.flush()
+        await self._notify_stream_append(session, run_id)
         return self._stream_row(row, created=True)
 
     async def list_stream_frames(
@@ -723,6 +743,7 @@ class DbRunEventStore(RunEventStore):
                 terminal.content = db_content
                 terminal.event_metadata = metadata
                 await session.flush()
+                await self._notify_stream_append(session, run_id)
             return self._stream_row(terminal, created=False)
 
         row = RunEventRow(
@@ -739,6 +760,7 @@ class DbRunEventStore(RunEventStore):
         )
         session.add(row)
         await session.flush()
+        await self._notify_stream_append(session, run_id)
         return self._stream_row(row, created=True)
 
     async def put(

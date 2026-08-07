@@ -296,7 +296,11 @@ export interface Translations {
       expandNavigation: string;
       collapseNavigation: string;
       previousPage: string;
+      nextPage: string;
       page: (page: number) => string;
+      pageSize: string;
+      pageSizeOption: (pageSize: number) => string;
+      itemsOnPage: (count: number) => string;
       copy: string;
       copied: string;
       platformHealthy: string;
@@ -317,7 +321,6 @@ export interface Translations {
     };
     overview: {
       title: string;
-      description: string;
       loading: string;
       unavailableTitle: string;
       unavailableDescription: string;
@@ -355,7 +358,6 @@ export interface Translations {
         title: string;
         emptyTitle: string;
         empty: string;
-        checkedAt: string;
       };
       counts: {
         projects: string;
@@ -376,7 +378,6 @@ export interface Translations {
     };
     projects: {
       title: string;
-      description: string;
       loading: string;
       unavailableTitle: string;
       unavailableDescription: string;
@@ -421,7 +422,6 @@ export interface Translations {
     };
     jobs: {
       title: string;
-      description: string;
       loading: string;
       unavailableTitle: string;
       unavailableDescription: string;
@@ -449,7 +449,10 @@ export interface Translations {
         retention_purge: string;
         mcp_discovery: string;
         memory_dream: string;
+        memory_seal: string;
       };
+      retrySafetyLabel: string;
+      errorLabel: string;
       retrySafety: {
         safe: string;
         unsafe: string;
@@ -458,26 +461,40 @@ export interface Translations {
       filters: {
         label: string;
         project: string;
-        projectQuery: string;
-        projectQueryPlaceholder: string;
+        allProjects: string;
         status: string;
         type: string;
         allStatuses: string;
         allTypes: string;
         apply: string;
         clear: string;
-        invalidQuery: string;
       };
     };
     audit: {
       title: string;
-      description: string;
       loading: string;
       unavailableTitle: string;
       unavailableDescription: string;
       emptyTitle: string;
       emptyDescription: string;
       older: string;
+      columns: {
+        time: string;
+        action: string;
+        outcome: string;
+        actor: string;
+        target: string;
+        project: string;
+        error: string;
+      };
+      filters: {
+        label: string;
+        project: string;
+        allProjects: string;
+        platformOnly: string;
+        apply: string;
+        clear: string;
+      };
     };
   };
 
@@ -493,12 +510,10 @@ export interface Translations {
     shell: {
       platformAria: string;
       systemCatalog: string;
-      systemCatalogDescription: string;
       adminScope: string;
       projectAria: string;
       backToProjects: string;
       projectGovernance: string;
-      projectBoundary: string;
       projectId: string;
     };
     common: {
@@ -556,6 +571,10 @@ export interface Translations {
       revoked: string;
       loading: string;
       migrationSuccess: string;
+      pendingMigrationNotice: (
+        total: number,
+        systemModelCount: number,
+      ) => string;
       credentialRotationNote: string;
       historySchemaUnavailable: string;
     };
@@ -608,41 +627,24 @@ export interface Translations {
       };
     };
     pages: {
-      systemEyebrow: string;
-      databaseCatalog: string;
-      runtimeReadOnly: string;
-      controlledWrite: string;
       loading: string;
       loadFailed: string;
       systemCount: (count: number) => string;
-      credentialCount: (count: number) => string;
-      systemNote: (kind: string) => string;
       emptySystem: (kind: string) => string;
       emptyCreate: string;
       system: {
         agentsTitle: string;
-        agentsDescription: string;
         skillsTitle: string;
-        skillsDescription: string;
         mcpTitle: string;
-        mcpDescription: string;
         credentialsTitle: string;
-        credentialsDescription: string;
       };
-      projectEyebrow: string;
-      projectDatabaseCatalog: string;
-      sharedOnly: string;
       projectLoadFailed: string;
       sourceCounts: (systemCount: number, projectCount: number) => string;
       project: {
         agentsTitle: string;
-        agentsDescription: string;
         skillsTitle: string;
-        skillsDescription: string;
         mcpTitle: string;
-        mcpDescription: string;
         credentialsTitle: string;
-        credentialsDescription: string;
       };
     };
     catalog: {
@@ -651,7 +653,6 @@ export interface Translations {
       searchPlaceholder: string;
       filterAll: string;
       catalogReady: string;
-      catalogReadyDetail: string;
       totalAssets: string;
       activeAssets: string;
       unpublishedAssets: string;
@@ -935,12 +936,6 @@ export interface Translations {
         requiredUnavailable: string;
       };
     };
-    rotation: {
-      title: string;
-      summary: (current: number, total: number) => string;
-      current: string;
-      pending: (count: number) => string;
-    };
     errors: {
       notFound: string;
       forbidden: string;
@@ -962,20 +957,15 @@ export interface Translations {
     header: {
       eyebrow: string;
       title: string;
-      description: string;
       create: string;
     };
     overview: {
       label: string;
       configured: string;
-      configuredDetail: string;
       active: string;
-      activeDetail: string;
       defaultModel: string;
-      defaultDetail: string;
       notSet: string;
       revision: string;
-      revisionDetail: string;
     };
     states: {
       loading: string;
@@ -985,8 +975,6 @@ export interface Translations {
       emptyTitle: string;
       emptyDescription: string;
       catalogLabel: string;
-      catalogDescription: string;
-      modelCount: (count: number) => string;
     };
     card: {
       defaultModel: string;
@@ -1113,7 +1101,6 @@ export interface Translations {
     header: {
       eyebrow: string;
       title: string;
-      description: string;
       refresh: string;
       refreshing: string;
     };
@@ -1488,6 +1475,8 @@ export interface Translations {
     writeFile: string;
     clickToViewContent: string;
     writeTodos: string;
+    rememberMemory: string;
+    remembered: string;
     skillInstallTooltip: string;
   };
 

@@ -21,6 +21,7 @@ import inspect
 import logging
 import os
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
@@ -32,6 +33,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS
 from deerflow.error_codes import (
     RUN_EXECUTION_FAILED_ERROR_CODE,
     PublicRunError,
@@ -78,6 +80,7 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.skill_context_authority import (
+    LEAD_MODEL_CALL_SEQ_CONTEXT_KEY,
     VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
@@ -258,6 +261,122 @@ class _LargeFileToolChunkBatcher:
         return chunks
 
 
+_TEXT_DELTA_FLUSH_BYTES = 4096
+# response_metadata keys that mark the end of a provider message stream.
+_TEXT_DELTA_FINISH_KEYS = ("finish_reason", "stop_reason", "done_reason")
+
+
+@dataclass
+class _TextDeltaCoalescer:
+    """Merge consecutive root assistant text deltas into bounded frames (U2).
+
+    Per-token durable frames dominate ``run_events`` row volume. Deltas that
+    belong to the same root assistant message are merged with the same ``+``
+    operator SDK clients use for accumulation, so the reassembled text is
+    byte-identical — only frame boundaries change. Namespaced (subgraph)
+    frames and every non-text frame are untouched.
+
+    Flush discipline mirrors ``_LargeFileToolChunkBatcher``: any
+    non-coalescible frame flushes the buffer before passing through, so
+    inter-frame order is preserved. Additional bounds: a time window
+    (``worker.stream.text_delta_flush_ms``), 4 KiB of accumulated content,
+    message-identity switches, and provider finish markers. When the buffer
+    is empty and the last flush is at least one window old, a delta ships
+    immediately (leading edge) so slow token streams keep per-token latency.
+    """
+
+    window_seconds: float
+    max_pending_bytes: int = _TEXT_DELTA_FLUSH_BYTES
+    pending_message: Any | None = None
+    pending_metadata: dict[str, Any] = field(default_factory=dict)
+    pending_message_id: str | None = None
+    pending_bytes: int = 0
+    window_started_at: float = 0.0
+    last_flush_at: float = float("-inf")
+
+    @staticmethod
+    def _content_size(content: Any) -> int:
+        if isinstance(content, str):
+            return len(content.encode("utf-8", errors="ignore"))
+        return sum(len(str(block)) for block in content)
+
+    @classmethod
+    def _text_delta_parts(cls, chunk: Any) -> tuple[Any, dict[str, Any], str, bool] | None:
+        """Return ``(message, metadata, message_id, is_final)`` for a pure text delta."""
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return None
+        message, metadata = chunk
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, str) or not message_id:
+            return None
+        # Only AIMessageChunk carries tool_call_chunks; requiring the list to
+        # be empty keeps tool-argument streams on the file-batcher path.
+        tool_call_chunks = getattr(message, "tool_call_chunks", None)
+        if not isinstance(tool_call_chunks, list) or tool_call_chunks:
+            return None
+        if getattr(message, "tool_calls", None) or getattr(message, "invalid_tool_calls", None):
+            return None
+        # Provider extras such as DeepSeek's reasoning_content merge with the
+        # same associative ``+`` the SDK applies client-side; only tool-call
+        # assembly fragments must stay per-frame.
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict):
+            if "function_call" in additional_kwargs or "tool_calls" in additional_kwargs:
+                return None
+        elif additional_kwargs is not None:
+            return None
+        content = getattr(message, "content", None)
+        if not isinstance(content, (str, list)):
+            return None
+        response_metadata = getattr(message, "response_metadata", None)
+        is_final = bool(getattr(message, "usage_metadata", None))
+        if isinstance(response_metadata, dict) and any(response_metadata.get(key) for key in _TEXT_DELTA_FINISH_KEYS):
+            is_final = True
+        return message, metadata if isinstance(metadata, dict) else {}, message_id, is_final
+
+    def push(self, chunk: Any) -> list[Any]:
+        parts = self._text_delta_parts(chunk)
+        if parts is None:
+            return [*self.flush(), chunk]
+        message, metadata, message_id, is_final = parts
+
+        now = time.monotonic()
+        outputs: list[Any] = []
+        if self.pending_message_id is not None and self.pending_message_id != message_id:
+            outputs.extend(self.flush())
+
+        if self.pending_message is None:
+            if is_final or now - self.last_flush_at >= self.window_seconds:
+                # Leading edge: the stream is not bursting, ship directly.
+                self.last_flush_at = now
+                outputs.append(chunk)
+                return outputs
+            self.pending_message = message
+            self.pending_metadata = dict(metadata)
+            self.pending_message_id = message_id
+            self.pending_bytes = self._content_size(getattr(message, "content", ""))
+            self.window_started_at = now
+        else:
+            self.pending_message = self.pending_message + message
+            self.pending_metadata.update(metadata)
+            self.pending_bytes += self._content_size(getattr(message, "content", ""))
+
+        if is_final or now - self.window_started_at >= self.window_seconds or self.pending_bytes >= self.max_pending_bytes:
+            outputs.extend(self.flush())
+        return outputs
+
+    def flush(self) -> list[Any]:
+        if self.pending_message is None:
+            return []
+        chunk = (self.pending_message, self.pending_metadata)
+        self.pending_message = None
+        self.pending_metadata = {}
+        self.pending_message_id = None
+        self.pending_bytes = 0
+        self.last_flush_at = time.monotonic()
+        return [chunk]
+
+
 def _private_output_delivery_satisfied(finalization_result: object | None) -> bool:
     """Require one trusted current-run artifact when this turn produced outputs."""
 
@@ -325,6 +444,7 @@ def _build_runtime_context(
                 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
                 _SLASH_SKILL_ACTIVATION_RUN_KEY,
                 VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+                LEAD_MODEL_CALL_SEQ_CONTEXT_KEY,
                 "__memory_authority",
                 "memory_authority",
                 GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
@@ -427,6 +547,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         existing_context.pop(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, None)
         existing_context.pop(_SLASH_SKILL_ACTIVATION_RUN_KEY, None)
         existing_context.pop(VERIFIED_SKILL_SOURCE_CONTEXT_KEY, None)
+        existing_context.pop(LEAD_MODEL_CALL_SEQ_CONTEXT_KEY, None)
         existing_context.pop("__memory_authority", None)
         existing_context.pop("memory_authority", None)
         existing_context.pop(GUARDRAIL_ATTRIBUTION_CONTEXT_KEY, None)
@@ -475,6 +596,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             "stop_reason",
             _SLASH_SKILL_ACTIVATION_RUN_KEY,
             VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
+            LEAD_MODEL_CALL_SEQ_CONTEXT_KEY,
             RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
         }
     }
@@ -1188,6 +1310,9 @@ async def run_agent(
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
+            text_delta_flush_ms = ctx.app_config.worker.stream.text_delta_flush_ms if isinstance(ctx.app_config, AppConfig) else DEFAULT_TEXT_DELTA_FLUSH_MS
+            # 0 disables coalescing and restores per-token durable frames.
+            text_delta_coalescer = _TextDeltaCoalescer(window_seconds=text_delta_flush_ms / 1000.0) if text_delta_flush_ms > 0 and "messages" in lg_modes else None
             try:
                 if len(lg_modes) == 1 and not stream_subgraphs:
                     # Single mode, no subgraphs: astream yields raw chunks.
@@ -1210,11 +1335,13 @@ async def run_agent(
                             pre_existing_message_ids,
                         )
                         sse_event = _lg_mode_to_sse_event(single_mode)
-                        await bridge.publish(
-                            run_id,
-                            sse_event,
-                            serialize(chunk, mode=single_mode),
-                        )
+                        frames = text_delta_coalescer.push(chunk) if single_mode == "messages" and text_delta_coalescer is not None else [chunk]
+                        for frame in frames:
+                            await bridge.publish(
+                                run_id,
+                                sse_event,
+                                serialize(frame, mode=single_mode),
+                            )
                         if single_mode == "custom":
                             await subagent_events.add(chunk)
                     return
@@ -1253,13 +1380,23 @@ async def run_agent(
                         chunk=chunk,
                         namespace=namespace,
                         file_tool_chunk_batcher=file_tool_chunk_batcher,
+                        text_delta_coalescer=text_delta_coalescer,
                         subagent_events=subagent_events,
                     )
             finally:
                 stream_error = sys.exception()
-                if file_tool_chunk_batcher is not None:
+                if text_delta_coalescer is not None or file_tool_chunk_batcher is not None:
                     try:
-                        for publish_chunk in file_tool_chunk_batcher.finish():
+                        # Terminal flush: coalesced text first (routed through
+                        # the file batcher so any older tool-argument batch
+                        # keeps its place), then the file batcher itself.
+                        pending_frames: list[Any] = []
+                        if text_delta_coalescer is not None:
+                            for frame in text_delta_coalescer.flush():
+                                pending_frames.extend(file_tool_chunk_batcher.push(frame) if file_tool_chunk_batcher is not None else [frame])
+                        if file_tool_chunk_batcher is not None:
+                            pending_frames.extend(file_tool_chunk_batcher.finish())
+                        for publish_chunk in pending_frames:
                             await bridge.publish(
                                 run_id,
                                 "messages",
@@ -1272,7 +1409,7 @@ async def run_agent(
                         if stream_error is None:
                             raise
                         logger.debug(
-                            "Could not flush pending file-tool chunks for run %s",
+                            "Could not flush pending stream chunks for run %s",
                             run_id,
                             exc_info=True,
                         )
@@ -2588,6 +2725,7 @@ async def _publish_stream_item(
     chunk: Any,
     namespace: tuple[str, ...],
     file_tool_chunk_batcher: _LargeFileToolChunkBatcher | None,
+    text_delta_coalescer: _TextDeltaCoalescer | None,
     subagent_events: _SubagentEventBuffer,
 ) -> None:
     """Publish one frame without letting child data enter root consumers.
@@ -2595,11 +2733,15 @@ async def _publish_stream_item(
     Every emitted frame still goes through the injected StreamBridge. Private
     Workers therefore retain the existing lease check, PostgreSQL commit, and
     post-commit notification boundary; batching only reduces how often root
-    file-tool argument deltas cross that boundary.
+    file-tool argument deltas and root text deltas cross that boundary.
     """
 
     sse_event = _namespaced_sse_event(mode, namespace)
     if namespace:
+        # Subgraph frames keep current behavior and never disturb root
+        # batching: they render in their own UI lane, so holding root text
+        # for at most one window does not reorder anything a consumer can
+        # observe per message id.
         await bridge.publish(
             run_id,
             sse_event,
@@ -2607,8 +2749,15 @@ async def _publish_stream_item(
         )
         return
 
-    if file_tool_chunk_batcher is not None and mode != "messages":
-        pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
+    if mode != "messages":
+        # Root mode switch: flush coalesced text first, routed through the
+        # file batcher so an older pending tool-argument batch stays ahead.
+        pending_chunks: list[Any] = []
+        if text_delta_coalescer is not None:
+            for frame in text_delta_coalescer.flush():
+                pending_chunks.extend(file_tool_chunk_batcher.push(frame) if file_tool_chunk_batcher is not None else [frame])
+        if file_tool_chunk_batcher is not None:
+            pending_chunks.extend(file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush())
         for publish_chunk in pending_chunks:
             await bridge.publish(
                 run_id,
@@ -2616,13 +2765,15 @@ async def _publish_stream_item(
                 serialize(publish_chunk, mode="messages"),
             )
 
-    chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
-    for publish_chunk in chunks_to_publish:
-        await bridge.publish(
-            run_id,
-            sse_event,
-            serialize(publish_chunk, mode=mode),
-        )
+    frames = text_delta_coalescer.push(chunk) if mode == "messages" and text_delta_coalescer is not None else [chunk]
+    for frame in frames:
+        chunks_to_publish = file_tool_chunk_batcher.push(frame) if mode == "messages" and file_tool_chunk_batcher is not None else [frame]
+        for publish_chunk in chunks_to_publish:
+            await bridge.publish(
+                run_id,
+                sse_event,
+                serialize(publish_chunk, mode=mode),
+            )
     if mode == "custom":
         await subagent_events.add(chunk)
 

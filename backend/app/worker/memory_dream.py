@@ -45,15 +45,24 @@ from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model, model_supports_temperature
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.private_work.memory_document_repository import (
+    BUDGET_REWRITE_HISTORY_DIGEST,
     MemoryDocumentConflict,
     MemoryDocumentRepository,
     MemoryDocumentScope,
     MemoryDreamWork,
     compute_dream_history_digest,
+    memory_document_deletion_ratio,
     memory_document_digest,
 )
 
 _MEMORY_DREAM_REQUEST_ID = "memory-dream-worker"
+
+
+def _deletion_ratio_bucket(ratio: float) -> str:
+    """Content-free decile bucket for the review audit metadata."""
+
+    lower = min(90, int(ratio * 10) * 10)
+    return f"{lower}-{lower + 10}%"
 
 
 class DreamRunnerPort(Protocol):
@@ -111,6 +120,7 @@ class MemoryDreamJobHandler:
         personalization_repository_builder=AccountPersonalizationRepository,
         retry_initial_seconds: int = 5,
         retry_max_seconds: int = 300,
+        audit=None,
     ) -> None:
         if (
             not callable(session_factory)
@@ -125,6 +135,8 @@ class MemoryDreamJobHandler:
             or retry_max_seconds < retry_initial_seconds
         ):
             raise ValueError("Dream Worker configuration is invalid")
+        if audit is not None and not callable(getattr(audit, "memory_dream_review_flagged", None)):
+            raise ValueError("Dream Worker audit port is invalid")
         self._sessions = session_factory
         self._app_config = app_config
         self._model_materializer = model_materializer or SystemModelMaterializer(session_factory)
@@ -137,6 +149,7 @@ class MemoryDreamJobHandler:
         self._personalization_repository_builder = personalization_repository_builder
         self._retry_initial_seconds = retry_initial_seconds
         self._retry_max_seconds = retry_max_seconds
+        self._audit = audit
 
     def _repository(self, session: AsyncSession) -> MemoryDocumentRepository:
         return self._repository_builder(
@@ -200,15 +213,16 @@ class MemoryDreamJobHandler:
         *,
         max_tokens: int,
     ) -> MemoryDreamInput:
-        if (
+        if work.prompt_version != DREAM_PROMPT_VERSION or work.result_version is not None or work.history_count != len(work.history) or memory_document_digest(work.base_content) != work.base_content_digest:
+            raise ValueError("Dream frozen work is invalid")
+        if work.trigger == "budget_rewrite":
+            if work.history or work.history_from is not None or work.history_to is not None or work.history_digest != BUDGET_REWRITE_HISTORY_DIGEST:
+                raise ValueError("Dream frozen work is invalid")
+        elif (
             not work.history
-            or work.prompt_version != DREAM_PROMPT_VERSION
-            or work.result_version is not None
-            or work.history_count != len(work.history)
             or work.history_from != work.history[0].sequence
             or work.history_to != work.history[-1].sequence
             or compute_dream_history_digest(work.history) != work.history_digest
-            or memory_document_digest(work.base_content) != work.base_content_digest
             or any(item.tagged_text is None for item in work.history)
         ):
             raise ValueError("Dream frozen work is invalid")
@@ -219,10 +233,12 @@ class MemoryDreamJobHandler:
                 DreamHistoryInput(
                     sequence=item.sequence,
                     tagged_text=item.tagged_text or "",
+                    origin=item.origin,
                 )
                 for item in work.history
             ),
             max_tokens=max_tokens,
+            budget_rewrite=work.trigger == "budget_rewrite",
         )
 
     async def __call__(
@@ -328,6 +344,7 @@ class MemoryDreamJobHandler:
             work=work,
             content=result.content,
             max_tokens=frozen_policy.memory.max_injection_tokens,
+            episode_retention_days=frozen_policy.memory.episode_retention_days,
         )
 
     def _success_settlement(
@@ -337,6 +354,7 @@ class MemoryDreamJobHandler:
         work: MemoryDreamWork,
         content: str,
         max_tokens: int,
+        episode_retention_days: int,
     ) -> JobSettlement:
         async def commit() -> None:
             async with self._sessions() as session, session.begin():
@@ -396,7 +414,7 @@ class MemoryDreamJobHandler:
                 validate_memory_document(content, max_tokens)
                 try:
                     async with session.begin_nested():
-                        await repository.finalize_dream(
+                        record = await repository.finalize_dream(
                             self._scope(claim),
                             job_id=claim.job_id,
                             lease_token=claim.lease_token,
@@ -405,7 +423,21 @@ class MemoryDreamJobHandler:
                             expected_base_digest=work.base_content_digest,
                             content=content,
                             now=datetime.now(UTC),
+                            episode_retention_days=episode_retention_days,
                         )
+                        if record.needs_review and self._audit is not None:
+                            ratio = memory_document_deletion_ratio(
+                                work.base_content,
+                                content,
+                            )
+                            await self._audit.memory_dream_review_flagged(
+                                session,
+                                project_id=work.project_id,
+                                job_id=claim.job_id,
+                                request_id=_MEMORY_DREAM_REQUEST_ID,
+                                version=record.version,
+                                deletion_ratio_bucket=_deletion_ratio_bucket(ratio or 0.0),
+                            )
                 except MemoryDocumentConflict:
                     await repository.release_dream(
                         self._scope(claim),

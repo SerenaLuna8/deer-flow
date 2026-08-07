@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -39,6 +40,7 @@ from app.gateway.private_work_schemas import (
     StrictPrivateWorkRequest,
     StrictPrivateWorkResponse,
 )
+from app.gateway.run_event_wakeup import RunEventWakeup
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpoint_state import (
     bind_scoped_checkpoint_state,
@@ -725,8 +727,15 @@ def _require_run_runtime(request: Request, request_id: str) -> PostgresStreamBri
 
 
 _PRIVATE_STREAM_POLL_SECONDS = 0.25
+_PRIVATE_STREAM_WAKEUP_WAIT_SECONDS = 2.5
 _PRIVATE_STREAM_HEARTBEAT_SECONDS = 15.0
 _PRIVATE_RUN_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+
+
+def _run_event_wakeup(request: Request) -> RunEventWakeup | None:
+    """Return the per-process wakeup dispatcher; absence degrades to polling."""
+    wakeup = getattr(request.app.state, "run_event_wakeup", None)
+    return wakeup if isinstance(wakeup, RunEventWakeup) else None
 
 
 def _private_stream_cursor(request: Request, request_id: str) -> int:
@@ -803,6 +812,7 @@ async def _durable_private_sse_consumer(
     cursor: int,
     initial_frames: tuple[StoredStreamFrame, ...],
     cancel_on_disconnect: bool,
+    wakeup: RunEventWakeup | None = None,
 ) -> AsyncIterator[str]:
     frames = initial_frames
     pending_terminal: StoredStreamFrame | None = None
@@ -811,6 +821,7 @@ async def _durable_private_sse_consumer(
     terminal_emitted = False
     loop = asyncio.get_running_loop()
     next_heartbeat = loop.time() + _PRIVATE_STREAM_HEARTBEAT_SECONDS
+    waiter = wakeup.subscribe(run_id) if wakeup is not None else None
     try:
         while True:
             for frame in frames:
@@ -830,6 +841,10 @@ async def _durable_private_sse_consumer(
                 return
 
             if pending_terminal is None:
+                # Re-arm before reading so a NOTIFY that lands during the read
+                # is not lost between this page and the next idle wait.
+                if waiter is not None:
+                    waiter.clear()
                 frames = await _read_private_stream_page(
                     bridge,
                     context,
@@ -863,16 +878,21 @@ async def _durable_private_sse_consumer(
             if now >= next_heartbeat:
                 yield ": heartbeat\n\n"
                 next_heartbeat = loop.time() + _PRIVATE_STREAM_HEARTBEAT_SECONDS
-            await asyncio.sleep(
-                min(
-                    _PRIVATE_STREAM_POLL_SECONDS,
-                    max(0.001, next_heartbeat - loop.time()),
-                )
-            )
+            idle_seconds = _PRIVATE_STREAM_WAKEUP_WAIT_SECONDS if waiter is not None and wakeup is not None and wakeup.listening else _PRIVATE_STREAM_POLL_SECONDS
+            deadline = min(idle_seconds, max(0.001, next_heartbeat - loop.time()))
+            if waiter is None:
+                await asyncio.sleep(deadline)
+            else:
+                # NOTIFY is only an alarm clock: the timeout fallback keeps the
+                # legacy poll behavior whenever a notification is lost.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(waiter.wait(), timeout=deadline)
     except asyncio.CancelledError:
         cancelled = True
         raise
     finally:
+        if wakeup is not None and waiter is not None:
+            wakeup.unsubscribe(run_id, waiter)
         if (disconnected or cancelled) and cancel_on_disconnect and not terminal_emitted:
             await _persist_private_disconnect_cancel(
                 service=service,
@@ -1417,6 +1437,7 @@ async def stream_private_run(
             cursor=cursor,
             initial_frames=(),
             cancel_on_disconnect=record.on_disconnect == DisconnectMode.cancel,
+            wakeup=_run_event_wakeup(request),
         ),
         media_type="text/event-stream",
         headers=_private_stream_headers(
@@ -1468,6 +1489,7 @@ async def reconnect_private_run_stream(
             cursor=cursor,
             initial_frames=initial_frames,
             cancel_on_disconnect=False,
+            wakeup=_run_event_wakeup(request),
         ),
         media_type="text/event-stream",
         headers=_private_stream_headers(

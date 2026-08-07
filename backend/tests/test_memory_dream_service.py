@@ -86,6 +86,12 @@ class _Repository:
         self.list_kwargs = kwargs
         return self.scopes
 
+    async def read_state(self, _scope_value, **_kwargs):
+        return SimpleNamespace(
+            document=SimpleNamespace(version=1, content=EMPTY_MEMORY_DOCUMENT),
+            pending_count=3,
+        )
+
     async def admit_dream(self, scope, **kwargs):
         self.admissions.append((scope, kwargs))
         return MemoryDreamAdmissionRecord(
@@ -296,6 +302,16 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
             events.append(("due", self.session.identity))
             return scopes
 
+        async def list_budget_rewrite_scopes(self, **_kwargs):
+            events.append(("budget", self.session.identity))
+            return ()
+
+        async def read_state(self, _scope_value, **_kwargs):
+            return SimpleNamespace(
+                document=SimpleNamespace(version=1, content=EMPTY_MEMORY_DOCUMENT),
+                pending_count=3,
+            )
+
         async def admit_dream(self, _scope_value, **_kwargs):
             events.append(("document", self.session.identity))
             return MemoryDreamAdmissionRecord(
@@ -360,22 +376,24 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
     )
 
     assert await scheduler.admit_due(now=NOW) == 2
-    assert len(factory.sessions) == 3
+    assert len(factory.sessions) == 4
     assert events == [
         ("policy", 0, False),
         ("due", 0),
-        ("project", 1),
-        ("policy", 1, True),
-        ("model", 1),
-        ("due_scope", 1),
-        ("preference", 1),
-        ("document", 1),
+        ("policy", 1, False),
+        ("budget", 1),
         ("project", 2),
         ("policy", 2, True),
         ("model", 2),
         ("due_scope", 2),
         ("preference", 2),
         ("document", 2),
+        ("project", 3),
+        ("policy", 3, True),
+        ("model", 3),
+        ("due_scope", 3),
+        ("preference", 3),
+        ("document", 3),
     ]
 
 
@@ -393,6 +411,9 @@ async def test_scheduler_rechecks_due_with_the_locked_current_interval(
         async def list_due_scopes(self, **kwargs):
             intervals.append(kwargs["interval_minutes"])
             return (scope,)
+
+        async def list_budget_rewrite_scopes(self, **_kwargs):
+            return ()
 
         async def is_scope_due(self, _scope_value, **kwargs):
             intervals.append(kwargs["interval_minutes"])
@@ -521,10 +542,15 @@ async def test_scheduler_wrapper_preserves_the_configured_poll_bound() -> None:
             self.sessions.append(session)
             return (_scope(),)
 
+        async def list_budget_rewrite_scopes(self, session, **kwargs):
+            assert kwargs == {"max_jobs": 9}
+            self.sessions.append(session)
+            return ()
+
         async def admit_scheduled_scope(self, session, scope, **kwargs):
             self.sessions.append(session)
             assert scope == _scope()
-            assert kwargs == {"now": NOW}
+            assert kwargs == {"now": NOW, "require_due": True}
             return MemoryDreamAdmissionRecord(
                 disposition="queued",
                 job_id=uuid.uuid4(),
@@ -548,7 +574,7 @@ async def test_scheduler_wrapper_preserves_the_configured_poll_bound() -> None:
     assert await scheduler.admit_due(now=NOW) == 1
     assert admission.kwargs == (sessions[0], {"now": NOW, "max_jobs": 9})
     assert admission.sessions == sessions
-    assert len(sessions) == 2
+    assert len(sessions) == 3
 
 
 class _DreamBarrier:

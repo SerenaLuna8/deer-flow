@@ -604,6 +604,165 @@ class OperationalAuditSink:
             job_id=_uuid(job_id),
         )
 
+    async def memory_remembered(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        request_id: str,
+        kind: str,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_REMEMBER,
+            AuditTarget(
+                AuditTargetKind.RUN,
+                _uuid(run_id),
+                _uuid(scope.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {"kind": kind},
+            request_id=request_id,
+            job_id=_uuid(job_id),
+        )
+
+    async def memory_recall_executed(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        request_id: str,
+        result_bucket: str,
+        matched_stage: str,
+        tags_filtered: bool,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_RECALL_EXECUTED,
+            AuditTarget(
+                AuditTargetKind.RUN,
+                _uuid(run_id),
+                _uuid(scope.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "result_bucket": result_bucket,
+                "matched_stage": matched_stage,
+                "tags_filtered": tags_filtered,
+            },
+            request_id=request_id,
+            job_id=_uuid(job_id),
+        )
+
+    async def memory_injection_skipped(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | str,
+        run_id: uuid.UUID | str,
+        request_id: str,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY, AuditProcess.SCHEDULER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_INJECTION_SKIPPED,
+            AuditTarget(
+                AuditTargetKind.RUN,
+                _uuid(run_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {"reason": "over_budget"},
+            request_id=request_id,
+        )
+
+    async def memory_dream_review_flagged(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | str,
+        job_id: uuid.UUID,
+        request_id: str,
+        version: int,
+        deletion_ratio_bucket: str,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_DREAM_REVIEW_FLAGGED,
+            AuditTarget(
+                AuditTargetKind.JOB,
+                _uuid(job_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "version": version,
+                "deletion_ratio_bucket": deletion_ratio_bucket,
+            },
+            request_id=request_id,
+            job_id=_uuid(job_id),
+        )
+
+    async def memory_seal_admitted(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | str,
+        job_id: uuid.UUID,
+        request_id: str,
+    ) -> None:
+        self._require_process(AuditProcess.SCHEDULER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_SEAL_ADMITTED,
+            AuditTarget(
+                AuditTargetKind.JOB,
+                _uuid(job_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {},
+            request_id=request_id,
+            job_id=_uuid(job_id),
+        )
+
+    async def memory_seal_settled(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | str,
+        job_id: uuid.UUID,
+        request_id: str,
+        disposition: str,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_SEAL_SETTLED,
+            AuditTarget(
+                AuditTargetKind.JOB,
+                _uuid(job_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {"disposition": disposition},
+            request_id=request_id,
+            job_id=_uuid(job_id),
+        )
+
     async def job_terminalized(
         self,
         session: AsyncSession,

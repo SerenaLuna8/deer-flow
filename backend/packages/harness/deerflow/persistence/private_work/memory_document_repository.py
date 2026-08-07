@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deerflow.agents.memory.snip import (
     SNIP_NOTHING,
     compute_snip_content_digest,
+    validate_snip_line,
     validate_snip_output,
 )
 from deerflow.persistence.jobs.model import JobRow
@@ -26,6 +27,7 @@ from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     MemoryDocumentVersionRow,
     MemoryDreamRunRow,
+    MemoryEpisodeRow,
     MemoryHistoryEntryRow,
     RunMemoryContextSnapshotRow,
 )
@@ -33,6 +35,143 @@ from deerflow.persistence.system_settings import SystemModelConfigVersionRow
 from deerflow.persistence.user.model import UserRow
 
 DEFAULT_MEMORY_NAMESPACE = "default"
+# Platform default until `episode_retention_days` ships as a Memory policy
+# field; ``0`` keeps episodes forever.
+DEFAULT_EPISODE_RETENTION_DAYS = 365
+_EPISODE_PRUNE_BATCH_LIMIT = 500
+# Closed tag vocabulary shared by the recall tool, the episodes API, and the
+# SNIP line contract (``skip`` never reaches storage).
+EPISODE_SEARCH_TAGS: tuple[str, ...] = (
+    "permanent",
+    "durable",
+    "ephemeral",
+    "correction",
+)
+MAX_EPISODE_QUERY_CHARS = 200
+# Explicit floor instead of the pg_trgm GUC threshold (0.3): recall favors
+# finding loosely related notes, and an explicit constant keeps the filter
+# deterministic across environments.
+EPISODE_SIMILARITY_FLOOR = 0.1
+# Contract for tool-originated history rows written by the `remember` tool.
+REMEMBER_PROMPT_VERSION = "remember-tool-v1"
+MAX_REMEMBER_CONTENT_CHARS = 500
+REMEMBER_RUN_LIMIT = 5
+REMEMBER_BACKLOG_LIMIT = 200
+_REMEMBER_SOURCE_DOMAIN = "deerflow.remember.source.v1"
+# One Dream consumes at most this many pending entries; a full batch makes a
+# scope due immediately instead of waiting out the interval.
+DREAM_HISTORY_BATCH_SIZE = 20
+# A pending `remember` proposal makes its scope due after this many minutes,
+# so explicit user requests reach the document within one scheduler cycle
+# plus this grace window.
+TOOL_ENTRY_DUE_MINUTES = 10
+# A published version is flagged for review when the previous document had at
+# least this many content lines and at least this fraction of them were purely
+# deleted, unless the consumed batch carried an explicit `[correction]` line.
+MEMORY_REVIEW_MIN_LINES = 8
+MEMORY_REVIEW_DELETION_RATIO = 0.4
+# `budget_rewrite` freezes zero history rows; its digest column carries this
+# domain-separated sentinel instead of a batch hash.
+BUDGET_REWRITE_HISTORY_DIGEST = hashlib.sha256(b"deerflow.dream.budget_rewrite.empty.v1").hexdigest()
+
+
+def compute_remember_source_digest(
+    *,
+    run_id: str,
+    tool_call_id: str,
+    content: str,
+) -> str:
+    """Hash the server-bound identity of one remember proposal.
+
+    Canonical JSON keeps field boundaries unambiguous, so no concatenation of
+    ``run_id``/``tool_call_id``/``content`` can collide across fields.
+    """
+
+    payload = {
+        "content": content,
+        "domain": _REMEMBER_SOURCE_DOMAIN,
+        "run_id": run_id,
+        "tool_call_id": tool_call_id,
+    }
+    canonical = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def validate_episode_retention_days(days: int) -> int:
+    """Enforce the platform retention contract: ``0`` or ``30..3650`` days."""
+
+    if type(days) is not int or (days != 0 and not 30 <= days <= 3650):
+        raise ValueError("Episode retention days are out of contract")
+    return days
+
+
+def _document_content_lines(content: str) -> list[str]:
+    """Content lines of a document: non-empty and not a section heading."""
+
+    return [line.strip() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("# ")]
+
+
+def memory_document_deletion_ratio(previous: str, replacement: str) -> float | None:
+    """Fraction of previous content lines that vanished from the replacement.
+
+    Returns ``None`` when the previous document is too small for the ratio to
+    be meaningful (fewer than ``MEMORY_REVIEW_MIN_LINES`` content lines).
+    """
+
+    if not isinstance(previous, str) or not isinstance(replacement, str):
+        raise TypeError("Memory documents must be text")
+    previous_lines = _document_content_lines(previous)
+    if len(previous_lines) < MEMORY_REVIEW_MIN_LINES:
+        return None
+    replacement_lines = set(_document_content_lines(replacement))
+    deleted = sum(1 for line in previous_lines if line not in replacement_lines)
+    return deleted / len(previous_lines)
+
+
+def memory_document_needs_review(
+    previous: str,
+    replacement: str,
+    history: tuple[MemoryDreamHistoryRecord, ...],
+) -> bool:
+    """Zero-cost heuristic for flagging a large-deletion Dream settlement.
+
+    An explicit ``[correction]`` line anywhere in the consumed batch means the
+    user asked for the removal, so the flag stays off.
+    """
+
+    ratio = memory_document_deletion_ratio(previous, replacement)
+    if ratio is None or ratio < MEMORY_REVIEW_DELETION_RATIO:
+        return False
+    for item in history:
+        text = item.tagged_text or ""
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            stripped = stripped.removeprefix("- ")
+            if stripped.startswith("[correction]"):
+                return False
+    return True
+
+
+def _escape_like_pattern(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _validated_episode_tags(tags: object) -> tuple[str, ...]:
+    if not isinstance(tags, (tuple, list)):
+        raise ValueError("Episode tags must be a sequence")
+    normalized: list[str] = []
+    for tag in tags:
+        if tag not in EPISODE_SEARCH_TAGS:
+            raise ValueError("Episode tag is out of contract")
+        if tag not in normalized:
+            normalized.append(tag)
+    return tuple(normalized)
 
 
 class MemoryDocumentNotFound(LookupError):
@@ -43,12 +182,13 @@ class MemoryDocumentConflict(RuntimeError):
     pass
 
 
-MemoryDreamTrigger = Literal["auto_dream", "manual_dream"]
+MemoryDreamTrigger = Literal["auto_dream", "manual_dream", "budget_rewrite"]
 MemoryDreamAdmissionDisposition = Literal[
     "queued",
     "already_running",
     "nothing_pending",
 ]
+MemoryDreamAdmissionKind = Literal["history", "budget_rewrite"]
 MemoryHistoryActivationStatus = Literal[
     "created",
     "pending",
@@ -138,6 +278,75 @@ class MemoryHistoryActivationResult:
     entry_id: uuid.UUID | None
 
 
+MemoryProposalDisposition = Literal[
+    "recorded",
+    "duplicate",
+    "memory_disabled",
+    "run_limit_reached",
+    "backlog_full",
+]
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryRememberProposal:
+    """One `remember` tool proposal bound to a live Run.
+
+    The tagged line is derived server-side from the closed ``kind`` vocabulary
+    and the single-line content, then revalidated against the SNIP line
+    grammar so tool rows stay indistinguishable from SNIP rows for Dream.
+    """
+
+    scope: MemoryDocumentScope
+    thread_id: str
+    run_id: str
+    tool_call_id: str
+    kind: str
+    content: str
+
+    def __post_init__(self) -> None:
+        if type(self.scope) is not MemoryDocumentScope:
+            raise ValueError("Memory proposal requires a memory scope")
+        if not isinstance(self.thread_id, str) or not self.thread_id or len(self.thread_id) > 64:
+            raise ValueError("Memory proposal thread is invalid")
+        if not isinstance(self.run_id, str) or not self.run_id or len(self.run_id) > 64:
+            raise ValueError("Memory proposal run is invalid")
+        if not isinstance(self.tool_call_id, str) or not self.tool_call_id or len(self.tool_call_id) > 128:
+            raise ValueError("Memory proposal tool call is invalid")
+        if self.kind not in EPISODE_SEARCH_TAGS:
+            raise ValueError("Memory proposal kind is out of contract")
+        if not isinstance(self.content, str):
+            raise ValueError("Memory proposal content must be text")
+        content = self.content.strip()
+        if not content or len(content) > MAX_REMEMBER_CONTENT_CHARS or _CONTROL_CHARS.search(content):
+            raise ValueError("Memory proposal content must be one bounded line")
+        try:
+            validate_snip_line(f"- [{self.kind}] {content}")
+        except (TypeError, ValueError):
+            raise ValueError("Memory proposal does not form a valid tagged line") from None
+        object.__setattr__(self, "content", content)
+
+    @property
+    def tagged_text(self) -> str:
+        return f"- [{self.kind}] {self.content}"
+
+    @property
+    def source_digest(self) -> str:
+        return compute_remember_source_digest(
+            run_id=self.run_id,
+            tool_call_id=self.tool_call_id,
+            content=self.content,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryProposalOutcome:
+    disposition: MemoryProposalDisposition
+    entry_id: uuid.UUID | None
+    tagged_text: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryDocumentRecord:
     content: str
@@ -155,6 +364,16 @@ class MemoryDocumentState:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryPendingEntryRecord:
+    """One not-yet-consumed history entry, in Dream consumption order."""
+
+    sequence: int
+    origin: str
+    tagged_text: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryDocumentVersionRecord:
     version: int
     content: str
@@ -167,6 +386,7 @@ class MemoryDocumentVersionRecord:
     history_count: int | None
     prompt_version: str | None
     model_ref: uuid.UUID | None
+    needs_review: bool
     created_at: datetime
 
 
@@ -201,6 +421,7 @@ class MemoryDreamAdmissionRecord:
     disposition: MemoryDreamAdmissionDisposition
     job_id: uuid.UUID | None
     history_count: int
+    admission_kind: MemoryDreamAdmissionKind = "history"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +430,21 @@ class MemoryDreamHistoryRecord:
     sequence: int
     tagged_text: str | None
     content_digest: str
+    # Origin is presentation metadata for Dream trust framing; it is
+    # deliberately excluded from the frozen batch digest.
+    origin: str = "snip"
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryEpisodeRecord:
+    """One archived episode returned by recall search or the browse API."""
+
+    id: uuid.UUID
+    thread_id: str
+    origin: str
+    tagged_text: str
+    occurred_at: datetime
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,8 +454,8 @@ class MemoryDreamWork:
     owner_user_id: str
     namespace: str
     trigger: MemoryDreamTrigger
-    history_from: int
-    history_to: int
+    history_from: int | None
+    history_to: int | None
     history_count: int
     history_digest: str
     base_document_version: int
@@ -245,6 +481,7 @@ class MemoryResetCounts:
     versions: int
     dream_runs: int
     snapshots: int
+    episodes: int
     jobs_cancelled: int
 
 
@@ -470,6 +707,126 @@ class MemoryDocumentRepository:
         ):
             raise MemoryDocumentConflict("Memory history receipt conflicts")
 
+    async def propose_entry(
+        self,
+        proposal: MemoryRememberProposal,
+    ) -> MemoryProposalOutcome:
+        """Record one tool-originated pending history entry, idempotently.
+
+        The owner's preference row is locked first: this serializes every
+        memory writer for the account, making the duplicate check and both
+        caps race-free, and pins the ``preference_version`` recorded on the
+        row. Replaying the same tool call is a ``duplicate`` before any cap
+        applies, so retries never consume quota.
+        """
+
+        if type(proposal) is not MemoryRememberProposal:
+            raise TypeError("MemoryRememberProposal is required")
+        preference = (
+            await self.session.execute(
+                sa.select(
+                    UserRow.memory_enabled,
+                    UserRow.preferences_version,
+                )
+                .where(UserRow.id == proposal.scope.owner_user_id)
+                .with_for_update(of=UserRow)
+            )
+        ).one_or_none()
+        if preference is None or not bool(preference.memory_enabled):
+            return MemoryProposalOutcome(
+                disposition="memory_disabled",
+                entry_id=None,
+                tagged_text=None,
+            )
+
+        scope_predicates = self._scope_predicates(MemoryHistoryEntryRow, proposal.scope)
+        existing_id = await self.session.scalar(
+            sa.select(MemoryHistoryEntryRow.id).where(
+                *scope_predicates,
+                MemoryHistoryEntryRow.thread_id == proposal.thread_id,
+                MemoryHistoryEntryRow.source_digest == proposal.source_digest,
+            )
+        )
+        if existing_id is not None:
+            return MemoryProposalOutcome(
+                disposition="duplicate",
+                entry_id=existing_id,
+                tagged_text=proposal.tagged_text,
+            )
+
+        run_count = int(
+            await self.session.scalar(
+                sa.select(sa.func.count())
+                .select_from(MemoryHistoryEntryRow)
+                .where(
+                    *scope_predicates,
+                    MemoryHistoryEntryRow.origin == "tool",
+                    MemoryHistoryEntryRow.source_run_id == proposal.run_id,
+                )
+            )
+            or 0
+        )
+        if run_count >= REMEMBER_RUN_LIMIT:
+            return MemoryProposalOutcome(
+                disposition="run_limit_reached",
+                entry_id=None,
+                tagged_text=None,
+            )
+
+        pending_count = int(
+            await self.session.scalar(
+                sa.select(sa.func.count())
+                .select_from(MemoryHistoryEntryRow)
+                .where(
+                    *scope_predicates,
+                    MemoryHistoryEntryRow.status == "pending",
+                )
+            )
+            or 0
+        )
+        if pending_count >= REMEMBER_BACKLOG_LIMIT:
+            return MemoryProposalOutcome(
+                disposition="backlog_full",
+                entry_id=None,
+                tagged_text=None,
+            )
+
+        inserted_id = await self.session.scalar(
+            pg_insert(MemoryHistoryEntryRow)
+            .values(
+                project_id=proposal.scope.project_id,
+                owner_user_id=proposal.scope.owner_user_id,
+                namespace=proposal.scope.namespace,
+                thread_id=proposal.thread_id,
+                origin="tool",
+                source_run_id=proposal.run_id,
+                source_digest=proposal.source_digest,
+                status="pending",
+                tagged_text=proposal.tagged_text,
+                content_digest=compute_snip_content_digest(proposal.tagged_text),
+                preference_version=int(preference.preferences_version),
+                snip_prompt_version=REMEMBER_PROMPT_VERSION,
+            )
+            .on_conflict_do_nothing(
+                index_elements=(
+                    MemoryHistoryEntryRow.project_id,
+                    MemoryHistoryEntryRow.owner_user_id,
+                    MemoryHistoryEntryRow.namespace,
+                    MemoryHistoryEntryRow.thread_id,
+                    MemoryHistoryEntryRow.source_digest,
+                )
+            )
+            .returning(MemoryHistoryEntryRow.id)
+        )
+        if inserted_id is None:
+            raise MemoryDocumentConflict("Memory proposal disappeared under lock")
+        await self.session.flush()
+        return MemoryProposalOutcome(
+            disposition="recorded",
+            entry_id=inserted_id,
+            tagged_text=proposal.tagged_text,
+        )
+
     async def read_state(
         self,
         scope: MemoryDocumentScope,
@@ -496,6 +853,45 @@ class MemoryDocumentRepository:
         return MemoryDocumentState(
             document=self._document_record(row),
             pending_count=pending_count,
+        )
+
+    async def list_pending_entries(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[MemoryPendingEntryRecord, ...]:
+        """Bounded window over the pending backlog, oldest first.
+
+        The order matches Dream consumption (ascending ``sequence``), so the
+        first page is exactly what the next Dream will organize.
+        """
+
+        if type(scope) is not MemoryDocumentScope:
+            raise TypeError("MemoryDocumentScope is required")
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 10_000:
+            raise ValueError("Memory pending pagination is invalid")
+        rows = (
+            await self.session.execute(
+                sa.select(MemoryHistoryEntryRow)
+                .where(
+                    *self._scope_predicates(MemoryHistoryEntryRow, scope),
+                    MemoryHistoryEntryRow.status == "pending",
+                )
+                .order_by(MemoryHistoryEntryRow.sequence)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars()
+        return tuple(
+            MemoryPendingEntryRecord(
+                sequence=int(row.sequence),
+                origin=row.origin,
+                tagged_text=row.tagged_text or "",
+                created_at=row.created_at,
+            )
+            for row in rows
         )
 
     async def list_versions(
@@ -533,6 +929,166 @@ class MemoryDocumentRepository:
             raise MemoryDocumentNotFound
         return self._version_record(row)
 
+    @staticmethod
+    def _episode_record(row: MemoryEpisodeRow) -> MemoryEpisodeRecord:
+        return MemoryEpisodeRecord(
+            id=row.id,
+            thread_id=row.thread_id,
+            origin=row.origin,
+            tagged_text=row.tagged_text,
+            occurred_at=row.occurred_at,
+            created_at=row.created_at,
+        )
+
+    def _episode_predicates(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        tags: tuple[str, ...],
+        retention_days: int,
+        now: datetime,
+    ) -> list[sa.ColumnElement[bool]]:
+        predicates: list[sa.ColumnElement[bool]] = [
+            *self._scope_predicates(MemoryEpisodeRow, scope),
+        ]
+        if retention_days:
+            # Read-side retention keeps scopes that never trigger a Dream from
+            # surfacing rows the settlement prune has not reached yet.
+            predicates.append(MemoryEpisodeRow.occurred_at >= now - timedelta(days=retention_days))
+        if tags:
+            predicates.append(sa.or_(*(MemoryEpisodeRow.tagged_text.like(f"%[{tag}]%") for tag in tags)))
+        return predicates
+
+    @staticmethod
+    def _episode_read_boundary(
+        scope: MemoryDocumentScope,
+        limit: int,
+        retention_days: int,
+        now: datetime,
+    ) -> None:
+        if type(scope) is not MemoryDocumentScope:
+            raise TypeError("MemoryDocumentScope is required")
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("Episode limit is out of contract")
+        validate_episode_retention_days(retention_days)
+        if not isinstance(now, datetime) or now.tzinfo is None:
+            raise ValueError("Episode read time must be timezone-aware")
+
+    async def search_episodes(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        query: str,
+        tags: tuple[str, ...] = (),
+        limit: int = 5,
+        retention_days: int = DEFAULT_EPISODE_RETENTION_DAYS,
+        now: datetime,
+    ) -> tuple[MemoryEpisodeRecord, ...]:
+        """Deterministic ranked recall: exact substring, then trigram similarity."""
+
+        self._episode_read_boundary(scope, limit, retention_days, now)
+        if not isinstance(query, str):
+            raise ValueError("Episode query must be a string")
+        query = query.strip()
+        if not query or len(query) > MAX_EPISODE_QUERY_CHARS:
+            raise ValueError("Episode query is out of contract")
+        normalized_tags = _validated_episode_tags(tags)
+
+        pattern = f"%{_escape_like_pattern(query)}%"
+        exact_hit = sa.case(
+            (MemoryEpisodeRow.tagged_text.ilike(pattern, escape="\\"), 1),
+            else_=0,
+        )
+        similarity = sa.func.similarity(MemoryEpisodeRow.tagged_text, query)
+        statement = (
+            sa.select(MemoryEpisodeRow)
+            .where(
+                *self._episode_predicates(
+                    scope,
+                    tags=normalized_tags,
+                    retention_days=retention_days,
+                    now=now,
+                ),
+                sa.or_(exact_hit == 1, similarity >= EPISODE_SIMILARITY_FLOOR),
+            )
+            .order_by(
+                exact_hit.desc(),
+                similarity.desc(),
+                MemoryEpisodeRow.occurred_at.desc(),
+                MemoryEpisodeRow.id.desc(),
+            )
+            .limit(limit)
+        )
+        rows = (await self.session.execute(statement)).scalars()
+        return tuple(self._episode_record(row) for row in rows)
+
+    async def list_episodes(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        tags: tuple[str, ...] = (),
+        before: datetime | None = None,
+        limit: int = 20,
+        retention_days: int = DEFAULT_EPISODE_RETENTION_DAYS,
+        now: datetime,
+    ) -> tuple[MemoryEpisodeRecord, ...]:
+        """Time-ordered browse with a strictly-before cursor for paging."""
+
+        self._episode_read_boundary(scope, limit, retention_days, now)
+        if before is not None and (not isinstance(before, datetime) or before.tzinfo is None):
+            raise ValueError("Episode cursor must be timezone-aware")
+        normalized_tags = _validated_episode_tags(tags)
+
+        predicates = self._episode_predicates(
+            scope,
+            tags=normalized_tags,
+            retention_days=retention_days,
+            now=now,
+        )
+        if before is not None:
+            predicates.append(MemoryEpisodeRow.occurred_at < before)
+        statement = (
+            sa.select(MemoryEpisodeRow)
+            .where(*predicates)
+            .order_by(
+                MemoryEpisodeRow.occurred_at.desc(),
+                MemoryEpisodeRow.id.desc(),
+            )
+            .limit(limit)
+        )
+        rows = (await self.session.execute(statement)).scalars()
+        return tuple(self._episode_record(row) for row in rows)
+
+    @classmethod
+    def _due_condition(
+        cls,
+        history: type[MemoryHistoryEntryRow],
+        document: type[MemoryDocumentRow],
+        *,
+        now: datetime,
+        interval_minutes: int,
+    ) -> sa.ColumnElement[bool]:
+        """Three-way due rule over one scope's grouped pending entries.
+
+        A scope is due when the interval has elapsed since the last Dream
+        activity, when a full batch is already waiting, or when an explicit
+        `remember` proposal has been pending longer than its grace window.
+        """
+
+        oldest_pending = sa.func.min(history.created_at)
+        latest_dream_activity = cls._latest_dream_activity(history)
+        due_anchor = sa.func.greatest(
+            oldest_pending,
+            sa.func.coalesce(document.updated_at, oldest_pending),
+            sa.func.coalesce(latest_dream_activity, oldest_pending),
+        )
+        oldest_tool_pending = sa.func.min(sa.case((history.origin == "tool", history.created_at)))
+        return sa.or_(
+            due_anchor <= now - timedelta(minutes=interval_minutes),
+            sa.func.count() >= DREAM_HISTORY_BATCH_SIZE,
+            oldest_tool_pending <= now - timedelta(minutes=TOOL_ENTRY_DUE_MINUTES),
+        )
+
     async def list_due_scopes(
         self,
         *,
@@ -542,7 +1098,6 @@ class MemoryDocumentRepository:
     ) -> tuple[MemoryDocumentScope, ...]:
         if not isinstance(now, datetime) or now.tzinfo is None or type(interval_minutes) is not int or not 15 <= interval_minutes <= 1_440 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Dream schedule boundary is invalid")
-        cutoff = now - timedelta(minutes=interval_minutes)
         document = MemoryDocumentRow
         history = MemoryHistoryEntryRow
         oldest_pending = sa.func.min(history.created_at)
@@ -578,8 +1133,67 @@ class MemoryDocumentRepository:
                     document.updated_at,
                     document.active_dream_job_id,
                 )
-                .having(due_anchor <= cutoff)
+                .having(
+                    self._due_condition(
+                        history,
+                        document,
+                        now=now,
+                        interval_minutes=interval_minutes,
+                    )
+                )
                 .order_by(due_anchor, history.project_id, history.owner_user_id)
+                .limit(limit)
+            )
+        )
+        return tuple(
+            MemoryDocumentScope(
+                project_id=row.project_id,
+                owner_user_id=row.owner_user_id,
+                namespace=row.namespace,
+            )
+            for row in rows
+        )
+
+    async def list_budget_rewrite_scopes(
+        self,
+        *,
+        budget_tokens: int,
+        limit: int = 100,
+    ) -> tuple[MemoryDocumentScope, ...]:
+        """Discover scopes that may need the empty-batch budget rescue.
+
+        ``char_length(content) > budget_tokens`` is a necessary condition for
+        being over budget (the token estimate never exceeds the character
+        count), so this SQL prefilter can only over-approximate. Admission
+        re-verifies the exact estimate per scope under locks.
+        """
+
+        if type(budget_tokens) is not int or not 100 <= budget_tokens <= 8_000 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Dream schedule boundary is invalid")
+        document = MemoryDocumentRow
+        history = MemoryHistoryEntryRow
+        pending_exists = sa.exists(
+            sa.select(sa.literal(1)).where(
+                history.project_id == document.project_id,
+                history.owner_user_id == document.owner_user_id,
+                history.namespace == document.namespace,
+                history.status == "pending",
+            )
+        )
+        rows = tuple(
+            await self.session.execute(
+                sa.select(
+                    document.project_id,
+                    document.owner_user_id,
+                    document.namespace,
+                )
+                .where(
+                    document.active_dream_job_id.is_(None),
+                    document.version >= 1,
+                    sa.func.char_length(document.content) > budget_tokens,
+                    ~pending_exists,
+                )
+                .order_by(document.updated_at)
                 .limit(limit)
             )
         )
@@ -603,16 +1217,8 @@ class MemoryDocumentRepository:
 
         if type(scope) is not MemoryDocumentScope or not isinstance(now, datetime) or now.tzinfo is None or type(interval_minutes) is not int or not 15 <= interval_minutes <= 1_440:
             raise ValueError("Dream schedule boundary is invalid")
-        cutoff = now - timedelta(minutes=interval_minutes)
         document = MemoryDocumentRow
         history = MemoryHistoryEntryRow
-        oldest_pending = sa.func.min(history.created_at)
-        latest_dream_activity = self._latest_dream_activity(history)
-        due_anchor = sa.func.greatest(
-            oldest_pending,
-            sa.func.coalesce(document.updated_at, oldest_pending),
-            sa.func.coalesce(latest_dream_activity, oldest_pending),
-        )
         row = await self.session.scalar(
             sa.select(sa.literal(True))
             .select_from(history)
@@ -636,7 +1242,14 @@ class MemoryDocumentRepository:
                 document.updated_at,
                 document.active_dream_job_id,
             )
-            .having(due_anchor <= cutoff)
+            .having(
+                self._due_condition(
+                    history,
+                    document,
+                    now=now,
+                    interval_minutes=interval_minutes,
+                )
+            )
             .limit(1)
         )
         return row is True
@@ -653,7 +1266,7 @@ class MemoryDocumentRepository:
     ) -> MemoryDreamAdmissionRecord:
         if (
             type(scope) is not MemoryDocumentScope
-            or trigger not in {"auto_dream", "manual_dream"}
+            or trigger not in {"auto_dream", "manual_dream", "budget_rewrite"}
             or type(frozen) is not MemoryDreamFrozenRuntime
             or not isinstance(initial_content, str)
             or not initial_content
@@ -699,11 +1312,30 @@ class MemoryDocumentRepository:
                         MemoryHistoryEntryRow.status == "pending",
                     )
                     .order_by(MemoryHistoryEntryRow.sequence)
-                    .limit(20)
+                    .limit(DREAM_HISTORY_BATCH_SIZE)
                     .with_for_update(of=MemoryHistoryEntryRow)
                 )
             ).scalars()
-        )[:20]
+        )[:DREAM_HISTORY_BATCH_SIZE]
+        if trigger == "budget_rewrite":
+            # The rescue path is only legal against an empty backlog; a raced
+            # `remember` proposal must surface as a conflict, never as a Dream
+            # that silently ignores pending work.
+            if rows:
+                raise MemoryDocumentConflict("Dream budget rewrite requires an empty backlog")
+            if int(document.version) < 1:
+                raise MemoryDocumentConflict("Dream budget rewrite requires a published document")
+            return await self._enqueue_dream(
+                scope,
+                document=document,
+                trigger=trigger,
+                frozen=frozen,
+                history=(),
+                history_digest=BUDGET_REWRITE_HISTORY_DIGEST,
+                rows=(),
+                now=now,
+                max_attempts=max_attempts,
+            )
         if not rows:
             return MemoryDreamAdmissionRecord(
                 disposition="nothing_pending",
@@ -716,12 +1348,38 @@ class MemoryDocumentRepository:
                 sequence=int(row.sequence),
                 tagged_text=row.tagged_text,
                 content_digest=row.content_digest,
+                origin=row.origin,
             )
             for row in rows
         )
         if any(item.tagged_text is None for item in history):
             raise MemoryDocumentConflict("Dream pending history is invalid")
         history_digest = compute_dream_history_digest(history)
+        return await self._enqueue_dream(
+            scope,
+            document=document,
+            trigger=trigger,
+            frozen=frozen,
+            history=history,
+            history_digest=history_digest,
+            rows=rows,
+            now=now,
+            max_attempts=max_attempts,
+        )
+
+    async def _enqueue_dream(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        document: MemoryDocumentRow,
+        trigger: MemoryDreamTrigger,
+        frozen: MemoryDreamFrozenRuntime,
+        history: tuple[MemoryDreamHistoryRecord, ...],
+        history_digest: str,
+        rows: tuple[MemoryHistoryEntryRow, ...],
+        now: datetime,
+        max_attempts: int,
+    ) -> MemoryDreamAdmissionRecord:
         prior_generations = int(
             await self.session.scalar(
                 sa.select(sa.func.count())
@@ -757,7 +1415,7 @@ class MemoryDocumentRepository:
                 occurrence_id=None,
                 max_attempts=max_attempts,
                 retry_safety="safe",
-                priority=10 if trigger == "manual_dream" else 0,
+                priority=0 if trigger == "auto_dream" else 10,
             )
         )
         run = MemoryDreamRunRow(
@@ -766,8 +1424,8 @@ class MemoryDocumentRepository:
             owner_user_id=scope.owner_user_id,
             namespace=scope.namespace,
             trigger=trigger,
-            history_from=history[0].sequence,
-            history_to=history[-1].sequence,
+            history_from=history[0].sequence if history else None,
+            history_to=history[-1].sequence if history else None,
             history_count=len(history),
             history_digest=history_digest,
             base_document_version=int(document.version),
@@ -791,6 +1449,7 @@ class MemoryDocumentRepository:
             disposition="queued",
             job_id=job_id,
             history_count=len(history),
+            admission_kind=("budget_rewrite" if trigger == "budget_rewrite" else "history"),
         )
 
     async def _active_dream(
@@ -827,6 +1486,7 @@ class MemoryDocumentRepository:
                 disposition="already_running",
                 job_id=job.id,
                 history_count=int(run.history_count),
+                admission_kind=("budget_rewrite" if run.trigger == "budget_rewrite" else "history"),
             )
         if run is not None and run.result_version is not None:
             document.active_dream_job_id = None
@@ -903,6 +1563,7 @@ class MemoryDocumentRepository:
                 sequence=int(row.sequence),
                 tagged_text=row.tagged_text,
                 content_digest=row.content_digest,
+                origin=row.origin,
             )
             for row in history_rows
         )
@@ -912,8 +1573,8 @@ class MemoryDocumentRepository:
             owner_user_id=run.owner_user_id,
             namespace=run.namespace,
             trigger=run.trigger,
-            history_from=int(run.history_from),
-            history_to=int(run.history_to),
+            history_from=(None if run.history_from is None else int(run.history_from)),
+            history_to=(None if run.history_to is None else int(run.history_to)),
             history_count=int(run.history_count),
             history_digest=run.history_digest,
             base_document_version=int(run.base_document_version),
@@ -942,7 +1603,9 @@ class MemoryDocumentRepository:
         expected_base_digest: str,
         content: str,
         now: datetime,
+        episode_retention_days: int = DEFAULT_EPISODE_RETENTION_DAYS,
     ) -> MemoryDocumentVersionRecord:
+        validate_episode_retention_days(episode_retention_days)
         existing = (
             await self.session.execute(
                 sa.select(MemoryDocumentVersionRow).where(
@@ -983,6 +1646,7 @@ class MemoryDocumentRepository:
                 sequence=int(row.sequence),
                 tagged_text=row.tagged_text,
                 content_digest=row.content_digest,
+                origin=row.origin,
             )
             for row in history_rows
         )
@@ -996,11 +1660,14 @@ class MemoryDocumentRepository:
             or run.base_content_digest != expected_base_digest
             or run.history_digest != expected_history_digest
             or int(run.history_count) != len(history)
-            or not history
-            or int(run.history_from) != history[0].sequence
-            or int(run.history_to) != history[-1].sequence
             or any(row.status != "processing" for row in history_rows)
-            or compute_dream_history_digest(history) != expected_history_digest
+        ):
+            raise MemoryDocumentConflict("Dream settlement contract changed")
+        if run.trigger == "budget_rewrite":
+            if history or expected_history_digest != BUDGET_REWRITE_HISTORY_DIGEST:
+                raise MemoryDocumentConflict("Dream settlement contract changed")
+        elif (
+            not history or run.history_from is None or run.history_to is None or int(run.history_from) != history[0].sequence or int(run.history_to) != history[-1].sequence or compute_dream_history_digest(history) != expected_history_digest
         ):
             raise MemoryDocumentConflict("Dream settlement contract changed")
         next_version = int(document.version) + 1
@@ -1021,22 +1688,48 @@ class MemoryDocumentRepository:
             history_count=run.history_count,
             prompt_version=run.prompt_version,
             model_ref=run.model_ref,
+            needs_review=memory_document_needs_review(document.content, content, history),
             created_at=now,
         )
         self.session.add(version)
         for row in history_rows:
+            # Archive the full text as an episode in the same transaction that
+            # tombstones the history row.  Reusing the history UUID makes a
+            # duplicate settlement collide on the primary key instead of
+            # silently duplicating the archive.
+            self.session.add(
+                MemoryEpisodeRow(
+                    id=row.id,
+                    project_id=row.project_id,
+                    owner_user_id=row.owner_user_id,
+                    namespace=row.namespace,
+                    thread_id=row.thread_id,
+                    origin=row.origin,
+                    tagged_text=row.tagged_text,
+                    content_digest=row.content_digest,
+                    occurred_at=row.created_at,
+                    consumed_dream_job_id=job_id,
+                    created_at=now,
+                )
+            )
             row.status = "consumed"
             row.tagged_text = None
             row.consumed_at = now
         document.content = content
         document.content_digest = content_digest
         document.version = next_version
-        document.dream_cursor = max(int(document.dream_cursor), int(run.history_to))
+        if run.history_to is not None:
+            document.dream_cursor = max(int(document.dream_cursor), int(run.history_to))
         document.active_dream_job_id = None
         document.updated_at = now
         run.result_version = next_version
         run.completed_at = now
         await self.session.flush()
+        await self._prune_expired_episodes(
+            scope,
+            now=now,
+            episode_retention_days=episode_retention_days,
+        )
         if not await self.jobs.settle_success(
             job_id,
             lease_token=lease_token,
@@ -1045,6 +1738,29 @@ class MemoryDocumentRepository:
             raise MemoryDocumentConflict("Dream Job lease changed")
         await self.session.flush()
         return self._version_record(version)
+
+    async def _prune_expired_episodes(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        now: datetime,
+        episode_retention_days: int,
+    ) -> None:
+        """Bounded same-transaction cleanup; there is no dedicated purge Job."""
+
+        if episode_retention_days == 0:
+            return
+        cutoff = now - timedelta(days=episode_retention_days)
+        expired = (
+            sa.select(MemoryEpisodeRow.id)
+            .where(
+                *self._scope_predicates(MemoryEpisodeRow, scope),
+                MemoryEpisodeRow.occurred_at < cutoff,
+            )
+            .order_by(MemoryEpisodeRow.occurred_at)
+            .limit(_EPISODE_PRUNE_BATCH_LIMIT)
+        )
+        await self.session.execute(sa.delete(MemoryEpisodeRow).where(MemoryEpisodeRow.id.in_(expired)))
 
     async def release_dream(
         self,
@@ -1197,6 +1913,7 @@ class MemoryDocumentRepository:
             history_count=(None if row.history_count is None else int(row.history_count)),
             prompt_version=row.prompt_version,
             model_ref=row.model_ref,
+            needs_review=bool(row.needs_review),
             created_at=row.created_at,
         )
 
@@ -1251,6 +1968,7 @@ class MemoryDocumentRepository:
                 RunMemoryContextSnapshotRow,
                 owner_user_id,
             ),
+            "episodes": await self._count(MemoryEpisodeRow, owner_user_id),
         }
 
         active_jobs = tuple(
@@ -1259,7 +1977,7 @@ class MemoryDocumentRepository:
                     sa.select(JobRow.id, JobRow.project_id, JobRow.owner_user_id)
                     .where(
                         JobRow.owner_user_id == owner_user_id,
-                        JobRow.job_type == "memory_dream",
+                        JobRow.job_type.in_(("memory_dream", "memory_seal")),
                         JobRow.status.in_(("queued", "leased", "running", "retry_wait")),
                     )
                     .with_for_update(of=JobRow)
@@ -1282,6 +2000,7 @@ class MemoryDocumentRepository:
 
         await self.session.execute(sa.delete(RunMemoryContextSnapshotRow).where(RunMemoryContextSnapshotRow.owner_user_id == owner_user_id))
         await self.session.execute(sa.delete(MemoryHistoryEntryRow).where(MemoryHistoryEntryRow.owner_user_id == owner_user_id))
+        await self.session.execute(sa.delete(MemoryEpisodeRow).where(MemoryEpisodeRow.owner_user_id == owner_user_id))
         await self.session.execute(sa.delete(MemoryDocumentRow).where(MemoryDocumentRow.owner_user_id == owner_user_id))
         await self.session.flush()
         return MemoryResetCounts(
@@ -1291,6 +2010,7 @@ class MemoryDocumentRepository:
             versions=counts["versions"],
             dream_runs=counts["dream_runs"],
             snapshots=counts["snapshots"],
+            episodes=counts["episodes"],
             jobs_cancelled=jobs_cancelled,
         )
 
@@ -1299,7 +2019,10 @@ class MemoryDocumentRepository:
 
 
 __all__ = [
+    "BUDGET_REWRITE_HISTORY_DIGEST",
     "DEFAULT_MEMORY_NAMESPACE",
+    "MEMORY_REVIEW_DELETION_RATIO",
+    "MEMORY_REVIEW_MIN_LINES",
     "MemoryDocumentConflict",
     "MemoryDocumentNotFound",
     "MemoryDocumentRecord",
@@ -1308,6 +2031,7 @@ __all__ = [
     "MemoryDocumentState",
     "MemoryDocumentVersionRecord",
     "MemoryDreamAdmissionDisposition",
+    "MemoryDreamAdmissionKind",
     "MemoryDreamAdmissionRecord",
     "MemoryDreamFrozenRuntime",
     "MemoryDreamHistoryRecord",
@@ -1318,6 +2042,8 @@ __all__ = [
     "MemoryHistoryActivationStatus",
     "MemoryResetCounts",
     "compute_dream_history_digest",
+    "memory_document_deletion_ratio",
     "memory_document_digest",
+    "memory_document_needs_review",
     "memory_document_unified_diff",
 ]

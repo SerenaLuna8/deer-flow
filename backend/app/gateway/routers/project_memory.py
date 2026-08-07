@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 
 from app.gateway.deps import (
     get_current_agent_runtime_config,
@@ -43,13 +43,15 @@ class ProjectMemoryDocumentResponse(StrictPrivateWorkResponse):
     updated_at: datetime | None = Field(alias="updatedAt")
     pending_count: int = Field(alias="pendingCount", ge=0)
     dream_running: bool = Field(alias="dreamRunning")
+    injection_status: Literal["ok", "skipped_over_budget"] = Field(alias="injectionStatus")
 
 
 class ProjectMemoryVersionSummary(StrictPrivateWorkResponse):
     version: int = Field(ge=1)
-    trigger: Literal["auto_dream", "manual_dream", "restore"]
+    trigger: Literal["auto_dream", "manual_dream", "restore", "budget_rewrite"]
     history_count: int | None = Field(default=None, alias="historyCount", ge=1, le=20)
     changed: bool
+    needs_review: bool = Field(alias="needsReview")
     created_at: datetime = Field(alias="createdAt")
 
 
@@ -60,6 +62,30 @@ class ProjectMemoryVersionsResponse(StrictPrivateWorkResponse):
 class ProjectMemoryVersionDetailResponse(ProjectMemoryVersionSummary):
     content: str = Field(max_length=16_000)
     unified_diff: str = Field(alias="unifiedDiff", max_length=64_000)
+
+
+class ProjectMemoryEpisodeItem(StrictPrivateWorkResponse):
+    id: uuid.UUID
+    thread_id: str = Field(alias="threadId", max_length=64)
+    origin: Literal["snip", "tool"]
+    tagged_text: str = Field(alias="taggedText", max_length=1_000)
+    occurred_at: datetime = Field(alias="occurredAt")
+    created_at: datetime = Field(alias="createdAt")
+
+
+class ProjectMemoryEpisodesResponse(StrictPrivateWorkResponse):
+    items: list[ProjectMemoryEpisodeItem] = Field(max_length=50)
+
+
+class ProjectMemoryPendingItem(StrictPrivateWorkResponse):
+    sequence: int = Field(ge=1)
+    origin: Literal["snip", "tool"]
+    tagged_text: str = Field(alias="taggedText", max_length=1_000)
+    created_at: datetime = Field(alias="createdAt")
+
+
+class ProjectMemoryPendingResponse(StrictPrivateWorkResponse):
+    items: list[ProjectMemoryPendingItem] = Field(max_length=100)
 
 
 class ProjectMemoryDreamRequest(StrictPrivateWorkRequest):
@@ -115,6 +141,7 @@ def _version_summary(
         trigger=row.trigger,
         historyCount=row.history_count,
         changed=bool(row.unified_diff),
+        needsReview=row.needs_review,
         createdAt=row.created_at,
     )
 
@@ -126,13 +153,14 @@ async def get_project_memory(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> ProjectMemoryDocumentResponse:
     response.headers["Cache-Control"] = "no-store"
-    state = await _call(_service(request).get(context))
+    state, injection_status = await _call(_service(request).get(context))
     return ProjectMemoryDocumentResponse(
         content=state.document.content,
         version=state.document.version,
         updatedAt=state.document.updated_at,
         pendingCount=state.pending_count,
         dreamRunning=state.document.active_dream_job_id is not None,
+        injectionStatus=injection_status,
     )
 
 
@@ -153,6 +181,71 @@ async def list_project_memory_versions(
         )
     )
     return ProjectMemoryVersionsResponse(items=[_version_summary(row) for row in rows])
+
+
+@router.get("/pending", response_model=ProjectMemoryPendingResponse)
+async def list_project_memory_pending(
+    request: Request,
+    response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=10_000),
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryPendingResponse:
+    response.headers["Cache-Control"] = "no-store"
+    rows = await _call(
+        _service(request).list_pending(
+            context,
+            limit=limit,
+            offset=offset,
+        )
+    )
+    return ProjectMemoryPendingResponse(
+        items=[
+            ProjectMemoryPendingItem(
+                sequence=row.sequence,
+                origin=row.origin,
+                taggedText=row.tagged_text,
+                createdAt=row.created_at,
+            )
+            for row in rows
+        ]
+    )
+
+
+@router.get("/episodes", response_model=ProjectMemoryEpisodesResponse)
+async def list_project_memory_episodes(
+    request: Request,
+    response: Response,
+    q: str | None = Query(default=None, min_length=1, max_length=200),
+    tags: list[Literal["permanent", "durable", "ephemeral", "correction"]] | None = Query(default=None),
+    before: AwareDatetime | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=50),
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ProjectMemoryEpisodesResponse:
+    response.headers["Cache-Control"] = "no-store"
+    normalized_q = q.strip() if isinstance(q, str) else None
+    rows = await _call(
+        _service(request).list_episodes(
+            context,
+            q=normalized_q or None,
+            tags=tuple(dict.fromkeys(tags or ())),
+            before=before,
+            limit=limit,
+        )
+    )
+    return ProjectMemoryEpisodesResponse(
+        items=[
+            ProjectMemoryEpisodeItem(
+                id=row.id,
+                threadId=row.thread_id,
+                origin=row.origin,
+                taggedText=row.tagged_text,
+                occurredAt=row.occurred_at,
+                createdAt=row.created_at,
+            )
+            for row in rows
+        ]
+    )
 
 
 @router.get(

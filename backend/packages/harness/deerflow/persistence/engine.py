@@ -37,12 +37,24 @@ async def init_engine(config: DatabaseConfig) -> None:
         connect_args={"server_settings": {"statement_timeout": str(config.statement_timeout_seconds * 1000)}},
         json_serializer=_json_serializer,
     )
+    from deerflow.persistence.bootstrap import (
+        M7RecreateRequired,
+        SchemaSetupRequired,
+        SchemaUpgradeRequired,
+        validate_schema,
+    )
+
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
-        from deerflow.persistence.bootstrap import validate_schema
-
         await validate_schema(engine)
+    except (SchemaSetupRequired, SchemaUpgradeRequired, M7RecreateRequired) as exc:
+        # Schema gates carry their own operator guidance (setup-db/upgrade-db);
+        # never bury it under the generic connectivity message.
+        await engine.dispose()
+        _engine = None
+        _session_factory = None
+        raise RuntimeError(f"Unable to initialize PostgreSQL database. {exc}") from exc
     except Exception as exc:
         await engine.dispose()
         _engine = None

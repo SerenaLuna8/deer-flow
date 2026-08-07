@@ -32,6 +32,7 @@ from deerflow.runtime.secret_context import (
     write_slash_skill_source_path,
 )
 from deerflow.runtime.skill_context_authority import (
+    advance_lead_model_call_seq,
     read_verified_skill_source_paths,
 )
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
@@ -112,6 +113,14 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._runtime_skills_root = runtime_skills_root
         self._runtime_skills_container_path = runtime_skills_container_path
         self._slash_source_owner_token = slash_source_owner_token or secrets.token_urlsafe(24)
+        # Secret bindings consume the same verified-read evidence as the tool
+        # policy and expire with it (D10). Slash activation stays exempt.
+        if app_config is not None:
+            self._read_evidence_ttl_calls = app_config.skills.read_evidence_ttl_calls
+        else:
+            from deerflow.config.skills_config import SkillsConfig
+
+            self._read_evidence_ttl_calls = SkillsConfig().read_evidence_ttl_calls
 
     @staticmethod
     def _read_skill_content(skill_file: Path, skills_root: Path) -> str:
@@ -371,6 +380,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         return request.override(messages=messages), activation
 
     def _handle_model_request(self, request: ModelRequest, *, hook: str) -> ModelRequest | AIMessage:
+        # This middleware wraps every lead model call and sits outermost in the
+        # skill chain, so it owns the run-scoped call ordinal that verified-read
+        # evidence TTLs are measured against.
+        advance_lead_model_call_seq(getattr(getattr(request, "runtime", None), "context", None))
         prepared, activation = self._prepare_model_request(request, hook=hook)
         if isinstance(prepared, AIMessage):
             return prepared
@@ -442,6 +455,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 verified_paths = read_verified_skill_source_paths(
                     context,
                     owner_token=self._slash_source_owner_token,
+                    ttl_calls=self._read_evidence_ttl_calls,
                 )
                 if verified_paths is None:
                     logger.warning("Verified Skill read evidence is malformed or unauthenticated; suppressing autonomous secret binding")

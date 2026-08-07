@@ -3,7 +3,6 @@
 import {
   ArrowRightIcon,
   BotIcon,
-  FilePlus2Icon,
   PlugZapIcon,
   PlusIcon,
   SearchIcon,
@@ -21,7 +20,6 @@ import {
 } from "react";
 
 import {
-  CreateAssetDialog,
   CreateVersionDialog,
   type VersionAuthoringInput,
 } from "@/components/admin/assets/admin-asset-dialogs";
@@ -43,7 +41,6 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Project } from "@/core/projects/types";
 import {
-  useCreateProjectAsset,
   useCreateProjectAssetVersion,
   useChangeProjectAssetStatus,
   useDisableProjectSystemBinding,
@@ -68,7 +65,6 @@ import { ProjectPageHeader } from "../project-page-header";
 import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import {
-  projectAssetCreateErrorMessage,
   projectMcpStatusToggleState,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
@@ -113,11 +109,9 @@ const BINDING_KIND: Record<MutableAssetKind, AssetKind> = {
 
 export function SkillCreateMenuItems({
   projectSlug,
-  onBlank,
   onImport,
 }: {
   projectSlug: string;
-  onBlank: () => void;
   onImport: () => void;
 }) {
   return (
@@ -127,10 +121,6 @@ export function SkillCreateMenuItems({
           <SparklesIcon aria-hidden className="size-4" />
           AI 对话创建
         </Link>
-      </DropdownMenuItem>
-      <DropdownMenuItem onSelect={onBlank}>
-        <FilePlus2Icon aria-hidden className="size-4" />
-        从空白创建
       </DropdownMenuItem>
       <DropdownMenuItem onSelect={onImport}>
         <UploadIcon aria-hidden className="size-4" />
@@ -750,7 +740,6 @@ function ProjectAssetCatalog({
 }) {
   const { t } = useI18n();
   const query = useProjectAssets(accountId, project.id, kind);
-  const createAsset = useCreateProjectAsset(accountId, project.id, kind);
   const createVersion = useCreateProjectAssetVersion(
     accountId,
     project.id,
@@ -805,21 +794,11 @@ function ProjectAssetCatalog({
   const [configuredMcpStatus, setConfiguredMcpStatus] = useState<
     "published" | "pending_approval" | null
   >(null);
-  const [createdAssetId, setCreatedAssetId] = useState<string | null>(null);
   const [versionSubmission, setVersionSubmission] = useState<{
     token: VersionDialogSubmissionToken;
     pending: boolean;
     error: unknown;
   } | null>(null);
-
-  useEffect(() => {
-    if (!createAsset.isSuccess) return;
-    onCreateOpenChange(false);
-    if ((kind !== "skills" && kind !== "agents") || !createAsset.data) return;
-    setSourceTouched(true);
-    setSourceFilter("project");
-    setCreatedAssetId(createAsset.data.item.id);
-  }, [createAsset.data, createAsset.isSuccess, kind, onCreateOpenChange]);
 
   const handleRequestedVersionHandled = useCallback(
     (assetId: string, versionId: string) => {
@@ -969,16 +948,6 @@ function ProjectAssetCatalog({
     );
     setConfiguredMcpSelection(null);
   }, [configuredMcpSelection, data]);
-
-  useEffect(() => {
-    const readyAssetId = createdProjectAssetSelectionReady(
-      data,
-      createdAssetId,
-    );
-    if (!readyAssetId) return;
-    setSelectedAssetId(readyAssetId);
-    setCreatedAssetId(null);
-  }, [createdAssetId, data]);
 
   useEffect(() => {
     if (selectedAssetId && data && !selectedItem) setSelectedAssetId(null);
@@ -1224,7 +1193,6 @@ function ProjectAssetCatalog({
                     <DropdownMenuContent align="end">
                       <SkillCreateMenuItems
                         projectSlug={project.slug}
-                        onBlank={() => onCreateOpenChange(true)}
                         onImport={() => {
                           importSkill.reset();
                           setImportOpen(true);
@@ -1325,22 +1293,6 @@ function ProjectAssetCatalog({
           renderVersion={renderVersion}
         />
       )}
-
-      {kind === "skills" ? (
-        <CreateAssetDialog
-          kind={kind}
-          scope="project"
-          open={createOpen}
-          pending={createAsset.isPending}
-          errorMessage={
-            createAsset.error
-              ? projectAssetCreateErrorMessage(kind, createAsset.error)
-              : null
-          }
-          onOpenChange={onCreateOpenChange}
-          onSubmit={(input) => createAsset.mutate(input)}
-        />
-      ) : null}
 
       {kind === "mcp-servers" ? (
         <ProjectMcpCreateDialog

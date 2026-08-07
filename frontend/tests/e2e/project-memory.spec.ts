@@ -55,6 +55,7 @@ async function mockProjectMemoryRoute(page: Page) {
     updatedAt: TIMESTAMP,
     pendingCount: 2,
     dreamRunning: false,
+    injectionStatus: "ok",
   };
   const details = new Map<
     number,
@@ -63,6 +64,7 @@ async function mockProjectMemoryRoute(page: Page) {
       trigger: "auto_dream" | "manual_dream" | "restore";
       historyCount: number | null;
       changed: boolean;
+      needsReview: boolean;
       createdAt: string;
       content: string;
       unifiedDiff: string;
@@ -75,6 +77,7 @@ async function mockProjectMemoryRoute(page: Page) {
         trigger: "manual_dream",
         historyCount: 2,
         changed: true,
+        needsReview: false,
         createdAt: TIMESTAMP,
         content: document.content,
         unifiedDiff:
@@ -88,6 +91,7 @@ async function mockProjectMemoryRoute(page: Page) {
         trigger: "auto_dream",
         historyCount: 1,
         changed: false,
+        needsReview: false,
         createdAt: "2026-08-04T00:00:00Z",
         content: "# Working preferences",
         unifiedDiff: "",
@@ -129,6 +133,12 @@ async function mockProjectMemoryRoute(page: Page) {
     if (path === memoryBase && request.method() === "GET") {
       return json(route, document);
     }
+    if (path === `${memoryBase}/pending` && request.method() === "GET") {
+      return json(route, { items: [] });
+    }
+    if (path === `${memoryBase}/episodes` && request.method() === "GET") {
+      return json(route, { items: [] });
+    }
     if (path === `${memoryBase}/versions` && request.method() === "GET") {
       return json(route, {
         items: [...details.values()].map(
@@ -165,6 +175,7 @@ async function mockProjectMemoryRoute(page: Page) {
         trigger: "restore",
         historyCount: null,
         changed: true,
+        needsReview: false,
         createdAt: TIMESTAMP,
         content: source.content,
         unifiedDiff:
@@ -184,6 +195,7 @@ async function mockProjectMemoryRoute(page: Page) {
         trigger: "manual_dream",
         historyCount: 2,
         changed: true,
+        needsReview: false,
         createdAt: TIMESTAMP,
         content: `${document.content}\n\nPrefers explicit acceptance checks.`,
         unifiedDiff:

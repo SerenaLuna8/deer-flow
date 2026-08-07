@@ -62,6 +62,7 @@ class LoopDetectionConfig(BaseModel):
         default_factory=lambda: {
             "web_fetch": ToolFreqOverride(warn=6, hard_limit=10),
             "web_search": ToolFreqOverride(warn=6, hard_limit=10),
+            "recall_memory": ToolFreqOverride(warn=6, hard_limit=10),
         },
         description=(
             "Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. "

@@ -232,6 +232,14 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
           model_name: logicalModelNameSchema.nullable(),
           dream_interval_minutes: boundedInteger(15, 1_440),
           max_injection_tokens: boundedInteger(100, 8_000),
+          idle_seal_minutes: boundedInteger(0, 10_080).refine(
+            (value) => value === 0 || value >= 30,
+            { message: "idle_seal_minutes must be 0 or at least 30" },
+          ),
+          episode_retention_days: boundedInteger(0, 3_650).refine(
+            (value) => value === 0 || value >= 30,
+            { message: "episode_retention_days must be 0 or at least 30" },
+          ),
         })
         .strict(),
       tool_search: z

@@ -396,6 +396,15 @@ async def gateway_platform_runtime(
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
         app.state.private_stream_bridge = PostgresStreamBridge(sf)
+
+        from app.gateway.run_event_wakeup import RunEventWakeup
+
+        # Per-process LISTEN/NOTIFY alarm clock for durable SSE consumers. A
+        # broken listener only degrades those consumers to the poll cadence.
+        run_event_wakeup = RunEventWakeup(config.database.checkpointer_url)
+        await run_event_wakeup.start()
+        stack.push_async_callback(run_event_wakeup.aclose)
+        app.state.run_event_wakeup = run_event_wakeup
         yield
 
 

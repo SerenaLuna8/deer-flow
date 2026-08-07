@@ -8,7 +8,7 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
-CURRENT_SCHEMA_MARKER = "full_schema_v4"
+CURRENT_SCHEMA_MARKER = "full_schema_v5"
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:
@@ -33,9 +33,10 @@ def _connection(
     *,
     revision: str | None = CURRENT_SCHEMA_MARKER,
     present_tables=None,
+    pg_trgm: bool = True,
 ):
     connection = AsyncMock()
-    connection.scalar.side_effect = ["PostgreSQL 17.5", revision is not None] + ([revision] if revision is not None else [])
+    connection.scalar.side_effect = ["PostgreSQL 17.5", pg_trgm, revision is not None] + ([revision] if revision is not None else [])
     rows = MagicMock()
     rows.scalars.return_value = present_tables if present_tables is not None else check_postgres.REQUIRED_TABLES
     connection.execute.return_value = rows
@@ -68,6 +69,7 @@ async def test_check_is_read_only_parameterized_and_healthy(monkeypatch) -> None
     assert result.schema_state == "ready"
     assert result.revision_matches is True
     assert result.missing_tables == ()
+    assert result.pg_trgm_installed is True
     sql, parameters = connection.execute.await_args.args
     assert "information_schema.tables" in str(sql)
     assert "CAST(:required_tables AS text[])" in str(sql)
@@ -151,6 +153,20 @@ async def test_check_reports_legacy_schema_as_recreate_required(
 
 
 @pytest.mark.asyncio
+async def test_check_is_unhealthy_without_the_pg_trgm_extension(monkeypatch) -> None:
+    connection = _connection(pg_trgm=False)
+    monkeypatch.setattr(check_postgres, "create_async_engine", lambda *_args, **_kwargs: _Engine(connection))
+    monkeypatch.setattr(check_postgres, "classify_database", AsyncMock(return_value="current"))
+    monkeypatch.setattr(check_postgres, "get_schema_marker", lambda: CURRENT_SCHEMA_MARKER)
+
+    result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
+
+    assert result.schema_state == "ready"
+    assert result.pg_trgm_installed is False
+    assert result.healthy is False
+
+
+@pytest.mark.asyncio
 async def test_check_connection_failure_is_sanitized(monkeypatch) -> None:
     error = RuntimeError("cannot connect postgresql://owner:database-secret@localhost/deerflow_test_1_abc")
     monkeypatch.setattr(
@@ -177,6 +193,7 @@ def test_check_result_contains_only_safe_connection_metadata() -> None:
         head_revision=CURRENT_SCHEMA_MARKER,
         revision_matches=True,
         missing_tables=(),
+        pg_trgm_installed=True,
         schema_state="ready",
     )
     fields = result.__dataclass_fields__
