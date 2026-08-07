@@ -13,8 +13,8 @@ import {
   adminAssetErrorMessage,
   adminCredentialTypeLabel,
 } from "@/components/admin/assets/admin-asset-view-model";
+import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -221,17 +221,14 @@ export function ProjectCredentialCatalogView({
                           {credential.name}
                         </p>
                       </div>
-                      <Badge
-                        variant={
+                      <AssetStatusBadge
+                        status={credential.status}
+                        label={
                           credential.status === "active"
-                            ? "default"
-                            : "secondary"
+                            ? t.adminAssets.common.active
+                            : t.adminAssets.common.revoked
                         }
-                      >
-                        {credential.status === "active"
-                          ? t.adminAssets.common.active
-                          : t.adminAssets.common.revoked}
-                      </Badge>
+                      />
                     </div>
                   </CardHeader>
                   <CardContent className="space-y-4 px-4">
